@@ -16,16 +16,28 @@ class ProposalService {
     required List<String> sourceIds,
   }) async {
     final project = await vault.readProject(projectId);
-    final sources = await vault.getSources(projectId, sourceIds);
+    var sources = await vault.getSources(projectId, sourceIds);
     if (sources.isEmpty) {
       throw ArgumentError('At least one source is required.');
     }
+    for (final source in sources) {
+      if (source.type == SourceType.image &&
+          source.state == SourceState.pending) {
+        await _extractImageSource(source);
+      }
+    }
+    sources = await vault.getSources(projectId, sourceIds);
     final now = DateTime.now().toUtc();
-    final markdown = await aiProvider.createOutlineProposal(
-      projectTitle: project.title,
-      currentMarkdown: project.markdown,
-      sources: sources,
+    final imageOnly = sources.every(
+      (source) => source.type == SourceType.image,
     );
+    final markdown = imageOnly
+        ? _imageOcrMarkdown(sources)
+        : await aiProvider.createOutlineProposal(
+            projectTitle: project.title,
+            currentMarkdown: project.markdown,
+            sources: sources,
+          );
     final proposal = AiProposal(
       id: _uuid.v4(),
       projectId: projectId,
@@ -37,6 +49,40 @@ class ProposalService {
       updatedAt: now,
     );
     return vault.saveProposal(proposal);
+  }
+
+  String _imageOcrMarkdown(List<SourceItem> sources) {
+    return sources
+        .map((source) => (source.extractedText ?? '').trim())
+        .where((text) => text.isNotEmpty)
+        .join('\n\n')
+        .trim();
+  }
+
+  Future<void> _extractImageSource(SourceItem source) async {
+    try {
+      final bytes = await vault.readSourceAttachment(source);
+      final extraction = await aiProvider.extractImageText(
+        filename: source.title,
+        mimeType: source.mimeType ?? 'application/octet-stream',
+        bytes: bytes,
+      );
+      await vault.updateSource(
+        source.copyWith(
+          state: SourceState.processed,
+          extractedText: extraction.text,
+          updatedAt: DateTime.now().toUtc(),
+        ),
+      );
+    } catch (_) {
+      await vault.updateSource(
+        source.copyWith(
+          state: SourceState.failed,
+          updatedAt: DateTime.now().toUtc(),
+        ),
+      );
+      rethrow;
+    }
   }
 
   Future<AiProposal> applyProposal(String proposalId) async {

@@ -213,6 +213,46 @@ $text
   }
 
   @override
+  Future<List<int>> readSourceAttachment(SourceItem source) async {
+    final file = await _attachmentFileFor(source);
+    if (!await file.exists()) {
+      throw StateError('Attachment not found: ${source.attachmentPath}');
+    }
+    return file.readAsBytes();
+  }
+
+  @override
+  Future<SourceItem> updateSource(SourceItem source) async {
+    final sources = await listSources(source.projectId);
+    final index = sources.indexWhere((item) => item.id == source.id);
+    if (index < 0) {
+      throw StateError('Source not found: ${source.id}');
+    }
+    final updated = [...sources];
+    updated[index] = source;
+    await _writeSources(source.projectId, updated);
+    return source;
+  }
+
+  @override
+  Future<void> deleteSource(SourceItem source) async {
+    final sources = await listSources(source.projectId);
+    final index = sources.indexWhere((item) => item.id == source.id);
+    if (index < 0) {
+      throw StateError('Source not found: ${source.id}');
+    }
+    File? attachment;
+    if (source.type == SourceType.image) {
+      attachment = await _attachmentFileFor(source);
+    }
+    final updated = [...sources]..removeAt(index);
+    if (attachment != null && await attachment.exists()) {
+      await attachment.delete();
+    }
+    await _writeSources(source.projectId, updated);
+  }
+
+  @override
   Future<AiProposal> saveProposal(AiProposal proposal) async {
     final proposals = await _readProposals();
     await _writeProposals([
@@ -246,6 +286,31 @@ $text
       proposal,
     ]);
     return proposal;
+  }
+
+  @override
+  Future<void> deleteProposal(String proposalId) async {
+    final proposals = await _readProposals();
+    final index = proposals.indexWhere((proposal) => proposal.id == proposalId);
+    if (index < 0) {
+      throw StateError('Proposal not found: $proposalId');
+    }
+    final updated = [...proposals]..removeAt(index);
+    await _writeProposals(updated);
+  }
+
+  Future<File> _attachmentFileFor(SourceItem source) async {
+    final attachmentPath = source.attachmentPath;
+    if (attachmentPath == null || attachmentPath.trim().isEmpty) {
+      throw StateError('Source has no attachment: ${source.id}');
+    }
+    final project = await _findProject(source.projectId);
+    final rootPath = p.normalize(project.rootPath);
+    final filePath = p.normalize(p.join(project.rootPath, attachmentPath));
+    if (!p.equals(filePath, rootPath) && !p.isWithin(rootPath, filePath)) {
+      throw StateError('Attachment path escapes project root: $attachmentPath');
+    }
+    return File(filePath);
   }
 
   Future<Directory> _uniqueProjectDirectory(String title) async {

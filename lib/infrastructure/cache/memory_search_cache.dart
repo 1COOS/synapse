@@ -23,9 +23,10 @@ class SearchResult {
 }
 
 class MemorySearchCache {
-  MemorySearchCache(this.aiProvider);
+  MemorySearchCache(this.aiProvider, {this.semanticSearchEnabled = true});
 
   final AiProvider aiProvider;
+  final bool semanticSearchEnabled;
   final _documents = <_IndexedDocument>[];
 
   Future<void> indexDocument({
@@ -34,7 +35,9 @@ class MemorySearchCache {
     required String title,
     required String text,
   }) async {
-    final embedding = await aiProvider.createEmbedding('$title\n$text');
+    final embedding = semanticSearchEnabled
+        ? await aiProvider.createEmbedding('$title\n$text')
+        : null;
     _documents.removeWhere((document) => document.id == id);
     _documents.add(
       _IndexedDocument(
@@ -48,7 +51,9 @@ class MemorySearchCache {
   }
 
   Future<List<SearchResult>> search(String query, {String? projectId}) async {
-    final queryEmbedding = await aiProvider.createEmbedding(query);
+    final queryEmbedding = semanticSearchEnabled
+        ? await aiProvider.createEmbedding(query)
+        : null;
     final results =
         _documents
             .where(
@@ -60,7 +65,10 @@ class MemorySearchCache {
               final fullTextScore = haystack.contains(query)
                   ? 1.0
                   : _tokenOverlap(query, haystack);
-              final semanticScore = _cosine(queryEmbedding, document.embedding);
+              final semanticScore =
+                  queryEmbedding != null && document.embedding != null
+                  ? _cosine(queryEmbedding, document.embedding!)
+                  : 0.0;
               final reasons = <SearchMatchReason>[];
               if (fullTextScore > 0) {
                 reasons.add(SearchMatchReason.fullText);
@@ -97,7 +105,7 @@ class _IndexedDocument {
   final String projectId;
   final String title;
   final String text;
-  final List<double> embedding;
+  final List<double>? embedding;
 }
 
 double _tokenOverlap(String query, String text) {

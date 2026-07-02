@@ -135,6 +135,29 @@ class SourceItem {
 
   String get searchableText => extractedText ?? text ?? title;
 
+  SourceItem copyWith({
+    SourceState? state,
+    DateTime? updatedAt,
+    String? text,
+    String? extractedText,
+    String? attachmentPath,
+    String? mimeType,
+  }) {
+    return SourceItem(
+      id: id,
+      projectId: projectId,
+      type: type,
+      title: title,
+      state: state ?? this.state,
+      createdAt: createdAt,
+      updatedAt: updatedAt ?? this.updatedAt,
+      text: text ?? this.text,
+      extractedText: extractedText ?? this.extractedText,
+      attachmentPath: attachmentPath ?? this.attachmentPath,
+      mimeType: mimeType ?? this.mimeType,
+    );
+  }
+
   Map<String, Object?> toJson() => {
     'id': id,
     'projectId': projectId,
@@ -239,4 +262,67 @@ class ProviderConfig {
   final String chatModel;
   final String visionModel;
   final String embeddingModel;
+
+  static const empty = ProviderConfig(
+    baseUrl: '',
+    apiKey: '',
+    chatModel: '',
+    visionModel: '',
+    embeddingModel: '',
+  );
+
+  String get normalizedBaseUrl {
+    return baseUrl.trim().replaceFirst(RegExp(r'/+$'), '');
+  }
+
+  bool get hasUsableKey => apiKey.trim().isNotEmpty;
+
+  bool get hasEmbeddingConfig {
+    return normalizedBaseUrl.isNotEmpty &&
+        hasUsableKey &&
+        embeddingModel.trim().isNotEmpty;
+  }
+
+  bool get isComplete {
+    return normalizedBaseUrl.isNotEmpty &&
+        hasUsableKey &&
+        chatModel.trim().isNotEmpty &&
+        visionModel.trim().isNotEmpty;
+  }
+
+  ProviderConfig copyWith({
+    String? baseUrl,
+    String? apiKey,
+    String? chatModel,
+    String? visionModel,
+    String? embeddingModel,
+  }) {
+    return ProviderConfig(
+      baseUrl: baseUrl ?? this.baseUrl,
+      apiKey: apiKey ?? this.apiKey,
+      chatModel: chatModel ?? this.chatModel,
+      visionModel: visionModel ?? this.visionModel,
+      embeddingModel: embeddingModel ?? this.embeddingModel,
+    );
+  }
+
+  Map<String, Object?> toJson({bool includeApiKey = true}) {
+    return {
+      'baseUrl': baseUrl,
+      if (includeApiKey) 'apiKey': apiKey,
+      'chatModel': chatModel,
+      'visionModel': visionModel,
+      'embeddingModel': embeddingModel,
+    };
+  }
+
+  static ProviderConfig fromJson(Map<String, Object?> json) {
+    return ProviderConfig(
+      baseUrl: json['baseUrl']?.toString() ?? '',
+      apiKey: json['apiKey']?.toString() ?? '',
+      chatModel: json['chatModel']?.toString() ?? '',
+      visionModel: json['visionModel']?.toString() ?? '',
+      embeddingModel: json['embeddingModel']?.toString() ?? '',
+    );
+  }
 }

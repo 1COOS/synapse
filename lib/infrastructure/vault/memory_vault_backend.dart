@@ -15,6 +15,7 @@ class MemoryVaultBackend implements VaultBackend {
   final _projects = <String, Project>{};
   final _markdown = <String, String>{};
   final _sources = <String, List<SourceItem>>{};
+  final _attachmentBytes = <String, List<int>>{};
   final _proposals = <String, AiProposal>{};
 
   @override
@@ -127,6 +128,7 @@ class MemoryVaultBackend implements VaultBackend {
       mimeType: mimeType,
     );
     _sources.putIfAbsent(projectId, () => <SourceItem>[]).add(source);
+    _attachmentBytes[source.id] = List<int>.unmodifiable(bytes);
     return source;
   }
 
@@ -144,6 +146,40 @@ class MemoryVaultBackend implements VaultBackend {
     return (_sources[projectId] ?? const [])
         .where((source) => wanted.contains(source.id))
         .toList();
+  }
+
+  @override
+  Future<List<int>> readSourceAttachment(SourceItem source) async {
+    final bytes = _attachmentBytes[source.id];
+    if (bytes == null) {
+      throw StateError('Attachment not found: ${source.id}');
+    }
+    return bytes;
+  }
+
+  @override
+  Future<SourceItem> updateSource(SourceItem source) async {
+    final sources = _sources[source.projectId] ?? const <SourceItem>[];
+    final index = sources.indexWhere((item) => item.id == source.id);
+    if (index < 0) {
+      throw StateError('Source not found: ${source.id}');
+    }
+    final updated = [...sources];
+    updated[index] = source;
+    _sources[source.projectId] = updated;
+    return source;
+  }
+
+  @override
+  Future<void> deleteSource(SourceItem source) async {
+    final sources = _sources[source.projectId] ?? const <SourceItem>[];
+    final index = sources.indexWhere((item) => item.id == source.id);
+    if (index < 0) {
+      throw StateError('Source not found: ${source.id}');
+    }
+    final updated = [...sources]..removeAt(index);
+    _sources[source.projectId] = updated;
+    _attachmentBytes.remove(source.id);
   }
 
   @override
@@ -175,6 +211,14 @@ class MemoryVaultBackend implements VaultBackend {
   Future<AiProposal> updateProposal(AiProposal proposal) async {
     _proposals[proposal.id] = proposal;
     return proposal;
+  }
+
+  @override
+  Future<void> deleteProposal(String proposalId) async {
+    final removed = _proposals.remove(proposalId);
+    if (removed == null) {
+      throw StateError('Proposal not found: $proposalId');
+    }
   }
 
   Project _project(String id) {
@@ -244,8 +288,79 @@ class MemoryVaultBackend implements VaultBackend {
       createdAt: now,
       updatedAt: now,
     );
+    _attachmentBytes['preview-image-source'] = _tinyPreviewPng;
   }
 }
+
+const _tinyPreviewPng = <int>[
+  137,
+  80,
+  78,
+  71,
+  13,
+  10,
+  26,
+  10,
+  0,
+  0,
+  0,
+  13,
+  73,
+  72,
+  68,
+  82,
+  0,
+  0,
+  0,
+  1,
+  0,
+  0,
+  0,
+  1,
+  8,
+  6,
+  0,
+  0,
+  0,
+  31,
+  21,
+  196,
+  137,
+  0,
+  0,
+  0,
+  10,
+  73,
+  68,
+  65,
+  84,
+  120,
+  156,
+  99,
+  0,
+  1,
+  0,
+  0,
+  5,
+  0,
+  1,
+  13,
+  10,
+  45,
+  180,
+  0,
+  0,
+  0,
+  0,
+  73,
+  69,
+  78,
+  68,
+  174,
+  66,
+  96,
+  130,
+];
 
 String _initialMarkdown(Project project) {
   return MarkdownDocument(

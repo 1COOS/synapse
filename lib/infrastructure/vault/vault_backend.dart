@@ -37,6 +37,12 @@ abstract class VaultBackend {
 
   Future<List<SourceItem>> getSources(String projectId, List<String> sourceIds);
 
+  Future<List<int>> readSourceAttachment(SourceItem source);
+
+  Future<SourceItem> updateSource(SourceItem source);
+
+  Future<void> deleteSource(SourceItem source);
+
   Future<AiProposal> saveProposal(AiProposal proposal);
 
   Future<List<AiProposal>> listProposals(String projectId);
@@ -44,4 +50,6 @@ abstract class VaultBackend {
   Future<AiProposal> getProposal(String proposalId);
 
   Future<AiProposal> updateProposal(AiProposal proposal);
+
+  Future<void> deleteProposal(String proposalId);
 }
