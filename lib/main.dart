@@ -2,11 +2,13 @@ import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter/services.dart';
 
 import 'application/proposals/proposal_service.dart';
 import 'domain/study/project.dart';
 import 'infrastructure/ai/mock_ai_provider.dart';
 import 'infrastructure/cache/memory_search_cache.dart';
+import 'infrastructure/input/image_input_service.dart';
 import 'infrastructure/vault/default_vault_backend.dart';
 import 'infrastructure/vault/vault_backend.dart';
 
@@ -15,7 +17,10 @@ void main() {
 }
 
 class SynapseApp extends StatelessWidget {
-  const SynapseApp({super.key});
+  const SynapseApp({super.key, this.vault, this.imageInput});
+
+  final VaultBackend? vault;
+  final ImageInputService? imageInput;
 
   @override
   Widget build(BuildContext context) {
@@ -32,14 +37,17 @@ class SynapseApp extends StatelessWidget {
           scaffoldBackgroundColor: const Color(0xFFF6F4EF),
           visualDensity: VisualDensity.compact,
         ),
-        home: const SynapseWorkspace(),
+        home: SynapseWorkspace(initialVault: vault, imageInput: imageInput),
       ),
     );
   }
 }
 
 class SynapseWorkspace extends StatefulWidget {
-  const SynapseWorkspace({super.key});
+  const SynapseWorkspace({super.key, this.initialVault, this.imageInput});
+
+  final VaultBackend? initialVault;
+  final ImageInputService? imageInput;
 
   @override
   State<SynapseWorkspace> createState() => _SynapseWorkspaceState();
@@ -49,13 +57,13 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   late VaultBackend _vault;
   late ProposalService _proposalService;
   late MemorySearchCache _searchCache;
+  late ImageInputService _imageInput;
 
   final _aiProvider = MockAiProvider();
   final _markdownController = TextEditingController();
   final _projectTitleController = TextEditingController();
-  final _sourceTitleController = TextEditingController();
-  final _sourceTextController = TextEditingController();
   final _searchController = TextEditingController();
+  final _sourcePaneFocusNode = FocusNode();
 
   List<Project> _projects = const [];
   ProjectContent? _activeProject;
@@ -64,13 +72,15 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   final Set<String> _selectedSourceIds = <String>{};
   StudyTemplate _newProjectTemplate = StudyTemplate.subject;
   bool _busy = false;
+  bool _previewMarkdown = false;
   String _message = '';
   String _vaultLabel = supportsDirectoryVault ? 'vault/' : 'H5 预览库';
 
   @override
   void initState() {
     super.initState();
-    _resetServices(createDefaultVaultBackend());
+    _imageInput = widget.imageInput ?? const PlatformImageInputService();
+    _resetServices(widget.initialVault ?? createDefaultVaultBackend());
     _loadProjects();
   }
 
@@ -78,9 +88,8 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   void dispose() {
     _markdownController.dispose();
     _projectTitleController.dispose();
-    _sourceTitleController.dispose();
-    _sourceTextController.dispose();
     _searchController.dispose();
+    _sourcePaneFocusNode.dispose();
     super.dispose();
   }
 
@@ -151,6 +160,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
         _activeProject = loaded;
         _markdownController.text = loaded.markdown;
         _selectedSourceIds.clear();
+        _previewMarkdown = false;
       });
       await _refreshProposals(project.id);
     });
@@ -173,6 +183,8 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
         _activeProject = loaded;
         _markdownController.text = loaded.markdown;
         _proposals = const [];
+        _selectedSourceIds.clear();
+        _previewMarkdown = false;
       });
     });
   }
@@ -194,6 +206,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       _proposals = const [];
       _selectedSourceIds.clear();
       _markdownController.clear();
+      _previewMarkdown = false;
     });
     await _loadProjects();
   }
@@ -215,47 +228,70 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     });
   }
 
-  Future<void> _addTextSource() async {
-    final active = _activeProject;
-    final text = _sourceTextController.text.trim();
-    if (active == null || text.isEmpty) {
-      return;
-    }
-    await _runBusy(() async {
-      await _vault.addTextSource(
-        projectId: active.id,
-        title: _sourceTitleController.text.trim().isEmpty
-            ? '摘录'
-            : _sourceTitleController.text.trim(),
-        text: text,
-      );
-      _sourceTitleController.clear();
-      _sourceTextController.clear();
-      await _refreshActiveProject();
-    });
-  }
-
   Future<void> _addImageSource() async {
     final active = _activeProject;
     if (active == null) {
+      setState(() => _message = '请先选择或创建项目');
       return;
     }
-    final file = await openFile(
-      acceptedTypeGroups: const [
-        XTypeGroup(label: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp']),
-      ],
-    );
-    if (file == null) {
+    final image = await _imageInput.pickImage();
+    if (image == null) {
+      setState(() => _message = '未选择图片');
+      return;
+    }
+    await _saveImportedImage(image, message: '图片已导入：${image.filename}');
+  }
+
+  Future<void> _pasteImageSource() async {
+    final active = _activeProject;
+    if (active == null) {
+      setState(() => _message = '请先选择或创建项目');
       return;
     }
     await _runBusy(() async {
-      await _vault.addImageSource(
+      final image = await _imageInput.pasteImage();
+      if (image == null) {
+        setState(() => _message = '剪贴板中没有可导入的图片');
+        return;
+      }
+      await _saveImportedImage(
+        image,
+        message: '剪贴板图片已导入：${image.filename}',
+        wrapBusy: false,
+      );
+    });
+  }
+
+  Future<void> _saveImportedImage(
+    ImportedImage image, {
+    required String message,
+    bool wrapBusy = true,
+  }) async {
+    final active = _activeProject;
+    if (active == null) {
+      setState(() => _message = '请先选择或创建项目');
+      return;
+    }
+    Future<void> save() async {
+      final source = await _vault.addImageSource(
         projectId: active.id,
-        filename: file.name,
-        mimeType: file.mimeType ?? 'application/octet-stream',
-        bytes: await file.readAsBytes(),
+        filename: image.filename,
+        mimeType: image.mimeType,
+        bytes: image.bytes,
       );
       await _refreshActiveProject();
+      setState(() {
+        _selectedSourceIds.add(source.id);
+        _message = message;
+      });
+    }
+
+    if (!wrapBusy) {
+      await save();
+      return;
+    }
+    await _runBusy(() async {
+      await save();
     });
   }
 
@@ -273,11 +309,9 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     });
   }
 
-  Future<void> _applyProposal(AiProposal proposal) async {
-    await _runBusy(() async {
-      await _proposalService.applyProposal(proposal.id);
-      await _refreshActiveProject();
-    });
+  Future<void> _copyProposal(AiProposal proposal) async {
+    await Clipboard.setData(ClipboardData(text: proposal.proposedMarkdown));
+    setState(() => _message = '建议已复制到剪贴板');
   }
 
   Future<void> _search() async {
@@ -426,18 +460,54 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
 
   Widget _buildEditorPane() {
     return _Pane(
-      title: 'Markdown',
+      title: '笔记',
       icon: Icons.edit_note,
-      trailing: IconButton(
-        tooltip: '保存笔记',
-        onPressed: _activeProject == null || _busy ? null : _saveMarkdown,
-        icon: const Icon(Icons.save_outlined),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
         children: [
-          Expanded(
-            child: TextField(
+          SegmentedButton<bool>(
+            segments: const [
+              ButtonSegment<bool>(
+                value: false,
+                icon: Icon(Icons.edit_outlined),
+                label: Text('编辑'),
+              ),
+              ButtonSegment<bool>(
+                value: true,
+                icon: Icon(Icons.visibility_outlined),
+                label: Text('预览'),
+              ),
+            ],
+            selected: {_previewMarkdown},
+            showSelectedIcon: false,
+            onSelectionChanged: (values) {
+              setState(() => _previewMarkdown = values.first);
+            },
+          ),
+          const SizedBox(width: 8),
+          IconButton(
+            tooltip: '保存笔记',
+            onPressed: _activeProject == null || _busy ? null : _saveMarkdown,
+            icon: const Icon(Icons.save_outlined),
+          ),
+        ],
+      ),
+      child: _previewMarkdown
+          ? DecoratedBox(
+              decoration: BoxDecoration(
+                border: Border.all(
+                  color: Theme.of(context).colorScheme.outlineVariant,
+                ),
+                borderRadius: BorderRadius.circular(8),
+                color: Theme.of(context).colorScheme.surface,
+              ),
+              child: Markdown(
+                data: _markdownController.text,
+                selectable: true,
+                padding: const EdgeInsets.all(16),
+              ),
+            )
+          : TextField(
               controller: _markdownController,
               enabled: _activeProject != null,
               expands: true,
@@ -453,188 +523,180 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
                 hintText: '选择或创建项目后开始整理 Markdown',
               ),
             ),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: DecoratedBox(
-              decoration: BoxDecoration(
-                border: Border.all(
-                  color: Theme.of(context).colorScheme.outlineVariant,
-                ),
-                borderRadius: BorderRadius.circular(8),
-                color: Theme.of(context).colorScheme.surface,
-              ),
-              child: Markdown(
-                data: _markdownController.text,
-                selectable: true,
-                padding: const EdgeInsets.all(16),
-              ),
-            ),
-          ),
-        ],
-      ),
     );
   }
 
   Widget _buildSourcePane() {
-    final sources = _activeProject?.sources ?? const <SourceItem>[];
+    final sources = (_activeProject?.sources ?? const <SourceItem>[])
+        .where((source) => source.type == SourceType.image)
+        .toList();
     return _Pane(
       title: '素材',
       icon: Icons.collections_bookmark_outlined,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          TextField(
-            controller: _sourceTitleController,
-            decoration: const InputDecoration(
-              isDense: true,
-              border: OutlineInputBorder(),
-              hintText: '素材标题',
-            ),
-          ),
-          const SizedBox(height: 8),
-          SizedBox(
-            height: 92,
-            child: TextField(
-              controller: _sourceTextController,
-              expands: true,
-              minLines: null,
-              maxLines: null,
-              decoration: const InputDecoration(
-                border: OutlineInputBorder(),
-                hintText: '粘贴文本素材',
-              ),
-            ),
-          ),
-          const SizedBox(height: 8),
-          Row(
-            children: [
-              FilledButton.icon(
-                onPressed: _activeProject == null || _busy
-                    ? null
-                    : _addTextSource,
-                icon: const Icon(Icons.upload_file),
-                label: const Text('加入文本'),
-              ),
-              const SizedBox(width: 8),
-              IconButton.outlined(
-                tooltip: '加入图片',
-                onPressed: _activeProject == null || _busy
-                    ? null
-                    : _addImageSource,
-                icon: const Icon(Icons.image_outlined),
-              ),
-            ],
-          ),
-          const SizedBox(height: 12),
-          Expanded(
-            child: ListView.builder(
-              itemCount: sources.length,
-              itemBuilder: (context, index) {
-                final source = sources[index];
-                return CheckboxListTile(
-                  dense: true,
-                  value: _selectedSourceIds.contains(source.id),
-                  onChanged: (value) {
-                    setState(() {
-                      if (value ?? false) {
-                        _selectedSourceIds.add(source.id);
-                      } else {
-                        _selectedSourceIds.remove(source.id);
-                      }
-                    });
-                  },
-                  title: Text(source.title, overflow: TextOverflow.ellipsis),
-                  subtitle: Text(source.type == SourceType.image ? '图片' : '文本'),
-                );
+      child: Shortcuts(
+        shortcuts: const {
+          SingleActivator(LogicalKeyboardKey.keyV, control: true):
+              _PasteImageIntent(),
+          SingleActivator(LogicalKeyboardKey.keyV, meta: true):
+              _PasteImageIntent(),
+        },
+        child: Actions(
+          actions: {
+            _PasteImageIntent: CallbackAction<_PasteImageIntent>(
+              onInvoke: (_) {
+                if (!_busy) {
+                  _pasteImageSource();
+                }
+                return null;
               },
             ),
-          ),
-          const Divider(),
-          Row(
-            children: [
-              Expanded(
-                child: FilledButton.icon(
-                  onPressed: _selectedSourceIds.isEmpty || _busy
-                      ? null
-                      : _generateProposal,
-                  icon: const Icon(Icons.auto_awesome),
-                  label: const Text('生成建议'),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 8),
-          const Align(
-            alignment: Alignment.centerLeft,
-            child: Text('AI 建议', style: TextStyle(fontWeight: FontWeight.w700)),
-          ),
-          const SizedBox(height: 8),
-          SizedBox(
-            height: 210,
-            child: ListView(
-              children: [
-                for (final proposal in _proposals)
-                  Card(
-                    elevation: 0,
-                    child: Padding(
-                      padding: const EdgeInsets.all(10),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Row(
-                            children: [
-                              Expanded(
-                                child: Text(
-                                  proposal.title,
-                                  style: const TextStyle(
-                                    fontWeight: FontWeight.w700,
-                                  ),
-                                ),
-                              ),
-                              Text(proposal.status.name),
-                              if (proposal.status == ProposalStatus.pending)
-                                IconButton(
-                                  tooltip: '写入笔记',
-                                  onPressed: _busy
-                                      ? null
-                                      : () => _applyProposal(proposal),
-                                  icon: const Icon(Icons.check),
-                                ),
-                            ],
+          },
+          child: Focus(
+            focusNode: _sourcePaneFocusNode,
+            child: GestureDetector(
+              key: const Key('image-input-area'),
+              behavior: HitTestBehavior.opaque,
+              onTap: _sourcePaneFocusNode.requestFocus,
+              child: ListView(
+                padding: EdgeInsets.zero,
+                children: [
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Tooltip(
+                          message: '加入图片',
+                          child: FilledButton.icon(
+                            onPressed: _busy ? null : _addImageSource,
+                            icon: const Icon(Icons.image_outlined),
+                            label: const Text('导入图片'),
                           ),
-                          Text(
-                            proposal.proposedMarkdown,
-                            maxLines: 6,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                              fontFamily: 'monospace',
-                              fontSize: 12,
-                            ),
-                          ),
-                        ],
+                        ),
                       ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          onPressed: _busy ? null : _pasteImageSource,
+                          icon: const Icon(Icons.content_paste),
+                          label: const Text('粘贴图片'),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  if (sources.isEmpty)
+                    const Padding(
+                      padding: EdgeInsets.symmetric(vertical: 20),
+                      child: Center(child: Text('暂无图片素材')),
+                    ),
+                  for (final source in sources)
+                    CheckboxListTile(
+                      dense: true,
+                      value: _selectedSourceIds.contains(source.id),
+                      onChanged: (value) {
+                        setState(() {
+                          if (value ?? false) {
+                            _selectedSourceIds.add(source.id);
+                          } else {
+                            _selectedSourceIds.remove(source.id);
+                          }
+                        });
+                      },
+                      title: Text(
+                        source.title,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      subtitle: const Text('图片'),
+                    ),
+                  const Divider(),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: FilledButton.icon(
+                          onPressed: _selectedSourceIds.isEmpty || _busy
+                              ? null
+                              : _generateProposal,
+                          icon: const Icon(Icons.auto_awesome),
+                          label: const Text('生成建议'),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  const Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text(
+                      'AI 建议',
+                      style: TextStyle(fontWeight: FontWeight.w700),
                     ),
                   ),
-              ],
+                  const SizedBox(height: 8),
+                  for (final proposal in _proposals)
+                    Card(
+                      elevation: 0,
+                      child: Padding(
+                        padding: const EdgeInsets.all(10),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              children: [
+                                Expanded(
+                                  child: Text(
+                                    proposal.title,
+                                    style: const TextStyle(
+                                      fontWeight: FontWeight.w700,
+                                    ),
+                                  ),
+                                ),
+                                Text(proposal.status.name),
+                                IconButton(
+                                  tooltip: '复制建议',
+                                  onPressed: _busy
+                                      ? null
+                                      : () => _copyProposal(proposal),
+                                  icon: const Icon(Icons.copy_outlined),
+                                ),
+                              ],
+                            ),
+                            Text(
+                              proposal.proposedMarkdown,
+                              maxLines: 6,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                fontFamily: 'monospace',
+                                fontSize: 12,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  if (_searchResults.isNotEmpty) ...[
+                    const Divider(),
+                    for (final result in _searchResults)
+                      ListTile(
+                        dense: true,
+                        leading: const Icon(Icons.search),
+                        title: Text(result.title),
+                        subtitle: Text(
+                          result.reasons
+                              .map((reason) => reason.name)
+                              .join(' + '),
+                        ),
+                      ),
+                  ],
+                ],
+              ),
             ),
           ),
-          if (_searchResults.isNotEmpty) ...[
-            const Divider(),
-            for (final result in _searchResults)
-              ListTile(
-                dense: true,
-                leading: const Icon(Icons.search),
-                title: Text(result.title),
-                subtitle: Text(
-                  result.reasons.map((reason) => reason.name).join(' + '),
-                ),
-              ),
-          ],
-        ],
+        ),
       ),
     );
   }
+}
+
+class _PasteImageIntent extends Intent {
+  const _PasteImageIntent();
 }
 
 class _TopBar extends StatelessWidget {

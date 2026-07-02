@@ -5,8 +5,10 @@ import '../../domain/study/project.dart';
 import 'vault_backend.dart';
 
 class MemoryVaultBackend implements VaultBackend {
-  MemoryVaultBackend() {
-    seedExample();
+  MemoryVaultBackend({bool seedExampleData = true}) {
+    if (seedExampleData) {
+      seedExample();
+    }
   }
 
   final _uuid = const Uuid();
@@ -216,7 +218,32 @@ class MemoryVaultBackend implements VaultBackend {
         createdAt: now,
         updatedAt: now,
       ),
+      SourceItem(
+        id: 'preview-image-source',
+        projectId: id,
+        type: SourceType.image,
+        title: '经文截图.png',
+        attachmentPath: 'attachments/经文截图.png',
+        mimeType: 'image/png',
+        state: SourceState.processed,
+        createdAt: now,
+        updatedAt: now,
+      ),
     ];
+    _proposals['preview-proposal'] = AiProposal(
+      id: 'preview-proposal',
+      projectId: id,
+      sourceIds: const ['preview-image-source'],
+      title: '图片 OCR 整理建议',
+      proposedMarkdown: '''## 图片摘录
+
+- 观自在菩萨行深般若波罗蜜多时。
+- 可整理为“观照”“五蕴”“空性”三个知识点。
+''',
+      status: ProposalStatus.pending,
+      createdAt: now,
+      updatedAt: now,
+    );
   }
 }
 
