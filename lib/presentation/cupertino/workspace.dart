@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart'
     show MenuAnchor, MenuController, MenuItemButton, Tooltip;
@@ -25,6 +27,7 @@ typedef ProviderConfigTester = Future<String> Function(ProviderConfig config);
 typedef DirectoryPicker = Future<String?> Function();
 typedef VaultBackendFactory = VaultBackend Function(String rootPath);
 
+const _autoSaveDelay = Duration(milliseconds: 1000);
 const _background = Color(0xFFF5F5F7);
 const _surface = Color(0xFFFFFFFF);
 const _secondarySurface = Color(0xFFF9F9FB);
@@ -94,6 +97,8 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   _WorkspaceSection _narrowSection = _WorkspaceSection.resources;
   bool _busy = false;
   bool _previewMarkdown = false;
+  bool _programmaticMarkdownChange = false;
+  bool _autoSaving = false;
   String _message = '';
   String _vaultLabel = supportsDirectoryVault ? '选择仓库' : 'H5 预览库';
   String? _vaultRootPath;
@@ -101,6 +106,8 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   VaultLocationStore? _vaultLocationStore;
   ProviderConfig? _providerConfig;
   bool _usesInjectedAiProvider = false;
+  Timer? _autoSaveTimer;
+  Future<bool>? _markdownSaveInFlight;
 
   @override
   void initState() {
@@ -116,11 +123,14 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       _resetServices(createDefaultVaultBackend());
       _vaultLabel = 'H5 预览库';
     }
+    _markdownController.addListener(_handleMarkdownEdited);
     _initializeWorkspace();
   }
 
   @override
   void dispose() {
+    _autoSaveTimer?.cancel();
+    _markdownController.removeListener(_handleMarkdownEdited);
     _markdownController.dispose();
     _searchController.dispose();
     _sourcePaneFocusNode.dispose();
@@ -143,7 +153,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     _proposals = const [];
     _searchResults = const [];
     _selectedSourceIds.clear();
-    _markdownController.clear();
+    _replaceEditorMarkdown('');
     _previewMarkdown = false;
     _narrowSection = _WorkspaceSection.resources;
     _resetAiServices();
@@ -170,6 +180,47 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   bool get _hasDirtyMarkdown {
     final active = _activeNote;
     return active != null && _markdownController.text != active.markdown;
+  }
+
+  void _handleMarkdownEdited() {
+    if (_programmaticMarkdownChange) {
+      return;
+    }
+    if (_activeNote == null) {
+      _cancelPendingAutoSave();
+      return;
+    }
+    if (!_hasDirtyMarkdown) {
+      _cancelPendingAutoSave();
+      return;
+    }
+    _scheduleAutoSave();
+  }
+
+  void _replaceEditorMarkdown(String markdown) {
+    _cancelPendingAutoSave();
+    _programmaticMarkdownChange = true;
+    _markdownController.text = markdown;
+    _programmaticMarkdownChange = false;
+  }
+
+  void _cancelPendingAutoSave() {
+    _autoSaveTimer?.cancel();
+    _autoSaveTimer = null;
+  }
+
+  void _scheduleAutoSave() {
+    _cancelPendingAutoSave();
+    _autoSaveTimer = Timer(_autoSaveDelay, () {
+      _autoSaveTimer = null;
+      unawaited(
+        _saveCurrentMarkdown(
+          successMessage: '笔记已自动保存',
+          automatic: true,
+          rescheduleIfDirty: true,
+        ),
+      );
+    });
   }
 
   VaultBackend _requireVault() {
@@ -292,7 +343,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     _proposals = const [];
     _searchResults = const [];
     _selectedSourceIds.clear();
-    _markdownController.clear();
+    _replaceEditorMarkdown('');
     _previewMarkdown = false;
     _narrowSection = _WorkspaceSection.resources;
   }
@@ -393,7 +444,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       _resources = resources;
       _selectedResource = firstNote;
       _activeNote = active;
-      _markdownController.text = active?.markdown ?? '';
+      _replaceEditorMarkdown(active?.markdown ?? '');
       _proposals = proposals;
       _searchResults = const [];
       _selectedSourceIds.clear();
@@ -415,7 +466,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       _resources = resources;
       _selectedResource = _findResource(resources, refreshed.id);
       _activeNote = refreshed;
-      _markdownController.text = refreshed.markdown;
+      _replaceEditorMarkdown(refreshed.markdown);
     });
     await _refreshProposals(refreshed.id);
   }
@@ -452,11 +503,14 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       return;
     }
     await _runBusy(() async {
+      if (!await _flushPendingMarkdown()) {
+        return;
+      }
       final loaded = await _requireVault().readNote(resource.id);
       setState(() {
         _selectedResource = resource;
         _activeNote = loaded;
-        _markdownController.text = loaded.markdown;
+        _replaceEditorMarkdown(loaded.markdown);
         _selectedSourceIds.clear();
         _previewMarkdown = false;
         _narrowSection = _WorkspaceSection.notes;
@@ -495,6 +549,9 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       return;
     }
     await _runBusy(() async {
+      if (!await _flushPendingMarkdown()) {
+        return;
+      }
       final vault = _requireVault();
       final note = await vault.createNote(parentPath: parentPath, title: title);
       final loaded = await vault.readNote(note.id);
@@ -503,7 +560,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
         _resources = resources;
         _selectedResource = _findResource(resources, note.id);
         _activeNote = loaded;
-        _markdownController.text = loaded.markdown;
+        _replaceEditorMarkdown(loaded.markdown);
         _proposals = const [];
         _selectedSourceIds.clear();
         _collapsedFolderIds.remove(parentPath);
@@ -594,28 +651,12 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   }
 
   Future<bool> _autoSaveDirtyMarkdownBeforeSwitch() async {
-    final active = _activeNote;
-    if (active == null || !_hasDirtyMarkdown) {
-      return true;
-    }
     setState(() {
       _busy = true;
       _message = '';
     });
     try {
-      final updated = await _requireVault().updateMarkdown(
-        noteId: active.id,
-        markdown: _markdownController.text,
-      );
-      if (mounted) {
-        setState(() => _activeNote = updated);
-      }
-      return true;
-    } catch (error) {
-      if (mounted) {
-        setState(() => _message = error.toString());
-      }
-      return false;
+      return await _flushPendingMarkdown();
     } finally {
       if (mounted) {
         setState(() => _busy = false);
@@ -628,22 +669,129 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     if (active == null) {
       return;
     }
-    await _runBusy(() async {
-      final updated = await _requireVault().updateMarkdown(
-        noteId: active.id,
-        markdown: _markdownController.text,
-      );
-      setState(() {
-        _activeNote = updated;
-        _message = '笔记已保存';
-      });
+    setState(() {
+      _busy = true;
+      _message = '';
     });
+    try {
+      await _flushPendingMarkdown(successMessage: '笔记已保存');
+    } finally {
+      if (mounted) {
+        setState(() => _busy = false);
+      }
+    }
+  }
+
+  Future<bool> _flushPendingMarkdown({String? successMessage}) async {
+    _cancelPendingAutoSave();
+    while (true) {
+      final inFlight = _markdownSaveInFlight;
+      if (inFlight != null) {
+        final saved = await inFlight;
+        if (!saved) {
+          return false;
+        }
+        _cancelPendingAutoSave();
+        continue;
+      }
+      if (!_hasDirtyMarkdown) {
+        return true;
+      }
+      final saved = await _saveCurrentMarkdown(
+        successMessage: successMessage,
+        automatic: false,
+        rescheduleIfDirty: false,
+      );
+      if (!saved) {
+        return false;
+      }
+    }
+  }
+
+  Future<bool> _saveCurrentMarkdown({
+    required bool automatic,
+    required bool rescheduleIfDirty,
+    String? successMessage,
+  }) {
+    final inFlight = _markdownSaveInFlight;
+    if (inFlight != null) {
+      return inFlight;
+    }
+    final active = _activeNote;
+    if (active == null || !_hasDirtyMarkdown) {
+      return Future.value(true);
+    }
+    final noteId = active.id;
+    final markdown = _markdownController.text;
+    late final Future<bool> saveFuture;
+    saveFuture =
+        _performMarkdownSave(
+          noteId: noteId,
+          markdown: markdown,
+          successMessage: successMessage,
+          automatic: automatic,
+          rescheduleIfDirty: rescheduleIfDirty,
+        ).whenComplete(() {
+          if (identical(_markdownSaveInFlight, saveFuture)) {
+            _markdownSaveInFlight = null;
+          }
+        });
+    _markdownSaveInFlight = saveFuture;
+    return saveFuture;
+  }
+
+  Future<bool> _performMarkdownSave({
+    required String noteId,
+    required String markdown,
+    required bool automatic,
+    required bool rescheduleIfDirty,
+    String? successMessage,
+  }) async {
+    if (automatic && mounted) {
+      setState(() => _autoSaving = true);
+    }
+    try {
+      final updated = await _requireVault().updateMarkdown(
+        noteId: noteId,
+        markdown: markdown,
+      );
+      if (!mounted) {
+        return true;
+      }
+      final activeStillOpen = _activeNote?.id == noteId;
+      final stillDirty =
+          activeStillOpen && _markdownController.text != markdown;
+      setState(() {
+        if (activeStillOpen) {
+          _activeNote = updated;
+        }
+        if (successMessage != null && !stillDirty) {
+          _message = successMessage;
+        }
+      });
+      if (stillDirty && rescheduleIfDirty) {
+        _scheduleAutoSave();
+      }
+      return true;
+    } catch (error) {
+      if (mounted) {
+        setState(() => _message = '笔记保存失败：$error');
+      }
+      return false;
+    } finally {
+      if (automatic && mounted) {
+        setState(() => _autoSaving = false);
+      }
+    }
   }
 
   Future<void> _addImageSource() async {
     final active = _activeNote;
     if (active == null) {
       setState(() => _message = '请先选择或创建笔记');
+      return;
+    }
+    if (!await _flushPendingMarkdown()) {
       return;
     }
     final image = await _imageInput.pickImage();
@@ -661,6 +809,9 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       return;
     }
     await _runBusy(() async {
+      if (!await _flushPendingMarkdown()) {
+        return;
+      }
       final image = await _imageInput.pasteImage();
       if (image == null) {
         setState(() => _message = '剪贴板中没有可导入的图片');
@@ -685,6 +836,9 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       return;
     }
     Future<void> save() async {
+      if (!await _flushPendingMarkdown()) {
+        return;
+      }
       final source = await _requireVault().addImageSource(
         noteId: active.id,
         filename: image.filename,
@@ -717,6 +871,9 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       return;
     }
     await _runBusy(() async {
+      if (!await _flushPendingMarkdown()) {
+        return;
+      }
       await _requireProposalService().createOutlineProposal(
         noteId: active.id,
         sourceIds: _selectedSourceIds.toList(),
@@ -803,6 +960,9 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       return;
     }
     await _runBusy(() async {
+      if (!await _flushPendingMarkdown()) {
+        return;
+      }
       final renamed = await _requireVault().renameFolder(
         folderPath: folder.path,
         title: title,
@@ -832,6 +992,9 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       return;
     }
     await _runBusy(() async {
+      if (!await _flushPendingMarkdown()) {
+        return;
+      }
       final renamed = await _requireVault().renameNote(
         noteId: note.id,
         title: title,
@@ -845,6 +1008,9 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       return;
     }
     await _runBusy(() async {
+      if (!await _flushPendingMarkdown()) {
+        return;
+      }
       final copied = await _requireVault().copyNote(noteId: note.id);
       await _openNoteAfterMutation(copied, message: '笔记已复制');
     });
@@ -859,6 +1025,9 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       return;
     }
     await _runBusy(() async {
+      if (!await _flushPendingMarkdown()) {
+        return;
+      }
       final moved = await _requireVault().moveNote(
         noteId: note.id,
         parentPath: parentPath,
@@ -889,7 +1058,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       _resources = resources;
       _selectedResource = _findResource(resources, note.id);
       _activeNote = loaded;
-      _markdownController.text = loaded.markdown;
+      _replaceEditorMarkdown(loaded.markdown);
       _proposals = proposals;
       _searchResults = const [];
       _selectedSourceIds.clear();
@@ -921,7 +1090,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
         _resources = resources;
         _activeNote = loaded;
         _selectedResource = _findResource(resources, loaded.id);
-        _markdownController.text = loaded.markdown;
+        _replaceEditorMarkdown(loaded.markdown);
         _proposals = proposals;
         _selectedSourceIds.clear();
         _collapsedFolderIds.remove(before.id);
@@ -969,7 +1138,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
           _resources = resources;
           _selectedResource = null;
           _activeNote = null;
-          _markdownController.clear();
+          _replaceEditorMarkdown('');
           _proposals = const [];
           _searchResults = const [];
           _selectedSourceIds.clear();
@@ -986,7 +1155,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
         _resources = resources;
         _selectedResource = _findResource(resources, firstNote.id) ?? firstNote;
         _activeNote = loaded;
-        _markdownController.text = loaded.markdown;
+        _replaceEditorMarkdown(loaded.markdown);
         _proposals = proposals;
         _searchResults = const [];
         _selectedSourceIds.clear();
@@ -1019,6 +1188,9 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       return;
     }
     await _runBusy(() async {
+      if (!await _flushPendingMarkdown()) {
+        return;
+      }
       await _requireVault().deleteSource(source);
       await _refreshActiveNote();
       setState(() {
@@ -1151,7 +1323,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
             _TopBar(
               vaultLabel: _vaultLabel,
               vaultTooltip: _vaultRootPath ?? _vaultLabel,
-              busy: _busy,
+              busy: _busy || _autoSaving,
               message: _message,
               searchController: _searchController,
               onSearch: _search,
@@ -1323,7 +1495,9 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
             key: const Key('save-note-button'),
             label: '保存笔记',
             icon: CupertinoIcons.tray_arrow_down,
-            onPressed: _activeNote == null || _busy ? null : _saveMarkdown,
+            onPressed: _activeNote == null || _busy || _autoSaving
+                ? null
+                : _saveMarkdown,
           ),
         ],
       ),

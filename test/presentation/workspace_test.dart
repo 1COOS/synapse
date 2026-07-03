@@ -395,6 +395,120 @@ void main() {
     expect(find.textContaining('save failed'), findsOneWidget);
   });
 
+  testWidgets('auto-saves markdown after editing pauses', (tester) async {
+    final vault = _CountingUpdateVaultBackend();
+
+    await _pumpWorkspace(tester, vault: vault);
+    await tester.enterText(
+      find.byKey(const Key('note-editor')),
+      '# 心经学习\n自动保存内容',
+    );
+
+    await tester.pump(const Duration(milliseconds: 999));
+    expect(vault.updateCalls, 0);
+
+    await tester.pump(const Duration(milliseconds: 1));
+    await tester.pump();
+
+    expect(vault.updateCalls, 1);
+    expect(
+      (await vault.readNote('preview-note.md')).markdown,
+      contains('自动保存内容'),
+    );
+    expect(find.text('笔记已自动保存'), findsOneWidget);
+  });
+
+  testWidgets('debounces auto-save while editing continues', (tester) async {
+    final vault = _CountingUpdateVaultBackend(seedExampleData: false);
+    await vault.createNote(parentPath: '', title: 'Draft');
+
+    await _pumpWorkspace(tester, vault: vault);
+    await tester.enterText(
+      find.byKey(const Key('note-editor')),
+      '# Draft\nfirst',
+    );
+    await tester.pump(const Duration(milliseconds: 600));
+    await tester.enterText(
+      find.byKey(const Key('note-editor')),
+      '# Draft\nfinal',
+    );
+
+    await tester.pump(const Duration(milliseconds: 999));
+    expect(vault.updateCalls, 0);
+
+    await tester.pump(const Duration(milliseconds: 1));
+    await tester.pump();
+
+    expect(vault.updateCalls, 1);
+    expect(vault.lastSavedMarkdown, contains('final'));
+    expect(vault.lastSavedMarkdown, isNot(contains('first')));
+  });
+
+  testWidgets('does not switch notes when auto-save fails', (tester) async {
+    final vault = _FailingUpdateVaultBackend(seedExampleData: false);
+    await vault.createNote(parentPath: '', title: 'First');
+    await vault.createNote(parentPath: '', title: 'Second');
+
+    await _pumpWorkspace(tester, vault: vault);
+    await tester.enterText(
+      find.byKey(const Key('note-editor')),
+      '# First\nchanged',
+    );
+    vault.failUpdates = true;
+
+    await tester.tap(find.byKey(const Key('resource-row-Second.md')));
+    await tester.pump(const Duration(milliseconds: 250));
+
+    final noteEditor = tester.widget<CupertinoTextField>(
+      find.byKey(const Key('note-editor')),
+    );
+    expect(noteEditor.controller?.text, contains('changed'));
+    expect(noteEditor.controller?.text, isNot(contains('# Second')));
+    expect(find.textContaining('save failed'), findsOneWidget);
+  });
+
+  testWidgets('switches notes after saving dirty markdown', (tester) async {
+    final vault = _CountingUpdateVaultBackend(seedExampleData: false);
+    await vault.createNote(parentPath: '', title: 'First');
+    await vault.createNote(parentPath: '', title: 'Second');
+
+    await _pumpWorkspace(tester, vault: vault);
+    await tester.enterText(
+      find.byKey(const Key('note-editor')),
+      '# First\nchanged before switch',
+    );
+
+    await tester.tap(find.byKey(const Key('resource-row-Second.md')));
+    await tester.pump(const Duration(milliseconds: 250));
+
+    expect(vault.updateCalls, 1);
+    expect(
+      (await vault.readNote('First.md')).markdown,
+      contains('changed before switch'),
+    );
+    final noteEditor = tester.widget<CupertinoTextField>(
+      find.byKey(const Key('note-editor')),
+    );
+    expect(noteEditor.controller?.text, contains('# Second'));
+  });
+
+  testWidgets('manual save cancels the pending auto-save', (tester) async {
+    final vault = _CountingUpdateVaultBackend();
+
+    await _pumpWorkspace(tester, vault: vault);
+    await tester.enterText(
+      find.byKey(const Key('note-editor')),
+      '# 心经学习\nmanual save wins',
+    );
+
+    await tester.tap(find.byKey(const Key('save-note-button')));
+    await tester.pump(const Duration(milliseconds: 250));
+    await tester.pump(const Duration(milliseconds: 1000));
+
+    expect(vault.updateCalls, 1);
+    expect(vault.lastSavedMarkdown, contains('manual save wins'));
+  });
+
   testWidgets('uses a Cupertino app shell and shows the desktop workbench', (
     tester,
   ) async {
@@ -1241,7 +1355,24 @@ class _FakeVaultLocationStore implements VaultLocationStore {
   }
 }
 
-class _FailingUpdateVaultBackend extends MemoryVaultBackend {
+class _CountingUpdateVaultBackend extends MemoryVaultBackend {
+  _CountingUpdateVaultBackend({super.seedExampleData});
+
+  int updateCalls = 0;
+  String? lastSavedMarkdown;
+
+  @override
+  Future<VaultNoteContent> updateMarkdown({
+    required String noteId,
+    required String markdown,
+  }) {
+    updateCalls += 1;
+    lastSavedMarkdown = markdown;
+    return super.updateMarkdown(noteId: noteId, markdown: markdown);
+  }
+}
+
+class _FailingUpdateVaultBackend extends _CountingUpdateVaultBackend {
   _FailingUpdateVaultBackend({super.seedExampleData});
 
   bool failUpdates = false;
