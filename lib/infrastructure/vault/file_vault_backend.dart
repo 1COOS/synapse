@@ -114,6 +114,70 @@ class FileVaultBackend implements VaultBackend {
   }
 
   @override
+  Future<VaultNote> renameNote({
+    required String noteId,
+    required String title,
+  }) async {
+    final file = _fileForNoteId(noteId);
+    if (!await file.exists()) {
+      throw StateError('Note not found: $noteId');
+    }
+    return _moveNoteFile(file: file, parent: file.parent, title: title);
+  }
+
+  @override
+  Future<VaultNote> copyNote({required String noteId}) async {
+    final file = _fileForNoteId(noteId);
+    if (!await file.exists()) {
+      throw StateError('Note not found: $noteId');
+    }
+
+    final markdown = await file.readAsString();
+    final doc = MarkdownDocument.parse(markdown);
+    final note = await _noteFromExistingFile(file, doc);
+    final now = DateTime.now().toUtc();
+    final target = await _uniqueNoteFile(file.parent, note.title);
+    final copiedId = _relativePath(target.path);
+    final copiedTitle = p.basenameWithoutExtension(target.path);
+    await target.writeAsString(
+      _retitleMarkdown(
+        markdown,
+        oldTitle: note.title,
+        newTitle: copiedTitle,
+        updatedAt: now,
+      ),
+    );
+
+    final assets = Directory(_assetsDirectoryPathForFile(file));
+    final copiedAssets = Directory(_assetsDirectoryPathForFile(target));
+    if (await assets.exists()) {
+      await _copyDirectory(assets, copiedAssets);
+    } else {
+      await copiedAssets.create(recursive: true);
+    }
+    await _rewriteCopiedNoteMetadata(noteId: copiedId);
+    return (await readNote(copiedId)).note;
+  }
+
+  @override
+  Future<VaultNote> moveNote({
+    required String noteId,
+    required String parentPath,
+  }) async {
+    final file = _fileForNoteId(noteId);
+    if (!await file.exists()) {
+      throw StateError('Note not found: $noteId');
+    }
+    final parent = _directoryForFolder(parentPath);
+    if (!await parent.exists()) {
+      throw StateError('Folder not found: $parentPath');
+    }
+    final doc = MarkdownDocument.parse(await file.readAsString());
+    final note = await _noteFromExistingFile(file, doc);
+    return _moveNoteFile(file: file, parent: parent, title: note.title);
+  }
+
+  @override
   Future<void> deleteFolder(String folderPath) async {
     final relative = _normalizeFolderPath(folderPath);
     if (relative.isEmpty) {
@@ -593,15 +657,76 @@ $text
     return candidate;
   }
 
-  Future<File> _uniqueNoteFile(Directory parent, String title) async {
+  Future<File> _uniqueNoteFile(
+    Directory parent,
+    String title, {
+    String? excludePath,
+  }) async {
     final base = sanitizeFileName(title);
     var candidate = File(p.join(parent.path, '$base.md'));
     var suffix = 2;
-    while (await candidate.exists()) {
+    while (!p.equals(
+          p.normalize(candidate.path),
+          p.normalize(excludePath ?? ''),
+        ) &&
+        (await candidate.exists() ||
+            await Directory(_assetsDirectoryPathForFile(candidate)).exists())) {
       candidate = File(p.join(parent.path, '$base $suffix.md'));
       suffix += 1;
     }
     return candidate;
+  }
+
+  Future<VaultNote> _moveNoteFile({
+    required File file,
+    required Directory parent,
+    required String title,
+  }) async {
+    final markdown = await file.readAsString();
+    final doc = MarkdownDocument.parse(markdown);
+    final note = await _noteFromExistingFile(file, doc);
+    final now = DateTime.now().toUtc();
+    final target = await _uniqueNoteFile(parent, title, excludePath: file.path);
+    final movedId = _relativePath(target.path);
+    final movedTitle = p.basenameWithoutExtension(target.path);
+    final updatedMarkdown = _retitleMarkdown(
+      markdown,
+      oldTitle: note.title,
+      newTitle: movedTitle,
+      updatedAt: now,
+    );
+
+    if (p.equals(p.normalize(file.path), p.normalize(target.path))) {
+      await file.writeAsString(updatedMarkdown);
+    } else {
+      await target.parent.create(recursive: true);
+      final movedFile = await file.rename(target.path);
+      await movedFile.writeAsString(updatedMarkdown);
+      final assets = Directory(_assetsDirectoryPathForFile(file));
+      final movedAssets = Directory(_assetsDirectoryPathForFile(target));
+      if (await assets.exists()) {
+        await assets.rename(movedAssets.path);
+      } else {
+        await movedAssets.create(recursive: true);
+      }
+    }
+    await _rewriteMovedNoteMetadata(noteId: movedId);
+    return (await readNote(movedId)).note;
+  }
+
+  Future<void> _copyDirectory(Directory source, Directory target) async {
+    if (await target.exists()) {
+      await target.delete(recursive: true);
+    }
+    await target.create(recursive: true);
+    await for (final entity in source.list(recursive: false)) {
+      final targetPath = p.join(target.path, p.basename(entity.path));
+      if (entity is Directory) {
+        await _copyDirectory(entity, Directory(targetPath));
+      } else if (entity is File) {
+        await entity.copy(targetPath);
+      }
+    }
   }
 
   String _relativePath(String absolutePath) {
@@ -650,6 +775,64 @@ $text
       ]);
     }
   }
+
+  Future<void> _rewriteCopiedNoteMetadata({required String noteId}) async {
+    final now = DateTime.now().toUtc();
+    final sourceIdMap = <String, String>{};
+    final sources = await listSources(noteId);
+    if (sources.isNotEmpty || await _sourcesFile(noteId).exists()) {
+      await _writeSources(noteId, [
+        for (final source in sources)
+          _copySource(
+            source,
+            noteId: noteId,
+            id: sourceIdMap[source.id] = _uuid.v4(),
+            now: now,
+          ),
+      ]);
+    }
+
+    final proposals = await _readProposalsFile(noteId);
+    if (proposals.isNotEmpty || await _proposalsFile(noteId).exists()) {
+      await _writeProposals(noteId, [
+        for (final proposal in proposals)
+          AiProposal(
+            id: _uuid.v4(),
+            noteId: noteId,
+            sourceIds: [
+              for (final sourceId in proposal.sourceIds)
+                sourceIdMap[sourceId] ?? sourceId,
+            ],
+            title: proposal.title,
+            proposedMarkdown: proposal.proposedMarkdown,
+            status: proposal.status,
+            createdAt: now,
+            updatedAt: now,
+          ),
+      ]);
+    }
+  }
+
+  SourceItem _copySource(
+    SourceItem source, {
+    required String noteId,
+    required String id,
+    required DateTime now,
+  }) {
+    return SourceItem(
+      id: id,
+      noteId: noteId,
+      type: source.type,
+      title: source.title,
+      state: source.state,
+      createdAt: now,
+      updatedAt: now,
+      text: source.text,
+      extractedText: source.extractedText,
+      attachmentPath: source.attachmentPath,
+      mimeType: source.mimeType,
+    );
+  }
 }
 
 String _initialMarkdown(VaultNote note) {
@@ -660,6 +843,35 @@ String _initialMarkdown(VaultNote note) {
       'updatedAt': formatMarkdownTimestamp(note.updatedAt),
     },
     body: '# ${note.title}\n',
+  ).toMarkdown();
+}
+
+String _retitleMarkdown(
+  String markdown, {
+  required String oldTitle,
+  required String newTitle,
+  required DateTime updatedAt,
+}) {
+  final document = MarkdownDocument.parse(markdown);
+  final frontmatter = <String, Object?>{
+    ...document.frontmatter,
+    'title': newTitle,
+    'updatedAt': formatMarkdownTimestamp(updatedAt),
+  };
+  final lines = document.body.split('\n');
+  for (var index = 0; index < lines.length; index += 1) {
+    final match = RegExp(r'^#\s+(.+?)\s*$').firstMatch(lines[index]);
+    if (match == null) {
+      continue;
+    }
+    if (match.group(1) == oldTitle) {
+      lines[index] = '# $newTitle';
+    }
+    break;
+  }
+  return MarkdownDocument(
+    frontmatter: frontmatter,
+    body: lines.join('\n'),
   ).toMarkdown();
 }
 

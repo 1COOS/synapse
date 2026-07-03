@@ -811,6 +811,95 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     });
   }
 
+  Future<void> _createSiblingNote(VaultResourceNode note) async {
+    if (!note.isNote) {
+      return;
+    }
+    await _createNote(parentPath: _parentFolderPath(note.path));
+  }
+
+  Future<void> _renameNote(VaultResourceNode note) async {
+    if (!note.isNote) {
+      return;
+    }
+    final title = await _promptResourceName(
+      title: '重命名笔记',
+      placeholder: '笔记名称',
+      initialValue: note.title,
+      actionLabel: '重命名',
+    );
+    if (title == null) {
+      return;
+    }
+    await _runBusy(() async {
+      final renamed = await _requireVault().renameNote(
+        noteId: note.id,
+        title: title,
+      );
+      await _openNoteAfterMutation(renamed, message: '笔记已重命名');
+    });
+  }
+
+  Future<void> _copyNote(VaultResourceNode note) async {
+    if (!note.isNote) {
+      return;
+    }
+    await _runBusy(() async {
+      final copied = await _requireVault().copyNote(noteId: note.id);
+      await _openNoteAfterMutation(copied, message: '笔记已复制');
+    });
+  }
+
+  Future<void> _moveNote(VaultResourceNode note) async {
+    if (!note.isNote) {
+      return;
+    }
+    final parentPath = await _promptMoveNoteTarget(note);
+    if (parentPath == null) {
+      return;
+    }
+    await _runBusy(() async {
+      final moved = await _requireVault().moveNote(
+        noteId: note.id,
+        parentPath: parentPath,
+      );
+      await _openNoteAfterMutation(moved, message: '笔记已移动');
+    });
+  }
+
+  Future<String?> _promptMoveNoteTarget(VaultResourceNode note) {
+    return showCupertinoDialog<String>(
+      context: context,
+      builder: (context) => _MoveNoteTargetDialog(
+        nodes: _resources,
+        initialParentPath: _parentFolderPath(note.path),
+      ),
+    );
+  }
+
+  Future<void> _openNoteAfterMutation(
+    VaultNote note, {
+    required String message,
+  }) async {
+    final vault = _requireVault();
+    final loaded = await vault.readNote(note.id);
+    final resources = await vault.listResources();
+    final proposals = await vault.listProposals(note.id);
+    setState(() {
+      _resources = resources;
+      _selectedResource = _findResource(resources, note.id);
+      _activeNote = loaded;
+      _markdownController.text = loaded.markdown;
+      _proposals = proposals;
+      _searchResults = const [];
+      _selectedSourceIds.clear();
+      _collapsedFolderIds.remove(_parentFolderPath(note.path));
+      _previewMarkdown = false;
+      _narrowSection = _WorkspaceSection.notes;
+      _message = message;
+    });
+  }
+
   Future<void> _refreshAfterFolderRenamed({
     required VaultResourceNode before,
     required VaultResourceNode after,
@@ -1180,7 +1269,11 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
                 onCreateFolder: (folder) =>
                     _createFolder(parentPath: folder.path),
                 onCreateNote: (folder) => _createNote(parentPath: folder.path),
+                onCreateSiblingNote: _createSiblingNote,
                 onRenameFolder: _renameFolder,
+                onRenameNote: _renameNote,
+                onCopyNote: _copyNote,
+                onMoveNote: _moveNote,
                 onDelete: _deleteResource,
               ),
             ),
@@ -1495,6 +1588,12 @@ String _replacePathPrefix(String path, String oldPrefix, String newPrefix) {
   return '$newPrefix/${path.substring(oldPrefix.length + 1)}';
 }
 
+String _parentFolderPath(String path) {
+  final normalized = path.replaceAll('\\', '/');
+  final index = normalized.lastIndexOf('/');
+  return index < 0 ? '' : normalized.substring(0, index);
+}
+
 class _Pane extends StatelessWidget {
   const _Pane({
     super.key,
@@ -1719,6 +1818,157 @@ class _SearchField extends StatelessWidget {
   }
 }
 
+class _MoveNoteTargetDialog extends StatefulWidget {
+  const _MoveNoteTargetDialog({
+    required this.nodes,
+    required this.initialParentPath,
+  });
+
+  final List<VaultResourceNode> nodes;
+  final String initialParentPath;
+
+  @override
+  State<_MoveNoteTargetDialog> createState() => _MoveNoteTargetDialogState();
+}
+
+class _MoveNoteTargetDialogState extends State<_MoveNoteTargetDialog> {
+  late String _selectedPath;
+
+  @override
+  void initState() {
+    super.initState();
+    _selectedPath = widget.initialParentPath;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final size = MediaQuery.sizeOf(context);
+    return Center(
+      child: CupertinoPopupSurface(
+        child: ConstrainedBox(
+          constraints: BoxConstraints(
+            maxWidth: 420,
+            maxHeight: size.height * 0.72,
+          ),
+          child: Container(
+            color: _surface,
+            padding: const EdgeInsets.fromLTRB(16, 14, 16, 12),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const Text(
+                  '移动笔记',
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800),
+                ),
+                const SizedBox(height: 12),
+                Flexible(
+                  child: ListView(
+                    shrinkWrap: true,
+                    padding: EdgeInsets.zero,
+                    children: [
+                      _targetRow(
+                        key: const Key('move-target-root'),
+                        title: '根级',
+                        path: '',
+                        depth: 0,
+                      ),
+                      for (final row in _folderRows(widget.nodes, 0)) row,
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.end,
+                  children: [
+                    CupertinoButton(
+                      padding: const EdgeInsets.symmetric(horizontal: 12),
+                      onPressed: () => Navigator.of(context).pop(),
+                      child: const Text('取消'),
+                    ),
+                    CupertinoButton.filled(
+                      padding: const EdgeInsets.symmetric(horizontal: 14),
+                      onPressed: () => Navigator.of(context).pop(_selectedPath),
+                      child: const Text('移动'),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  List<Widget> _folderRows(List<VaultResourceNode> nodes, int depth) {
+    final rows = <Widget>[];
+    for (final node in nodes) {
+      if (!node.isFolder) {
+        continue;
+      }
+      rows.add(
+        _targetRow(
+          key: Key('move-target-folder-${node.id}'),
+          title: node.title,
+          path: node.path,
+          depth: depth,
+        ),
+      );
+      rows.addAll(_folderRows(node.children, depth + 1));
+    }
+    return rows;
+  }
+
+  Widget _targetRow({
+    required Key key,
+    required String title,
+    required String path,
+    required int depth,
+  }) {
+    final selected = _selectedPath == path;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 2),
+      child: CupertinoButton(
+        key: key,
+        minimumSize: const Size.fromHeight(34),
+        padding: EdgeInsets.only(left: 8 + depth * 18, right: 8),
+        color: selected ? const Color(0xFFE8F2FF) : null,
+        borderRadius: _radius,
+        onPressed: () => setState(() => _selectedPath = path),
+        child: Row(
+          children: [
+            Icon(
+              path.isEmpty ? CupertinoIcons.archivebox : CupertinoIcons.folder,
+              size: 18,
+              color: selected ? _primary : _muted,
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                title,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  color: _text,
+                  fontSize: 15,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+            if (selected)
+              const Icon(
+                CupertinoIcons.check_mark_circled_solid,
+                size: 18,
+                color: _primary,
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _CupertinoField extends StatelessWidget {
   const _CupertinoField({
     super.key,
@@ -1758,7 +2008,11 @@ class _ResourceTree extends StatelessWidget {
     required this.onToggleFolder,
     required this.onCreateFolder,
     required this.onCreateNote,
+    required this.onCreateSiblingNote,
     required this.onRenameFolder,
+    required this.onRenameNote,
+    required this.onCopyNote,
+    required this.onMoveNote,
     required this.onDelete,
   });
 
@@ -1769,7 +2023,11 @@ class _ResourceTree extends StatelessWidget {
   final ValueChanged<VaultResourceNode> onToggleFolder;
   final ValueChanged<VaultResourceNode> onCreateFolder;
   final ValueChanged<VaultResourceNode> onCreateNote;
+  final ValueChanged<VaultResourceNode> onCreateSiblingNote;
   final ValueChanged<VaultResourceNode> onRenameFolder;
+  final ValueChanged<VaultResourceNode> onRenameNote;
+  final ValueChanged<VaultResourceNode> onCopyNote;
+  final ValueChanged<VaultResourceNode> onMoveNote;
   final ValueChanged<VaultResourceNode> onDelete;
 
   @override
@@ -1804,7 +2062,11 @@ class _ResourceTree extends StatelessWidget {
         onToggleFolder: () => onToggleFolder(node),
         onCreateFolder: () => onCreateFolder(node),
         onCreateNote: () => onCreateNote(node),
+        onCreateSiblingNote: () => onCreateSiblingNote(node),
         onRenameFolder: () => onRenameFolder(node),
+        onRenameNote: () => onRenameNote(node),
+        onCopyNote: () => onCopyNote(node),
+        onMoveNote: () => onMoveNote(node),
         onDelete: () => onDelete(node),
       ),
       if (!collapsed)
@@ -1825,7 +2087,11 @@ class _ResourceRow extends StatelessWidget {
     required this.onToggleFolder,
     required this.onCreateFolder,
     required this.onCreateNote,
+    required this.onCreateSiblingNote,
     required this.onRenameFolder,
+    required this.onRenameNote,
+    required this.onCopyNote,
+    required this.onMoveNote,
     required this.onDelete,
   });
 
@@ -1838,7 +2104,11 @@ class _ResourceRow extends StatelessWidget {
   final VoidCallback onToggleFolder;
   final VoidCallback onCreateFolder;
   final VoidCallback onCreateNote;
+  final VoidCallback onCreateSiblingNote;
   final VoidCallback onRenameFolder;
+  final VoidCallback onRenameNote;
+  final VoidCallback onCopyNote;
+  final VoidCallback onMoveNote;
   final VoidCallback onDelete;
 
   @override
@@ -1935,35 +2205,70 @@ class _ResourceRow extends StatelessWidget {
       );
     }
 
-    return _ResourceRowShell(
-      key: Key('resource-row-${node.id}'),
-      depth: depth,
-      selected: selected,
-      onTap: onTap,
-      child: Row(
-        children: [
-          const SizedBox(width: 24),
-          Icon(
-            CupertinoIcons.doc_text,
-            size: 18,
-            color: selected ? _primary : _muted,
-          ),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Text(
-              node.title,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(fontWeight: FontWeight.w600),
+    final menuController = MenuController();
+    return MenuAnchor(
+      controller: menuController,
+      consumeOutsideTap: true,
+      menuChildren: [
+        MenuItemButton(
+          key: Key('note-menu-new-note-${node.id}'),
+          leadingIcon: const Icon(CupertinoIcons.square_pencil, size: 16),
+          onPressed: onCreateSiblingNote,
+          child: const Text('新建笔记'),
+        ),
+        MenuItemButton(
+          key: Key('note-menu-rename-${node.id}'),
+          leadingIcon: const Icon(CupertinoIcons.pencil, size: 16),
+          onPressed: onRenameNote,
+          child: const Text('重命名笔记'),
+        ),
+        MenuItemButton(
+          key: Key('note-menu-copy-${node.id}'),
+          leadingIcon: const Icon(CupertinoIcons.doc_on_doc, size: 16),
+          onPressed: onCopyNote,
+          child: const Text('复制笔记'),
+        ),
+        MenuItemButton(
+          key: Key('note-menu-move-${node.id}'),
+          leadingIcon: const Icon(CupertinoIcons.folder, size: 16),
+          onPressed: onMoveNote,
+          child: const Text('移动笔记'),
+        ),
+        MenuItemButton(
+          key: Key('note-menu-delete-${node.id}'),
+          leadingIcon: const Icon(CupertinoIcons.trash, size: 16),
+          onPressed: onDelete,
+          child: const Text('删除笔记'),
+        ),
+      ],
+      child: _ResourceRowShell(
+        key: Key('resource-row-${node.id}'),
+        depth: depth,
+        selected: selected,
+        onTap: onTap,
+        onSecondaryTapDown: (details) {
+          onTap();
+          menuController.open(position: details.localPosition);
+        },
+        child: Row(
+          children: [
+            const SizedBox(width: 24),
+            Icon(
+              CupertinoIcons.doc_text,
+              size: 18,
+              color: selected ? _primary : _muted,
             ),
-          ),
-          _IconAction(
-            key: Key('delete-resource-${node.id}'),
-            label: '删除笔记',
-            icon: CupertinoIcons.trash,
-            onPressed: onDelete,
-          ),
-        ],
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                node.title,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(fontWeight: FontWeight.w600),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

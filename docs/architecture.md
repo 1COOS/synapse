@@ -36,7 +36,7 @@ infrastructure
   Vault 文件系统、Web 内存库、AI Provider、搜索缓存、平台适配
 ```
 
-当前代码已经按目录拆出 `domain`、`application`、`infrastructure` 和 `presentation` 的边界，但 UI 仍集中在 [lib/main.dart](/Users/bruce/Workspace/1coos/synapse/lib/main.dart)。后续建议把 `SynapseWorkspace` 拆为页面、controller 和 Riverpod providers。
+当前代码已经按目录拆出 `domain`、`application`、`infrastructure` 和 `presentation` 的边界。[lib/main.dart](/Users/bruce/Workspace/1coos/synapse/lib/main.dart) 只负责应用装配，主工作台集中在 [lib/presentation/cupertino/workspace.dart](/Users/bruce/Workspace/1coos/synapse/lib/presentation/cupertino/workspace.dart)。后续建议继续把 `SynapseWorkspace` 拆为页面、controller 和 Riverpod providers。
 
 ## 4. 目录结构
 
@@ -65,6 +65,9 @@ lib/
       default_vault_backend.dart
       default_vault_backend_io.dart
       default_vault_backend_web.dart
+  presentation/
+    cupertino/
+      workspace.dart
 test/
   application/
   domain/
@@ -114,10 +117,10 @@ test/
 
 ### 4.4 `presentation`
 
-当前 presentation 主要在 `main.dart`：
+当前 presentation 主要在 `lib/presentation/cupertino/workspace.dart`：
 
 - 顶栏：Vault 选择、搜索、状态消息。
-- 左栏：新建文件夹、新建笔记、资源树、大纲树。
+- 左栏：根级新建、Apple Notes 式资源树、文件夹右键菜单、笔记右键菜单、大纲树。
 - 中栏：Markdown 编辑和预览。
 - 右栏：素材录入、图片导入、proposal 列表和确认写入。
 
@@ -273,6 +276,8 @@ export 'default_vault_backend_web.dart'
 - 创建文件夹时写入真实目录。
 - 创建笔记时写入普通 `.md` 文件。
 - 图片会复制到同名 `.assets/attachments/`。
+- 重命名或移动笔记时移动 `.md` 和同名 `.assets/`，并重写 sources/proposals 的 `noteId`。
+- 复制笔记时完整复制 Markdown、assets、attachments、sources 和 proposals，并为复制出的 source/proposal 生成新 id。
 - 删除笔记时删除 `.md` 和同名 `.assets/`。
 - 删除文件夹时递归删除该目录内所有子资源；禁止删除 Vault 根目录。
 
@@ -518,8 +523,8 @@ flutter build windows
 
 | 风险 | 影响 | 建议 |
 | --- | --- | --- |
-| UI 状态集中在 `main.dart` | 后续功能增加后难维护 | 拆分 presentation，并把用例状态迁移到 Riverpod |
-| `.synapse/sources.json` 暂时承载素材清单 | 删除后素材列表无法完整恢复 | 实现从 `sources/` 和 `attachments/` 重建素材清单 |
+| UI 状态集中在 `presentation/cupertino/workspace.dart` | 后续功能增加后难维护 | 继续拆分 presentation，并把用例状态迁移到 Riverpod |
+| `.assets/sources.json` 暂时承载素材清单 | 删除后素材列表无法完整恢复 | 实现从 `sources/` 和 `attachments/` 重建素材清单 |
 | proposal 是纯 Markdown 片段 | 难以做 diff、局部采纳和冲突处理 | 升级为结构化 changes |
 | 图片 OCR 未接入主流程 | 图片素材暂时不能进入 AI 结构化 | 导入后触发 `extractImageText` 并更新 `SourceItem` |
 | 真实 Provider 未实现 | 无法使用生产 AI 能力 | 新增 OpenAI 兼容 Provider 和配置界面 |
@@ -529,7 +534,7 @@ flutter build windows
 
 建议按以下顺序推进：
 
-1. 拆分 `main.dart`，沉淀 presentation 组件。
+1. 继续拆分 `presentation/cupertino/workspace.dart`，沉淀 presentation 组件。
 2. 接入 Riverpod controller，替代散落的本地状态。
 3. 实现 OpenAI 兼容 Provider。
 4. 图片导入后调用视觉提取，生成可审核文本。

@@ -309,6 +309,219 @@ void main() {
     },
   );
 
+  test(
+    'renames a note with markdown title assets sources and proposals',
+    () async {
+      final backend = FileVaultBackend(root.path);
+      final folder = await backend.createFolder(parentPath: '', title: '读书');
+      final note = await backend.createNote(
+        parentPath: folder.path,
+        title: '心经',
+      );
+      await backend.updateMarkdown(
+        noteId: note.id,
+        markdown: '''---
+title: 心经
+createdAt: 2026-01-01 00:00
+updatedAt: 2026-01-01 00:00
+---
+
+# 心经
+
+正文
+''',
+      );
+      final source = await backend.addImageSource(
+        noteId: note.id,
+        filename: 'screen.png',
+        mimeType: 'image/png',
+        bytes: [137, 80, 78, 71],
+      );
+      await backend.saveProposal(
+        AiProposal(
+          id: 'proposal-1',
+          noteId: note.id,
+          sourceIds: [source.id],
+          title: '建议',
+          proposedMarkdown: '## 建议',
+          status: ProposalStatus.pending,
+          createdAt: DateTime.utc(2026),
+          updatedAt: DateTime.utc(2026),
+        ),
+      );
+
+      final renamed = await backend.renameNote(noteId: note.id, title: '金刚经');
+
+      expect(renamed.id, '读书/金刚经.md');
+      expect(await File(p.join(root.path, '读书', '心经.md')).exists(), isFalse);
+      expect(
+        await Directory(p.join(root.path, '读书', '心经.assets')).exists(),
+        isFalse,
+      );
+      expect(await File(p.join(root.path, '读书', '金刚经.md')).exists(), isTrue);
+      expect(
+        await Directory(p.join(root.path, '读书', '金刚经.assets')).exists(),
+        isTrue,
+      );
+      expect(() => backend.readNote(note.id), throwsA(isA<StateError>()));
+      final loaded = await backend.readNote(renamed.id);
+      expect(loaded.title, '金刚经');
+      expect(loaded.markdown, contains('title: 金刚经'));
+      expect(loaded.markdown, contains('# 金刚经'));
+      final sources = await backend.listSources(renamed.id);
+      expect(sources.single.noteId, renamed.id);
+      expect(await backend.readSourceAttachment(sources.single), [
+        137,
+        80,
+        78,
+        71,
+      ]);
+      expect(await backend.listSources(note.id), isEmpty);
+      final proposals = await backend.listProposals(renamed.id);
+      expect(proposals.single.noteId, renamed.id);
+      expect(proposals.single.sourceIds, [source.id]);
+      expect(await backend.listProposals(note.id), isEmpty);
+    },
+  );
+
+  test('copies a note with new source and proposal ids', () async {
+    final backend = FileVaultBackend(root.path);
+    final note = await backend.createNote(parentPath: '', title: '心经');
+    final source = await backend.addImageSource(
+      noteId: note.id,
+      filename: 'screen.png',
+      mimeType: 'image/png',
+      bytes: [137, 80, 78, 71],
+    );
+    final proposal = await backend.saveProposal(
+      AiProposal(
+        id: 'proposal-1',
+        noteId: note.id,
+        sourceIds: [source.id],
+        title: '建议',
+        proposedMarkdown: '## 建议',
+        status: ProposalStatus.pending,
+        createdAt: DateTime.utc(2026),
+        updatedAt: DateTime.utc(2026),
+      ),
+    );
+
+    final copy = await backend.copyNote(noteId: note.id);
+
+    expect(copy.id, '心经 2.md');
+    expect(await File(p.join(root.path, '心经.md')).exists(), isTrue);
+    expect(await File(p.join(root.path, '心经 2.md')).exists(), isTrue);
+    expect(await Directory(p.join(root.path, '心经.assets')).exists(), isTrue);
+    expect(await Directory(p.join(root.path, '心经 2.assets')).exists(), isTrue);
+    final original = await backend.readNote(note.id);
+    final copied = await backend.readNote(copy.id);
+    expect(original.title, '心经');
+    expect(copied.title, '心经 2');
+    expect(copied.markdown, contains('title: 心经 2'));
+    final copiedSources = await backend.listSources(copy.id);
+    expect(copiedSources.single.id, isNot(source.id));
+    expect(copiedSources.single.noteId, copy.id);
+    expect(await backend.readSourceAttachment(copiedSources.single), [
+      137,
+      80,
+      78,
+      71,
+    ]);
+    final copiedProposals = await backend.listProposals(copy.id);
+    expect(copiedProposals.single.id, isNot(proposal.id));
+    expect(copiedProposals.single.noteId, copy.id);
+    expect(copiedProposals.single.sourceIds, [copiedSources.single.id]);
+    expect((await backend.listProposals(note.id)).single.id, proposal.id);
+  });
+
+  test(
+    'moves a note to root and folders with unique conflict handling',
+    () async {
+      final backend = FileVaultBackend(root.path);
+      final sourceFolder = await backend.createFolder(
+        parentPath: '',
+        title: '源',
+      );
+      final targetFolder = await backend.createFolder(
+        parentPath: '',
+        title: '目标',
+      );
+      await backend.createNote(parentPath: targetFolder.path, title: '心经');
+      final note = await backend.createNote(
+        parentPath: sourceFolder.path,
+        title: '心经',
+      );
+      final source = await backend.addImageSource(
+        noteId: note.id,
+        filename: 'screen.png',
+        mimeType: 'image/png',
+        bytes: [137, 80, 78, 71],
+      );
+      await backend.saveProposal(
+        AiProposal(
+          id: 'proposal-1',
+          noteId: note.id,
+          sourceIds: [source.id],
+          title: '建议',
+          proposedMarkdown: '## 建议',
+          status: ProposalStatus.pending,
+          createdAt: DateTime.utc(2026),
+          updatedAt: DateTime.utc(2026),
+        ),
+      );
+
+      final moved = await backend.moveNote(
+        noteId: note.id,
+        parentPath: targetFolder.path,
+      );
+
+      expect(moved.id, '目标/心经 2.md');
+      expect(await File(p.join(root.path, '源', '心经.md')).exists(), isFalse);
+      expect(await File(p.join(root.path, '目标', '心经 2.md')).exists(), isTrue);
+      expect(
+        await Directory(p.join(root.path, '目标', '心经 2.assets')).exists(),
+        isTrue,
+      );
+      expect(() => backend.readNote(note.id), throwsA(isA<StateError>()));
+      expect((await backend.listSources(moved.id)).single.noteId, moved.id);
+      expect((await backend.listProposals(moved.id)).single.noteId, moved.id);
+
+      final movedToRoot = await backend.moveNote(
+        noteId: moved.id,
+        parentPath: '',
+      );
+
+      expect(movedToRoot.id, '心经 2.md');
+      expect(await File(p.join(root.path, '心经 2.md')).exists(), isTrue);
+      expect(
+        await Directory(p.join(root.path, '心经 2.assets')).exists(),
+        isTrue,
+      );
+    },
+  );
+
+  test('rejects invalid note operations', () async {
+    final backend = FileVaultBackend(root.path);
+    final note = await backend.createNote(parentPath: '', title: '心经');
+
+    expect(
+      () => backend.renameNote(noteId: 'missing.md', title: '缺失'),
+      throwsA(isA<StateError>()),
+    );
+    expect(
+      () => backend.copyNote(noteId: 'missing.md'),
+      throwsA(isA<StateError>()),
+    );
+    expect(
+      () => backend.moveNote(noteId: note.id, parentPath: '../outside'),
+      throwsA(isA<ArgumentError>()),
+    );
+    expect(
+      () => backend.moveNote(noteId: note.id, parentPath: 'missing'),
+      throwsA(isA<StateError>()),
+    );
+  });
+
   test('renames folders uniquely and rejects invalid folder paths', () async {
     final backend = FileVaultBackend(root.path);
     await backend.createFolder(parentPath: '', title: '课程');

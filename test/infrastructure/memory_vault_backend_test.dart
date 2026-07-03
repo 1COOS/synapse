@@ -187,6 +187,183 @@ void main() {
     expect(proposals.single.noteId, loaded.id);
   });
 
+  test(
+    'renames a note and keeps markdown sources and proposals attached',
+    () async {
+      final backend = MemoryVaultBackend(seedExampleData: false);
+      final folder = await backend.createFolder(parentPath: '', title: '读书');
+      final note = await backend.createNote(
+        parentPath: folder.path,
+        title: '心经',
+      );
+      final source = await backend.addImageSource(
+        noteId: note.id,
+        filename: 'screen.png',
+        mimeType: 'image/png',
+        bytes: [1, 2, 3],
+      );
+      await backend.saveProposal(
+        AiProposal(
+          id: 'proposal-1',
+          noteId: note.id,
+          sourceIds: [source.id],
+          title: '建议',
+          proposedMarkdown: '## 建议',
+          status: ProposalStatus.pending,
+          createdAt: DateTime.utc(2026),
+          updatedAt: DateTime.utc(2026),
+        ),
+      );
+
+      final renamed = await backend.renameNote(noteId: note.id, title: '金刚经');
+
+      expect(renamed.id, '读书/金刚经.md');
+      expect(() => backend.readNote(note.id), throwsA(isA<StateError>()));
+      final loaded = await backend.readNote(renamed.id);
+      expect(loaded.title, '金刚经');
+      expect(loaded.markdown, contains('title: 金刚经'));
+      expect(loaded.markdown, contains('# 金刚经'));
+      expect(loaded.sources.single.noteId, renamed.id);
+      expect(await backend.readSourceAttachment(loaded.sources.single), [
+        1,
+        2,
+        3,
+      ]);
+      final proposals = await backend.listProposals(renamed.id);
+      expect(proposals.single.noteId, renamed.id);
+      expect(proposals.single.sourceIds, [source.id]);
+      expect(await backend.listProposals(note.id), isEmpty);
+    },
+  );
+
+  test(
+    'copies a note with independent sources attachments and proposals',
+    () async {
+      final backend = MemoryVaultBackend(seedExampleData: false);
+      final note = await backend.createNote(parentPath: '', title: '心经');
+      final source = await backend.addImageSource(
+        noteId: note.id,
+        filename: 'screen.png',
+        mimeType: 'image/png',
+        bytes: [1, 2, 3],
+      );
+      final proposal = await backend.saveProposal(
+        AiProposal(
+          id: 'proposal-1',
+          noteId: note.id,
+          sourceIds: [source.id],
+          title: '建议',
+          proposedMarkdown: '## 建议',
+          status: ProposalStatus.pending,
+          createdAt: DateTime.utc(2026),
+          updatedAt: DateTime.utc(2026),
+        ),
+      );
+
+      final copy = await backend.copyNote(noteId: note.id);
+
+      expect(copy.id, '心经 2.md');
+      expect((await backend.readNote(note.id)).title, '心经');
+      final copied = await backend.readNote(copy.id);
+      expect(copied.title, '心经 2');
+      expect(copied.markdown, contains('title: 心经 2'));
+      expect(copied.markdown, contains('# 心经 2'));
+      expect(copied.sources.single.id, isNot(source.id));
+      expect(copied.sources.single.noteId, copy.id);
+      expect(await backend.readSourceAttachment(copied.sources.single), [
+        1,
+        2,
+        3,
+      ]);
+      final copiedProposals = await backend.listProposals(copy.id);
+      expect(copiedProposals.single.id, isNot(proposal.id));
+      expect(copiedProposals.single.noteId, copy.id);
+      expect(copiedProposals.single.sourceIds, [copied.sources.single.id]);
+      expect((await backend.listProposals(note.id)).single.id, proposal.id);
+    },
+  );
+
+  test(
+    'moves a note to folders or root with unique conflict handling',
+    () async {
+      final backend = MemoryVaultBackend(seedExampleData: false);
+      final sourceFolder = await backend.createFolder(
+        parentPath: '',
+        title: '源',
+      );
+      final targetFolder = await backend.createFolder(
+        parentPath: '',
+        title: '目标',
+      );
+      await backend.createNote(parentPath: targetFolder.path, title: '心经');
+      final note = await backend.createNote(
+        parentPath: sourceFolder.path,
+        title: '心经',
+      );
+      final source = await backend.addImageSource(
+        noteId: note.id,
+        filename: 'screen.png',
+        mimeType: 'image/png',
+        bytes: [1, 2, 3],
+      );
+      await backend.saveProposal(
+        AiProposal(
+          id: 'proposal-1',
+          noteId: note.id,
+          sourceIds: [source.id],
+          title: '建议',
+          proposedMarkdown: '## 建议',
+          status: ProposalStatus.pending,
+          createdAt: DateTime.utc(2026),
+          updatedAt: DateTime.utc(2026),
+        ),
+      );
+
+      final moved = await backend.moveNote(
+        noteId: note.id,
+        parentPath: targetFolder.path,
+      );
+
+      expect(moved.id, '目标/心经 2.md');
+      expect(() => backend.readNote(note.id), throwsA(isA<StateError>()));
+      expect(
+        (await backend.readNote(moved.id)).sources.single.noteId,
+        moved.id,
+      );
+      expect((await backend.listProposals(moved.id)).single.noteId, moved.id);
+
+      final movedToRoot = await backend.moveNote(
+        noteId: moved.id,
+        parentPath: '',
+      );
+
+      expect(movedToRoot.id, '心经 2.md');
+      expect((await backend.readNote(movedToRoot.id)).title, '心经 2');
+    },
+  );
+
+  test('rejects invalid note operations', () async {
+    final backend = MemoryVaultBackend(seedExampleData: false);
+    final note = await backend.createNote(parentPath: '', title: '心经');
+
+    expect(
+      () => backend.renameNote(noteId: 'missing.md', title: '缺失'),
+      throwsA(isA<StateError>()),
+    );
+    expect(
+      () => backend.copyNote(noteId: 'missing.md'),
+      throwsA(isA<StateError>()),
+    );
+    expect(
+      () => backend.moveNote(noteId: note.id, parentPath: '../outside'),
+      throwsA(isA<ArgumentError>()),
+    );
+    expect(
+      () => backend.moveNote(noteId: note.id, parentPath: 'missing'),
+      throwsA(isA<StateError>()),
+    );
+  });
+
   test('renames folders uniquely and rejects invalid folder paths', () async {
     final backend = MemoryVaultBackend(seedExampleData: false);
     await backend.createFolder(parentPath: '', title: '课程');

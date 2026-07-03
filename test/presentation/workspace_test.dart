@@ -622,33 +622,135 @@ void main() {
     },
   );
 
-  testWidgets('deletes a note after confirmation and selects the next note', (
+  testWidgets(
+    'deletes a note from the context menu and selects the next note',
+    (tester) async {
+      final vault = MemoryVaultBackend(seedExampleData: false);
+      final first = await vault.createNote(parentPath: '', title: 'Alpha');
+      final second = await vault.createNote(parentPath: '', title: 'Beta');
+
+      await _pumpWorkspace(tester, vault: vault);
+
+      expect(find.byKey(Key('delete-resource-${first.id}')), findsNothing);
+
+      await tester.tap(
+        find.byKey(Key('resource-row-${first.id}')),
+        buttons: kSecondaryMouseButton,
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(Key('note-menu-delete-${first.id}')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('取消'));
+      await tester.pumpAndSettle();
+      expect((await vault.readNote(first.id)).title, 'Alpha');
+
+      await tester.tap(
+        find.byKey(Key('resource-row-${first.id}')),
+        buttons: kSecondaryMouseButton,
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(Key('note-menu-delete-${first.id}')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('删除'));
+      await tester.pumpAndSettle();
+
+      expect(() => vault.readNote(first.id), throwsA(isA<StateError>()));
+      expect((await vault.readNote(second.id)).title, 'Beta');
+      final noteEditor = tester.widget<CupertinoTextField>(
+        find.byKey(const Key('note-editor')),
+      );
+      expect(noteEditor.controller?.text, contains('# Beta'));
+      expect(find.text('Alpha'), findsNothing);
+    },
+  );
+
+  testWidgets('uses a note context menu for sibling note management', (
     tester,
   ) async {
     final vault = MemoryVaultBackend(seedExampleData: false);
-    final first = await vault.createNote(parentPath: '', title: 'Alpha');
-    final second = await vault.createNote(parentPath: '', title: 'Beta');
+    final sourceFolder = await vault.createFolder(parentPath: '', title: '读书');
+    final targetFolder = await vault.createFolder(parentPath: '', title: '课程');
+    final note = await vault.createNote(
+      parentPath: sourceFolder.path,
+      title: '心经',
+    );
 
     await _pumpWorkspace(tester, vault: vault);
 
-    await tester.tap(find.byKey(Key('delete-resource-${first.id}')));
+    await tester.tap(
+      find.byKey(Key('resource-row-${note.id}')),
+      buttons: kSecondaryMouseButton,
+    );
     await tester.pumpAndSettle();
-    await tester.tap(find.text('取消'));
-    await tester.pumpAndSettle();
-    expect((await vault.readNote(first.id)).title, 'Alpha');
 
-    await tester.tap(find.byKey(Key('delete-resource-${first.id}')));
+    expect(find.byKey(Key('note-menu-new-note-${note.id}')), findsOneWidget);
+    expect(find.byKey(Key('note-menu-rename-${note.id}')), findsOneWidget);
+    expect(find.byKey(Key('note-menu-copy-${note.id}')), findsOneWidget);
+    expect(find.byKey(Key('note-menu-move-${note.id}')), findsOneWidget);
+    expect(find.byKey(Key('note-menu-delete-${note.id}')), findsOneWidget);
+
+    await tester.tap(find.byKey(Key('note-menu-new-note-${note.id}')));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byKey(const Key('resource-name-input')), '金刚经');
+    await tester.tap(find.text('创建'));
+    await tester.pumpAndSettle();
+
+    expect((await vault.readNote('读书/金刚经.md')).title, '金刚经');
+
+    await tester.tap(
+      find.byKey(Key('resource-row-${note.id}')),
+      buttons: kSecondaryMouseButton,
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(Key('note-menu-rename-${note.id}')));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.byKey(const Key('resource-name-input')),
+      '心经重命名',
+    );
+    await tester.tap(find.text('重命名'));
+    await tester.pumpAndSettle();
+
+    expect(() => vault.readNote(note.id), throwsA(isA<StateError>()));
+    expect((await vault.readNote('读书/心经重命名.md')).title, '心经重命名');
+
+    await tester.tap(
+      find.byKey(const Key('resource-row-读书/心经重命名.md')),
+      buttons: kSecondaryMouseButton,
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('note-menu-copy-读书/心经重命名.md')));
+    await tester.pumpAndSettle();
+
+    expect((await vault.readNote('读书/心经重命名 2.md')).title, '心经重命名 2');
+
+    await tester.tap(
+      find.byKey(const Key('resource-row-读书/心经重命名.md')),
+      buttons: kSecondaryMouseButton,
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('note-menu-move-读书/心经重命名.md')));
+    await tester.pumpAndSettle();
+    expect(find.text('移动笔记'), findsOneWidget);
+    await tester.tap(find.byKey(Key('move-target-folder-${targetFolder.id}')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('移动'));
+    await tester.pumpAndSettle();
+
+    expect(() => vault.readNote('读书/心经重命名.md'), throwsA(isA<StateError>()));
+    expect((await vault.readNote('课程/心经重命名.md')).title, '心经重命名');
+
+    await tester.tap(
+      find.byKey(const Key('resource-row-课程/心经重命名.md')),
+      buttons: kSecondaryMouseButton,
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('note-menu-delete-课程/心经重命名.md')));
     await tester.pumpAndSettle();
     await tester.tap(find.text('删除'));
     await tester.pumpAndSettle();
 
-    expect(() => vault.readNote(first.id), throwsA(isA<StateError>()));
-    expect((await vault.readNote(second.id)).title, 'Beta');
-    final noteEditor = tester.widget<CupertinoTextField>(
-      find.byKey(const Key('note-editor')),
-    );
-    expect(noteEditor.controller?.text, contains('# Beta'));
-    expect(find.text('Alpha'), findsNothing);
+    expect(() => vault.readNote('课程/心经重命名.md'), throwsA(isA<StateError>()));
   });
 
   testWidgets(

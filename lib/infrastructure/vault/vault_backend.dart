@@ -27,6 +27,15 @@ abstract class VaultBackend {
 
   Future<void> deleteNote(String noteId);
 
+  Future<VaultNote> renameNote({required String noteId, required String title});
+
+  Future<VaultNote> copyNote({required String noteId});
+
+  Future<VaultNote> moveNote({
+    required String noteId,
+    required String parentPath,
+  });
+
   Future<void> deleteFolder(String folderPath);
 
   Future<VaultResourceNode> renameFolder({

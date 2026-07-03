@@ -88,11 +88,11 @@ Web/H5 刷新后会重置数据。不要把它当作生产端。
 | 测试文件 | 覆盖内容 |
 | --- | --- |
 | `test/domain/markdown_document_test.dart` | frontmatter、Markdown 大纲、表格工具 |
-| `test/infrastructure/file_vault_backend_test.dart` | 文件夹/笔记创建、删除、Markdown 更新、附件和素材保存 |
+| `test/infrastructure/file_vault_backend_test.dart` | 文件夹/笔记创建、重命名、复制、移动、删除、Markdown 更新、附件和素材保存 |
 | `test/infrastructure/search_cache_test.dart` | 内存搜索缓存 |
 | `test/infrastructure/sqlite_search_cache_test.dart` | SQLite 搜索缓存 |
 | `test/application/proposal_service_test.dart` | proposal 生成和应用 |
-| `test/presentation/workspace_test.dart` | 三栏工作台、资源树创建/删除、素材和设置交互 |
+| `test/presentation/workspace_test.dart` | 三栏工作台、资源树右键菜单、创建/删除/移动、素材和设置交互 |
 
 ## 6. 开发约定
 
@@ -131,11 +131,11 @@ AI、OCR、导入器和搜索都应通过接口进入业务流程。UI 不应直
 
 ## 8. 当前已知工程债
 
-- `lib/main.dart` 同时承担 UI、状态和用例调用，需要拆分。
+- `lib/presentation/cupertino/workspace.dart` 仍集中承担 UI、状态和用例调用，需要继续拆分。
 - `flutter_riverpod` 还没有真正承接 workspace 状态。
 - 图片导入后没有进入 OCR/视觉理解处理队列。
 - `SqliteSearchCache` 尚未接入 UI。
-- `.synapse/sources.json` 还没有从素材目录重建的实现。
+- `.assets/sources.json` 还没有从素材目录重建的实现。
 - proposal 还不是结构化 patch。
 
 ## 9. 验证清单

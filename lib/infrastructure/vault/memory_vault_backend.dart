@@ -162,6 +162,99 @@ class MemoryVaultBackend implements VaultBackend {
   }
 
   @override
+  Future<VaultNote> renameNote({
+    required String noteId,
+    required String title,
+  }) async {
+    final note = _note(noteId);
+    final target = _uniqueNotePath(
+      _dirname(note.path),
+      title,
+      excludePath: note.path,
+    );
+    return _moveNoteRecord(note: note, targetPath: target);
+  }
+
+  @override
+  Future<VaultNote> copyNote({required String noteId}) async {
+    final note = _note(noteId);
+    final now = DateTime.now().toUtc();
+    final target = _uniqueNotePath(_dirname(note.path), note.title);
+    final title = _basenameWithoutExtension(target);
+    final copied = VaultNote(
+      id: target,
+      title: title,
+      path: target,
+      markdownPath: 'memory/$target',
+      assetsPath: 'memory/${_assetsPathFor(target)}',
+      createdAt: now,
+      updatedAt: now,
+    );
+    _notes[copied.id] = copied;
+    _markdown[copied.id] = _retitleMarkdown(
+      _markdown[note.id] ?? _initialMarkdown(note),
+      oldTitle: note.title,
+      newTitle: title,
+      updatedAt: now,
+    );
+
+    final sourceIdMap = <String, String>{};
+    final copiedSources = <SourceItem>[];
+    for (final source in _sources[note.id] ?? const <SourceItem>[]) {
+      final copiedSource = _copySource(
+        source,
+        id: _uuid.v4(),
+        noteId: copied.id,
+        now: now,
+      );
+      sourceIdMap[source.id] = copiedSource.id;
+      copiedSources.add(copiedSource);
+      final bytes = _attachmentBytes[source.id];
+      if (bytes != null) {
+        _attachmentBytes[copiedSource.id] = List<int>.unmodifiable(bytes);
+      }
+    }
+    _sources[copied.id] = copiedSources;
+
+    final proposals = _proposals.values
+        .where((proposal) => proposal.noteId == note.id)
+        .toList();
+    for (final proposal in proposals) {
+      final copiedProposal = AiProposal(
+        id: _uuid.v4(),
+        noteId: copied.id,
+        sourceIds: [
+          for (final sourceId in proposal.sourceIds)
+            sourceIdMap[sourceId] ?? sourceId,
+        ],
+        title: proposal.title,
+        proposedMarkdown: proposal.proposedMarkdown,
+        status: proposal.status,
+        createdAt: now,
+        updatedAt: now,
+      );
+      _proposals[copiedProposal.id] = copiedProposal;
+    }
+    return copied;
+  }
+
+  @override
+  Future<VaultNote> moveNote({
+    required String noteId,
+    required String parentPath,
+  }) async {
+    final note = _note(noteId);
+    final parent = _normalizeFolderPath(parentPath);
+    _ensureFolderExists(parent);
+    final target = _uniqueNotePath(
+      parent,
+      _basenameWithoutExtension(note.path),
+      excludePath: note.path,
+    );
+    return _moveNoteRecord(note: note, targetPath: target);
+  }
+
+  @override
   Future<void> deleteFolder(String folderPath) async {
     final folder = _normalizeFolderPath(folderPath);
     if (folder.isEmpty) {
@@ -407,6 +500,74 @@ class MemoryVaultBackend implements VaultBackend {
     _notes[noteId] = note.copyWith(updatedAt: DateTime.now().toUtc());
   }
 
+  VaultNote _moveNoteRecord({
+    required VaultNote note,
+    required String targetPath,
+  }) {
+    final now = DateTime.now().toUtc();
+    final title = _basenameWithoutExtension(targetPath);
+    final moved = note.copyWith(
+      id: targetPath,
+      title: title,
+      path: targetPath,
+      markdownPath: 'memory/$targetPath',
+      assetsPath: 'memory/${_assetsPathFor(targetPath)}',
+      updatedAt: now,
+    );
+
+    _notes.remove(note.id);
+    _notes[moved.id] = moved;
+    final markdown = _markdown.remove(note.id) ?? _initialMarkdown(note);
+    _markdown[moved.id] = _retitleMarkdown(
+      markdown,
+      oldTitle: note.title,
+      newTitle: title,
+      updatedAt: now,
+    );
+
+    final sources = _sources.remove(note.id);
+    if (sources != null) {
+      _sources[moved.id] = [
+        for (final source in sources)
+          source.copyWith(noteId: moved.id, updatedAt: now),
+      ];
+    }
+
+    _proposals.updateAll((_, proposal) {
+      return proposal.noteId == note.id
+          ? proposal.copyWith(noteId: moved.id, updatedAt: now)
+          : proposal;
+    });
+    return moved;
+  }
+
+  SourceItem _copySource(
+    SourceItem source, {
+    required String id,
+    required String noteId,
+    required DateTime now,
+  }) {
+    return SourceItem(
+      id: id,
+      noteId: noteId,
+      type: source.type,
+      title: source.title,
+      state: source.state,
+      createdAt: now,
+      updatedAt: now,
+      text: source.text,
+      extractedText: source.extractedText,
+      attachmentPath: source.attachmentPath,
+      mimeType: source.mimeType,
+    );
+  }
+
+  void _ensureFolderExists(String folderPath) {
+    if (folderPath.isNotEmpty && !_folders.contains(folderPath)) {
+      throw StateError('Folder not found: $folderPath');
+    }
+  }
+
   void seedExample() {
     if (_notes.isNotEmpty) {
       return;
@@ -480,12 +641,17 @@ class MemoryVaultBackend implements VaultBackend {
     return candidate;
   }
 
-  String _uniqueNotePath(String parentPath, String title) {
+  String _uniqueNotePath(
+    String parentPath,
+    String title, {
+    String? excludePath,
+  }) {
     final base = _joinPath(parentPath, '${sanitizeFileName(title)}.md');
     final stem = _withoutExtension(base);
     var candidate = base;
     var suffix = 2;
-    while (_notes.containsKey(candidate) || _folders.contains(candidate)) {
+    while (candidate != excludePath &&
+        (_notes.containsKey(candidate) || _folders.contains(candidate))) {
       candidate = '$stem $suffix.md';
       suffix += 1;
     }
@@ -571,6 +737,35 @@ String _initialMarkdown(VaultNote note) {
       'updatedAt': formatMarkdownTimestamp(note.updatedAt),
     },
     body: '# ${note.title}\n',
+  ).toMarkdown();
+}
+
+String _retitleMarkdown(
+  String markdown, {
+  required String oldTitle,
+  required String newTitle,
+  required DateTime updatedAt,
+}) {
+  final document = MarkdownDocument.parse(markdown);
+  final frontmatter = <String, Object?>{
+    ...document.frontmatter,
+    'title': newTitle,
+    'updatedAt': formatMarkdownTimestamp(updatedAt),
+  };
+  final lines = document.body.split('\n');
+  for (var index = 0; index < lines.length; index += 1) {
+    final match = RegExp(r'^#\s+(.+?)\s*$').firstMatch(lines[index]);
+    if (match == null) {
+      continue;
+    }
+    if (match.group(1) == oldTitle) {
+      lines[index] = '# $newTitle';
+    }
+    break;
+  }
+  return MarkdownDocument(
+    frontmatter: frontmatter,
+    body: lines.join('\n'),
   ).toMarkdown();
 }
 
