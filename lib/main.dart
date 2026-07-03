@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'infrastructure/ai/ai_provider.dart';
 import 'infrastructure/config/provider_config_store.dart';
+import 'infrastructure/config/vault_location_store.dart';
 import 'infrastructure/input/image_input_service.dart';
 import 'infrastructure/vault/vault_backend.dart';
 import 'presentation/cupertino/workspace.dart';
@@ -17,14 +18,20 @@ class SynapseApp extends StatelessWidget {
     this.vault,
     this.imageInput,
     this.providerConfigStore,
+    this.vaultLocationStore,
     this.aiProvider,
+    this.directoryPicker,
+    this.vaultBackendFactory,
     this.providerConfigTester,
   });
 
   final VaultBackend? vault;
   final ImageInputService? imageInput;
   final ProviderConfigStore? providerConfigStore;
+  final VaultLocationStore? vaultLocationStore;
   final AiProvider? aiProvider;
+  final DirectoryPicker? directoryPicker;
+  final VaultBackendFactory? vaultBackendFactory;
   final ProviderConfigTester? providerConfigTester;
 
   @override
@@ -42,7 +49,10 @@ class SynapseApp extends StatelessWidget {
           initialVault: vault,
           imageInput: imageInput,
           providerConfigStore: providerConfigStore,
+          vaultLocationStore: vaultLocationStore,
           aiProvider: aiProvider,
+          directoryPicker: directoryPicker,
+          vaultBackendFactory: vaultBackendFactory,
           providerConfigTester: providerConfigTester,
         ),
       ),

@@ -1,9 +1,9 @@
-import 'package:file_selector/file_selector.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart'
     show MenuAnchor, MenuController, MenuItemButton, Tooltip;
 import 'package:flutter/services.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
+import 'package:path/path.dart' as p;
 
 import '../../application/proposals/proposal_service.dart';
 import '../../domain/markdown/markdown_document.dart';
@@ -13,12 +13,17 @@ import '../../infrastructure/ai/missing_config_ai_provider.dart';
 import '../../infrastructure/ai/openai_compatible_provider.dart';
 import '../../infrastructure/cache/memory_search_cache.dart';
 import '../../infrastructure/config/default_provider_config_store.dart';
+import '../../infrastructure/config/default_vault_location_store.dart';
 import '../../infrastructure/config/provider_config_store.dart';
+import '../../infrastructure/config/vault_directory_access.dart';
+import '../../infrastructure/config/vault_location_store.dart';
 import '../../infrastructure/input/image_input_service.dart';
 import '../../infrastructure/vault/default_vault_backend.dart';
 import '../../infrastructure/vault/vault_backend.dart';
 
 typedef ProviderConfigTester = Future<String> Function(ProviderConfig config);
+typedef DirectoryPicker = Future<String?> Function();
+typedef VaultBackendFactory = VaultBackend Function(String rootPath);
 
 const _background = Color(0xFFF5F5F7);
 const _surface = Color(0xFFFFFFFF);
@@ -48,14 +53,20 @@ class SynapseWorkspace extends StatefulWidget {
     this.initialVault,
     this.imageInput,
     this.providerConfigStore,
+    this.vaultLocationStore,
     this.aiProvider,
+    this.directoryPicker,
+    this.vaultBackendFactory,
     this.providerConfigTester,
   });
 
   final VaultBackend? initialVault;
   final ImageInputService? imageInput;
   final ProviderConfigStore? providerConfigStore;
+  final VaultLocationStore? vaultLocationStore;
   final AiProvider? aiProvider;
+  final DirectoryPicker? directoryPicker;
+  final VaultBackendFactory? vaultBackendFactory;
   final ProviderConfigTester? providerConfigTester;
 
   @override
@@ -63,8 +74,8 @@ class SynapseWorkspace extends StatefulWidget {
 }
 
 class _SynapseWorkspaceState extends State<SynapseWorkspace> {
-  late VaultBackend _vault;
-  late ProposalService _proposalService;
+  VaultBackend? _vault;
+  ProposalService? _proposalService;
   late MemorySearchCache _searchCache;
   late ImageInputService _imageInput;
   late AiProvider _aiProvider;
@@ -84,8 +95,10 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   bool _busy = false;
   bool _previewMarkdown = false;
   String _message = '';
-  String _vaultLabel = supportsDirectoryVault ? 'vault/' : 'H5 预览库';
+  String _vaultLabel = supportsDirectoryVault ? '选择仓库' : 'H5 预览库';
+  String? _vaultRootPath;
   ProviderConfigStore? _providerConfigStore;
+  VaultLocationStore? _vaultLocationStore;
   ProviderConfig? _providerConfig;
   bool _usesInjectedAiProvider = false;
 
@@ -95,7 +108,14 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     _imageInput = widget.imageInput ?? const PlatformImageInputService();
     _usesInjectedAiProvider = widget.aiProvider != null;
     _aiProvider = widget.aiProvider ?? const MissingConfigAiProvider();
-    _resetServices(widget.initialVault ?? createDefaultVaultBackend());
+    _resetAiServices();
+    if (widget.initialVault != null) {
+      _resetServices(widget.initialVault!);
+      _vaultLabel = supportsDirectoryVault ? '测试仓库' : 'H5 预览库';
+    } else if (!supportsDirectoryVault) {
+      _resetServices(createDefaultVaultBackend());
+      _vaultLabel = 'H5 预览库';
+    }
     _initializeWorkspace();
   }
 
@@ -112,8 +132,28 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     _resetAiServices();
   }
 
+  void _clearVaultLocationState() {
+    _vault = null;
+    _proposalService = null;
+    _vaultRootPath = null;
+    _vaultLabel = supportsDirectoryVault ? '选择仓库' : 'H5 预览库';
+    _activeNote = null;
+    _selectedResource = null;
+    _resources = const [];
+    _proposals = const [];
+    _searchResults = const [];
+    _selectedSourceIds.clear();
+    _markdownController.clear();
+    _previewMarkdown = false;
+    _narrowSection = _WorkspaceSection.resources;
+    _resetAiServices();
+  }
+
   void _resetAiServices() {
-    _proposalService = ProposalService(vault: _vault, aiProvider: _aiProvider);
+    final vault = _vault;
+    _proposalService = vault == null
+        ? null
+        : ProposalService(vault: vault, aiProvider: _aiProvider);
     _searchCache = MemorySearchCache(
       _aiProvider,
       semanticSearchEnabled: _semanticSearchEnabled,
@@ -125,14 +165,136 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
         (_providerConfig?.hasEmbeddingConfig ?? false);
   }
 
+  bool get _hasVault => _vault != null;
+
+  bool get _hasDirtyMarkdown {
+    final active = _activeNote;
+    return active != null && _markdownController.text != active.markdown;
+  }
+
+  VaultBackend _requireVault() {
+    final vault = _vault;
+    if (vault == null) {
+      throw StateError('请先选择仓库位置');
+    }
+    return vault;
+  }
+
+  ProposalService _requireProposalService() {
+    final proposalService = _proposalService;
+    if (proposalService == null) {
+      throw StateError('请先选择仓库位置');
+    }
+    return proposalService;
+  }
+
+  VaultBackend _createVaultBackend(String rootPath) {
+    final factory = widget.vaultBackendFactory ?? createDefaultVaultBackend;
+    return factory(rootPath);
+  }
+
+  String _formatVaultLabel(String rootPath) {
+    final basename = p.basename(rootPath);
+    return basename.isEmpty ? rootPath : basename;
+  }
+
+  Future<VaultLocation?> _pickVaultLocation() async {
+    final injectedPicker = widget.directoryPicker;
+    if (injectedPicker != null) {
+      final rootPath = await injectedPicker();
+      if (rootPath == null) {
+        return null;
+      }
+      return VaultLocation(rootPath: rootPath);
+    }
+    return VaultDirectoryAccess.pickDirectory();
+  }
+
+  Future<VaultLocation> _restoreVaultAccess(VaultLocation location) {
+    return VaultDirectoryAccess.startAccessing(location);
+  }
+
   void _useAiProvider(AiProvider provider) {
     _aiProvider = provider;
     _resetAiServices();
   }
 
   Future<void> _initializeWorkspace() async {
-    await _loadResources();
+    if (_hasVault) {
+      await _loadResources();
+    } else if (supportsDirectoryVault) {
+      await _loadSavedVaultLocation();
+    }
     await _loadProviderConfig();
+  }
+
+  Future<VaultLocationStore> _getVaultLocationStore() async {
+    final store =
+        _vaultLocationStore ??
+        widget.vaultLocationStore ??
+        await createDefaultVaultLocationStore();
+    _vaultLocationStore = store;
+    return store;
+  }
+
+  Future<void> _loadSavedVaultLocation() async {
+    try {
+      final store = await _getVaultLocationStore();
+      var location = await store.load();
+      if (!mounted) {
+        return;
+      }
+      if (location == null) {
+        setState(() => _message = '请选择仓库位置');
+        return;
+      }
+      final restoredLocation = await _restoreVaultAccess(location);
+      if (!await store.exists(restoredLocation)) {
+        if (mounted) {
+          setState(() => _message = '仓库位置不可用：${restoredLocation.rootPath}');
+        }
+        return;
+      }
+      setState(() {
+        _busy = true;
+        _message = '';
+      });
+      try {
+        _setVaultLocation(restoredLocation);
+        await _loadResourcesFromCurrentVault(message: '仓库已打开');
+        await store.save(restoredLocation);
+      } catch (error) {
+        if (mounted) {
+          setState(() {
+            _clearVaultLocationState();
+            _message = '仓库位置读取失败：$error';
+          });
+        }
+      } finally {
+        if (mounted) {
+          setState(() => _busy = false);
+        }
+      }
+    } catch (error) {
+      if (mounted) {
+        setState(() => _message = '仓库位置读取失败：$error');
+      }
+    }
+  }
+
+  void _setVaultLocation(VaultLocation location) {
+    _resetServices(_createVaultBackend(location.rootPath));
+    _vaultRootPath = location.rootPath;
+    _vaultLabel = _formatVaultLabel(location.rootPath);
+    _activeNote = null;
+    _selectedResource = null;
+    _resources = const [];
+    _proposals = const [];
+    _searchResults = const [];
+    _selectedSourceIds.clear();
+    _markdownController.clear();
+    _previewMarkdown = false;
+    _narrowSection = _WorkspaceSection.resources;
   }
 
   Future<void> _loadProviderConfig() async {
@@ -155,7 +317,9 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
               ? OpenAICompatibleProvider(config: config!)
               : const MissingConfigAiProvider(),
         );
-        _message = _modelConfigurationMessage();
+        if (_message.isEmpty) {
+          _message = _modelConfigurationMessage();
+        }
       });
     } catch (error) {
       if (mounted) {
@@ -211,20 +375,30 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
 
   Future<void> _loadResources() async {
     await _runBusy(() async {
-      final resources = await _vault.listResources();
-      final firstNote = _firstNote(resources);
-      VaultNoteContent? active;
-      if (firstNote != null) {
-        active = await _vault.readNote(firstNote.id);
-      }
-      setState(() {
-        _resources = resources;
-        _selectedResource = firstNote;
-        _activeNote = active;
-        _markdownController.text = active?.markdown ?? '';
-      });
-      if (active != null) {
-        await _refreshProposals(active.id);
+      await _loadResourcesFromCurrentVault();
+    });
+  }
+
+  Future<void> _loadResourcesFromCurrentVault({String? message}) async {
+    final vault = _requireVault();
+    final resources = await vault.listResources();
+    final firstNote = _firstNote(resources);
+    VaultNoteContent? active;
+    List<AiProposal> proposals = const [];
+    if (firstNote != null) {
+      active = await vault.readNote(firstNote.id);
+      proposals = await vault.listProposals(active.id);
+    }
+    setState(() {
+      _resources = resources;
+      _selectedResource = firstNote;
+      _activeNote = active;
+      _markdownController.text = active?.markdown ?? '';
+      _proposals = proposals;
+      _searchResults = const [];
+      _selectedSourceIds.clear();
+      if (message != null) {
+        _message = message;
       }
     });
   }
@@ -234,8 +408,9 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     if (active == null) {
       return;
     }
-    final refreshed = await _vault.readNote(active.id);
-    final resources = await _vault.listResources();
+    final vault = _requireVault();
+    final refreshed = await vault.readNote(active.id);
+    final resources = await vault.listResources();
     setState(() {
       _resources = resources;
       _selectedResource = _findResource(resources, refreshed.id);
@@ -250,8 +425,9 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     if (active == null) {
       return;
     }
-    final refreshed = await _vault.readNote(active.id);
-    final resources = await _vault.listResources();
+    final vault = _requireVault();
+    final refreshed = await vault.readNote(active.id);
+    final resources = await vault.listResources();
     setState(() {
       _resources = resources;
       _selectedResource = _findResource(resources, refreshed.id);
@@ -263,7 +439,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   }
 
   Future<void> _refreshProposals(String noteId) async {
-    final proposals = await _vault.listProposals(noteId);
+    final proposals = await _requireVault().listProposals(noteId);
     setState(() => _proposals = proposals);
   }
 
@@ -276,7 +452,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       return;
     }
     await _runBusy(() async {
-      final loaded = await _vault.readNote(resource.id);
+      final loaded = await _requireVault().readNote(resource.id);
       setState(() {
         _selectedResource = resource;
         _activeNote = loaded;
@@ -298,11 +474,12 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       return;
     }
     await _runBusy(() async {
-      final folder = await _vault.createFolder(
+      final vault = _requireVault();
+      final folder = await vault.createFolder(
         parentPath: parentPath,
         title: title,
       );
-      final resources = await _vault.listResources();
+      final resources = await vault.listResources();
       setState(() {
         _resources = resources;
         _selectedResource = _findResource(resources, folder.id) ?? folder;
@@ -318,12 +495,10 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       return;
     }
     await _runBusy(() async {
-      final note = await _vault.createNote(
-        parentPath: parentPath,
-        title: title,
-      );
-      final loaded = await _vault.readNote(note.id);
-      final resources = await _vault.listResources();
+      final vault = _requireVault();
+      final note = await vault.createNote(parentPath: parentPath, title: title);
+      final loaded = await vault.readNote(note.id);
+      final resources = await vault.listResources();
       setState(() {
         _resources = resources;
         _selectedResource = _findResource(resources, note.id);
@@ -393,23 +568,59 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       setState(() => _message = 'H5 预览使用浏览器沙盒库');
       return;
     }
-    final path = await getDirectoryPath(confirmButtonText: '选择 Vault');
-    if (path == null) {
+    VaultLocation? pickedLocation;
+    try {
+      pickedLocation = await _pickVaultLocation();
+    } catch (error) {
+      if (mounted) {
+        setState(() => _message = '仓库位置选择失败：$error');
+      }
       return;
     }
-    _resetServices(createDefaultVaultBackend(rootPath: path));
-    setState(() {
-      _vaultLabel = path;
-      _activeNote = null;
-      _selectedResource = null;
-      _resources = const [];
-      _proposals = const [];
-      _selectedSourceIds.clear();
-      _markdownController.clear();
-      _previewMarkdown = false;
-      _narrowSection = _WorkspaceSection.resources;
+    if (pickedLocation == null) {
+      return;
+    }
+    if (!await _autoSaveDirtyMarkdownBeforeSwitch()) {
+      return;
+    }
+    await _runBusy(() async {
+      final store = await _getVaultLocationStore();
+      var location = pickedLocation!;
+      await store.save(location);
+      location = await store.load() ?? location;
+      _setVaultLocation(location);
+      await _loadResourcesFromCurrentVault(message: '仓库已切换');
     });
-    await _loadResources();
+  }
+
+  Future<bool> _autoSaveDirtyMarkdownBeforeSwitch() async {
+    final active = _activeNote;
+    if (active == null || !_hasDirtyMarkdown) {
+      return true;
+    }
+    setState(() {
+      _busy = true;
+      _message = '';
+    });
+    try {
+      final updated = await _requireVault().updateMarkdown(
+        noteId: active.id,
+        markdown: _markdownController.text,
+      );
+      if (mounted) {
+        setState(() => _activeNote = updated);
+      }
+      return true;
+    } catch (error) {
+      if (mounted) {
+        setState(() => _message = error.toString());
+      }
+      return false;
+    } finally {
+      if (mounted) {
+        setState(() => _busy = false);
+      }
+    }
   }
 
   Future<void> _saveMarkdown() async {
@@ -418,7 +629,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       return;
     }
     await _runBusy(() async {
-      final updated = await _vault.updateMarkdown(
+      final updated = await _requireVault().updateMarkdown(
         noteId: active.id,
         markdown: _markdownController.text,
       );
@@ -474,7 +685,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       return;
     }
     Future<void> save() async {
-      final source = await _vault.addImageSource(
+      final source = await _requireVault().addImageSource(
         noteId: active.id,
         filename: image.filename,
         mimeType: image.mimeType,
@@ -506,7 +717,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       return;
     }
     await _runBusy(() async {
-      await _proposalService.createOutlineProposal(
+      await _requireProposalService().createOutlineProposal(
         noteId: active.id,
         sourceIds: _selectedSourceIds.toList(),
       );
@@ -565,10 +776,11 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       return;
     }
     await _runBusy(() async {
+      final vault = _requireVault();
       if (resource.isFolder) {
-        await _vault.deleteFolder(resource.path);
+        await vault.deleteFolder(resource.path);
       } else {
-        await _vault.deleteNote(resource.id);
+        await vault.deleteNote(resource.id);
       }
       await _refreshAfterResourceDeleted(
         deleted: resource,
@@ -591,7 +803,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       return;
     }
     await _runBusy(() async {
-      final renamed = await _vault.renameFolder(
+      final renamed = await _requireVault().renameFolder(
         folderPath: folder.path,
         title: title,
       );
@@ -603,7 +815,8 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     required VaultResourceNode before,
     required VaultResourceNode after,
   }) async {
-    final resources = await _vault.listResources();
+    final vault = _requireVault();
+    final resources = await vault.listResources();
     final active = _activeNote;
     final currentSelected = _selectedResource;
 
@@ -613,8 +826,8 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
         before.path,
         after.path,
       );
-      final loaded = await _vault.readNote(newActiveId);
-      final proposals = await _vault.listProposals(newActiveId);
+      final loaded = await vault.readNote(newActiveId);
+      final proposals = await vault.listProposals(newActiveId);
       setState(() {
         _resources = resources;
         _activeNote = loaded;
@@ -655,7 +868,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     required VaultResourceNode deleted,
     required String message,
   }) async {
-    final resources = await _vault.listResources();
+    final resources = await _requireVault().listResources();
     final activeId = _activeNote?.id;
     final activeWasDeleted =
         activeId != null && _resourceContainsNote(deleted, activeId);
@@ -677,8 +890,9 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
         });
         return;
       }
-      final loaded = await _vault.readNote(firstNote.id);
-      final proposals = await _vault.listProposals(firstNote.id);
+      final vault = _requireVault();
+      final loaded = await vault.readNote(firstNote.id);
+      final proposals = await vault.listProposals(firstNote.id);
       setState(() {
         _resources = resources;
         _selectedResource = _findResource(resources, firstNote.id) ?? firstNote;
@@ -716,7 +930,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       return;
     }
     await _runBusy(() async {
-      await _vault.deleteSource(source);
+      await _requireVault().deleteSource(source);
       await _refreshActiveNote();
       setState(() {
         _selectedSourceIds.remove(source.id);
@@ -734,7 +948,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       return;
     }
     await _runBusy(() async {
-      await _vault.deleteProposal(proposal.id);
+      await _requireVault().deleteProposal(proposal.id);
       final active = _activeNote;
       if (active != null) {
         await _refreshProposals(active.id);
@@ -847,6 +1061,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
           children: [
             _TopBar(
               vaultLabel: _vaultLabel,
+              vaultTooltip: _vaultRootPath ?? _vaultLabel,
               busy: _busy,
               message: _message,
               searchController: _searchController,
@@ -927,48 +1142,56 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
                 key: const Key('new-folder-button'),
                 label: '新建文件夹',
                 icon: CupertinoIcons.folder_badge_plus,
-                onPressed: _busy ? null : () => _createFolder(),
+                onPressed: _busy || !_hasVault ? null : () => _createFolder(),
               ),
               const SizedBox(width: 6),
               _IconAction(
                 key: const Key('new-note-button'),
                 label: '新建笔记',
                 icon: CupertinoIcons.square_pencil,
-                onPressed: _busy ? null : () => _createNote(),
+                onPressed: _busy || !_hasVault ? null : () => _createNote(),
               ),
             ],
           ),
           const SizedBox(height: 12),
-          Expanded(
-            flex: 2,
-            child: _ResourceTree(
-              nodes: _resources,
-              selectedId: _selectedResource?.id,
-              collapsedFolderIds: _collapsedFolderIds,
-              onSelect: _selectResource,
-              onToggleFolder: (folder) {
-                setState(() {
-                  if (_collapsedFolderIds.contains(folder.id)) {
-                    _collapsedFolderIds.remove(folder.id);
-                  } else {
-                    _collapsedFolderIds.add(folder.id);
-                  }
-                });
-              },
-              onCreateFolder: (folder) =>
-                  _createFolder(parentPath: folder.path),
-              onCreateNote: (folder) => _createNote(parentPath: folder.path),
-              onRenameFolder: _renameFolder,
-              onDelete: _deleteResource,
+          if (!_hasVault)
+            Expanded(
+              child: _VaultLocationEmptyState(
+                onChooseVault: _busy ? null : _chooseVault,
+              ),
+            )
+          else ...[
+            Expanded(
+              flex: 2,
+              child: _ResourceTree(
+                nodes: _resources,
+                selectedId: _selectedResource?.id,
+                collapsedFolderIds: _collapsedFolderIds,
+                onSelect: _selectResource,
+                onToggleFolder: (folder) {
+                  setState(() {
+                    if (_collapsedFolderIds.contains(folder.id)) {
+                      _collapsedFolderIds.remove(folder.id);
+                    } else {
+                      _collapsedFolderIds.add(folder.id);
+                    }
+                  });
+                },
+                onCreateFolder: (folder) =>
+                    _createFolder(parentPath: folder.path),
+                onCreateNote: (folder) => _createNote(parentPath: folder.path),
+                onRenameFolder: _renameFolder,
+                onDelete: _deleteResource,
+              ),
             ),
-          ),
-          const _SectionDivider(),
-          const _PaneSubheading('大纲'),
-          const SizedBox(height: 8),
-          Expanded(
-            flex: 3,
-            child: _OutlineTree(nodes: _activeNote?.outline ?? const []),
-          ),
+            const _SectionDivider(),
+            const _PaneSubheading('大纲'),
+            const SizedBox(height: 8),
+            Expanded(
+              flex: 3,
+              child: _OutlineTree(nodes: _activeNote?.outline ?? const []),
+            ),
+          ],
         ],
       ),
     );
@@ -1091,138 +1314,131 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       key: const Key('source-pane'),
       title: '素材',
       icon: CupertinoIcons.photo_on_rectangle,
-      child: Shortcuts(
-        shortcuts: const {
-          SingleActivator(LogicalKeyboardKey.keyV, control: true):
-              _PasteImageIntent(),
-          SingleActivator(LogicalKeyboardKey.keyV, meta: true):
-              _PasteImageIntent(),
-        },
-        child: Actions(
-          actions: {
-            _PasteImageIntent: CallbackAction<_PasteImageIntent>(
-              onInvoke: (_) {
-                if (!_busy) {
-                  _pasteImageSource();
-                }
-                return null;
-              },
-            ),
-          },
-          child: Focus(
-            focusNode: _sourcePaneFocusNode,
-            child: GestureDetector(
-              key: const Key('image-input-area'),
-              behavior: HitTestBehavior.opaque,
-              onTap: _sourcePaneFocusNode.requestFocus,
-              child: ListView(
-                padding: EdgeInsets.zero,
+      child: Focus(
+        focusNode: _sourcePaneFocusNode,
+        onKeyEvent: _handleSourcePaneKeyEvent,
+        child: GestureDetector(
+          key: const Key('image-input-area'),
+          behavior: HitTestBehavior.opaque,
+          onTap: _sourcePaneFocusNode.requestFocus,
+          child: ListView(
+            padding: EdgeInsets.zero,
+            children: [
+              Row(
                 children: [
-                  Row(
-                    children: [
-                      Expanded(
-                        child: _PrimaryButton(
-                          key: const Key('add-image-button'),
-                          label: '导入图片',
-                          icon: CupertinoIcons.photo,
-                          onPressed: _busy ? null : _addImageSource,
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: _SecondaryButton(
-                          key: const Key('paste-image-button'),
-                          label: '粘贴图片',
-                          icon: CupertinoIcons.doc_on_clipboard,
-                          onPressed: _busy ? null : _pasteImageSource,
-                        ),
-                      ),
-                    ],
+                  Expanded(
+                    child: _PrimaryButton(
+                      key: const Key('add-image-button'),
+                      label: '导入图片',
+                      icon: CupertinoIcons.photo,
+                      onPressed: _busy || !_hasVault ? null : _addImageSource,
+                    ),
                   ),
-                  const SizedBox(height: 12),
-                  if (sources.isEmpty)
-                    const Padding(
-                      padding: EdgeInsets.symmetric(vertical: 24),
-                      child: _EmptyState(text: '暂无图片素材'),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: _SecondaryButton(
+                      key: const Key('paste-image-button'),
+                      label: '粘贴图片',
+                      icon: CupertinoIcons.doc_on_clipboard,
+                      onPressed: _busy || !_hasVault ? null : _pasteImageSource,
                     ),
-                  if (sources.isNotEmpty)
-                    GridView.builder(
-                      shrinkWrap: true,
-                      physics: const NeverScrollableScrollPhysics(),
-                      itemCount: sources.length,
-                      gridDelegate:
-                          const SliverGridDelegateWithFixedCrossAxisCount(
-                            crossAxisCount: 2,
-                            mainAxisSpacing: 8,
-                            crossAxisSpacing: 8,
-                            childAspectRatio: 1.15,
-                          ),
-                      itemBuilder: (context, index) {
-                        final source = sources[index];
-                        return _ImageSourceTile(
-                          source: source,
-                          selected: _selectedSourceIds.contains(source.id),
-                          busy: _busy,
-                          imageBytes: _vault.readSourceAttachment(source),
-                          onToggle: () {
-                            setState(() {
-                              if (_selectedSourceIds.contains(source.id)) {
-                                _selectedSourceIds.remove(source.id);
-                              } else {
-                                _selectedSourceIds.add(source.id);
-                              }
-                            });
-                          },
-                          onDelete: () => _deleteSource(source),
-                        );
-                      },
-                    ),
-                  const _SectionDivider(),
-                  _PrimaryButton(
-                    key: const Key('generate-proposal-button'),
-                    label: '生成建议',
-                    icon: CupertinoIcons.sparkles,
-                    onPressed: _selectedSourceIds.isEmpty || _busy
-                        ? null
-                        : _generateProposal,
                   ),
-                  const SizedBox(height: 12),
-                  const _PaneSubheading('AI 建议'),
-                  const SizedBox(height: 8),
-                  for (var index = 0; index < _proposals.length; index++)
-                    _ProposalCard(
-                      proposal: _proposals[index],
-                      copyKey: Key(
-                        index == 0
-                            ? 'copy-proposal-button'
-                            : 'copy-proposal-button-${_proposals[index].id}',
-                      ),
-                      deleteKey: Key(
-                        index == 0
-                            ? 'delete-proposal-button'
-                            : 'delete-proposal-button-${_proposals[index].id}',
-                      ),
-                      busy: _busy,
-                      onCopy: () => _copyProposal(_proposals[index]),
-                      onDelete: () => _deleteProposal(_proposals[index]),
-                    ),
-                  if (_searchResults.isNotEmpty) ...[
-                    const _SectionDivider(),
-                    for (final result in _searchResults)
-                      _SearchResultRow(result: result),
-                  ],
                 ],
               ),
-            ),
+              const SizedBox(height: 12),
+              if (sources.isEmpty)
+                const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 24),
+                  child: _EmptyState(text: '暂无图片素材'),
+                ),
+              if (sources.isNotEmpty)
+                GridView.builder(
+                  shrinkWrap: true,
+                  physics: const NeverScrollableScrollPhysics(),
+                  itemCount: sources.length,
+                  gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                    crossAxisCount: 2,
+                    mainAxisSpacing: 8,
+                    crossAxisSpacing: 8,
+                    childAspectRatio: 1.15,
+                  ),
+                  itemBuilder: (context, index) {
+                    final source = sources[index];
+                    return _ImageSourceTile(
+                      source: source,
+                      selected: _selectedSourceIds.contains(source.id),
+                      busy: _busy,
+                      imageBytes: _requireVault().readSourceAttachment(source),
+                      onToggle: () {
+                        setState(() {
+                          if (_selectedSourceIds.contains(source.id)) {
+                            _selectedSourceIds.remove(source.id);
+                          } else {
+                            _selectedSourceIds.add(source.id);
+                          }
+                        });
+                      },
+                      onDelete: () => _deleteSource(source),
+                    );
+                  },
+                ),
+              const _SectionDivider(),
+              _PrimaryButton(
+                key: const Key('generate-proposal-button'),
+                label: '生成建议',
+                icon: CupertinoIcons.sparkles,
+                onPressed: _selectedSourceIds.isEmpty || _busy
+                    ? null
+                    : _generateProposal,
+              ),
+              const SizedBox(height: 12),
+              const _PaneSubheading('AI 建议'),
+              const SizedBox(height: 8),
+              for (var index = 0; index < _proposals.length; index++)
+                _ProposalCard(
+                  proposal: _proposals[index],
+                  copyKey: Key(
+                    index == 0
+                        ? 'copy-proposal-button'
+                        : 'copy-proposal-button-${_proposals[index].id}',
+                  ),
+                  deleteKey: Key(
+                    index == 0
+                        ? 'delete-proposal-button'
+                        : 'delete-proposal-button-${_proposals[index].id}',
+                  ),
+                  busy: _busy,
+                  onCopy: () => _copyProposal(_proposals[index]),
+                  onDelete: () => _deleteProposal(_proposals[index]),
+                ),
+              if (_searchResults.isNotEmpty) ...[
+                const _SectionDivider(),
+                for (final result in _searchResults)
+                  _SearchResultRow(result: result),
+              ],
+            ],
           ),
         ),
       ),
     );
   }
-}
 
-class _PasteImageIntent extends Intent {
-  const _PasteImageIntent();
+  KeyEventResult _handleSourcePaneKeyEvent(FocusNode node, KeyEvent event) {
+    if (!_isPasteImageShortcutKeyUp(event)) {
+      return KeyEventResult.ignored;
+    }
+    if (!_busy && _hasVault) {
+      _pasteImageSource();
+    }
+    return KeyEventResult.handled;
+  }
+
+  bool _isPasteImageShortcutKeyUp(KeyEvent event) {
+    return event is KeyUpEvent &&
+        event.logicalKey == LogicalKeyboardKey.keyV &&
+        (HardwareKeyboard.instance.isControlPressed ||
+            HardwareKeyboard.instance.isMetaPressed);
+  }
 }
 
 VaultResourceNode? _firstNote(List<VaultResourceNode> nodes) {
@@ -1332,6 +1548,7 @@ class _Pane extends StatelessWidget {
 class _TopBar extends StatelessWidget {
   const _TopBar({
     required this.vaultLabel,
+    required this.vaultTooltip,
     required this.busy,
     required this.message,
     required this.searchController,
@@ -1341,6 +1558,7 @@ class _TopBar extends StatelessWidget {
   });
 
   final String vaultLabel;
+  final String vaultTooltip;
   final bool busy;
   final String message;
   final TextEditingController searchController;
@@ -1377,7 +1595,9 @@ class _TopBar extends StatelessWidget {
         ),
         const SizedBox(width: 16),
         _PillButton(
+          key: const Key('vault-location-button'),
           label: vaultLabel,
+          tooltip: vaultTooltip,
           icon: CupertinoIcons.folder,
           maxLabelWidth: 220,
           onPressed: busy ? null : onChooseVault,
@@ -1435,6 +1655,15 @@ class _TopBar extends StatelessWidget {
         const SizedBox(height: 8),
         Row(
           children: [
+            _PillButton(
+              key: const Key('vault-location-button'),
+              label: vaultLabel,
+              tooltip: vaultTooltip,
+              icon: CupertinoIcons.folder,
+              maxLabelWidth: 170,
+              onPressed: busy ? null : onChooseVault,
+            ),
+            const SizedBox(width: 8),
             Expanded(
               child: _SearchField(
                 controller: searchController,
@@ -2505,42 +2734,48 @@ class _SecondaryButton extends StatelessWidget {
 
 class _PillButton extends StatelessWidget {
   const _PillButton({
+    super.key,
     required this.label,
     required this.icon,
     required this.onPressed,
+    this.tooltip,
     this.maxLabelWidth,
   });
 
   final String label;
   final IconData icon;
   final VoidCallback? onPressed;
+  final String? tooltip;
   final double? maxLabelWidth;
 
   @override
   Widget build(BuildContext context) {
     final labelWidget = Text(label, overflow: TextOverflow.ellipsis);
-    return Semantics(
-      label: label,
-      button: true,
-      child: CupertinoButton(
-        minimumSize: const Size(36, 36),
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
-        color: _secondarySurface,
-        borderRadius: _radius,
-        onPressed: onPressed,
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(icon, size: 16),
-            const SizedBox(width: 6),
-            if (maxLabelWidth == null)
-              labelWidget
-            else
-              ConstrainedBox(
-                constraints: BoxConstraints(maxWidth: maxLabelWidth!),
-                child: labelWidget,
-              ),
-          ],
+    return Tooltip(
+      message: tooltip ?? label,
+      child: Semantics(
+        label: label,
+        button: true,
+        child: CupertinoButton(
+          minimumSize: const Size(36, 36),
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+          color: _secondarySurface,
+          borderRadius: _radius,
+          onPressed: onPressed,
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, size: 16),
+              const SizedBox(width: 6),
+              if (maxLabelWidth == null)
+                labelWidget
+              else
+                ConstrainedBox(
+                  constraints: BoxConstraints(maxWidth: maxLabelWidth!),
+                  child: labelWidget,
+                ),
+            ],
+          ),
         ),
       ),
     );
@@ -2646,6 +2881,75 @@ class _Hairline extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return const SizedBox(height: 1, child: ColoredBox(color: _softLine));
+  }
+}
+
+class _VaultLocationEmptyState extends StatelessWidget {
+  const _VaultLocationEmptyState({required this.onChooseVault});
+
+  final VoidCallback? onChooseVault;
+
+  @override
+  Widget build(BuildContext context) {
+    final canChooseVault = onChooseVault != null;
+    final pickerLabel = Semantics(
+      button: true,
+      enabled: canChooseVault,
+      onTap: onChooseVault,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: onChooseVault,
+        child: MouseRegion(
+          cursor: canChooseVault
+              ? SystemMouseCursors.click
+              : SystemMouseCursors.basic,
+          child: const Padding(
+            padding: EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(CupertinoIcons.folder, size: 34, color: _muted),
+                SizedBox(height: 10),
+                Text(
+                  '选择仓库位置',
+                  style: TextStyle(fontWeight: FontWeight.w700, color: _text),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+    final content = Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        pickerLabel,
+        const SizedBox(height: 8),
+        CupertinoButton.filled(
+          key: const Key('choose-vault-empty-button'),
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 9),
+          onPressed: onChooseVault,
+          child: const Text('选择仓库位置'),
+        ),
+      ],
+    );
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final availableHeight = constraints.maxHeight.isFinite
+            ? constraints.maxHeight
+            : 0.0;
+        final minHeight = availableHeight > 16 ? availableHeight - 16 : 0.0;
+        return SingleChildScrollView(
+          padding: const EdgeInsets.symmetric(vertical: 8),
+          physics: const ClampingScrollPhysics(),
+          child: ConstrainedBox(
+            constraints: BoxConstraints(minHeight: minHeight),
+            child: Center(child: content),
+          ),
+        );
+      },
+    );
   }
 }
 

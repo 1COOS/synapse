@@ -1,12 +1,17 @@
+import 'dart:io';
+
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:path/path.dart' as p;
 import 'package:synapse/domain/vault/vault_resource.dart';
 import 'package:synapse/infrastructure/config/provider_config_store.dart';
+import 'package:synapse/infrastructure/config/vault_location_store.dart';
 import 'package:synapse/infrastructure/input/image_input_service.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
+import 'package:synapse/infrastructure/vault/vault_backend.dart';
 import 'package:synapse/main.dart';
 
 const _tinyPng = <int>[
@@ -80,6 +85,316 @@ const _tinyPng = <int>[
 ];
 
 void main() {
+  testWidgets('requires choosing a vault location when none is saved', (
+    tester,
+  ) async {
+    final locationStore = _FakeVaultLocationStore();
+
+    await _pumpWorkspace(
+      tester,
+      vault: null,
+      vaultLocationStore: locationStore,
+      directoryPicker: () async => null,
+    );
+
+    expect(locationStore.loadCalls, 1);
+    expect(find.byKey(const Key('choose-vault-empty-button')), findsOneWidget);
+    expect(find.text('选择仓库位置'), findsWidgets);
+    expect(find.text('暂无资源'), findsNothing);
+    await tester.tap(find.byKey(const Key('new-folder-button')));
+    await tester.pump(const Duration(milliseconds: 250));
+    await tester.tap(find.byKey(const Key('new-note-button')));
+    await tester.pump(const Duration(milliseconds: 250));
+    expect(find.byKey(const Key('resource-name-input')), findsNothing);
+  });
+
+  testWidgets('keeps the vault chooser visible and clickable in tight panes', (
+    tester,
+  ) async {
+    const rootPath = '/vault/tight';
+    var picked = false;
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    await vault.createNote(parentPath: '', title: 'Tight');
+    final locationStore = _FakeVaultLocationStore(existingPaths: {rootPath});
+
+    await _pumpWorkspace(
+      tester,
+      vault: null,
+      vaultLocationStore: locationStore,
+      directoryPicker: () async {
+        picked = true;
+        return rootPath;
+      },
+      vaultBackendFactory: (_) => vault,
+      size: const Size(1280, 430),
+    );
+
+    expect(tester.takeException(), isNull);
+    await tester.tap(find.byKey(const Key('choose-vault-empty-button')));
+    await tester.pump(const Duration(milliseconds: 500));
+
+    expect(picked, isTrue);
+    expect(find.text('Tight'), findsWidgets);
+  });
+
+  testWidgets('starts vault selection when the empty-state label is tapped', (
+    tester,
+  ) async {
+    const rootPath = '/vault/label';
+    var picked = false;
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    await vault.createNote(parentPath: '', title: 'Label');
+    final locationStore = _FakeVaultLocationStore(existingPaths: {rootPath});
+
+    await _pumpWorkspace(
+      tester,
+      vault: null,
+      vaultLocationStore: locationStore,
+      directoryPicker: () async {
+        picked = true;
+        return rootPath;
+      },
+      vaultBackendFactory: (_) => vault,
+    );
+
+    await tester.tap(find.text('选择仓库位置').first);
+    await tester.pump(const Duration(milliseconds: 500));
+
+    expect(picked, isTrue);
+    expect(find.text('Label'), findsWidgets);
+  });
+
+  testWidgets('saves a chosen vault location and loads its resources', (
+    tester,
+  ) async {
+    const rootPath = '/vault/chosen';
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    await vault.createNote(parentPath: '', title: 'Alpha');
+    final locationStore = _FakeVaultLocationStore(existingPaths: {rootPath});
+
+    await _pumpWorkspace(
+      tester,
+      vault: null,
+      vaultLocationStore: locationStore,
+      directoryPicker: () async => rootPath,
+      vaultBackendFactory: (_) => vault,
+    );
+
+    await tester.tap(find.byKey(const Key('choose-vault-empty-button')));
+    await tester.pump(const Duration(milliseconds: 500));
+
+    expect(locationStore.savedLocations.single.rootPath, rootPath);
+    expect(find.text('Alpha'), findsWidgets);
+    expect(find.text('chosen'), findsOneWidget);
+  });
+
+  testWidgets('shows an error when the vault directory picker fails', (
+    tester,
+  ) async {
+    final locationStore = _FakeVaultLocationStore();
+
+    await _pumpWorkspace(
+      tester,
+      vault: null,
+      vaultLocationStore: locationStore,
+      directoryPicker: () => throw StateError('picker unavailable'),
+    );
+
+    await tester.tap(find.byKey(const Key('choose-vault-empty-button')));
+    await tester.pump(const Duration(milliseconds: 250));
+
+    expect(find.textContaining('仓库位置选择失败'), findsOneWidget);
+    expect(find.textContaining('picker unavailable'), findsOneWidget);
+    expect(locationStore.savedLocations, isEmpty);
+  });
+
+  testWidgets('opens a saved valid vault location on startup', (tester) async {
+    const rootPath = '/vault/saved';
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    await vault.createNote(parentPath: '', title: 'Saved');
+    final locationStore = _FakeVaultLocationStore(
+      loadedLocation: const VaultLocation(rootPath: rootPath),
+      existingPaths: const {rootPath},
+    );
+
+    await _pumpWorkspace(
+      tester,
+      vault: null,
+      vaultLocationStore: locationStore,
+      directoryPicker: () async => null,
+      vaultBackendFactory: (_) => vault,
+    );
+
+    expect(find.text('Saved'), findsWidgets);
+    expect(find.byKey(const Key('choose-vault-empty-button')), findsNothing);
+    expect(locationStore.savedLocations.single.rootPath, rootPath);
+  });
+
+  testWidgets('restores and refreshes a saved vault bookmark on startup', (
+    tester,
+  ) async {
+    const rootPath = '/vault/bookmarked';
+    const channel = MethodChannel('synapse/vault_access');
+    final calls = <MethodCall>[];
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (call) async {
+          calls.add(call);
+          return {'rootPath': rootPath, 'bookmarkBase64': 'fresh-bookmark'};
+        });
+    addTearDown(() {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, null);
+    });
+
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    await vault.createNote(parentPath: '', title: 'Bookmarked');
+    final locationStore = _FakeVaultLocationStore(
+      loadedLocation: const VaultLocation(
+        rootPath: rootPath,
+        bookmarkBase64: 'saved-bookmark',
+      ),
+      existingPaths: const {rootPath},
+    );
+
+    await _pumpWorkspace(
+      tester,
+      vault: null,
+      vaultLocationStore: locationStore,
+      directoryPicker: () async => null,
+      vaultBackendFactory: (_) => vault,
+    );
+
+    expect(calls.single.method, 'startAccessingBookmark');
+    expect(calls.single.arguments, {'bookmarkBase64': 'saved-bookmark'});
+    expect(locationStore.savedLocations.single.rootPath, rootPath);
+    expect(
+      locationStore.savedLocations.single.bookmarkBase64,
+      'fresh-bookmark',
+    );
+    expect(find.text('Bookmarked'), findsWidgets);
+  });
+
+  testWidgets('prompts for a new vault when the saved path is unavailable', (
+    tester,
+  ) async {
+    final missingPath = p.join(
+      Directory.systemTemp.path,
+      'synapse-missing-vault-for-test',
+    );
+    final locationStore = _FakeVaultLocationStore(
+      loadedLocation: VaultLocation(rootPath: missingPath),
+    );
+
+    await _pumpWorkspace(
+      tester,
+      vault: null,
+      vaultLocationStore: locationStore,
+      directoryPicker: () async => null,
+    );
+
+    expect(find.byKey(const Key('choose-vault-empty-button')), findsOneWidget);
+    expect(find.textContaining('仓库位置不可用'), findsOneWidget);
+    expect(Directory(missingPath).existsSync(), isFalse);
+  });
+
+  testWidgets('returns to the chooser when a saved vault cannot be read', (
+    tester,
+  ) async {
+    const rootPath = '/vault/locked';
+    final locationStore = _FakeVaultLocationStore(
+      loadedLocation: const VaultLocation(rootPath: rootPath),
+      existingPaths: const {rootPath},
+    );
+
+    await _pumpWorkspace(
+      tester,
+      vault: null,
+      vaultLocationStore: locationStore,
+      directoryPicker: () async => null,
+      vaultBackendFactory: (_) =>
+          _ListingFailureVaultBackend(seedExampleData: false),
+    );
+
+    expect(find.byKey(const Key('choose-vault-empty-button')), findsOneWidget);
+    expect(find.text('暂无资源'), findsNothing);
+    expect(find.textContaining('仓库位置读取失败'), findsOneWidget);
+    expect(locationStore.savedLocations, isEmpty);
+  });
+
+  testWidgets('auto-saves dirty markdown before switching vaults', (
+    tester,
+  ) async {
+    const firstPath = '/vault/first';
+    const secondPath = '/vault/second';
+    final firstVault = MemoryVaultBackend(seedExampleData: false);
+    await firstVault.createNote(parentPath: '', title: 'First');
+    final secondVault = MemoryVaultBackend(seedExampleData: false);
+    await secondVault.createNote(parentPath: '', title: 'Second');
+    final locationStore = _FakeVaultLocationStore(
+      loadedLocation: const VaultLocation(rootPath: firstPath),
+      existingPaths: const {firstPath, secondPath},
+    );
+
+    await _pumpWorkspace(
+      tester,
+      vault: null,
+      vaultLocationStore: locationStore,
+      directoryPicker: () async => secondPath,
+      vaultBackendFactory: (rootPath) {
+        return rootPath == firstPath ? firstVault : secondVault;
+      },
+    );
+    await tester.enterText(
+      find.byKey(const Key('note-editor')),
+      '# First\nchanged',
+    );
+    await tester.tap(find.byKey(const Key('vault-location-button')));
+    await tester.pump(const Duration(milliseconds: 500));
+
+    expect(
+      (await firstVault.readNote('First.md')).markdown,
+      contains('changed'),
+    );
+    expect(locationStore.savedLocations.last.rootPath, secondPath);
+    expect(find.text('Second'), findsWidgets);
+  });
+
+  testWidgets('does not switch vaults when auto-save fails', (tester) async {
+    final firstVault = _FailingUpdateVaultBackend(seedExampleData: false);
+    await firstVault.createNote(parentPath: '', title: 'First');
+    final secondVault = MemoryVaultBackend(seedExampleData: false);
+    await secondVault.createNote(parentPath: '', title: 'Second');
+    final locationStore = _FakeVaultLocationStore(
+      loadedLocation: const VaultLocation(rootPath: '/vault/first'),
+      existingPaths: const {'/vault/first', '/vault/second'},
+    );
+
+    await _pumpWorkspace(
+      tester,
+      vault: null,
+      vaultLocationStore: locationStore,
+      directoryPicker: () async => '/vault/second',
+      vaultBackendFactory: (rootPath) {
+        return rootPath == '/vault/first' ? firstVault : secondVault;
+      },
+    );
+    await tester.enterText(
+      find.byKey(const Key('note-editor')),
+      '# First\nchanged',
+    );
+    firstVault.failUpdates = true;
+    expect(locationStore.savedLocations.single.rootPath, '/vault/first');
+    locationStore.savedLocations.clear();
+
+    await tester.tap(find.byKey(const Key('vault-location-button')));
+    await tester.pump(const Duration(milliseconds: 500));
+
+    expect(find.text('First'), findsWidgets);
+    expect(find.text('Second'), findsNothing);
+    expect(locationStore.savedLocations, isEmpty);
+    expect(find.textContaining('save failed'), findsOneWidget);
+  });
+
   testWidgets('uses a Cupertino app shell and shows the desktop workbench', (
     tester,
   ) async {
@@ -517,9 +832,12 @@ void main() {
 
     await tester.tap(find.byKey(const Key('image-input-area')));
     await tester.pump();
-    await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
-    await tester.sendKeyEvent(LogicalKeyboardKey.keyV);
-    await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.metaLeft);
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.keyV);
+    await tester.pump();
+    expect(imageInput.pasteCalls, 0);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.keyV);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.metaLeft);
     await tester.pump(const Duration(milliseconds: 250));
 
     expect(imageInput.pasteCalls, 1);
@@ -764,9 +1082,12 @@ void main() {
 
 Future<void> _pumpWorkspace(
   WidgetTester tester, {
-  required MemoryVaultBackend vault,
+  required MemoryVaultBackend? vault,
   ImageInputService? imageInput,
   ProviderConfigStore? configStore,
+  VaultLocationStore? vaultLocationStore,
+  Future<String?> Function()? directoryPicker,
+  VaultBackend Function(String rootPath)? vaultBackendFactory,
   Future<String> Function(ProviderConfig config)? providerConfigTester,
   Size size = const Size(1280, 820),
 }) async {
@@ -779,10 +1100,72 @@ Future<void> _pumpWorkspace(
       vault: vault,
       imageInput: imageInput,
       providerConfigStore: configStore ?? _FakeProviderConfigStore(),
+      vaultLocationStore: vaultLocationStore,
+      directoryPicker: directoryPicker,
+      vaultBackendFactory: vaultBackendFactory,
       providerConfigTester: providerConfigTester,
     ),
   );
   await tester.pump(const Duration(milliseconds: 250));
+}
+
+class _FakeVaultLocationStore implements VaultLocationStore {
+  _FakeVaultLocationStore({
+    this.loadedLocation,
+    Set<String> existingPaths = const {},
+  }) : existingPaths = {...existingPaths};
+
+  VaultLocation? loadedLocation;
+  final Set<String> existingPaths;
+  final savedLocations = <VaultLocation>[];
+  int loadCalls = 0;
+
+  @override
+  Future<VaultLocation?> load() async {
+    loadCalls += 1;
+    return loadedLocation;
+  }
+
+  @override
+  Future<void> save(VaultLocation location) async {
+    savedLocations.add(location);
+    loadedLocation = location;
+    existingPaths.add(location.rootPath);
+  }
+
+  @override
+  Future<bool> exists(VaultLocation location) async {
+    return existingPaths.contains(location.rootPath);
+  }
+}
+
+class _FailingUpdateVaultBackend extends MemoryVaultBackend {
+  _FailingUpdateVaultBackend({super.seedExampleData});
+
+  bool failUpdates = false;
+
+  @override
+  Future<VaultNoteContent> updateMarkdown({
+    required String noteId,
+    required String markdown,
+  }) {
+    if (failUpdates) {
+      throw StateError('save failed');
+    }
+    return super.updateMarkdown(noteId: noteId, markdown: markdown);
+  }
+}
+
+class _ListingFailureVaultBackend extends MemoryVaultBackend {
+  _ListingFailureVaultBackend({super.seedExampleData});
+
+  @override
+  Future<List<VaultResourceNode>> listResources() {
+    throw const FileSystemException(
+      'Directory listing failed',
+      '/vault/locked',
+    );
+  }
 }
 
 class _FakeImageInputService implements ImageInputService {

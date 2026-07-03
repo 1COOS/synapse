@@ -3,6 +3,6 @@ import 'vault_backend.dart';
 
 bool get supportsDirectoryVault => false;
 
-VaultBackend createDefaultVaultBackend({String? rootPath}) {
+VaultBackend createDefaultVaultBackend([String? rootPath]) {
   return MemoryVaultBackend();
 }
