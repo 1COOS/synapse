@@ -29,6 +29,11 @@ abstract class VaultBackend {
 
   Future<void> deleteFolder(String folderPath);
 
+  Future<VaultResourceNode> renameFolder({
+    required String folderPath,
+    required String title,
+  });
+
   Future<SourceItem> addTextSource({
     required String noteId,
     required String title,

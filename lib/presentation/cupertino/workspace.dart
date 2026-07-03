@@ -1,6 +1,7 @@
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/cupertino.dart';
-import 'package:flutter/material.dart' show Tooltip;
+import 'package:flutter/material.dart'
+    show MenuAnchor, MenuController, MenuItemButton, Tooltip;
 import 'package:flutter/services.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 
@@ -78,6 +79,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   List<AiProposal> _proposals = const [];
   List<SearchResult> _searchResults = const [];
   final Set<String> _selectedSourceIds = <String>{};
+  final Set<String> _collapsedFolderIds = <String>{};
   _WorkspaceSection _narrowSection = _WorkspaceSection.resources;
   bool _busy = false;
   bool _previewMarkdown = false;
@@ -287,14 +289,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     });
   }
 
-  void _selectVaultRoot() {
-    setState(() {
-      _selectedResource = null;
-      _narrowSection = _WorkspaceSection.resources;
-    });
-  }
-
-  Future<void> _createFolder() async {
+  Future<void> _createFolder({String parentPath = ''}) async {
     final title = await _promptResourceName(
       title: '新建文件夹',
       placeholder: '文件夹名称',
@@ -304,26 +299,27 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     }
     await _runBusy(() async {
       final folder = await _vault.createFolder(
-        parentPath: _creationParentPath(),
+        parentPath: parentPath,
         title: title,
       );
       final resources = await _vault.listResources();
       setState(() {
         _resources = resources;
         _selectedResource = _findResource(resources, folder.id) ?? folder;
+        _collapsedFolderIds.remove(parentPath);
         _narrowSection = _WorkspaceSection.resources;
       });
     });
   }
 
-  Future<void> _createNote() async {
+  Future<void> _createNote({String parentPath = ''}) async {
     final title = await _promptResourceName(title: '新建笔记', placeholder: '笔记名称');
     if (title == null) {
       return;
     }
     await _runBusy(() async {
       final note = await _vault.createNote(
-        parentPath: _creationParentPath(),
+        parentPath: parentPath,
         title: title,
       );
       final loaded = await _vault.readNote(note.id);
@@ -335,28 +331,20 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
         _markdownController.text = loaded.markdown;
         _proposals = const [];
         _selectedSourceIds.clear();
+        _collapsedFolderIds.remove(parentPath);
         _previewMarkdown = false;
         _narrowSection = _WorkspaceSection.notes;
       });
     });
   }
 
-  String _creationParentPath() {
-    final selected = _selectedResource;
-    if (selected == null) {
-      return '';
-    }
-    if (selected.isFolder) {
-      return selected.path;
-    }
-    return _parentPath(selected.path);
-  }
-
   Future<String?> _promptResourceName({
     required String title,
     required String placeholder,
+    String? initialValue,
+    String actionLabel = '创建',
   }) async {
-    final controller = TextEditingController();
+    final controller = TextEditingController(text: initialValue);
     try {
       return await showCupertinoDialog<String>(
         context: context,
@@ -390,7 +378,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
                   Navigator.of(context).pop(trimmed);
                 }
               },
-              child: const Text('创建'),
+              child: Text(actionLabel),
             ),
           ],
         ),
@@ -586,6 +574,80 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
         deleted: resource,
         message: resource.isFolder ? '文件夹已删除' : '笔记已删除',
       );
+    });
+  }
+
+  Future<void> _renameFolder(VaultResourceNode folder) async {
+    if (!folder.isFolder) {
+      return;
+    }
+    final title = await _promptResourceName(
+      title: '重命名文件夹',
+      placeholder: '文件夹名称',
+      initialValue: folder.title,
+      actionLabel: '重命名',
+    );
+    if (title == null) {
+      return;
+    }
+    await _runBusy(() async {
+      final renamed = await _vault.renameFolder(
+        folderPath: folder.path,
+        title: title,
+      );
+      await _refreshAfterFolderRenamed(before: folder, after: renamed);
+    });
+  }
+
+  Future<void> _refreshAfterFolderRenamed({
+    required VaultResourceNode before,
+    required VaultResourceNode after,
+  }) async {
+    final resources = await _vault.listResources();
+    final active = _activeNote;
+    final currentSelected = _selectedResource;
+
+    if (active != null && _pathIsInside(active.id, before.path)) {
+      final newActiveId = _replacePathPrefix(
+        active.id,
+        before.path,
+        after.path,
+      );
+      final loaded = await _vault.readNote(newActiveId);
+      final proposals = await _vault.listProposals(newActiveId);
+      setState(() {
+        _resources = resources;
+        _activeNote = loaded;
+        _selectedResource = _findResource(resources, loaded.id);
+        _markdownController.text = loaded.markdown;
+        _proposals = proposals;
+        _selectedSourceIds.clear();
+        _collapsedFolderIds.remove(before.id);
+        _collapsedFolderIds.remove(after.id);
+        _message = '文件夹已重命名';
+      });
+      return;
+    }
+
+    VaultResourceNode? selected;
+    if (currentSelected != null &&
+        _pathIsInside(currentSelected.path, before.path)) {
+      final newSelectedId = _replacePathPrefix(
+        currentSelected.id,
+        before.path,
+        after.path,
+      );
+      selected = _findResource(resources, newSelectedId);
+    } else if (currentSelected != null) {
+      selected = _findResource(resources, currentSelected.id);
+    }
+
+    setState(() {
+      _resources = resources;
+      _selectedResource = selected;
+      _collapsedFolderIds.remove(before.id);
+      _collapsedFolderIds.remove(after.id);
+      _message = '文件夹已重命名';
     });
   }
 
@@ -865,14 +927,14 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
                 key: const Key('new-folder-button'),
                 label: '新建文件夹',
                 icon: CupertinoIcons.folder_badge_plus,
-                onPressed: _busy ? null : _createFolder,
+                onPressed: _busy ? null : () => _createFolder(),
               ),
               const SizedBox(width: 6),
               _IconAction(
                 key: const Key('new-note-button'),
                 label: '新建笔记',
                 icon: CupertinoIcons.square_pencil,
-                onPressed: _busy ? null : _createNote,
+                onPressed: _busy ? null : () => _createNote(),
               ),
             ],
           ),
@@ -882,8 +944,21 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
             child: _ResourceTree(
               nodes: _resources,
               selectedId: _selectedResource?.id,
-              onSelectRoot: _selectVaultRoot,
+              collapsedFolderIds: _collapsedFolderIds,
               onSelect: _selectResource,
+              onToggleFolder: (folder) {
+                setState(() {
+                  if (_collapsedFolderIds.contains(folder.id)) {
+                    _collapsedFolderIds.remove(folder.id);
+                  } else {
+                    _collapsedFolderIds.add(folder.id);
+                  }
+                });
+              },
+              onCreateFolder: (folder) =>
+                  _createFolder(parentPath: folder.path),
+              onCreateNote: (folder) => _createNote(parentPath: folder.path),
+              onRenameFolder: _renameFolder,
               onDelete: _deleteResource,
             ),
           ),
@@ -1176,16 +1251,11 @@ VaultResourceNode? _findResource(List<VaultResourceNode> nodes, String id) {
   return null;
 }
 
-String _parentPath(String path) {
-  final index = path.lastIndexOf('/');
-  return index < 0 ? '' : path.substring(0, index);
-}
-
 bool _resourceContainsNote(VaultResourceNode resource, String noteId) {
   if (resource.isNote) {
     return resource.id == noteId;
   }
-  return noteId.startsWith('${resource.path}/');
+  return _pathIsInside(noteId, resource.path);
 }
 
 bool _resourceContainsResource(
@@ -1195,7 +1265,18 @@ bool _resourceContainsResource(
   if (parent.isNote) {
     return parent.id == child.id;
   }
-  return child.path == parent.path || child.path.startsWith('${parent.path}/');
+  return _pathIsInside(child.path, parent.path);
+}
+
+bool _pathIsInside(String path, String folder) {
+  return path == folder || path.startsWith('$folder/');
+}
+
+String _replacePathPrefix(String path, String oldPrefix, String newPrefix) {
+  if (path == oldPrefix) {
+    return newPrefix;
+  }
+  return '$newPrefix/${path.substring(oldPrefix.length + 1)}';
 }
 
 class _Pane extends StatelessWidget {
@@ -1443,15 +1524,23 @@ class _ResourceTree extends StatelessWidget {
   const _ResourceTree({
     required this.nodes,
     required this.selectedId,
-    required this.onSelectRoot,
+    required this.collapsedFolderIds,
     required this.onSelect,
+    required this.onToggleFolder,
+    required this.onCreateFolder,
+    required this.onCreateNote,
+    required this.onRenameFolder,
     required this.onDelete,
   });
 
   final List<VaultResourceNode> nodes;
   final String? selectedId;
-  final VoidCallback onSelectRoot;
+  final Set<String> collapsedFolderIds;
   final ValueChanged<VaultResourceNode> onSelect;
+  final ValueChanged<VaultResourceNode> onToggleFolder;
+  final ValueChanged<VaultResourceNode> onCreateFolder;
+  final ValueChanged<VaultResourceNode> onCreateNote;
+  final ValueChanged<VaultResourceNode> onRenameFolder;
   final ValueChanged<VaultResourceNode> onDelete;
 
   @override
@@ -1459,8 +1548,6 @@ class _ResourceTree extends StatelessWidget {
     return ListView(
       padding: EdgeInsets.zero,
       children: [
-        _VaultRootRow(selected: selectedId == null, onTap: onSelectRoot),
-        const SizedBox(height: 6),
         if (nodes.isEmpty)
           const Padding(
             padding: EdgeInsets.symmetric(vertical: 18),
@@ -1476,48 +1563,25 @@ class _ResourceTree extends StatelessWidget {
     required VaultResourceNode node,
     required int depth,
   }) {
+    final collapsed = collapsedFolderIds.contains(node.id);
     return [
       _ResourceRow(
         node: node,
         depth: depth,
         selected: node.id == selectedId,
+        collapsed: collapsed,
+        noteCount: _noteCount(node),
         onTap: () => onSelect(node),
+        onToggleFolder: () => onToggleFolder(node),
+        onCreateFolder: () => onCreateFolder(node),
+        onCreateNote: () => onCreateNote(node),
+        onRenameFolder: () => onRenameFolder(node),
         onDelete: () => onDelete(node),
       ),
-      for (final child in node.children)
-        ..._buildNode(context, node: child, depth: depth + 1),
+      if (!collapsed)
+        for (final child in node.children)
+          ..._buildNode(context, node: child, depth: depth + 1),
     ];
-  }
-}
-
-class _VaultRootRow extends StatelessWidget {
-  const _VaultRootRow({required this.selected, required this.onTap});
-
-  final bool selected;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return _ResourceRowShell(
-      key: const Key('vault-root-row'),
-      depth: 0,
-      selected: selected,
-      onTap: onTap,
-      child: const Row(
-        children: [
-          Icon(CupertinoIcons.archivebox, size: 18, color: _muted),
-          SizedBox(width: 8),
-          Expanded(
-            child: Text(
-              'Vault 根目录',
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(fontWeight: FontWeight.w700),
-            ),
-          ),
-        ],
-      ),
-    );
   }
 }
 
@@ -1526,26 +1590,132 @@ class _ResourceRow extends StatelessWidget {
     required this.node,
     required this.depth,
     required this.selected,
+    required this.collapsed,
+    required this.noteCount,
     required this.onTap,
+    required this.onToggleFolder,
+    required this.onCreateFolder,
+    required this.onCreateNote,
+    required this.onRenameFolder,
     required this.onDelete,
   });
 
   final VaultResourceNode node;
   final int depth;
   final bool selected;
+  final bool collapsed;
+  final int noteCount;
   final VoidCallback onTap;
+  final VoidCallback onToggleFolder;
+  final VoidCallback onCreateFolder;
+  final VoidCallback onCreateNote;
+  final VoidCallback onRenameFolder;
   final VoidCallback onDelete;
 
   @override
   Widget build(BuildContext context) {
+    if (node.isFolder) {
+      final menuController = MenuController();
+      return MenuAnchor(
+        controller: menuController,
+        consumeOutsideTap: true,
+        menuChildren: [
+          MenuItemButton(
+            key: Key('folder-menu-new-folder-${node.id}'),
+            leadingIcon: const Icon(CupertinoIcons.folder_badge_plus, size: 16),
+            onPressed: onCreateFolder,
+            child: const Text('新建文件夹'),
+          ),
+          MenuItemButton(
+            key: Key('folder-menu-new-note-${node.id}'),
+            leadingIcon: const Icon(CupertinoIcons.square_pencil, size: 16),
+            onPressed: onCreateNote,
+            child: const Text('新建笔记'),
+          ),
+          MenuItemButton(
+            key: Key('folder-menu-rename-${node.id}'),
+            leadingIcon: const Icon(CupertinoIcons.pencil, size: 16),
+            onPressed: onRenameFolder,
+            child: const Text('重命名文件夹'),
+          ),
+          MenuItemButton(
+            key: Key('folder-menu-delete-${node.id}'),
+            leadingIcon: const Icon(CupertinoIcons.trash, size: 16),
+            onPressed: onDelete,
+            child: const Text('删除文件夹'),
+          ),
+        ],
+        child: _ResourceRowShell(
+          key: Key('resource-row-${node.id}'),
+          depth: depth,
+          selected: selected,
+          onTap: onTap,
+          onSecondaryTapDown: (details) {
+            onTap();
+            menuController.open(position: details.localPosition);
+          },
+          child: Row(
+            children: [
+              SizedBox(
+                width: 24,
+                child: node.children.isEmpty
+                    ? const SizedBox(width: 18)
+                    : CupertinoButton(
+                        key: Key('resource-toggle-${node.id}'),
+                        minimumSize: const Size.square(24),
+                        padding: EdgeInsets.zero,
+                        onPressed: onToggleFolder,
+                        child: Icon(
+                          collapsed
+                              ? CupertinoIcons.chevron_right
+                              : CupertinoIcons.chevron_down,
+                          size: 14,
+                          color: _muted,
+                        ),
+                      ),
+              ),
+              Icon(
+                CupertinoIcons.folder,
+                size: 19,
+                color: selected ? _primary : _muted,
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  node.title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 15,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+              Text(
+                '$noteCount',
+                key: Key('resource-count-${node.id}'),
+                style: const TextStyle(
+                  color: _muted,
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
     return _ResourceRowShell(
+      key: Key('resource-row-${node.id}'),
       depth: depth,
       selected: selected,
       onTap: onTap,
       child: Row(
         children: [
+          const SizedBox(width: 24),
           Icon(
-            node.isFolder ? CupertinoIcons.folder : CupertinoIcons.doc_text,
+            CupertinoIcons.doc_text,
             size: 18,
             color: selected ? _primary : _muted,
           ),
@@ -1560,7 +1730,7 @@ class _ResourceRow extends StatelessWidget {
           ),
           _IconAction(
             key: Key('delete-resource-${node.id}'),
-            label: node.isFolder ? '删除文件夹' : '删除笔记',
+            label: '删除笔记',
             icon: CupertinoIcons.trash,
             onPressed: onDelete,
           ),
@@ -1570,6 +1740,16 @@ class _ResourceRow extends StatelessWidget {
   }
 }
 
+int _noteCount(VaultResourceNode node) {
+  if (node.isNote) {
+    return 1;
+  }
+  return node.children.fold<int>(
+    0,
+    (count, child) => count + _noteCount(child),
+  );
+}
+
 class _ResourceRowShell extends StatelessWidget {
   const _ResourceRowShell({
     super.key,
@@ -1577,27 +1757,29 @@ class _ResourceRowShell extends StatelessWidget {
     required this.selected,
     required this.onTap,
     required this.child,
+    this.onSecondaryTapDown,
   });
 
   final int depth;
   final bool selected;
   final VoidCallback onTap;
   final Widget child;
+  final GestureTapDownCallback? onSecondaryTapDown;
 
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.only(bottom: 6),
+      padding: const EdgeInsets.only(bottom: 2),
       child: GestureDetector(
         behavior: HitTestBehavior.opaque,
         onTap: onTap,
+        onSecondaryTapDown: onSecondaryTapDown,
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 160),
-          height: 38,
-          padding: EdgeInsets.only(left: 8 + depth * 16, right: 8),
+          height: 34,
+          padding: EdgeInsets.only(left: 4 + depth * 18, right: 8),
           decoration: BoxDecoration(
-            color: selected ? const Color(0xFFE8F2FF) : _surface,
-            border: Border.all(color: selected ? _primary : _softLine),
+            color: selected ? const Color(0xFFE8F2FF) : const Color(0x00000000),
             borderRadius: _radius,
           ),
           child: child,

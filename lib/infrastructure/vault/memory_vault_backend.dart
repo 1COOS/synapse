@@ -180,6 +180,85 @@ class MemoryVaultBackend implements VaultBackend {
   }
 
   @override
+  Future<VaultResourceNode> renameFolder({
+    required String folderPath,
+    required String title,
+  }) async {
+    final folder = _normalizeFolderPath(folderPath);
+    if (folder.isEmpty) {
+      throw StateError('Cannot rename the vault root.');
+    }
+    if (!_folders.contains(folder)) {
+      throw StateError('Folder not found: $folderPath');
+    }
+
+    final target = _uniqueFolderPath(
+      _dirname(folder),
+      title,
+      excludePath: folder,
+    );
+    if (target == folder) {
+      return VaultResourceNode(
+        id: folder,
+        title: _basename(folder),
+        path: folder,
+        type: VaultResourceType.folder,
+      );
+    }
+
+    final movedFolders = _folders
+        .where((path) => _isPathInside(path, folder))
+        .toList();
+    final movedNotes = _notes.keys
+        .where((noteId) => _isPathInside(noteId, folder))
+        .toList();
+    final noteIdMap = {
+      for (final noteId in movedNotes)
+        noteId: _replacePathPrefix(noteId, folder, target),
+    };
+
+    _folders.removeWhere((path) => _isPathInside(path, folder));
+    _folders.addAll(
+      movedFolders.map((path) => _replacePathPrefix(path, folder, target)),
+    );
+
+    for (final oldId in movedNotes) {
+      final newId = noteIdMap[oldId]!;
+      final note = _notes.remove(oldId)!;
+      _notes[newId] = note.copyWith(
+        id: newId,
+        path: newId,
+        markdownPath: 'memory/$newId',
+        assetsPath: 'memory/${_assetsPathFor(newId)}',
+      );
+      final markdown = _markdown.remove(oldId);
+      if (markdown != null) {
+        _markdown[newId] = markdown;
+      }
+      final sources = _sources.remove(oldId);
+      if (sources != null) {
+        _sources[newId] = [
+          for (final source in sources) source.copyWith(noteId: newId),
+        ];
+      }
+    }
+
+    _proposals.updateAll((_, proposal) {
+      final newNoteId = noteIdMap[proposal.noteId];
+      return newNoteId == null
+          ? proposal
+          : proposal.copyWith(noteId: newNoteId);
+    });
+
+    return VaultResourceNode(
+      id: target,
+      title: _basename(target),
+      path: target,
+      type: VaultResourceType.folder,
+    );
+  }
+
+  @override
   Future<SourceItem> addTextSource({
     required String noteId,
     required String title,
@@ -385,11 +464,16 @@ class MemoryVaultBackend implements VaultBackend {
     _attachmentBytes['preview-image-source'] = _tinyPreviewPng;
   }
 
-  String _uniqueFolderPath(String parentPath, String title) {
+  String _uniqueFolderPath(
+    String parentPath,
+    String title, {
+    String? excludePath,
+  }) {
     final base = _joinPath(parentPath, sanitizeFileName(title));
     var candidate = base;
     var suffix = 2;
-    while (_folders.contains(candidate) || _notes.containsKey(candidate)) {
+    while (candidate != excludePath &&
+        (_folders.contains(candidate) || _notes.containsKey(candidate))) {
       candidate = '$base $suffix';
       suffix += 1;
     }
@@ -531,6 +615,13 @@ String _assetsPathFor(String notePath) =>
 
 bool _isPathInside(String path, String folder) {
   return path == folder || path.startsWith('$folder/');
+}
+
+String _replacePathPrefix(String path, String oldPrefix, String newPrefix) {
+  if (path == oldPrefix) {
+    return newPrefix;
+  }
+  return '$newPrefix/${path.substring(oldPrefix.length + 1)}';
 }
 
 void _sortNodes(List<VaultResourceNode> nodes) {

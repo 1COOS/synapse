@@ -243,4 +243,95 @@ void main() {
 
     expect(await backend.listProposals(note.id), isEmpty);
   });
+
+  test(
+    'renames a folder subtree with notes, assets, sources, and proposals',
+    () async {
+      final backend = FileVaultBackend(root.path);
+      final folder = await backend.createFolder(parentPath: '', title: '读书');
+      final nested = await backend.createFolder(
+        parentPath: folder.path,
+        title: '佛学',
+      );
+      final note = await backend.createNote(
+        parentPath: nested.path,
+        title: '心经',
+      );
+      final source = await backend.addImageSource(
+        noteId: note.id,
+        filename: 'screen.png',
+        mimeType: 'image/png',
+        bytes: [137, 80, 78, 71],
+      );
+      final proposal = await backend.saveProposal(
+        AiProposal(
+          id: 'proposal-1',
+          noteId: note.id,
+          sourceIds: [source.id],
+          title: '建议',
+          proposedMarkdown: '## 建议',
+          status: ProposalStatus.pending,
+          createdAt: DateTime.utc(2026),
+          updatedAt: DateTime.utc(2026),
+        ),
+      );
+
+      final renamed = await backend.renameFolder(
+        folderPath: folder.path,
+        title: '课程',
+      );
+
+      expect(renamed.path, '课程');
+      expect(await Directory(p.join(root.path, '读书')).exists(), isFalse);
+      expect(
+        await File(p.join(root.path, '课程', '佛学', '心经.md')).exists(),
+        isTrue,
+      );
+      expect(
+        await Directory(p.join(root.path, '课程', '佛学', '心经.assets')).exists(),
+        isTrue,
+      );
+      expect(() => backend.readNote(note.id), throwsA(isA<StateError>()));
+      final loaded = await backend.readNote('课程/佛学/心经.md');
+      final sources = await backend.listSources(loaded.id);
+      expect(sources.single.noteId, loaded.id);
+      expect(await backend.readSourceAttachment(sources.single), [
+        137,
+        80,
+        78,
+        71,
+      ]);
+      expect(await backend.listSources(note.id), isEmpty);
+      expect(await backend.listProposals(note.id), isEmpty);
+      final proposals = await backend.listProposals(loaded.id);
+      expect(proposals.single.id, proposal.id);
+      expect(proposals.single.noteId, loaded.id);
+    },
+  );
+
+  test('renames folders uniquely and rejects invalid folder paths', () async {
+    final backend = FileVaultBackend(root.path);
+    await backend.createFolder(parentPath: '', title: '课程');
+    final folder = await backend.createFolder(parentPath: '', title: '读书');
+
+    final renamed = await backend.renameFolder(
+      folderPath: folder.path,
+      title: '课程',
+    );
+
+    expect(renamed.path, '课程 2');
+    expect(await Directory(p.join(root.path, '课程 2')).exists(), isTrue);
+    expect(
+      () => backend.renameFolder(folderPath: '', title: '根目录'),
+      throwsA(isA<StateError>()),
+    );
+    expect(
+      () => backend.renameFolder(folderPath: '../outside', title: '逃逸'),
+      throwsA(isA<ArgumentError>()),
+    );
+    expect(
+      () => backend.renameFolder(folderPath: 'missing', title: '缺失'),
+      throwsA(isA<StateError>()),
+    );
+  });
 }

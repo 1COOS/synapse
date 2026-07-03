@@ -45,6 +45,7 @@ class VaultNote {
   final DateTime updatedAt;
 
   VaultNote copyWith({
+    String? id,
     String? title,
     String? path,
     String? markdownPath,
@@ -52,7 +53,7 @@ class VaultNote {
     DateTime? updatedAt,
   }) {
     return VaultNote(
-      id: id,
+      id: id ?? this.id,
       title: title ?? this.title,
       path: path ?? this.path,
       markdownPath: markdownPath ?? this.markdownPath,
@@ -138,8 +139,10 @@ class SourceItem {
   String get searchableText => extractedText ?? text ?? title;
 
   SourceItem copyWith({
+    String? noteId,
     SourceState? state,
     DateTime? updatedAt,
+    String? title,
     String? text,
     String? extractedText,
     String? attachmentPath,
@@ -147,9 +150,9 @@ class SourceItem {
   }) {
     return SourceItem(
       id: id,
-      noteId: noteId,
+      noteId: noteId ?? this.noteId,
       type: type,
-      title: title,
+      title: title ?? this.title,
       state: state ?? this.state,
       createdAt: createdAt,
       updatedAt: updatedAt ?? this.updatedAt,
@@ -212,10 +215,14 @@ class AiProposal {
   final DateTime createdAt;
   final DateTime updatedAt;
 
-  AiProposal copyWith({ProposalStatus? status, DateTime? updatedAt}) {
+  AiProposal copyWith({
+    String? noteId,
+    ProposalStatus? status,
+    DateTime? updatedAt,
+  }) {
     return AiProposal(
       id: id,
-      noteId: noteId,
+      noteId: noteId ?? this.noteId,
       sourceIds: sourceIds,
       title: title,
       proposedMarkdown: proposedMarkdown,

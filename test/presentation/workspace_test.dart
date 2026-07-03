@@ -1,4 +1,5 @@
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -99,8 +100,8 @@ void main() {
     expect(find.byKey(const Key('settings-button')), findsOneWidget);
     expect(find.byKey(const Key('new-folder-button')), findsOneWidget);
     expect(find.byKey(const Key('new-note-button')), findsOneWidget);
-    expect(find.byKey(const Key('vault-root-row')), findsOneWidget);
-    expect(find.text('Vault 根目录'), findsOneWidget);
+    expect(find.byKey(const Key('vault-root-row')), findsNothing);
+    expect(find.text('Vault 根目录'), findsNothing);
     expect(find.byTooltip('新建文件夹'), findsOneWidget);
     expect(find.byTooltip('新建笔记'), findsOneWidget);
     expect(find.text('学科'), findsNothing);
@@ -133,9 +134,7 @@ void main() {
     expect(find.text('AI 建议'), findsOneWidget);
   });
 
-  testWidgets('creates a folder and note in the selected resource tree', (
-    tester,
-  ) async {
+  testWidgets('creates root-level resources from the toolbar', (tester) async {
     final vault = MemoryVaultBackend(seedExampleData: false);
 
     await _pumpWorkspace(tester, vault: vault);
@@ -154,57 +153,159 @@ void main() {
     await tester.pumpAndSettle();
 
     final resources = await vault.listResources();
-    final note = await vault.readNote('读书/心经.md');
+    final note = await vault.readNote('心经.md');
     expect(find.text('读书'), findsOneWidget);
     expect(find.text('心经'), findsWidgets);
-    expect(resources.single.children.single.type, VaultResourceType.note);
+    expect(resources.map((resource) => resource.title), ['读书', '心经']);
+    expect(resources.first.children, isEmpty);
+    expect(resources.last.type, VaultResourceType.note);
     expect(note.markdown, contains('# 心经'));
   });
 
-  testWidgets('creates root-level folders after selecting the vault root', (
+  testWidgets(
+    'uses a folder context menu for child creation rename and delete',
+    (tester) async {
+      final vault = MemoryVaultBackend(seedExampleData: false);
+
+      await _pumpWorkspace(tester, vault: vault);
+      await tester.tap(find.byKey(const Key('new-folder-button')));
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byKey(const Key('resource-name-input')),
+        '读书',
+      );
+      await tester.tap(find.text('创建'));
+      await tester.pumpAndSettle();
+
+      await tester.tap(
+        find.byKey(const Key('resource-row-读书')),
+        buttons: kSecondaryMouseButton,
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('folder-menu-new-folder-读书')));
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byKey(const Key('resource-name-input')),
+        '佛学',
+      );
+      await tester.tap(find.text('创建'));
+      await tester.pumpAndSettle();
+
+      await tester.tap(
+        find.byKey(const Key('resource-row-读书')),
+        buttons: kSecondaryMouseButton,
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('folder-menu-new-note-读书')));
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byKey(const Key('resource-name-input')),
+        '心经',
+      );
+      await tester.tap(find.text('创建'));
+      await tester.pumpAndSettle();
+
+      expect((await vault.readNote('读书/心经.md')).title, '心经');
+      expect((await vault.listResources()).single.children.length, 2);
+
+      await tester.tap(
+        find.byKey(const Key('resource-row-读书')),
+        buttons: kSecondaryMouseButton,
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('folder-menu-rename-读书')));
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byKey(const Key('resource-name-input')),
+        '课程',
+      );
+      await tester.tap(find.text('重命名'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('读书'), findsNothing);
+      expect(find.text('课程'), findsOneWidget);
+      expect((await vault.readNote('课程/心经.md')).title, '心经');
+
+      await tester.tap(
+        find.byKey(const Key('resource-row-课程')),
+        buttons: kSecondaryMouseButton,
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('folder-menu-delete-课程')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('删除'));
+      await tester.pumpAndSettle();
+
+      expect(await vault.listResources(), isEmpty);
+      expect(find.text('课程'), findsNothing);
+    },
+  );
+
+  testWidgets('collapses folders and shows recursive note counts', (
     tester,
   ) async {
     final vault = MemoryVaultBackend(seedExampleData: false);
+    final folder = await vault.createFolder(parentPath: '', title: '读书');
+    final nested = await vault.createFolder(
+      parentPath: folder.path,
+      title: '佛学',
+    );
+    await vault.createNote(parentPath: folder.path, title: '心经');
+    await vault.createNote(parentPath: nested.path, title: '金刚经');
 
     await _pumpWorkspace(tester, vault: vault);
-    await tester.tap(find.byKey(const Key('new-folder-button')));
-    await tester.pumpAndSettle();
-    await tester.enterText(find.byKey(const Key('resource-name-input')), '读书');
-    await tester.tap(find.text('创建'));
+
+    expect(find.byKey(const Key('resource-count-读书')), findsOneWidget);
+    expect(find.byKey(const Key('resource-row-读书/心经.md')), findsOneWidget);
+    expect(find.byKey(const Key('resource-row-读书/佛学/金刚经.md')), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('resource-toggle-读书')));
     await tester.pumpAndSettle();
 
-    await tester.tap(find.text('读书'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const Key('new-note-button')));
-    await tester.pumpAndSettle();
-    await tester.enterText(find.byKey(const Key('resource-name-input')), '心经');
-    await tester.tap(find.text('创建'));
+    expect(find.byKey(const Key('resource-row-读书/心经.md')), findsNothing);
+    expect(find.byKey(const Key('resource-row-读书/佛学/金刚经.md')), findsNothing);
+
+    await tester.tap(find.byKey(const Key('resource-toggle-读书')));
     await tester.pumpAndSettle();
 
-    await tester.tap(find.byKey(const Key('vault-root-row')));
-    await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const Key('new-folder-button')));
-    await tester.pumpAndSettle();
-    await tester.enterText(find.byKey(const Key('resource-name-input')), '课程');
-    await tester.tap(find.text('创建'));
-    await tester.pumpAndSettle();
-
-    final resources = await vault.listResources();
-    final rootTitles = resources.map((resource) => resource.title).toSet();
-    expect(rootTitles, containsAll(['读书', '课程']));
-    expect(
-      resources
-          .singleWhere((resource) => resource.title == '读书')
-          .children
-          .single
-          .title,
-      '心经',
-    );
-    expect(
-      resources.singleWhere((resource) => resource.title == '课程').children,
-      isEmpty,
-    );
+    expect(find.byKey(const Key('resource-row-读书/心经.md')), findsOneWidget);
+    expect(find.byKey(const Key('resource-row-读书/佛学/金刚经.md')), findsOneWidget);
   });
+
+  testWidgets(
+    'toolbar keeps creating at the vault root after folder selection',
+    (tester) async {
+      final vault = MemoryVaultBackend(seedExampleData: false);
+
+      await _pumpWorkspace(tester, vault: vault);
+      await tester.tap(find.byKey(const Key('new-folder-button')));
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byKey(const Key('resource-name-input')),
+        '读书',
+      );
+      await tester.tap(find.text('创建'));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const Key('resource-row-读书')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('new-folder-button')));
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byKey(const Key('resource-name-input')),
+        '课程',
+      );
+      await tester.tap(find.text('创建'));
+      await tester.pumpAndSettle();
+
+      final resources = await vault.listResources();
+      expect(resources.map((resource) => resource.title).toSet(), {'读书', '课程'});
+      expect(
+        resources.singleWhere((resource) => resource.title == '读书').children,
+        isEmpty,
+      );
+    },
+  );
 
   testWidgets('deletes a note after confirmation and selects the next note', (
     tester,
@@ -252,7 +353,12 @@ void main() {
       );
       expect(beforeDelete.controller?.text, contains('# 心经'));
 
-      await tester.tap(find.byKey(Key('delete-resource-${folder.id}')));
+      await tester.tap(
+        find.byKey(Key('resource-row-${folder.id}')),
+        buttons: kSecondaryMouseButton,
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(Key('folder-menu-delete-${folder.id}')));
       await tester.pumpAndSettle();
       await tester.tap(find.text('删除'));
       await tester.pumpAndSettle();

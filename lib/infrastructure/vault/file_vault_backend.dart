@@ -127,6 +127,57 @@ class FileVaultBackend implements VaultBackend {
   }
 
   @override
+  Future<VaultResourceNode> renameFolder({
+    required String folderPath,
+    required String title,
+  }) async {
+    final relative = _normalizeFolderPath(folderPath);
+    if (relative.isEmpty) {
+      throw StateError('Cannot rename the vault root.');
+    }
+    final directory = _directoryForFolder(relative);
+    if (!await directory.exists()) {
+      throw StateError('Folder not found: $folderPath');
+    }
+
+    final target = await _uniqueDirectory(
+      directory.parent,
+      title,
+      excludePath: directory.path,
+    );
+    if (p.equals(p.normalize(directory.path), p.normalize(target.path))) {
+      return VaultResourceNode(
+        id: relative,
+        title: p.basename(directory.path),
+        path: relative,
+        type: VaultResourceType.folder,
+      );
+    }
+
+    final noteIds = await _noteIdsInsideFolder(relative);
+    final noteIdMap = {
+      for (final noteId in noteIds)
+        noteId: _replacePathPrefix(
+          noteId,
+          relative,
+          _relativePath(target.path),
+        ),
+    };
+
+    final moved = await directory.rename(target.path);
+    for (final entry in noteIdMap.entries) {
+      await _rewriteMovedNoteMetadata(noteId: entry.value);
+    }
+
+    return VaultResourceNode(
+      id: _relativePath(moved.path),
+      title: p.basename(moved.path),
+      path: _relativePath(moved.path),
+      type: VaultResourceType.folder,
+    );
+  }
+
+  @override
   Future<SourceItem> addTextSource({
     required String noteId,
     required String title,
@@ -283,18 +334,10 @@ $text
 
   @override
   Future<List<AiProposal>> listProposals(String noteId) async {
-    final file = _proposalsFile(noteId);
-    if (!await file.exists()) {
-      return const [];
-    }
     final proposals =
-        (jsonDecode(await file.readAsString()) as List<Object?>)
-            .map(
-              (item) =>
-                  AiProposal.fromJson((item as Map).cast<String, Object?>()),
-            )
-            .where((proposal) => proposal.noteId == noteId)
-            .toList()
+        (await _readProposalsFile(
+            noteId,
+          )).where((proposal) => proposal.noteId == noteId).toList()
           ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
     return proposals;
   }
@@ -531,11 +574,19 @@ $text
     return directory;
   }
 
-  Future<Directory> _uniqueDirectory(Directory parent, String title) async {
+  Future<Directory> _uniqueDirectory(
+    Directory parent,
+    String title, {
+    String? excludePath,
+  }) async {
     final base = sanitizeFileName(title);
     var candidate = Directory(p.join(parent.path, base));
     var suffix = 2;
-    while (await candidate.exists()) {
+    while (!p.equals(
+          p.normalize(candidate.path),
+          p.normalize(excludePath ?? ''),
+        ) &&
+        await candidate.exists()) {
       candidate = Directory(p.join(parent.path, '$base $suffix'));
       suffix += 1;
     }
@@ -555,6 +606,49 @@ $text
 
   String _relativePath(String absolutePath) {
     return p.relative(absolutePath, from: root.path).replaceAll('\\', '/');
+  }
+
+  Future<List<String>> _noteIdsInsideFolder(String folderPath) async {
+    final noteIds = <String>[];
+    void collect(List<VaultResourceNode> nodes) {
+      for (final node in nodes) {
+        if (node.isNote && _isPathInside(node.id, folderPath)) {
+          noteIds.add(node.id);
+        }
+        collect(node.children);
+      }
+    }
+
+    collect(await listResources());
+    return noteIds;
+  }
+
+  Future<List<AiProposal>> _readProposalsFile(String noteId) async {
+    final file = _proposalsFile(noteId);
+    if (!await file.exists()) {
+      return const [];
+    }
+    return (jsonDecode(await file.readAsString()) as List<Object?>)
+        .map(
+          (item) => AiProposal.fromJson((item as Map).cast<String, Object?>()),
+        )
+        .toList();
+  }
+
+  Future<void> _rewriteMovedNoteMetadata({required String noteId}) async {
+    final sources = await listSources(noteId);
+    if (sources.isNotEmpty || await _sourcesFile(noteId).exists()) {
+      await _writeSources(noteId, [
+        for (final source in sources) source.copyWith(noteId: noteId),
+      ]);
+    }
+
+    final proposals = await _readProposalsFile(noteId);
+    if (proposals.isNotEmpty || await _proposalsFile(noteId).exists()) {
+      await _writeProposals(noteId, [
+        for (final proposal in proposals) proposal.copyWith(noteId: noteId),
+      ]);
+    }
   }
 }
 
@@ -590,6 +684,17 @@ String _normalizeNotePath(String path) {
 }
 
 bool _isHiddenName(String name) => name.startsWith('.');
+
+bool _isPathInside(String path, String folder) {
+  return path == folder || path.startsWith('$folder/');
+}
+
+String _replacePathPrefix(String path, String oldPrefix, String newPrefix) {
+  if (path == oldPrefix) {
+    return newPrefix;
+  }
+  return '$newPrefix/${path.substring(oldPrefix.length + 1)}';
+}
 
 DateTime? _parseMarkdownTime(Object? value) {
   final text = value?.toString();
