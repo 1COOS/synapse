@@ -1,4 +1,4 @@
-import 'package:flutter/material.dart';
+import 'package:flutter/cupertino.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -79,11 +79,16 @@ const _tinyPng = <int>[
 ];
 
 void main() {
-  testWidgets('shows the three-pane learning workspace', (tester) async {
-    await tester.binding.setSurfaceSize(const Size(1280, 820));
-    await tester.pumpWidget(_testApp(vault: MemoryVaultBackend()));
-    await tester.pump(const Duration(milliseconds: 250));
+  testWidgets('uses a Cupertino app shell and shows the desktop workbench', (
+    tester,
+  ) async {
+    await _pumpWorkspace(tester, vault: MemoryVaultBackend());
 
+    expect(find.byType(CupertinoApp), findsOneWidget);
+    expect(find.byType(CupertinoPageScaffold), findsOneWidget);
+    expect(find.byKey(const Key('project-pane')), findsOneWidget);
+    expect(find.byKey(const Key('note-pane')), findsOneWidget);
+    expect(find.byKey(const Key('source-pane')), findsOneWidget);
     expect(find.text('Synapse'), findsOneWidget);
     expect(find.text('项目'), findsOneWidget);
     expect(find.text('笔记'), findsOneWidget);
@@ -91,54 +96,74 @@ void main() {
     expect(find.text('AI 建议'), findsOneWidget);
     expect(find.text('编辑'), findsOneWidget);
     expect(find.text('预览'), findsOneWidget);
-    expect(find.byTooltip('设置模型'), findsOneWidget);
-    expect(find.byTooltip('加入图片'), findsOneWidget);
-    expect(find.byTooltip('复制建议'), findsOneWidget);
-    expect(find.byTooltip('写入笔记'), findsNothing);
+    expect(find.byKey(const Key('settings-button')), findsOneWidget);
+    expect(find.byKey(const Key('add-image-button')), findsOneWidget);
+    expect(find.byKey(const Key('copy-proposal-button')), findsOneWidget);
     expect(find.text('pending'), findsNothing);
     expect(find.text('粘贴文本素材'), findsNothing);
     expect(find.text('加入文本'), findsNothing);
   });
 
-  testWidgets('does not overflow the source pane in a compact desktop window', (
+  testWidgets('uses Cupertino section navigation in narrow windows', (
     tester,
   ) async {
-    await tester.binding.setSurfaceSize(const Size(1280, 560));
-    await tester.pumpWidget(_testApp(vault: MemoryVaultBackend()));
+    await _pumpWorkspace(
+      tester,
+      vault: MemoryVaultBackend(),
+      size: const Size(720, 820),
+    );
+
+    expect(find.byKey(const Key('workspace-section-control')), findsOneWidget);
+    expect(find.byKey(const Key('project-pane')), findsOneWidget);
+    expect(find.byKey(const Key('note-pane')), findsNothing);
+
+    await tester.tap(find.text('素材'));
     await tester.pump(const Duration(milliseconds: 250));
 
-    expect(tester.takeException(), isNull);
+    expect(find.byKey(const Key('source-pane')), findsOneWidget);
     expect(find.text('AI 建议'), findsOneWidget);
+  });
+
+  testWidgets('creates a project with the selected template', (tester) async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+
+    await _pumpWorkspace(tester, vault: vault);
+    await tester.tap(find.byKey(const Key('project-template-button')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('自定义').last);
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.byKey(const Key('project-title-input')),
+      '新学习项目',
+    );
+    await tester.tap(find.byKey(const Key('create-project-button')));
+    await tester.pump(const Duration(milliseconds: 250));
+
+    expect(find.text('新学习项目'), findsWidgets);
+    expect(find.text('自定义'), findsWidgets);
+    expect((await vault.listProjects()).single.template, StudyTemplate.custom);
   });
 
   testWidgets('switches the note pane between edit and preview modes', (
     tester,
   ) async {
-    await tester.binding.setSurfaceSize(const Size(1280, 820));
-    await tester.pumpWidget(_testApp(vault: MemoryVaultBackend()));
-    await tester.pump(const Duration(milliseconds: 250));
+    await _pumpWorkspace(tester, vault: MemoryVaultBackend());
 
-    expect(find.byType(TextField), findsNWidgets(3));
+    expect(find.byKey(const Key('note-editor')), findsOneWidget);
     expect(find.byType(Markdown), findsNothing);
 
-    await tester.tap(find.text('预览'));
+    await tester.tap(find.byKey(const Key('note-mode-preview')));
     await tester.pump(const Duration(milliseconds: 250));
 
-    expect(find.byType(TextField), findsNWidgets(2));
+    expect(find.byKey(const Key('note-editor')), findsNothing);
     expect(find.byType(Markdown), findsOneWidget);
   });
 
   testWidgets('keeps the note editor editable and top aligned', (tester) async {
-    await tester.binding.setSurfaceSize(const Size(1280, 820));
-    await tester.pumpWidget(_testApp(vault: MemoryVaultBackend()));
-    await tester.pump(const Duration(milliseconds: 250));
+    await _pumpWorkspace(tester, vault: MemoryVaultBackend());
 
-    final noteEditorFinder = find.byWidgetPredicate(
-      (widget) =>
-          widget is TextField &&
-          widget.decoration?.hintText == '选择或创建项目后开始整理 Markdown',
-    );
-    final noteEditor = tester.widget<TextField>(noteEditorFinder);
+    final noteEditorFinder = find.byKey(const Key('note-editor'));
+    final noteEditor = tester.widget<CupertinoTextField>(noteEditorFinder);
 
     expect(noteEditor.enabled, isTrue);
     expect(noteEditor.readOnly, isFalse);
@@ -150,18 +175,30 @@ void main() {
     expect(find.text('# 手动笔记\n正文'), findsOneWidget);
   });
 
-  testWidgets('renders note preview with soft line breaks enabled', (
+  testWidgets('renders note preview with Cupertino Markdown styling', (
     tester,
   ) async {
-    await tester.binding.setSurfaceSize(const Size(1280, 820));
-    await tester.pumpWidget(_testApp(vault: MemoryVaultBackend()));
-    await tester.pump(const Duration(milliseconds: 250));
+    await _pumpWorkspace(tester, vault: MemoryVaultBackend());
 
-    await tester.tap(find.text('预览'));
+    await tester.tap(find.byKey(const Key('note-mode-preview')));
     await tester.pump(const Duration(milliseconds: 250));
 
     final markdown = tester.widget<Markdown>(find.byType(Markdown));
     expect(markdown.softLineBreak, isTrue);
+    expect(markdown.styleSheetTheme, MarkdownStyleSheetBaseTheme.cupertino);
+  });
+
+  testWidgets('does not overflow the source pane in a compact desktop window', (
+    tester,
+  ) async {
+    await _pumpWorkspace(
+      tester,
+      vault: MemoryVaultBackend(),
+      size: const Size(1280, 560),
+    );
+
+    expect(tester.takeException(), isNull);
+    expect(find.text('AI 建议'), findsOneWidget);
   });
 
   testWidgets('imports an image from the file button', (tester) async {
@@ -173,13 +210,13 @@ void main() {
       ),
     );
 
-    await tester.binding.setSurfaceSize(const Size(1280, 820));
-    await tester.pumpWidget(
-      _testApp(vault: MemoryVaultBackend(), imageInput: imageInput),
+    await _pumpWorkspace(
+      tester,
+      vault: MemoryVaultBackend(),
+      imageInput: imageInput,
     );
-    await tester.pump(const Duration(milliseconds: 250));
 
-    await tester.tap(find.text('导入图片'));
+    await tester.tap(find.byKey(const Key('add-image-button')));
     await tester.pump(const Duration(milliseconds: 250));
 
     expect(imageInput.pickCalls, 1);
@@ -199,16 +236,13 @@ void main() {
       ),
     );
 
-    await tester.binding.setSurfaceSize(const Size(1280, 820));
-    await tester.pumpWidget(
-      _testApp(
-        vault: MemoryVaultBackend(seedExampleData: false),
-        imageInput: imageInput,
-      ),
+    await _pumpWorkspace(
+      tester,
+      vault: MemoryVaultBackend(seedExampleData: false),
+      imageInput: imageInput,
     );
-    await tester.pump(const Duration(milliseconds: 250));
 
-    await tester.tap(find.text('导入图片'));
+    await tester.tap(find.byKey(const Key('add-image-button')));
     await tester.pump(const Duration(milliseconds: 250));
 
     expect(imageInput.pickCalls, 0);
@@ -224,11 +258,11 @@ void main() {
       ),
     );
 
-    await tester.binding.setSurfaceSize(const Size(1280, 820));
-    await tester.pumpWidget(
-      _testApp(vault: MemoryVaultBackend(), imageInput: imageInput),
+    await _pumpWorkspace(
+      tester,
+      vault: MemoryVaultBackend(),
+      imageInput: imageInput,
     );
-    await tester.pump(const Duration(milliseconds: 250));
 
     await tester.tap(find.byKey(const Key('image-input-area')));
     await tester.pump();
@@ -256,13 +290,12 @@ void main() {
       bytes: _tinyPng,
     );
 
-    await tester.binding.setSurfaceSize(const Size(1280, 820));
-    await tester.pumpWidget(_testApp(vault: vault));
+    await _pumpWorkspace(tester, vault: vault);
     await tester.pumpAndSettle();
 
     expect(find.byType(Image), findsOneWidget);
 
-    await tester.tap(find.byTooltip('删除图片素材'));
+    await tester.tap(find.byKey(const Key('delete-image-button')));
     await tester.pumpAndSettle();
     await tester.tap(find.text('删除'));
     await tester.pumpAndSettle();
@@ -275,13 +308,11 @@ void main() {
   testWidgets('deletes an AI proposal from the source pane', (tester) async {
     final vault = MemoryVaultBackend();
 
-    await tester.binding.setSurfaceSize(const Size(1280, 820));
-    await tester.pumpWidget(_testApp(vault: vault));
-    await tester.pump(const Duration(milliseconds: 250));
+    await _pumpWorkspace(tester, vault: vault);
 
     expect(find.text('图片 OCR 整理建议'), findsOneWidget);
 
-    await tester.tap(find.byTooltip('删除建议'));
+    await tester.tap(find.byKey(const Key('delete-proposal-button')));
     await tester.pumpAndSettle();
     await tester.tap(find.text('删除'));
     await tester.pumpAndSettle();
@@ -311,13 +342,13 @@ void main() {
       ),
     );
 
-    await tester.binding.setSurfaceSize(const Size(1280, 820));
-    await tester.pumpWidget(_testApp(vault: vault));
-    await tester.pumpAndSettle();
+    await _pumpWorkspace(tester, vault: vault);
 
+    expect(find.text(proposalMarkdown), findsOneWidget);
     expect(
-      find.byWidgetPredicate(
-        (widget) => widget is SelectableText && widget.data == proposalMarkdown,
+      find.ancestor(
+        of: find.text(proposalMarkdown),
+        matching: find.byType(SelectableRegion),
       ),
       findsOneWidget,
     );
@@ -361,11 +392,9 @@ void main() {
           .setMockMethodCallHandler(SystemChannels.platform, null);
     });
 
-    await tester.binding.setSurfaceSize(const Size(1280, 820));
-    await tester.pumpWidget(_testApp(vault: vault));
-    await tester.pumpAndSettle();
+    await _pumpWorkspace(tester, vault: vault);
 
-    await tester.tap(find.byTooltip('复制建议'));
+    await tester.tap(find.byKey(const Key('copy-proposal-button')));
     await tester.pump();
 
     expect(copiedText, '藏有二义\n├── 摄彼胜义故\n└── 依彼故');
@@ -374,15 +403,14 @@ void main() {
   testWidgets('shows contained image thumbnails and full image preview', (
     tester,
   ) async {
-    await tester.binding.setSurfaceSize(const Size(1280, 820));
-    await tester.pumpWidget(_testApp(vault: MemoryVaultBackend()));
+    await _pumpWorkspace(tester, vault: MemoryVaultBackend());
     await tester.pumpAndSettle();
 
     final image = tester.widget<Image>(find.byType(Image).first);
     expect(image.fit, BoxFit.contain);
-    expect(find.byTooltip('查看全图'), findsOneWidget);
+    expect(find.byKey(const Key('show-full-image-button')), findsOneWidget);
 
-    await tester.tap(find.byTooltip('查看全图'));
+    await tester.tap(find.byKey(const Key('show-full-image-button')));
     await tester.pumpAndSettle();
 
     expect(find.byType(InteractiveViewer), findsOneWidget);
@@ -392,28 +420,27 @@ void main() {
   testWidgets('prompts users to configure a model before AI actions', (
     tester,
   ) async {
-    await tester.binding.setSurfaceSize(const Size(1280, 820));
-    await tester.pumpWidget(_testApp(vault: MemoryVaultBackend()));
+    await _pumpWorkspace(tester, vault: MemoryVaultBackend());
     await tester.pumpAndSettle();
 
     await tester.tap(find.byType(Image).first);
     await tester.pump();
-    await tester.tap(find.text('生成建议'));
+    await tester.tap(find.byKey(const Key('generate-proposal-button')));
     await tester.pump(const Duration(milliseconds: 250));
 
     expect(find.textContaining('请先在设置中配置模型'), findsOneWidget);
   });
 
-  testWidgets('saves provider config from the settings dialog', (tester) async {
+  testWidgets('saves provider config from the settings sheet', (tester) async {
     final configStore = _FakeProviderConfigStore();
 
-    await tester.binding.setSurfaceSize(const Size(1280, 820));
-    await tester.pumpWidget(
-      _testApp(vault: MemoryVaultBackend(), configStore: configStore),
+    await _pumpWorkspace(
+      tester,
+      vault: MemoryVaultBackend(),
+      configStore: configStore,
     );
-    await tester.pump(const Duration(milliseconds: 250));
 
-    await tester.tap(find.byTooltip('设置模型'));
+    await tester.tap(find.byKey(const Key('settings-button')));
     await tester.pumpAndSettle();
     await tester.enterText(
       find.byKey(const Key('provider-base-url')),
@@ -447,23 +474,20 @@ void main() {
     expect(find.textContaining('模型设置已保存'), findsOneWidget);
   });
 
-  testWidgets('tests provider config from the settings dialog', (tester) async {
+  testWidgets('tests provider config from the settings sheet', (tester) async {
     ProviderConfig? testedConfig;
 
-    await tester.binding.setSurfaceSize(const Size(1280, 820));
-    await tester.pumpWidget(
-      _testApp(
-        vault: MemoryVaultBackend(),
-        configStore: _FakeProviderConfigStore(),
-        providerConfigTester: (config) async {
-          testedConfig = config;
-          return '连接成功：chat-model';
-        },
-      ),
+    await _pumpWorkspace(
+      tester,
+      vault: MemoryVaultBackend(),
+      configStore: _FakeProviderConfigStore(),
+      providerConfigTester: (config) async {
+        testedConfig = config;
+        return '连接成功：chat-model';
+      },
     );
-    await tester.pump(const Duration(milliseconds: 250));
 
-    await tester.tap(find.byTooltip('设置模型'));
+    await tester.tap(find.byKey(const Key('settings-button')));
     await tester.pumpAndSettle();
     await tester.enterText(
       find.byKey(const Key('provider-base-url')),
@@ -493,18 +517,27 @@ void main() {
   });
 }
 
-SynapseApp _testApp({
+Future<void> _pumpWorkspace(
+  WidgetTester tester, {
   required MemoryVaultBackend vault,
   ImageInputService? imageInput,
   ProviderConfigStore? configStore,
   Future<String> Function(ProviderConfig config)? providerConfigTester,
-}) {
-  return SynapseApp(
-    vault: vault,
-    imageInput: imageInput,
-    providerConfigStore: configStore ?? _FakeProviderConfigStore(),
-    providerConfigTester: providerConfigTester,
+  Size size = const Size(1280, 820),
+}) async {
+  await tester.binding.setSurfaceSize(size);
+  addTearDown(() async {
+    await tester.binding.setSurfaceSize(null);
+  });
+  await tester.pumpWidget(
+    SynapseApp(
+      vault: vault,
+      imageInput: imageInput,
+      providerConfigStore: configStore ?? _FakeProviderConfigStore(),
+      providerConfigTester: providerConfigTester,
+    ),
   );
+  await tester.pump(const Duration(milliseconds: 250));
 }
 
 class _FakeImageInputService implements ImageInputService {
