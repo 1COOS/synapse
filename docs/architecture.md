@@ -248,10 +248,16 @@ updatedAt: 2026-07-01 08:00
 图片导入时写入当前笔记的同名 `.assets/attachments/` 目录。保存到 `SourceItem.attachmentPath` 的路径使用 `/`，并保持相对 assets 根目录：
 
 ```text
-attachments/filename-uuid.png
+attachments/filename.png
 ```
 
-Markdown 中引用附件时也应使用相对路径，确保 Obsidian 可以直接解析。
+Markdown 中引用附件时也应使用相对路径，确保 Obsidian 可以直接解析。编辑区直接粘贴剪贴板图片时，系统复用同一条附件保存链路，并在当前光标位置插入 HTML 图片标签：
+
+```html
+<img src="foo.assets/attachments/1783082971508.png" width="480">
+```
+
+`src` 相对当前 Markdown 文件，剪贴板图片优先使用毫秒时间戳文件名，例如 `1783082971508.png`、`1783082971508-2.png`；`width` 只表示显示宽度，不改变原始附件。预览区的图片宽度控件会回写同一个 `width` 属性并立即保存 Markdown，避免图片附件已写入但正文没有引用。Synapse 自己生成的编辑区图片标签不写 `alt` 属性。
 
 ## 7. 平台适配
 

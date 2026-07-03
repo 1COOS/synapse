@@ -954,6 +954,184 @@ void main() {
     expect(markdown.styleSheet?.h1?.fontWeight, FontWeight.w600);
   });
 
+  testWidgets('pastes a clipboard image into the note editor and saves it', (
+    tester,
+  ) async {
+    final vault = _CountingUpdateVaultBackend();
+    final imageInput = _FakeImageInputService(
+      pastedImage: const ImportedImage(
+        filename: 'clipboard-1783082971508.png',
+        mimeType: 'image/png',
+        bytes: _tinyPng,
+      ),
+    );
+
+    await _pumpWorkspace(tester, vault: vault, imageInput: imageInput);
+    await tester.enterText(find.byKey(const Key('note-editor')), '# 心经学习\n正文');
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.metaLeft);
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.keyV);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.keyV);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.metaLeft);
+    await tester.pumpAndSettle();
+
+    const expectedImageTag =
+        '<img src="preview-note.assets/attachments/1783082971508.png" '
+        'width="480">';
+    final note = await vault.readNote('preview-note.md');
+    expect(imageInput.pasteCalls, 1);
+    expect(vault.updateCalls, 1);
+    expect(note.markdown, contains(expectedImageTag));
+    expect(note.markdown, isNot(contains(' alt=')));
+    expect(find.textContaining('图片已粘贴到笔记：1783082971508.png'), findsOneWidget);
+  });
+
+  testWidgets('falls back to text paste when the clipboard has no image', (
+    tester,
+  ) async {
+    final vault = _CountingUpdateVaultBackend();
+    final imageInput = _FakeImageInputService();
+    _mockClipboardText('普通剪贴板文本');
+
+    await _pumpWorkspace(tester, vault: vault, imageInput: imageInput);
+    await tester.enterText(find.byKey(const Key('note-editor')), '# 心经学习\n');
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.metaLeft);
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.keyV);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.keyV);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.metaLeft);
+    await tester.pump();
+
+    final noteEditor = tester.widget<CupertinoTextField>(
+      find.byKey(const Key('note-editor')),
+    );
+    expect(imageInput.pasteCalls, 1);
+    expect(noteEditor.controller?.text, contains('普通剪贴板文本'));
+
+    await tester.pump(const Duration(milliseconds: 1000));
+    await tester.pump();
+    expect(vault.lastSavedMarkdown, contains('普通剪贴板文本'));
+  });
+
+  testWidgets('shows guidance when pasting an image without an active note', (
+    tester,
+  ) async {
+    final imageInput = _FakeImageInputService(
+      pastedImage: const ImportedImage(
+        filename: 'clipboard-shot.png',
+        mimeType: 'image/png',
+        bytes: _tinyPng,
+      ),
+    );
+
+    await _pumpWorkspace(
+      tester,
+      vault: MemoryVaultBackend(seedExampleData: false),
+      imageInput: imageInput,
+    );
+    await tester.tap(find.byKey(const Key('note-editor-paste-target')));
+    await tester.pump();
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.metaLeft);
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.keyV);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.keyV);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.metaLeft);
+    await tester.pump();
+
+    expect(imageInput.pasteCalls, 0);
+    expect(find.textContaining('请先选择或创建笔记'), findsOneWidget);
+  });
+
+  testWidgets('renders pasted HTML images in the note preview', (tester) async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Image Study');
+    final source = await vault.addImageSource(
+      noteId: note.id,
+      filename: 'pasted.png',
+      mimeType: 'image/png',
+      bytes: _tinyPng,
+    );
+    await vault.updateMarkdown(
+      noteId: note.id,
+      markdown:
+          '# Image Study\n\n'
+          '<img src="Image Study.assets/attachments/pasted.png" '
+          'width="360" alt="pasted.png">',
+    );
+
+    await _pumpWorkspace(tester, vault: vault);
+    await tester.tap(find.byKey(const Key('note-mode-preview')));
+    await tester.pumpAndSettle();
+
+    final previewImage = find.byKey(Key('preview-image-${source.id}'));
+    expect(previewImage, findsOneWidget);
+    final image = tester.widget<Image>(
+      find.descendant(of: previewImage, matching: find.byType(Image)),
+    );
+    expect(image.fit, BoxFit.contain);
+  });
+
+  testWidgets('renders HTML images whose src contains percent signs', (
+    tester,
+  ) async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Image Study');
+    final source = await vault.addImageSource(
+      noteId: note.id,
+      filename: 'progress 100%.png',
+      mimeType: 'image/png',
+      bytes: _tinyPng,
+    );
+    await vault.updateMarkdown(
+      noteId: note.id,
+      markdown:
+          '# Image Study\n\n'
+          '<img src="Image Study.assets/attachments/progress 100%.png" '
+          'width="360" alt="progress 100%.png">',
+    );
+
+    await _pumpWorkspace(tester, vault: vault);
+    await tester.tap(find.byKey(const Key('note-mode-preview')));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(Key('preview-image-${source.id}')), findsOneWidget);
+  });
+
+  testWidgets('updates pasted image width from the preview controls', (
+    tester,
+  ) async {
+    final vault = _CountingUpdateVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Image Study');
+    final source = await vault.addImageSource(
+      noteId: note.id,
+      filename: 'pasted.png',
+      mimeType: 'image/png',
+      bytes: _tinyPng,
+    );
+    await vault.updateMarkdown(
+      noteId: note.id,
+      markdown:
+          '# Image Study\n\n'
+          '<img src="Image Study.assets/attachments/pasted.png" '
+          'width="360" alt="pasted.png">',
+    );
+    vault.updateCalls = 0;
+    vault.lastSavedMarkdown = null;
+
+    await _pumpWorkspace(tester, vault: vault);
+    await tester.tap(find.byKey(const Key('note-mode-preview')));
+    await tester.pumpAndSettle();
+    final previewImage = find.byKey(Key('preview-image-${source.id}'));
+    expect(previewImage, findsOneWidget);
+
+    final slider = tester.widget<CupertinoSlider>(
+      find.byKey(Key('image-width-slider-${source.id}')),
+    );
+    slider.onChanged?.call(640);
+    await tester.pumpAndSettle();
+
+    expect(vault.updateCalls, greaterThanOrEqualTo(1));
+    expect(vault.lastSavedMarkdown, contains('width="640"'));
+    expect((await vault.readNote(note.id)).markdown, contains('width="640"'));
+  });
+
   testWidgets('does not expose internal ids in the note editor', (
     tester,
   ) async {
@@ -1323,6 +1501,20 @@ Future<void> _pumpWorkspace(
     ),
   );
   await tester.pump(const Duration(milliseconds: 250));
+}
+
+void _mockClipboardText(String? text) {
+  TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+      .setMockMethodCallHandler(SystemChannels.platform, (methodCall) async {
+        if (methodCall.method == 'Clipboard.getData') {
+          return text == null ? null : <String, Object?>{'text': text};
+        }
+        return null;
+      });
+  addTearDown(() {
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(SystemChannels.platform, null);
+  });
 }
 
 class _FakeVaultLocationStore implements VaultLocationStore {

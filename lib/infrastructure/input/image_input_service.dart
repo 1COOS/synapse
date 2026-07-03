@@ -48,7 +48,7 @@ class PlatformImageInputService implements ImageInputService {
       return null;
     }
     return ImportedImage(
-      filename: 'clipboard-${DateTime.now().millisecondsSinceEpoch}.png',
+      filename: '${DateTime.now().millisecondsSinceEpoch}.png',
       mimeType: 'image/png',
       bytes: Uint8List.fromList(bytes),
     );

@@ -298,9 +298,11 @@ $text
         ? '.bin'
         : p.extension(filename);
     final base = sanitizeFileName(p.basenameWithoutExtension(filename));
-    final relative = p
-        .join('attachments', '$base-${_uuid.v4()}$extension')
-        .replaceAll('\\', '/');
+    final relative = await _uniqueAttachmentPath(
+      assetsPath: note.assetsPath,
+      base: base,
+      extension: extension,
+    );
     final file = File(p.join(note.assetsPath, relative));
     await file.parent.create(recursive: true);
     await file.writeAsBytes(bytes);
@@ -319,6 +321,24 @@ $text
     final sources = await listSources(note.id);
     await _writeSources(note.id, [...sources, source]);
     return source;
+  }
+
+  Future<String> _uniqueAttachmentPath({
+    required String assetsPath,
+    required String base,
+    required String extension,
+  }) async {
+    var index = 1;
+    while (true) {
+      final filename = index == 1
+          ? '$base$extension'
+          : '$base-$index$extension';
+      final relative = p.join('attachments', filename).replaceAll('\\', '/');
+      if (!await File(p.join(assetsPath, relative)).exists()) {
+        return relative;
+      }
+      index += 1;
+    }
   }
 
   @override

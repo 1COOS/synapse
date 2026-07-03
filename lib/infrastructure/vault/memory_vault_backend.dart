@@ -390,12 +390,31 @@ class MemoryVaultBackend implements VaultBackend {
       state: SourceState.pending,
       createdAt: now,
       updatedAt: now,
-      attachmentPath: 'attachments/$filename',
+      attachmentPath: _uniqueAttachmentPath(noteId, filename),
       mimeType: mimeType,
     );
     _sources.putIfAbsent(noteId, () => <SourceItem>[]).add(source);
     _attachmentBytes[source.id] = List<int>.unmodifiable(bytes);
     return source;
+  }
+
+  String _uniqueAttachmentPath(String noteId, String filename) {
+    final existing = {
+      for (final source in _sources[noteId] ?? const <SourceItem>[])
+        if (source.attachmentPath != null) source.attachmentPath!,
+    };
+    final dot = filename.lastIndexOf('.');
+    final base = dot <= 0 ? filename : filename.substring(0, dot);
+    final extension = dot <= 0 ? '' : filename.substring(dot);
+    var index = 1;
+    while (true) {
+      final name = index == 1 ? filename : '$base-$index$extension';
+      final path = 'attachments/$name';
+      if (!existing.contains(path)) {
+        return path;
+      }
+      index += 1;
+    }
   }
 
   @override

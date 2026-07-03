@@ -90,6 +90,42 @@ void main() {
     expect(source.type, SourceType.image);
   });
 
+  test(
+    'stores timestamp image attachments with compact conflict names',
+    () async {
+      final backend = FileVaultBackend(root.path);
+      final note = await backend.createNote(parentPath: '', title: '图像学习');
+
+      final first = await backend.addImageSource(
+        noteId: note.id,
+        filename: '1783082971508.png',
+        mimeType: 'image/png',
+        bytes: [1],
+      );
+      final second = await backend.addImageSource(
+        noteId: note.id,
+        filename: '1783082971508.png',
+        mimeType: 'image/png',
+        bytes: [2],
+      );
+
+      expect(first.attachmentPath, 'attachments/1783082971508.png');
+      expect(second.attachmentPath, 'attachments/1783082971508-2.png');
+      expect(
+        File(
+          p.join(root.path, '图像学习.assets', first.attachmentPath),
+        ).readAsBytesSync(),
+        [1],
+      );
+      expect(
+        File(
+          p.join(root.path, '图像学习.assets', second.attachmentPath),
+        ).readAsBytesSync(),
+        [2],
+      );
+    },
+  );
+
   test('deletes an image source and its attachment', () async {
     final backend = FileVaultBackend(root.path);
     final note = await backend.createNote(parentPath: '', title: '图像学习');

@@ -38,6 +38,10 @@ const _text = CupertinoColors.label;
 const _muted = CupertinoColors.secondaryLabel;
 const _danger = CupertinoColors.systemRed;
 const _radius = BorderRadius.all(Radius.circular(8));
+const _defaultPastedImageWidth = 480;
+const _minPastedImageWidth = 120.0;
+const _maxPastedImageWidth = 1200.0;
+final _htmlImageTagPattern = RegExp(r'<img\s+[^>]*>', caseSensitive: false);
 
 enum _WorkspaceSection {
   resources('资源', CupertinoIcons.folder),
@@ -85,6 +89,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
 
   final _markdownController = TextEditingController();
   final _searchController = TextEditingController();
+  final _editorPasteFocusNode = FocusNode();
   final _sourcePaneFocusNode = FocusNode();
 
   List<VaultResourceNode> _resources = const [];
@@ -100,6 +105,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   bool _programmaticMarkdownChange = false;
   bool _autoSaving = false;
   String _message = '';
+  String? _selectedPreviewImageSrc;
   String _vaultLabel = supportsDirectoryVault ? '选择仓库' : 'H5 预览库';
   String? _vaultRootPath;
   ProviderConfigStore? _providerConfigStore;
@@ -133,6 +139,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     _markdownController.removeListener(_handleMarkdownEdited);
     _markdownController.dispose();
     _searchController.dispose();
+    _editorPasteFocusNode.dispose();
     _sourcePaneFocusNode.dispose();
     super.dispose();
   }
@@ -153,6 +160,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     _proposals = const [];
     _searchResults = const [];
     _selectedSourceIds.clear();
+    _selectedPreviewImageSrc = null;
     _replaceEditorMarkdown('');
     _previewMarkdown = false;
     _narrowSection = _WorkspaceSection.resources;
@@ -783,6 +791,141 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
         setState(() => _autoSaving = false);
       }
     }
+  }
+
+  Future<void> _pasteIntoNoteEditor() async {
+    if (_busy || _autoSaving) {
+      return;
+    }
+    final active = _activeNote;
+    if (active == null) {
+      setState(() => _message = '请先选择或创建笔记');
+      return;
+    }
+    setState(() {
+      _busy = true;
+      _message = '';
+    });
+    try {
+      final image = await _imageInput.pasteImage();
+      if (image != null) {
+        await _insertPastedImage(active: active, image: image);
+        return;
+      }
+      final text = (await Clipboard.getData(Clipboard.kTextPlain))?.text;
+      if (text == null || text.isEmpty) {
+        return;
+      }
+      _replaceEditorSelection(text);
+    } catch (error) {
+      if (mounted) {
+        setState(() => _message = error.toString());
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _busy = false);
+      }
+    }
+  }
+
+  Future<void> _insertPastedImage({
+    required VaultNoteContent active,
+    required ImportedImage image,
+  }) async {
+    final filename = _noteEditorPastedImageFilename(image.filename);
+    final source = await _requireVault().addImageSource(
+      noteId: active.id,
+      filename: filename,
+      mimeType: image.mimeType,
+      bytes: image.bytes,
+    );
+    final tag = _imageMarkdownTag(active, source);
+    _replaceEditorSelection(_blockInsertionForCurrentSelection(tag));
+    final saved = await _flushPendingMarkdown(
+      successMessage: '图片已粘贴到笔记：$filename',
+    );
+    if (!saved || !mounted) {
+      return;
+    }
+    setState(() {
+      _selectedSourceIds.add(source.id);
+      _selectedPreviewImageSrc = _markdownAttachmentSrc(active, source);
+    });
+  }
+
+  String _imageMarkdownTag(VaultNoteContent note, SourceItem source) {
+    final src = _markdownAttachmentSrc(note, source);
+    return '<img src="${_escapeHtmlAttribute(src)}" '
+        'width="$_defaultPastedImageWidth">';
+  }
+
+  String _noteEditorPastedImageFilename(String filename) {
+    final extension = p.extension(filename).isEmpty
+        ? '.png'
+        : p.extension(filename);
+    final base = p.basenameWithoutExtension(filename);
+    final legacyClipboardMatch = RegExp(
+      r'^clipboard-(\d+)(?:-.+)?$',
+    ).firstMatch(base);
+    if (legacyClipboardMatch != null) {
+      return '${legacyClipboardMatch.group(1)}$extension';
+    }
+    return filename;
+  }
+
+  String _markdownAttachmentSrc(VaultNote note, SourceItem source) {
+    final attachmentPath = source.attachmentPath;
+    if (attachmentPath == null || attachmentPath.trim().isEmpty) {
+      throw StateError('Source has no attachment: ${source.id}');
+    }
+    final assetsDirectory = '${p.basenameWithoutExtension(note.path)}.assets';
+    return '$assetsDirectory/$attachmentPath'.replaceAll('\\', '/');
+  }
+
+  String _blockInsertionForCurrentSelection(String block) {
+    final value = _markdownController.value;
+    final text = value.text;
+    final selection = _normalizedSelection(value);
+    final before = text.substring(0, selection.start);
+    final after = text.substring(selection.end);
+    final prefix = before.isEmpty || before.endsWith('\n\n')
+        ? ''
+        : before.endsWith('\n')
+        ? '\n'
+        : '\n\n';
+    final suffix = after.isEmpty || after.startsWith('\n\n')
+        ? ''
+        : after.startsWith('\n')
+        ? '\n'
+        : '\n\n';
+    return '$prefix$block$suffix';
+  }
+
+  void _replaceEditorSelection(String replacement) {
+    final value = _markdownController.value;
+    final selection = _normalizedSelection(value);
+    final text = value.text;
+    final updated = text.replaceRange(
+      selection.start,
+      selection.end,
+      replacement,
+    );
+    final offset = selection.start + replacement.length;
+    _markdownController.value = value.copyWith(
+      text: updated,
+      selection: TextSelection.collapsed(offset: offset),
+      composing: TextRange.empty,
+    );
+  }
+
+  TextSelection _normalizedSelection(TextEditingValue value) {
+    final selection = value.selection;
+    if (!selection.isValid) {
+      return TextSelection.collapsed(offset: value.text.length);
+    }
+    final start = _clampTextOffset(selection.start, value.text.length);
+    final end = _clampTextOffset(selection.end, value.text.length);
+    return TextSelection(baseOffset: start, extentOffset: end);
   }
 
   Future<void> _addImageSource() async {
@@ -1506,7 +1649,9 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   }
 
   Widget _buildMarkdownPreview() {
-    final markdown = MarkdownDocument.parse(_markdownController.text).body;
+    final markdown = _markdownPreviewData(
+      MarkdownDocument.parse(_markdownController.text).body,
+    );
     final baseStyle = MarkdownStyleSheet.fromCupertinoTheme(
       CupertinoTheme.of(context),
     );
@@ -1518,8 +1663,9 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       ),
       child: Markdown(
         data: markdown,
-        selectable: true,
+        selectable: false,
         softLineBreak: true,
+        sizedImageBuilder: _buildPreviewImage,
         styleSheetTheme: MarkdownStyleSheetBaseTheme.cupertino,
         styleSheet: baseStyle.copyWith(
           p: const TextStyle(fontSize: 14, height: 1.55, color: _text),
@@ -1547,30 +1693,180 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     );
   }
 
+  String _markdownPreviewData(String markdown) {
+    return markdown.replaceAllMapped(_htmlImageTagPattern, (match) {
+      final tag = match.group(0)!;
+      final src = _htmlAttribute(tag, 'src');
+      if (src == null || _imageSourceForMarkdownSrc(src) == null) {
+        return tag;
+      }
+      final width = _imageWidthFromTag(tag);
+      final alt = _escapeMarkdownImageAlt(
+        _htmlAttribute(tag, 'alt') ?? 'image',
+      );
+      final encodedSrc = _encodeMarkdownImageSrc(src);
+      return '![$alt]($encodedSrc#${width}x)';
+    });
+  }
+
+  Widget _buildPreviewImage(MarkdownImageConfig config) {
+    final src = _safeUriDecode(config.uri.toString());
+    final source = _imageSourceForMarkdownSrc(src);
+    if (source == null) {
+      return Text(
+        config.alt ?? src,
+        style: const TextStyle(color: _muted, fontSize: 13),
+      );
+    }
+    final width = _clampImageWidth(
+      (config.width ?? _defaultPastedImageWidth.toDouble()).round(),
+    ).toDouble();
+    final selected = _selectedPreviewImageSrc == _normalizeImageSrc(src);
+    return _PreviewImageBlock(
+      key: Key('preview-image-${source.id}'),
+      source: source,
+      width: width,
+      selected: selected,
+      imageBytes: _requireVault().readSourceAttachment(source),
+      onTap: () {
+        setState(() => _selectedPreviewImageSrc = _normalizeImageSrc(src));
+      },
+      onWidthChanged: (value) {
+        _applyImageWidth(src: src, width: _clampImageWidth(value.round()));
+      },
+    );
+  }
+
+  Future<void> _applyImageWidth({
+    required String src,
+    required int width,
+  }) async {
+    final updated = _replaceImageWidthInMarkdown(
+      markdown: _markdownController.text,
+      src: src,
+      width: width,
+    );
+    if (updated == _markdownController.text) {
+      return;
+    }
+    setState(() {
+      _selectedPreviewImageSrc = _normalizeImageSrc(src);
+      _replaceEditorMarkdown(updated);
+    });
+    await _saveCurrentMarkdown(
+      successMessage: '图片宽度已更新',
+      automatic: false,
+      rescheduleIfDirty: false,
+    );
+  }
+
+  String _replaceImageWidthInMarkdown({
+    required String markdown,
+    required String src,
+    required int width,
+  }) {
+    var replaced = false;
+    final wanted = _normalizeImageSrc(src);
+    return markdown.replaceAllMapped(_htmlImageTagPattern, (match) {
+      final tag = match.group(0)!;
+      if (replaced ||
+          _normalizeImageSrc(_htmlAttribute(tag, 'src')) != wanted) {
+        return tag;
+      }
+      replaced = true;
+      return _replaceImageTagWidth(tag, width);
+    });
+  }
+
+  String _replaceImageTagWidth(String tag, int width) {
+    final widthPattern = RegExp(r'\swidth\s*=\s*"[^"]*"', caseSensitive: false);
+    if (widthPattern.hasMatch(tag)) {
+      return tag.replaceFirst(widthPattern, ' width="$width"');
+    }
+    final insertionIndex = tag.endsWith('/>') ? tag.length - 2 : tag.length - 1;
+    return '${tag.substring(0, insertionIndex)} width="$width"'
+        '${tag.substring(insertionIndex)}';
+  }
+
+  SourceItem? _imageSourceForMarkdownSrc(String? src) {
+    final active = _activeNote;
+    if (active == null || src == null) {
+      return null;
+    }
+    final normalizedSrc = _normalizeImageSrc(src);
+    for (final source in active.sources) {
+      if (source.type != SourceType.image || source.attachmentPath == null) {
+        continue;
+      }
+      if (_normalizeImageSrc(_markdownAttachmentSrc(active, source)) ==
+          normalizedSrc) {
+        return source;
+      }
+    }
+    return null;
+  }
+
+  int _imageWidthFromTag(String tag) {
+    final parsed = int.tryParse(_htmlAttribute(tag, 'width') ?? '');
+    return _clampImageWidth(parsed ?? _defaultPastedImageWidth);
+  }
+
   Widget _buildNoteEditor() {
-    return CupertinoTextField(
-      key: const Key('note-editor'),
-      controller: _markdownController,
-      enabled: _activeNote != null,
-      readOnly: false,
-      textAlignVertical: TextAlignVertical.top,
-      expands: true,
-      minLines: null,
-      maxLines: null,
-      padding: const EdgeInsets.all(16),
-      placeholder: '选择或创建笔记后开始整理 Markdown',
-      placeholderStyle: const TextStyle(color: _muted),
-      style: const TextStyle(
-        fontFamily: 'monospace',
-        fontSize: 13,
-        height: 1.55,
-      ),
-      decoration: BoxDecoration(
-        color: _surface,
-        border: Border.all(color: _line),
-        borderRadius: _radius,
+    return Focus(
+      focusNode: _editorPasteFocusNode,
+      onKeyEvent: _handleEmptyNoteEditorKeyEvent,
+      child: CallbackShortcuts(
+        bindings: <ShortcutActivator, VoidCallback>{
+          const SingleActivator(LogicalKeyboardKey.keyV, meta: true): () =>
+              unawaited(_pasteIntoNoteEditor()),
+          const SingleActivator(LogicalKeyboardKey.keyV, control: true): () =>
+              unawaited(_pasteIntoNoteEditor()),
+        },
+        child: GestureDetector(
+          key: const Key('note-editor-paste-target'),
+          behavior: HitTestBehavior.opaque,
+          onTap: () {
+            if (_activeNote == null) {
+              _editorPasteFocusNode.requestFocus();
+            }
+          },
+          child: CupertinoTextField(
+            key: const Key('note-editor'),
+            controller: _markdownController,
+            enabled: _activeNote != null,
+            readOnly: false,
+            textAlignVertical: TextAlignVertical.top,
+            expands: true,
+            minLines: null,
+            maxLines: null,
+            padding: const EdgeInsets.all(16),
+            placeholder: '选择或创建笔记后开始整理 Markdown',
+            placeholderStyle: const TextStyle(color: _muted),
+            style: const TextStyle(
+              fontFamily: 'monospace',
+              fontSize: 13,
+              height: 1.55,
+            ),
+            decoration: BoxDecoration(
+              color: _surface,
+              border: Border.all(color: _line),
+              borderRadius: _radius,
+            ),
+          ),
+        ),
       ),
     );
+  }
+
+  KeyEventResult _handleEmptyNoteEditorKeyEvent(
+    FocusNode node,
+    KeyEvent event,
+  ) {
+    if (_activeNote != null || !_isPasteImageShortcutKeyUp(event)) {
+      return KeyEventResult.ignored;
+    }
+    unawaited(_pasteIntoNoteEditor());
+    return KeyEventResult.handled;
   }
 
   Widget _buildSourcePane() {
@@ -1766,6 +2062,85 @@ String _parentFolderPath(String path) {
   final normalized = path.replaceAll('\\', '/');
   final index = normalized.lastIndexOf('/');
   return index < 0 ? '' : normalized.substring(0, index);
+}
+
+String _escapeHtmlAttribute(String value) {
+  return value
+      .replaceAll('&', '&amp;')
+      .replaceAll('"', '&quot;')
+      .replaceAll('<', '&lt;')
+      .replaceAll('>', '&gt;');
+}
+
+String _unescapeHtmlAttribute(String value) {
+  return value
+      .replaceAll('&quot;', '"')
+      .replaceAll('&lt;', '<')
+      .replaceAll('&gt;', '>')
+      .replaceAll('&amp;', '&');
+}
+
+String? _htmlAttribute(String tag, String name) {
+  final quoted = RegExp(
+    '\\s$name\\s*=\\s*"([^"]*)"',
+    caseSensitive: false,
+  ).firstMatch(tag);
+  if (quoted != null) {
+    return _unescapeHtmlAttribute(quoted.group(1)!);
+  }
+  final singleQuoted = RegExp(
+    "\\s$name\\s*=\\s*'([^']*)'",
+    caseSensitive: false,
+  ).firstMatch(tag);
+  if (singleQuoted != null) {
+    return _unescapeHtmlAttribute(singleQuoted.group(1)!);
+  }
+  return null;
+}
+
+String _escapeMarkdownImageAlt(String value) {
+  return value
+      .replaceAll(r'\', r'\\')
+      .replaceAll('[', r'\[')
+      .replaceAll(']', r'\]');
+}
+
+String _safeUriDecode(String value) {
+  try {
+    return Uri.decodeFull(value);
+  } on FormatException {
+    return value;
+  } on ArgumentError {
+    return value;
+  }
+}
+
+String _encodeMarkdownImageSrc(String value) {
+  return Uri(path: _safeUriDecode(value)).toString();
+}
+
+String _normalizeImageSrc(String? src) {
+  return _safeUriDecode(src ?? '').replaceAll('\\', '/');
+}
+
+int _clampImageWidth(int value) {
+  if (value < _minPastedImageWidth) {
+    return _minPastedImageWidth.toInt();
+  }
+  if (value > _maxPastedImageWidth) {
+    return _maxPastedImageWidth.toInt();
+  }
+  return value;
+}
+
+int _clampTextOffset(int value, int length) {
+  if (value < 0) {
+    return 0;
+  }
+  if (value > length) {
+    return length;
+  }
+  return value;
 }
 
 class _Pane extends StatelessWidget {
@@ -2492,6 +2867,133 @@ class _ResourceRowShell extends StatelessWidget {
           ),
           child: child,
         ),
+      ),
+    );
+  }
+}
+
+class _PreviewImageBlock extends StatelessWidget {
+  const _PreviewImageBlock({
+    super.key,
+    required this.source,
+    required this.width,
+    required this.selected,
+    required this.imageBytes,
+    required this.onTap,
+    required this.onWidthChanged,
+  });
+
+  final SourceItem source;
+  final double width;
+  final bool selected;
+  final Future<List<int>> imageBytes;
+  final VoidCallback onTap;
+  final ValueChanged<double> onWidthChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return SelectionContainer.disabled(
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final displayWidth =
+              constraints.maxWidth.isFinite && constraints.maxWidth < width
+              ? constraints.maxWidth
+              : width;
+          return SizedBox(
+            width: displayWidth,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                GestureDetector(
+                  key: Key('preview-image-tap-${source.id}'),
+                  behavior: HitTestBehavior.opaque,
+                  onTap: onTap,
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      border: Border.all(
+                        color: selected ? _primary : _softLine,
+                      ),
+                      borderRadius: _radius,
+                    ),
+                    child: ClipRRect(
+                      borderRadius: _radius,
+                      child: ConstrainedBox(
+                        constraints: const BoxConstraints(minHeight: 96),
+                        child: FutureBuilder<List<int>>(
+                          future: imageBytes,
+                          builder: (context, snapshot) {
+                            if (snapshot.connectionState !=
+                                ConnectionState.done) {
+                              return const SizedBox(
+                                height: 96,
+                                child: Center(
+                                  child: CupertinoActivityIndicator(),
+                                ),
+                              );
+                            }
+                            if (snapshot.hasError || !snapshot.hasData) {
+                              return const SizedBox(
+                                height: 96,
+                                child: Center(
+                                  child: Icon(
+                                    CupertinoIcons.exclamationmark_triangle,
+                                    color: _danger,
+                                  ),
+                                ),
+                              );
+                            }
+                            return Image.memory(
+                              Uint8List.fromList(snapshot.data!),
+                              fit: BoxFit.contain,
+                              gaplessPlayback: true,
+                              errorBuilder: (context, error, stackTrace) =>
+                                  const SizedBox(
+                                    height: 96,
+                                    child: Center(
+                                      child: Icon(
+                                        CupertinoIcons.exclamationmark_triangle,
+                                        color: _danger,
+                                      ),
+                                    ),
+                                  ),
+                            );
+                          },
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 6),
+                Row(
+                  children: [
+                    _TileAction(
+                      key: Key('decrease-image-width-${source.id}'),
+                      label: '缩小图片',
+                      icon: CupertinoIcons.minus,
+                      onPressed: () => onWidthChanged(width - 80),
+                    ),
+                    Expanded(
+                      child: CupertinoSlider(
+                        key: Key('image-width-slider-${source.id}'),
+                        min: _minPastedImageWidth,
+                        max: _maxPastedImageWidth,
+                        value: width,
+                        onChanged: onWidthChanged,
+                      ),
+                    ),
+                    _TileAction(
+                      key: Key('increase-image-width-${source.id}'),
+                      label: '放大图片',
+                      icon: CupertinoIcons.plus,
+                      onPressed: () => onWidthChanged(width + 80),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          );
+        },
       ),
     );
   }
