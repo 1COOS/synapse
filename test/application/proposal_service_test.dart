@@ -1,6 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:synapse/application/proposals/proposal_service.dart';
-import 'package:synapse/domain/study/project.dart';
+import 'package:synapse/domain/vault/vault_resource.dart';
 import 'package:synapse/infrastructure/ai/ai_provider.dart';
 import 'package:synapse/infrastructure/ai/mock_ai_provider.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
@@ -8,29 +8,23 @@ import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
 void main() {
   test('creates a proposal and applies it only after confirmation', () async {
     final vault = MemoryVaultBackend();
-    final project = await vault.createProject(
-      title: 'Study',
-      template: StudyTemplate.custom,
-    );
+    final note = await vault.createNote(parentPath: '', title: 'Study');
     final source = await vault.addTextSource(
-      projectId: project.id,
+      noteId: note.id,
       title: 'fragment',
       text: '核心概念：注意力。',
     );
     final service = ProposalService(vault: vault, aiProvider: MockAiProvider());
 
     final proposal = await service.createOutlineProposal(
-      projectId: project.id,
+      noteId: note.id,
       sourceIds: [source.id],
     );
-    expect(
-      (await vault.readProject(project.id)).markdown,
-      isNot(contains('注意力')),
-    );
+    expect((await vault.readNote(note.id)).markdown, isNot(contains('注意力')));
 
     await service.applyProposal(proposal.id);
 
-    final updated = await vault.readProject(project.id);
+    final updated = await vault.readNote(note.id);
     expect(updated.markdown, contains('## AI 整理建议'));
     expect(updated.markdown, contains('注意力'));
   });
@@ -39,12 +33,9 @@ void main() {
     'creates image proposals from OCR text without a second AI rewrite',
     () async {
       final vault = MemoryVaultBackend(seedExampleData: false);
-      final project = await vault.createProject(
-        title: 'Image Study',
-        template: StudyTemplate.custom,
-      );
+      final note = await vault.createNote(parentPath: '', title: 'Image Study');
       final source = await vault.addImageSource(
-        projectId: project.id,
+        noteId: note.id,
         filename: 'screen.png',
         mimeType: 'image/png',
         bytes: [1, 2, 3],
@@ -53,11 +44,11 @@ void main() {
       final service = ProposalService(vault: vault, aiProvider: aiProvider);
 
       final proposal = await service.createOutlineProposal(
-        projectId: project.id,
+        noteId: note.id,
         sourceIds: [source.id],
       );
 
-      final updatedSource = (await vault.getSources(project.id, [
+      final updatedSource = (await vault.getSources(note.id, [
         source.id,
       ])).single;
       expect(aiProvider.extractedFilenames, ['screen.png']);
@@ -75,7 +66,7 @@ class _RecordingAiProvider implements AiProvider {
 
   @override
   Future<String> createOutlineProposal({
-    required String projectTitle,
+    required String noteTitle,
     required String currentMarkdown,
     required List<SourceItem> sources,
   }) async {

@@ -2,7 +2,7 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:synapse/domain/study/project.dart';
+import 'package:synapse/domain/vault/vault_resource.dart';
 import 'package:synapse/infrastructure/config/provider_config_store.dart';
 import 'package:synapse/infrastructure/input/image_input_service.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
@@ -86,17 +86,26 @@ void main() {
 
     expect(find.byType(CupertinoApp), findsOneWidget);
     expect(find.byType(CupertinoPageScaffold), findsOneWidget);
-    expect(find.byKey(const Key('project-pane')), findsOneWidget);
+    expect(find.byKey(const Key('resource-pane')), findsOneWidget);
     expect(find.byKey(const Key('note-pane')), findsOneWidget);
     expect(find.byKey(const Key('source-pane')), findsOneWidget);
     expect(find.text('Synapse'), findsOneWidget);
-    expect(find.text('项目'), findsOneWidget);
+    expect(find.text('资源'), findsOneWidget);
     expect(find.text('笔记'), findsOneWidget);
     expect(find.text('素材'), findsOneWidget);
     expect(find.text('AI 建议'), findsOneWidget);
     expect(find.text('编辑'), findsOneWidget);
     expect(find.text('预览'), findsOneWidget);
     expect(find.byKey(const Key('settings-button')), findsOneWidget);
+    expect(find.byKey(const Key('new-folder-button')), findsOneWidget);
+    expect(find.byKey(const Key('new-note-button')), findsOneWidget);
+    expect(find.byKey(const Key('vault-root-row')), findsOneWidget);
+    expect(find.text('Vault 根目录'), findsOneWidget);
+    expect(find.byTooltip('新建文件夹'), findsOneWidget);
+    expect(find.byTooltip('新建笔记'), findsOneWidget);
+    expect(find.text('学科'), findsNothing);
+    expect(find.text('书籍'), findsNothing);
+    expect(find.text('自定义'), findsNothing);
     expect(find.byKey(const Key('add-image-button')), findsOneWidget);
     expect(find.byKey(const Key('copy-proposal-button')), findsOneWidget);
     expect(find.text('pending'), findsNothing);
@@ -114,7 +123,7 @@ void main() {
     );
 
     expect(find.byKey(const Key('workspace-section-control')), findsOneWidget);
-    expect(find.byKey(const Key('project-pane')), findsOneWidget);
+    expect(find.byKey(const Key('resource-pane')), findsOneWidget);
     expect(find.byKey(const Key('note-pane')), findsNothing);
 
     await tester.tap(find.text('素材'));
@@ -124,25 +133,140 @@ void main() {
     expect(find.text('AI 建议'), findsOneWidget);
   });
 
-  testWidgets('creates a project with the selected template', (tester) async {
+  testWidgets('creates a folder and note in the selected resource tree', (
+    tester,
+  ) async {
     final vault = MemoryVaultBackend(seedExampleData: false);
 
     await _pumpWorkspace(tester, vault: vault);
-    await tester.tap(find.byKey(const Key('project-template-button')));
+    await tester.tap(find.byKey(const Key('new-folder-button')));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('自定义').last);
+    await tester.enterText(find.byKey(const Key('resource-name-input')), '读书');
+    await tester.tap(find.text('创建'));
     await tester.pumpAndSettle();
-    await tester.enterText(
-      find.byKey(const Key('project-title-input')),
-      '新学习项目',
-    );
-    await tester.tap(find.byKey(const Key('create-project-button')));
-    await tester.pump(const Duration(milliseconds: 250));
 
-    expect(find.text('新学习项目'), findsWidgets);
-    expect(find.text('自定义'), findsWidgets);
-    expect((await vault.listProjects()).single.template, StudyTemplate.custom);
+    await tester.tap(find.text('读书'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('new-note-button')));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byKey(const Key('resource-name-input')), '心经');
+    await tester.tap(find.text('创建'));
+    await tester.pumpAndSettle();
+
+    final resources = await vault.listResources();
+    final note = await vault.readNote('读书/心经.md');
+    expect(find.text('读书'), findsOneWidget);
+    expect(find.text('心经'), findsWidgets);
+    expect(resources.single.children.single.type, VaultResourceType.note);
+    expect(note.markdown, contains('# 心经'));
   });
+
+  testWidgets('creates root-level folders after selecting the vault root', (
+    tester,
+  ) async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+
+    await _pumpWorkspace(tester, vault: vault);
+    await tester.tap(find.byKey(const Key('new-folder-button')));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byKey(const Key('resource-name-input')), '读书');
+    await tester.tap(find.text('创建'));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('读书'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('new-note-button')));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byKey(const Key('resource-name-input')), '心经');
+    await tester.tap(find.text('创建'));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('vault-root-row')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('new-folder-button')));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byKey(const Key('resource-name-input')), '课程');
+    await tester.tap(find.text('创建'));
+    await tester.pumpAndSettle();
+
+    final resources = await vault.listResources();
+    final rootTitles = resources.map((resource) => resource.title).toSet();
+    expect(rootTitles, containsAll(['读书', '课程']));
+    expect(
+      resources
+          .singleWhere((resource) => resource.title == '读书')
+          .children
+          .single
+          .title,
+      '心经',
+    );
+    expect(
+      resources.singleWhere((resource) => resource.title == '课程').children,
+      isEmpty,
+    );
+  });
+
+  testWidgets('deletes a note after confirmation and selects the next note', (
+    tester,
+  ) async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final first = await vault.createNote(parentPath: '', title: 'Alpha');
+    final second = await vault.createNote(parentPath: '', title: 'Beta');
+
+    await _pumpWorkspace(tester, vault: vault);
+
+    await tester.tap(find.byKey(Key('delete-resource-${first.id}')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('取消'));
+    await tester.pumpAndSettle();
+    expect((await vault.readNote(first.id)).title, 'Alpha');
+
+    await tester.tap(find.byKey(Key('delete-resource-${first.id}')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('删除'));
+    await tester.pumpAndSettle();
+
+    expect(() => vault.readNote(first.id), throwsA(isA<StateError>()));
+    expect((await vault.readNote(second.id)).title, 'Beta');
+    final noteEditor = tester.widget<CupertinoTextField>(
+      find.byKey(const Key('note-editor')),
+    );
+    expect(noteEditor.controller?.text, contains('# Beta'));
+    expect(find.text('Alpha'), findsNothing);
+  });
+
+  testWidgets(
+    'deletes a folder recursively and resets contained active notes',
+    (tester) async {
+      final vault = MemoryVaultBackend(seedExampleData: false);
+      final folder = await vault.createFolder(parentPath: '', title: '读书');
+      final nested = await vault.createNote(
+        parentPath: folder.path,
+        title: '心经',
+      );
+      final remaining = await vault.createNote(parentPath: '', title: '其他');
+
+      await _pumpWorkspace(tester, vault: vault);
+      final beforeDelete = tester.widget<CupertinoTextField>(
+        find.byKey(const Key('note-editor')),
+      );
+      expect(beforeDelete.controller?.text, contains('# 心经'));
+
+      await tester.tap(find.byKey(Key('delete-resource-${folder.id}')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('删除'));
+      await tester.pumpAndSettle();
+
+      expect(() => vault.readNote(nested.id), throwsA(isA<StateError>()));
+      expect((await vault.readNote(remaining.id)).title, '其他');
+      expect((await vault.listResources()).single.title, '其他');
+      final afterDelete = tester.widget<CupertinoTextField>(
+        find.byKey(const Key('note-editor')),
+      );
+      expect(afterDelete.controller?.text, contains('# 其他'));
+      expect(find.text('读书'), findsNothing);
+    },
+  );
 
   testWidgets('switches the note pane between edit and preview modes', (
     tester,
@@ -186,6 +310,27 @@ void main() {
     final markdown = tester.widget<Markdown>(find.byType(Markdown));
     expect(markdown.softLineBreak, isTrue);
     expect(markdown.styleSheetTheme, MarkdownStyleSheetBaseTheme.cupertino);
+    expect(markdown.data.trimLeft().startsWith('---'), isFalse);
+    expect(markdown.data, isNot(contains('title:')));
+    expect(markdown.data, isNot(contains('createdAt:')));
+    expect(markdown.styleSheet?.h1?.fontSize, 20);
+    expect(markdown.styleSheet?.h1?.fontWeight, FontWeight.w600);
+  });
+
+  testWidgets('does not expose internal ids in the note editor', (
+    tester,
+  ) async {
+    await _pumpWorkspace(tester, vault: MemoryVaultBackend());
+
+    final noteEditor = tester.widget<CupertinoTextField>(
+      find.byKey(const Key('note-editor')),
+    );
+
+    expect(noteEditor.controller?.text, isNot(contains('id:')));
+    expect(
+      noteEditor.controller?.text,
+      matches(RegExp(r'createdAt: \d{4}-\d{2}-\d{2} \d{2}:\d{2}')),
+    );
   });
 
   testWidgets('does not overflow the source pane in a compact desktop window', (
@@ -225,7 +370,7 @@ void main() {
     expect(find.textContaining('图片已导入'), findsOneWidget);
   });
 
-  testWidgets('shows guidance when importing without an active project', (
+  testWidgets('shows guidance when importing without an active note', (
     tester,
   ) async {
     final imageInput = _FakeImageInputService(
@@ -246,7 +391,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 250));
 
     expect(imageInput.pickCalls, 0);
-    expect(find.textContaining('请先选择或创建项目'), findsOneWidget);
+    expect(find.textContaining('请先选择或创建笔记'), findsOneWidget);
   });
 
   testWidgets('pastes a clipboard image into the source pane', (tester) async {
@@ -279,12 +424,9 @@ void main() {
 
   testWidgets('deletes an image source from the source pane', (tester) async {
     final vault = MemoryVaultBackend(seedExampleData: false);
-    final project = await vault.createProject(
-      title: 'Image Study',
-      template: StudyTemplate.custom,
-    );
+    final note = await vault.createNote(parentPath: '', title: 'Image Study');
     await vault.addImageSource(
-      projectId: project.id,
+      noteId: note.id,
       filename: 'delete-me.png',
       mimeType: 'image/png',
       bytes: _tinyPng,
@@ -302,7 +444,7 @@ void main() {
 
     expect(find.byType(Image), findsNothing);
     expect(find.text('暂无图片素材'), findsOneWidget);
-    expect(await vault.listSources(project.id), isEmpty);
+    expect(await vault.listSources(note.id), isEmpty);
   });
 
   testWidgets('deletes an AI proposal from the source pane', (tester) async {
@@ -318,21 +460,18 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('图片 OCR 整理建议'), findsNothing);
-    expect(await vault.listProposals('preview-project'), isEmpty);
+    expect(await vault.listProposals('preview-note.md'), isEmpty);
   });
 
   testWidgets('shows full selectable multiline proposal text', (tester) async {
     final vault = MemoryVaultBackend(seedExampleData: false);
-    final project = await vault.createProject(
-      title: 'Tree Study',
-      template: StudyTemplate.custom,
-    );
+    final note = await vault.createNote(parentPath: '', title: 'Tree Study');
     const proposalMarkdown = '藏有二义\n├── 摄彼胜义故\n└── 依彼故';
     final now = DateTime.now().toUtc();
     await vault.saveProposal(
       AiProposal(
         id: 'tree-proposal',
-        projectId: project.id,
+        noteId: note.id,
         sourceIds: const [],
         title: '树状 OCR',
         proposedMarkdown: proposalMarkdown,
@@ -358,16 +497,16 @@ void main() {
     tester,
   ) async {
     final vault = MemoryVaultBackend(seedExampleData: false);
-    final project = await vault.createProject(
+    final note = await vault.createNote(
+      parentPath: '',
       title: 'Clipboard Study',
-      template: StudyTemplate.custom,
     );
     const proposalMarkdown = '藏有二义\r\n├── 摄彼胜义故\r└── 依彼故';
     final now = DateTime.now().toUtc();
     await vault.saveProposal(
       AiProposal(
         id: 'clipboard-proposal',
-        projectId: project.id,
+        noteId: note.id,
         sourceIds: const [],
         title: '复制 OCR',
         proposedMarkdown: proposalMarkdown,

@@ -2,7 +2,7 @@ import 'dart:convert';
 
 import 'package:http/http.dart' as http;
 
-import '../../domain/study/project.dart';
+import '../../domain/vault/vault_resource.dart';
 import 'ai_provider.dart';
 
 class OpenAICompatibleProvider implements AiProvider {
@@ -26,7 +26,7 @@ class OpenAICompatibleProvider implements AiProvider {
 
   @override
   Future<String> createOutlineProposal({
-    required String projectTitle,
+    required String noteTitle,
     required String currentMarkdown,
     required List<SourceItem> sources,
   }) async {
@@ -46,7 +46,7 @@ class OpenAICompatibleProvider implements AiProvider {
         {
           'role': 'user',
           'content':
-              '项目：$projectTitle\n\n当前笔记：\n$currentMarkdown\n\n素材：\n$sourceText\n\n请生成结构化学习大纲、知识点和表格建议。',
+              '笔记：$noteTitle\n\n当前笔记：\n$currentMarkdown\n\n素材：\n$sourceText\n\n请生成结构化学习大纲、知识点和表格建议。',
         },
       ],
       'temperature': 0.2,

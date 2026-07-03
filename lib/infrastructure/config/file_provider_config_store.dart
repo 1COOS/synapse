@@ -5,7 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:path/path.dart' as p;
 
-import '../../domain/study/project.dart';
+import '../../domain/vault/vault_resource.dart';
 import 'provider_config_store.dart';
 
 class FileProviderConfigStore implements ProviderConfigStore {

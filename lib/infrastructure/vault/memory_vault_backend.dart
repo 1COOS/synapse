@@ -1,7 +1,7 @@
 import 'package:uuid/uuid.dart';
 
 import '../../domain/markdown/markdown_document.dart';
-import '../../domain/study/project.dart';
+import '../../domain/vault/vault_resource.dart';
 import 'vault_backend.dart';
 
 class MemoryVaultBackend implements VaultBackend {
@@ -12,91 +12,184 @@ class MemoryVaultBackend implements VaultBackend {
   }
 
   final _uuid = const Uuid();
-  final _projects = <String, Project>{};
+  final _folders = <String>{};
+  final _notes = <String, VaultNote>{};
   final _markdown = <String, String>{};
   final _sources = <String, List<SourceItem>>{};
   final _attachmentBytes = <String, List<int>>{};
   final _proposals = <String, AiProposal>{};
 
   @override
-  Future<Project> createProject({
+  Future<VaultResourceNode> createFolder({
+    required String parentPath,
     required String title,
-    required StudyTemplate template,
   }) async {
+    final parent = _normalizeFolderPath(parentPath);
+    final path = _uniqueFolderPath(parent, title);
+    _folders.add(path);
+    return VaultResourceNode(
+      id: path,
+      title: _basename(path),
+      path: path,
+      type: VaultResourceType.folder,
+    );
+  }
+
+  @override
+  Future<VaultNote> createNote({
+    required String parentPath,
+    required String title,
+  }) async {
+    final parent = _normalizeFolderPath(parentPath);
     final now = DateTime.now().toUtc();
-    final id = _uuid.v4();
-    final project = Project(
-      id: id,
-      title: title,
-      template: template,
-      rootPath: 'memory/$title',
-      markdownPath: 'memory/$title/index.md',
+    final path = _uniqueNotePath(parent, title);
+    final note = VaultNote(
+      id: path,
+      title: _basenameWithoutExtension(path),
+      path: path,
+      markdownPath: 'memory/$path',
+      assetsPath: 'memory/${_assetsPathFor(path)}',
       createdAt: now,
       updatedAt: now,
     );
-    _projects[id] = project;
-    _markdown[id] = _initialMarkdown(project);
-    _sources[id] = <SourceItem>[];
-    return project;
+    _notes[note.id] = note;
+    _markdown[note.id] = _initialMarkdown(note);
+    _sources[note.id] = <SourceItem>[];
+    return note;
   }
 
   @override
-  Future<List<Project>> listProjects() async {
-    final projects = _projects.values.toList()
-      ..sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
-    return projects;
+  Future<List<VaultResourceNode>> listResources() async {
+    final childrenByParent = <String, List<VaultResourceNode>>{};
+
+    for (final folder in _folders) {
+      final parent = _dirname(folder);
+      childrenByParent
+          .putIfAbsent(parent, () => <VaultResourceNode>[])
+          .add(
+            VaultResourceNode(
+              id: folder,
+              title: _basename(folder),
+              path: folder,
+              type: VaultResourceType.folder,
+            ),
+          );
+    }
+
+    for (final note in _notes.values) {
+      final parent = _dirname(note.path);
+      childrenByParent
+          .putIfAbsent(parent, () => <VaultResourceNode>[])
+          .add(
+            VaultResourceNode(
+              id: note.id,
+              title: note.title,
+              path: note.path,
+              type: VaultResourceType.note,
+            ),
+          );
+    }
+
+    VaultResourceNode hydrate(VaultResourceNode node) {
+      final children = (childrenByParent[node.path] ?? const [])
+          .map(hydrate)
+          .toList();
+      _sortNodes(children);
+      return VaultResourceNode(
+        id: node.id,
+        title: node.title,
+        path: node.path,
+        type: node.type,
+        children: children,
+      );
+    }
+
+    final roots = (childrenByParent[''] ?? const []).map(hydrate).toList();
+    _sortNodes(roots);
+    return roots;
   }
 
   @override
-  Future<ProjectContent> readProject(String projectId) async {
-    final project = _project(projectId);
-    final markdown = _markdown[projectId]!;
+  Future<VaultNoteContent> readNote(String noteId) async {
+    final note = _note(noteId);
+    final markdown = _markdown[note.id]!;
     final document = MarkdownDocument.parse(markdown);
-    return ProjectContent(
-      id: project.id,
-      title: project.title,
-      template: project.template,
-      rootPath: project.rootPath,
-      markdownPath: project.markdownPath,
-      createdAt: project.createdAt,
-      updatedAt: project.updatedAt,
+    return VaultNoteContent(
+      id: note.id,
+      title: note.title,
+      path: note.path,
+      markdownPath: note.markdownPath,
+      assetsPath: note.assetsPath,
+      createdAt: note.createdAt,
+      updatedAt: note.updatedAt,
       markdown: markdown,
       outline: document.outline,
-      sources: List.unmodifiable(_sources[projectId] ?? const []),
+      sources: List.unmodifiable(_sources[note.id] ?? const []),
     );
   }
 
   @override
-  Future<ProjectContent> updateMarkdown({
-    required String projectId,
+  Future<VaultNoteContent> updateMarkdown({
+    required String noteId,
     required String markdown,
   }) async {
-    _markdown[projectId] = markdown;
-    _touch(projectId);
-    return readProject(projectId);
+    _markdown[noteId] = markdown;
+    _touch(noteId);
+    return readNote(noteId);
   }
 
   @override
-  Future<ProjectContent> appendMarkdown({
-    required String projectId,
+  Future<VaultNoteContent> appendMarkdown({
+    required String noteId,
     required String markdown,
   }) async {
-    final current = _markdown[projectId] ?? '';
-    _markdown[projectId] = '${current.trimRight()}\n\n${markdown.trim()}\n';
-    _touch(projectId);
-    return readProject(projectId);
+    final current = _markdown[noteId] ?? '';
+    _markdown[noteId] = '${current.trimRight()}\n\n${markdown.trim()}\n';
+    _touch(noteId);
+    return readNote(noteId);
+  }
+
+  @override
+  Future<void> deleteNote(String noteId) async {
+    final note = _note(noteId);
+    final sources = _sources.remove(note.id) ?? const <SourceItem>[];
+    for (final source in sources) {
+      _attachmentBytes.remove(source.id);
+    }
+    _proposals.removeWhere((_, proposal) => proposal.noteId == note.id);
+    _markdown.remove(note.id);
+    _notes.remove(note.id);
+  }
+
+  @override
+  Future<void> deleteFolder(String folderPath) async {
+    final folder = _normalizeFolderPath(folderPath);
+    if (folder.isEmpty) {
+      throw StateError('Cannot delete the vault root.');
+    }
+    if (!_folders.contains(folder)) {
+      throw StateError('Folder not found: $folderPath');
+    }
+    final noteIds = _notes.keys
+        .where((noteId) => _isPathInside(noteId, folder))
+        .toList();
+    for (final noteId in noteIds) {
+      await deleteNote(noteId);
+    }
+    _folders.removeWhere((path) => _isPathInside(path, folder));
   }
 
   @override
   Future<SourceItem> addTextSource({
-    required String projectId,
+    required String noteId,
     required String title,
     required String text,
   }) async {
+    _note(noteId);
     final now = DateTime.now().toUtc();
     final source = SourceItem(
       id: _uuid.v4(),
-      projectId: projectId,
+      noteId: noteId,
       type: SourceType.text,
       title: title.trim().isEmpty ? '摘录' : title.trim(),
       text: text,
@@ -104,21 +197,22 @@ class MemoryVaultBackend implements VaultBackend {
       createdAt: now,
       updatedAt: now,
     );
-    _sources.putIfAbsent(projectId, () => <SourceItem>[]).add(source);
+    _sources.putIfAbsent(noteId, () => <SourceItem>[]).add(source);
     return source;
   }
 
   @override
   Future<SourceItem> addImageSource({
-    required String projectId,
+    required String noteId,
     required String filename,
     required String mimeType,
     required List<int> bytes,
   }) async {
+    _note(noteId);
     final now = DateTime.now().toUtc();
     final source = SourceItem(
       id: _uuid.v4(),
-      projectId: projectId,
+      noteId: noteId,
       type: SourceType.image,
       title: filename,
       state: SourceState.pending,
@@ -127,23 +221,23 @@ class MemoryVaultBackend implements VaultBackend {
       attachmentPath: 'attachments/$filename',
       mimeType: mimeType,
     );
-    _sources.putIfAbsent(projectId, () => <SourceItem>[]).add(source);
+    _sources.putIfAbsent(noteId, () => <SourceItem>[]).add(source);
     _attachmentBytes[source.id] = List<int>.unmodifiable(bytes);
     return source;
   }
 
   @override
-  Future<List<SourceItem>> listSources(String projectId) async {
-    return List.unmodifiable(_sources[projectId] ?? const []);
+  Future<List<SourceItem>> listSources(String noteId) async {
+    return List.unmodifiable(_sources[noteId] ?? const []);
   }
 
   @override
   Future<List<SourceItem>> getSources(
-    String projectId,
+    String noteId,
     List<String> sourceIds,
   ) async {
     final wanted = sourceIds.toSet();
-    return (_sources[projectId] ?? const [])
+    return (_sources[noteId] ?? const [])
         .where((source) => wanted.contains(source.id))
         .toList();
   }
@@ -159,26 +253,26 @@ class MemoryVaultBackend implements VaultBackend {
 
   @override
   Future<SourceItem> updateSource(SourceItem source) async {
-    final sources = _sources[source.projectId] ?? const <SourceItem>[];
+    final sources = _sources[source.noteId] ?? const <SourceItem>[];
     final index = sources.indexWhere((item) => item.id == source.id);
     if (index < 0) {
       throw StateError('Source not found: ${source.id}');
     }
     final updated = [...sources];
     updated[index] = source;
-    _sources[source.projectId] = updated;
+    _sources[source.noteId] = updated;
     return source;
   }
 
   @override
   Future<void> deleteSource(SourceItem source) async {
-    final sources = _sources[source.projectId] ?? const <SourceItem>[];
+    final sources = _sources[source.noteId] ?? const <SourceItem>[];
     final index = sources.indexWhere((item) => item.id == source.id);
     if (index < 0) {
       throw StateError('Source not found: ${source.id}');
     }
     final updated = [...sources]..removeAt(index);
-    _sources[source.projectId] = updated;
+    _sources[source.noteId] = updated;
     _attachmentBytes.remove(source.id);
   }
 
@@ -189,10 +283,10 @@ class MemoryVaultBackend implements VaultBackend {
   }
 
   @override
-  Future<List<AiProposal>> listProposals(String projectId) async {
+  Future<List<AiProposal>> listProposals(String noteId) async {
     final proposals =
         _proposals.values
-            .where((proposal) => proposal.projectId == projectId)
+            .where((proposal) => proposal.noteId == noteId)
             .toList()
           ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
     return proposals;
@@ -221,40 +315,40 @@ class MemoryVaultBackend implements VaultBackend {
     }
   }
 
-  Project _project(String id) {
-    final project = _projects[id];
-    if (project == null) {
-      throw StateError('Project not found: $id');
+  VaultNote _note(String id) {
+    final note = _notes[id];
+    if (note == null) {
+      throw StateError('Note not found: $id');
     }
-    return project;
+    return note;
   }
 
-  void _touch(String projectId) {
-    final project = _project(projectId);
-    _projects[projectId] = project.copyWith(updatedAt: DateTime.now().toUtc());
+  void _touch(String noteId) {
+    final note = _note(noteId);
+    _notes[noteId] = note.copyWith(updatedAt: DateTime.now().toUtc());
   }
 
   void seedExample() {
-    if (_projects.isNotEmpty) {
+    if (_notes.isNotEmpty) {
       return;
     }
     final now = DateTime.now().toUtc();
-    const id = 'preview-project';
-    final project = Project(
+    const id = 'preview-note.md';
+    final note = VaultNote(
       id: id,
       title: '心经学习',
-      template: StudyTemplate.scripture,
-      rootPath: 'memory/心经学习',
-      markdownPath: 'memory/心经学习/index.md',
+      path: id,
+      markdownPath: 'memory/$id',
+      assetsPath: 'memory/preview-note.assets',
       createdAt: now,
       updatedAt: now,
     );
-    _projects[id] = project;
-    _markdown[id] = _initialMarkdown(project);
+    _notes[id] = note;
+    _markdown[id] = _initialMarkdown(note);
     _sources[id] = [
       SourceItem(
         id: 'preview-source',
-        projectId: id,
+        noteId: id,
         type: SourceType.text,
         title: '示例摘录',
         text: '核心概念：观照。照见五蕴皆空。',
@@ -264,7 +358,7 @@ class MemoryVaultBackend implements VaultBackend {
       ),
       SourceItem(
         id: 'preview-image-source',
-        projectId: id,
+        noteId: id,
         type: SourceType.image,
         title: '经文截图.png',
         attachmentPath: 'attachments/经文截图.png',
@@ -276,7 +370,7 @@ class MemoryVaultBackend implements VaultBackend {
     ];
     _proposals['preview-proposal'] = AiProposal(
       id: 'preview-proposal',
-      projectId: id,
+      noteId: id,
       sourceIds: const ['preview-image-source'],
       title: '图片 OCR 整理建议',
       proposedMarkdown: '''## 图片摘录
@@ -289,6 +383,29 @@ class MemoryVaultBackend implements VaultBackend {
       updatedAt: now,
     );
     _attachmentBytes['preview-image-source'] = _tinyPreviewPng;
+  }
+
+  String _uniqueFolderPath(String parentPath, String title) {
+    final base = _joinPath(parentPath, sanitizeFileName(title));
+    var candidate = base;
+    var suffix = 2;
+    while (_folders.contains(candidate) || _notes.containsKey(candidate)) {
+      candidate = '$base $suffix';
+      suffix += 1;
+    }
+    return candidate;
+  }
+
+  String _uniqueNotePath(String parentPath, String title) {
+    final base = _joinPath(parentPath, '${sanitizeFileName(title)}.md');
+    final stem = _withoutExtension(base);
+    var candidate = base;
+    var suffix = 2;
+    while (_notes.containsKey(candidate) || _folders.contains(candidate)) {
+      candidate = '$stem $suffix.md';
+      suffix += 1;
+    }
+    return candidate;
   }
 }
 
@@ -362,23 +479,65 @@ const _tinyPreviewPng = <int>[
   130,
 ];
 
-String _initialMarkdown(Project project) {
+String _initialMarkdown(VaultNote note) {
   return MarkdownDocument(
     frontmatter: {
-      'id': project.id,
-      'title': project.title,
-      'template': project.template.value,
-      'createdAt': project.createdAt.toIso8601String(),
-      'updatedAt': project.updatedAt.toIso8601String(),
+      'title': note.title,
+      'createdAt': formatMarkdownTimestamp(note.createdAt),
+      'updatedAt': formatMarkdownTimestamp(note.updatedAt),
     },
-    body: '''# ${project.title}
-
-## 学习框架
-
-## 知识点
-
-| 类型 | 内容 | 备注 |
-| --- | --- | --- |
-''',
+    body: '# ${note.title}\n',
   ).toMarkdown();
+}
+
+String _normalizeFolderPath(String path) {
+  final parts = path
+      .replaceAll('\\', '/')
+      .split('/')
+      .where((part) => part.isNotEmpty && part != '.')
+      .toList();
+  if (parts.any((part) => part == '..')) {
+    throw ArgumentError('Path cannot escape the vault: $path');
+  }
+  return parts.join('/');
+}
+
+String _joinPath(String parent, String child) {
+  final cleanParent = _normalizeFolderPath(parent);
+  return cleanParent.isEmpty ? child : '$cleanParent/$child';
+}
+
+String _dirname(String path) {
+  final index = path.lastIndexOf('/');
+  return index < 0 ? '' : path.substring(0, index);
+}
+
+String _basename(String path) {
+  final index = path.lastIndexOf('/');
+  return index < 0 ? path : path.substring(index + 1);
+}
+
+String _basenameWithoutExtension(String path) {
+  final base = _basename(path);
+  return base.endsWith('.md') ? base.substring(0, base.length - 3) : base;
+}
+
+String _withoutExtension(String path) {
+  return path.endsWith('.md') ? path.substring(0, path.length - 3) : path;
+}
+
+String _assetsPathFor(String notePath) =>
+    '${_withoutExtension(notePath)}.assets';
+
+bool _isPathInside(String path, String folder) {
+  return path == folder || path.startsWith('$folder/');
+}
+
+void _sortNodes(List<VaultResourceNode> nodes) {
+  nodes.sort((a, b) {
+    if (a.type != b.type) {
+      return a.type == VaultResourceType.folder ? -1 : 1;
+    }
+    return a.title.compareTo(b.title);
+  });
 }

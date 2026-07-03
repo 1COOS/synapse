@@ -1,41 +1,50 @@
-import '../../domain/study/project.dart';
+import '../../domain/vault/vault_resource.dart';
 
 abstract class VaultBackend {
-  Future<List<Project>> listProjects();
+  Future<List<VaultResourceNode>> listResources();
 
-  Future<Project> createProject({
+  Future<VaultResourceNode> createFolder({
+    required String parentPath,
     required String title,
-    required StudyTemplate template,
   });
 
-  Future<ProjectContent> readProject(String projectId);
+  Future<VaultNote> createNote({
+    required String parentPath,
+    required String title,
+  });
 
-  Future<ProjectContent> updateMarkdown({
-    required String projectId,
+  Future<VaultNoteContent> readNote(String noteId);
+
+  Future<VaultNoteContent> updateMarkdown({
+    required String noteId,
     required String markdown,
   });
 
-  Future<ProjectContent> appendMarkdown({
-    required String projectId,
+  Future<VaultNoteContent> appendMarkdown({
+    required String noteId,
     required String markdown,
   });
+
+  Future<void> deleteNote(String noteId);
+
+  Future<void> deleteFolder(String folderPath);
 
   Future<SourceItem> addTextSource({
-    required String projectId,
+    required String noteId,
     required String title,
     required String text,
   });
 
   Future<SourceItem> addImageSource({
-    required String projectId,
+    required String noteId,
     required String filename,
     required String mimeType,
     required List<int> bytes,
   });
 
-  Future<List<SourceItem>> listSources(String projectId);
+  Future<List<SourceItem>> listSources(String noteId);
 
-  Future<List<SourceItem>> getSources(String projectId, List<String> sourceIds);
+  Future<List<SourceItem>> getSources(String noteId, List<String> sourceIds);
 
   Future<List<int>> readSourceAttachment(SourceItem source);
 
@@ -45,7 +54,7 @@ abstract class VaultBackend {
 
   Future<AiProposal> saveProposal(AiProposal proposal);
 
-  Future<List<AiProposal>> listProposals(String projectId);
+  Future<List<AiProposal>> listProposals(String noteId);
 
   Future<AiProposal> getProposal(String proposalId);
 

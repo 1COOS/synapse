@@ -1,6 +1,6 @@
 import 'package:uuid/uuid.dart';
 
-import '../../domain/study/project.dart';
+import '../../domain/vault/vault_resource.dart';
 import '../../infrastructure/ai/ai_provider.dart';
 import '../../infrastructure/vault/vault_backend.dart';
 
@@ -12,11 +12,11 @@ class ProposalService {
   final _uuid = const Uuid();
 
   Future<AiProposal> createOutlineProposal({
-    required String projectId,
+    required String noteId,
     required List<String> sourceIds,
   }) async {
-    final project = await vault.readProject(projectId);
-    var sources = await vault.getSources(projectId, sourceIds);
+    final note = await vault.readNote(noteId);
+    var sources = await vault.getSources(noteId, sourceIds);
     if (sources.isEmpty) {
       throw ArgumentError('At least one source is required.');
     }
@@ -26,7 +26,7 @@ class ProposalService {
         await _extractImageSource(source);
       }
     }
-    sources = await vault.getSources(projectId, sourceIds);
+    sources = await vault.getSources(noteId, sourceIds);
     final now = DateTime.now().toUtc();
     final imageOnly = sources.every(
       (source) => source.type == SourceType.image,
@@ -34,13 +34,13 @@ class ProposalService {
     final markdown = imageOnly
         ? _imageOcrMarkdown(sources)
         : await aiProvider.createOutlineProposal(
-            projectTitle: project.title,
-            currentMarkdown: project.markdown,
+            noteTitle: note.title,
+            currentMarkdown: note.markdown,
             sources: sources,
           );
     final proposal = AiProposal(
       id: _uuid.v4(),
-      projectId: projectId,
+      noteId: noteId,
       sourceIds: sourceIds,
       title: '整理 ${sources.length} 条素材',
       proposedMarkdown: markdown,
@@ -91,7 +91,7 @@ class ProposalService {
       return proposal;
     }
     await vault.appendMarkdown(
-      projectId: proposal.projectId,
+      noteId: proposal.noteId,
       markdown: proposal.proposedMarkdown,
     );
     final updated = proposal.copyWith(

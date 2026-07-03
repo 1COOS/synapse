@@ -3,7 +3,7 @@ import 'dart:convert';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
-import 'package:synapse/domain/study/project.dart';
+import 'package:synapse/domain/vault/vault_resource.dart';
 import 'package:synapse/infrastructure/ai/openai_compatible_provider.dart';
 
 void main() {
@@ -67,12 +67,12 @@ void main() {
     );
 
     await provider.createOutlineProposal(
-      projectTitle: '心经学习',
+      noteTitle: '心经学习',
       currentMarkdown: '# 心经学习',
       sources: [
         SourceItem(
           id: 'source-1',
-          projectId: 'project-1',
+          noteId: 'note-1.md',
           type: SourceType.text,
           title: '摘录',
           state: SourceState.ready,
@@ -108,12 +108,12 @@ void main() {
     );
 
     final proposal = await provider.createOutlineProposal(
-      projectTitle: '心经学习',
+      noteTitle: '心经学习',
       currentMarkdown: '# 心经学习',
       sources: [
         SourceItem(
           id: 'source-1',
-          projectId: 'project-1',
+          noteId: 'note-1.md',
           type: SourceType.image,
           title: '截图.png',
           state: SourceState.processed,

@@ -5,9 +5,8 @@ void main() {
   test('parses frontmatter and heading outline from markdown', () {
     const markdown = '''
 ---
-id: project-1
 title: 心经学习
-template: scripture
+createdAt: 2026-07-03 12:00
 ---
 
 # 心经学习
@@ -19,7 +18,8 @@ template: scripture
 
     final document = MarkdownDocument.parse(markdown);
 
-    expect(document.frontmatter['template'], 'scripture');
+    expect(document.frontmatter['title'], '心经学习');
+    expect(document.frontmatter, isNot(contains('template')));
     expect(document.outline.map((node) => node.title), contains('心经学习'));
     expect(document.outline.first.children.first.title, '观自在');
     expect(document.outline.first.children.first.children.first.level, 3);
@@ -27,13 +27,13 @@ template: scripture
 
   test('serializes frontmatter without losing the markdown body', () {
     final document = MarkdownDocument(
-      frontmatter: {'id': 'project-1', 'title': '学科笔记', 'template': 'subject'},
-      body: '# 学科笔记\n\n## 概念\n',
+      frontmatter: {'title': '学习笔记', 'createdAt': '2026-07-03 12:00'},
+      body: '# 学习笔记\n\n## 概念\n',
     );
 
     final markdown = document.toMarkdown();
 
-    expect(markdown, contains('template: subject'));
-    expect(markdown, contains('# 学科笔记'));
+    expect(markdown, isNot(contains('template:')));
+    expect(markdown, contains('# 学习笔记'));
   });
 }

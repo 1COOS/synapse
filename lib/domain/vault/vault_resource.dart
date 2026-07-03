@@ -1,21 +1,4 @@
-enum StudyTemplate {
-  scripture('scripture', '经文'),
-  book('book', '书籍'),
-  subject('subject', '学科'),
-  custom('custom', '自定义');
-
-  const StudyTemplate(this.value, this.label);
-
-  final String value;
-  final String label;
-
-  static StudyTemplate fromValue(String? value) {
-    return StudyTemplate.values.firstWhere(
-      (template) => template.value == value,
-      orElse: () => StudyTemplate.custom,
-    );
-  }
-}
+enum VaultResourceType { folder, note }
 
 enum SourceType { text, image }
 
@@ -23,51 +6,70 @@ enum SourceState { ready, pending, processed, failed }
 
 enum ProposalStatus { pending, applied, rejected }
 
-class Project {
-  const Project({
+class VaultResourceNode {
+  const VaultResourceNode({
     required this.id,
     required this.title,
-    required this.template,
-    required this.rootPath,
+    required this.path,
+    required this.type,
+    this.children = const [],
+  });
+
+  final String id;
+  final String title;
+  final String path;
+  final VaultResourceType type;
+  final List<VaultResourceNode> children;
+
+  bool get isFolder => type == VaultResourceType.folder;
+  bool get isNote => type == VaultResourceType.note;
+}
+
+class VaultNote {
+  const VaultNote({
+    required this.id,
+    required this.title,
+    required this.path,
     required this.markdownPath,
+    required this.assetsPath,
     required this.createdAt,
     required this.updatedAt,
   });
 
   final String id;
   final String title;
-  final StudyTemplate template;
-  final String rootPath;
+  final String path;
   final String markdownPath;
+  final String assetsPath;
   final DateTime createdAt;
   final DateTime updatedAt;
 
-  Project copyWith({
+  VaultNote copyWith({
     String? title,
-    StudyTemplate? template,
-    String? rootPath,
+    String? path,
     String? markdownPath,
+    String? assetsPath,
     DateTime? updatedAt,
   }) {
-    return Project(
+    return VaultNote(
       id: id,
       title: title ?? this.title,
-      template: template ?? this.template,
-      rootPath: rootPath ?? this.rootPath,
+      path: path ?? this.path,
       markdownPath: markdownPath ?? this.markdownPath,
+      assetsPath: assetsPath ?? this.assetsPath,
       createdAt: createdAt,
       updatedAt: updatedAt ?? this.updatedAt,
     );
   }
 }
 
-class ProjectContent extends Project {
-  const ProjectContent({
+class VaultNoteContent extends VaultNote {
+  const VaultNoteContent({
     required super.id,
     required super.title,
-    required super.template,
-    required super.rootPath,
+    required super.path,
     required super.markdownPath,
+    required super.assetsPath,
     required super.createdAt,
     required super.updatedAt,
     required this.markdown,
@@ -79,12 +81,12 @@ class ProjectContent extends Project {
   final List<OutlineNode> outline;
   final List<SourceItem> sources;
 
-  Project get project => Project(
+  VaultNote get note => VaultNote(
     id: id,
     title: title,
-    template: template,
-    rootPath: rootPath,
+    path: path,
     markdownPath: markdownPath,
+    assetsPath: assetsPath,
     createdAt: createdAt,
     updatedAt: updatedAt,
   );
@@ -109,7 +111,7 @@ class OutlineNode {
 class SourceItem {
   const SourceItem({
     required this.id,
-    required this.projectId,
+    required this.noteId,
     required this.type,
     required this.title,
     required this.state,
@@ -122,7 +124,7 @@ class SourceItem {
   });
 
   final String id;
-  final String projectId;
+  final String noteId;
   final SourceType type;
   final String title;
   final SourceState state;
@@ -145,7 +147,7 @@ class SourceItem {
   }) {
     return SourceItem(
       id: id,
-      projectId: projectId,
+      noteId: noteId,
       type: type,
       title: title,
       state: state ?? this.state,
@@ -160,7 +162,7 @@ class SourceItem {
 
   Map<String, Object?> toJson() => {
     'id': id,
-    'projectId': projectId,
+    'noteId': noteId,
     'type': type.name,
     'title': title,
     'state': state.name,
@@ -175,7 +177,7 @@ class SourceItem {
   static SourceItem fromJson(Map<String, Object?> json) {
     return SourceItem(
       id: json['id']! as String,
-      projectId: json['projectId']! as String,
+      noteId: json['noteId']! as String,
       type: SourceType.values.byName(json['type']! as String),
       title: json['title']! as String,
       state: SourceState.values.byName(json['state']! as String),
@@ -192,7 +194,7 @@ class SourceItem {
 class AiProposal {
   const AiProposal({
     required this.id,
-    required this.projectId,
+    required this.noteId,
     required this.sourceIds,
     required this.title,
     required this.proposedMarkdown,
@@ -202,7 +204,7 @@ class AiProposal {
   });
 
   final String id;
-  final String projectId;
+  final String noteId;
   final List<String> sourceIds;
   final String title;
   final String proposedMarkdown;
@@ -213,7 +215,7 @@ class AiProposal {
   AiProposal copyWith({ProposalStatus? status, DateTime? updatedAt}) {
     return AiProposal(
       id: id,
-      projectId: projectId,
+      noteId: noteId,
       sourceIds: sourceIds,
       title: title,
       proposedMarkdown: proposedMarkdown,
@@ -225,7 +227,7 @@ class AiProposal {
 
   Map<String, Object?> toJson() => {
     'id': id,
-    'projectId': projectId,
+    'noteId': noteId,
     'sourceIds': sourceIds,
     'title': title,
     'proposedMarkdown': proposedMarkdown,
@@ -237,7 +239,7 @@ class AiProposal {
   static AiProposal fromJson(Map<String, Object?> json) {
     return AiProposal(
       id: json['id']! as String,
-      projectId: json['projectId']! as String,
+      noteId: json['noteId']! as String,
       sourceIds: (json['sourceIds']! as List<Object?>).cast<String>(),
       title: json['title']! as String,
       proposedMarkdown: json['proposedMarkdown']! as String,
@@ -272,23 +274,20 @@ class ProviderConfig {
   );
 
   String get normalizedBaseUrl {
-    return baseUrl.trim().replaceFirst(RegExp(r'/+$'), '');
-  }
-
-  bool get hasUsableKey => apiKey.trim().isNotEmpty;
-
-  bool get hasEmbeddingConfig {
-    return normalizedBaseUrl.isNotEmpty &&
-        hasUsableKey &&
-        embeddingModel.trim().isNotEmpty;
+    final trimmed = baseUrl.trim();
+    return trimmed.replaceFirst(RegExp(r'/+$'), '');
   }
 
   bool get isComplete {
     return normalizedBaseUrl.isNotEmpty &&
-        hasUsableKey &&
+        apiKey.trim().isNotEmpty &&
         chatModel.trim().isNotEmpty &&
         visionModel.trim().isNotEmpty;
   }
+
+  bool get hasUsableKey => apiKey.trim().isNotEmpty;
+
+  bool get hasEmbeddingConfig => embeddingModel.trim().isNotEmpty;
 
   ProviderConfig copyWith({
     String? baseUrl,
@@ -306,15 +305,13 @@ class ProviderConfig {
     );
   }
 
-  Map<String, Object?> toJson({bool includeApiKey = true}) {
-    return {
-      'baseUrl': baseUrl,
-      if (includeApiKey) 'apiKey': apiKey,
-      'chatModel': chatModel,
-      'visionModel': visionModel,
-      'embeddingModel': embeddingModel,
-    };
-  }
+  Map<String, Object?> toJson({bool includeApiKey = false}) => {
+    'baseUrl': baseUrl,
+    if (includeApiKey) 'apiKey': apiKey,
+    'chatModel': chatModel,
+    'visionModel': visionModel,
+    'embeddingModel': embeddingModel,
+  };
 
   static ProviderConfig fromJson(Map<String, Object?> json) {
     return ProviderConfig(

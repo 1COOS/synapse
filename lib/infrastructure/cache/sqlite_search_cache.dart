@@ -14,7 +14,7 @@ class SqliteSearchCache {
     _db.execute('''
       CREATE TABLE IF NOT EXISTS documents (
         id TEXT PRIMARY KEY,
-        project_id TEXT NOT NULL,
+        note_id TEXT NOT NULL,
         title TEXT NOT NULL,
         body TEXT NOT NULL,
         embedding_json TEXT NOT NULL,
@@ -28,17 +28,17 @@ class SqliteSearchCache {
 
   Future<void> indexDocument({
     required String id,
-    required String projectId,
+    required String noteId,
     required String title,
     required String text,
   }) async {
     final embedding = await aiProvider.createEmbedding('$title\n$text');
     _db.execute(
       '''
-      INSERT INTO documents (id, project_id, title, body, embedding_json, updated_at)
+      INSERT INTO documents (id, note_id, title, body, embedding_json, updated_at)
       VALUES (?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
-        project_id = excluded.project_id,
+        note_id = excluded.note_id,
         title = excluded.title,
         body = excluded.body,
         embedding_json = excluded.embedding_json,
@@ -46,7 +46,7 @@ class SqliteSearchCache {
       ''',
       [
         id,
-        projectId,
+        noteId,
         title,
         text,
         jsonEncode(embedding),
@@ -55,14 +55,14 @@ class SqliteSearchCache {
     );
   }
 
-  Future<List<SearchResult>> search(String query, {String? projectId}) async {
-    final rows = projectId == null
+  Future<List<SearchResult>> search(String query, {String? noteId}) async {
+    final rows = noteId == null
         ? _db.select(
-            'SELECT id, project_id, title, body, embedding_json FROM documents',
+            'SELECT id, note_id, title, body, embedding_json FROM documents',
           )
         : _db.select(
-            'SELECT id, project_id, title, body, embedding_json FROM documents WHERE project_id = ?',
-            [projectId],
+            'SELECT id, note_id, title, body, embedding_json FROM documents WHERE note_id = ?',
+            [noteId],
           );
     final queryEmbedding = await aiProvider.createEmbedding(query);
     final results =
@@ -86,7 +86,7 @@ class SqliteSearchCache {
               ];
               return SearchResult(
                 id: row['id'] as String,
-                projectId: row['project_id'] as String,
+                noteId: row['note_id'] as String,
                 title: title,
                 text: text,
                 score: fullTextScore + semanticScore,

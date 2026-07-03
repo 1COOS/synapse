@@ -62,11 +62,12 @@ flutter build windows
 
 ```text
 vault/
-  <project>/
-    index.md
-    attachments/
-    sources/
-    .synapse/
+  <folder>/
+    note.md
+    note.assets/
+      attachments/
+      sources.json
+      proposals.json
   .synapse-cache/
 ```
 
@@ -87,11 +88,11 @@ Web/H5 刷新后会重置数据。不要把它当作生产端。
 | 测试文件 | 覆盖内容 |
 | --- | --- |
 | `test/domain/markdown_document_test.dart` | frontmatter、Markdown 大纲、表格工具 |
-| `test/infrastructure/file_vault_backend_test.dart` | 项目创建、Markdown 更新、附件和素材保存 |
+| `test/infrastructure/file_vault_backend_test.dart` | 文件夹/笔记创建、删除、Markdown 更新、附件和素材保存 |
 | `test/infrastructure/search_cache_test.dart` | 内存搜索缓存 |
 | `test/infrastructure/sqlite_search_cache_test.dart` | SQLite 搜索缓存 |
 | `test/application/proposal_service_test.dart` | proposal 生成和应用 |
-| `test/presentation/workspace_test.dart` | 三栏工作台基础渲染 |
+| `test/presentation/workspace_test.dart` | 三栏工作台、资源树创建/删除、素材和设置交互 |
 
 ## 6. 开发约定
 
@@ -158,4 +159,4 @@ flutter build macos
 flutter run -d chrome --web-hostname 127.0.0.1 --web-port 5173
 ```
 
-然后在浏览器中确认三栏工作台可见，能创建项目、添加文本素材、生成 Mock proposal 并写入 Markdown。
+然后在浏览器中确认三栏工作台可见，能创建文件夹和笔记、添加文本素材、生成 Mock proposal 并写入 Markdown。

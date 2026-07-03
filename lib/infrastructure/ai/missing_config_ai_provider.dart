@@ -1,4 +1,4 @@
-import '../../domain/study/project.dart';
+import '../../domain/vault/vault_resource.dart';
 import 'ai_provider.dart';
 
 class MissingConfigAiProvider implements AiProvider {
@@ -8,7 +8,7 @@ class MissingConfigAiProvider implements AiProvider {
 
   @override
   Future<String> createOutlineProposal({
-    required String projectTitle,
+    required String noteTitle,
     required String currentMarkdown,
     required List<SourceItem> sources,
   }) {

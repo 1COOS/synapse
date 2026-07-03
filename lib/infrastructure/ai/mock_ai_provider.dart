@@ -1,13 +1,13 @@
 import 'dart:math';
 
 import '../../domain/markdown/markdown_document.dart';
-import '../../domain/study/project.dart';
+import '../../domain/vault/vault_resource.dart';
 import 'ai_provider.dart';
 
 class MockAiProvider implements AiProvider {
   @override
   Future<String> createOutlineProposal({
-    required String projectTitle,
+    required String noteTitle,
     required String currentMarkdown,
     required List<SourceItem> sources,
   }) async {

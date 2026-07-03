@@ -1,10 +1,12 @@
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/material.dart' show Tooltip;
 import 'package:flutter/services.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 
 import '../../application/proposals/proposal_service.dart';
-import '../../domain/study/project.dart';
+import '../../domain/markdown/markdown_document.dart';
+import '../../domain/vault/vault_resource.dart';
 import '../../infrastructure/ai/ai_provider.dart';
 import '../../infrastructure/ai/missing_config_ai_provider.dart';
 import '../../infrastructure/ai/openai_compatible_provider.dart';
@@ -29,7 +31,7 @@ const _danger = CupertinoColors.systemRed;
 const _radius = BorderRadius.all(Radius.circular(8));
 
 enum _WorkspaceSection {
-  projects('项目', CupertinoIcons.folder),
+  resources('资源', CupertinoIcons.folder),
   notes('笔记', CupertinoIcons.square_pencil),
   sources('素材', CupertinoIcons.photo_on_rectangle);
 
@@ -67,17 +69,16 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   late AiProvider _aiProvider;
 
   final _markdownController = TextEditingController();
-  final _projectTitleController = TextEditingController();
   final _searchController = TextEditingController();
   final _sourcePaneFocusNode = FocusNode();
 
-  List<Project> _projects = const [];
-  ProjectContent? _activeProject;
+  List<VaultResourceNode> _resources = const [];
+  VaultResourceNode? _selectedResource;
+  VaultNoteContent? _activeNote;
   List<AiProposal> _proposals = const [];
   List<SearchResult> _searchResults = const [];
   final Set<String> _selectedSourceIds = <String>{};
-  StudyTemplate _newProjectTemplate = StudyTemplate.subject;
-  _WorkspaceSection _narrowSection = _WorkspaceSection.projects;
+  _WorkspaceSection _narrowSection = _WorkspaceSection.resources;
   bool _busy = false;
   bool _previewMarkdown = false;
   String _message = '';
@@ -99,7 +100,6 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   @override
   void dispose() {
     _markdownController.dispose();
-    _projectTitleController.dispose();
     _searchController.dispose();
     _sourcePaneFocusNode.dispose();
     super.dispose();
@@ -129,7 +129,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   }
 
   Future<void> _initializeWorkspace() async {
-    await _loadProjects();
+    await _loadResources();
     await _loadProviderConfig();
   }
 
@@ -207,16 +207,18 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     return false;
   }
 
-  Future<void> _loadProjects() async {
+  Future<void> _loadResources() async {
     await _runBusy(() async {
-      final projects = await _vault.listProjects();
-      ProjectContent? active;
-      if (projects.isNotEmpty) {
-        active = await _vault.readProject(projects.first.id);
+      final resources = await _vault.listResources();
+      final firstNote = _firstNote(resources);
+      VaultNoteContent? active;
+      if (firstNote != null) {
+        active = await _vault.readNote(firstNote.id);
       }
       setState(() {
-        _projects = projects;
-        _activeProject = active;
+        _resources = resources;
+        _selectedResource = firstNote;
+        _activeNote = active;
         _markdownController.text = active?.markdown ?? '';
       });
       if (active != null) {
@@ -225,71 +227,111 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     });
   }
 
-  Future<void> _refreshActiveProject() async {
-    final active = _activeProject;
+  Future<void> _refreshActiveNote() async {
+    final active = _activeNote;
     if (active == null) {
       return;
     }
-    final refreshed = await _vault.readProject(active.id);
-    final projects = await _vault.listProjects();
+    final refreshed = await _vault.readNote(active.id);
+    final resources = await _vault.listResources();
     setState(() {
-      _projects = projects;
-      _activeProject = refreshed;
+      _resources = resources;
+      _selectedResource = _findResource(resources, refreshed.id);
+      _activeNote = refreshed;
       _markdownController.text = refreshed.markdown;
     });
     await _refreshProposals(refreshed.id);
   }
 
-  Future<void> _refreshActiveProjectMetadata() async {
-    final active = _activeProject;
+  Future<void> _refreshActiveNoteMetadata() async {
+    final active = _activeNote;
     if (active == null) {
       return;
     }
-    final refreshed = await _vault.readProject(active.id);
-    final projects = await _vault.listProjects();
+    final refreshed = await _vault.readNote(active.id);
+    final resources = await _vault.listResources();
     setState(() {
-      _projects = projects;
-      _activeProject = refreshed;
+      _resources = resources;
+      _selectedResource = _findResource(resources, refreshed.id);
+      _activeNote = refreshed;
       _selectedSourceIds.removeWhere(
         (sourceId) => !refreshed.sources.any((source) => source.id == sourceId),
       );
     });
   }
 
-  Future<void> _refreshProposals(String projectId) async {
-    final proposals = await _vault.listProposals(projectId);
+  Future<void> _refreshProposals(String noteId) async {
+    final proposals = await _vault.listProposals(noteId);
     setState(() => _proposals = proposals);
   }
 
-  Future<void> _selectProject(Project project) async {
-    await _runBusy(() async {
-      final loaded = await _vault.readProject(project.id);
+  Future<void> _selectResource(VaultResourceNode resource) async {
+    if (resource.isFolder) {
       setState(() {
-        _activeProject = loaded;
+        _selectedResource = resource;
+        _narrowSection = _WorkspaceSection.resources;
+      });
+      return;
+    }
+    await _runBusy(() async {
+      final loaded = await _vault.readNote(resource.id);
+      setState(() {
+        _selectedResource = resource;
+        _activeNote = loaded;
         _markdownController.text = loaded.markdown;
         _selectedSourceIds.clear();
         _previewMarkdown = false;
         _narrowSection = _WorkspaceSection.notes;
       });
-      await _refreshProposals(project.id);
+      await _refreshProposals(resource.id);
     });
   }
 
-  Future<void> _createProject() async {
-    final title = _projectTitleController.text.trim();
-    if (title.isEmpty) {
+  void _selectVaultRoot() {
+    setState(() {
+      _selectedResource = null;
+      _narrowSection = _WorkspaceSection.resources;
+    });
+  }
+
+  Future<void> _createFolder() async {
+    final title = await _promptResourceName(
+      title: '新建文件夹',
+      placeholder: '文件夹名称',
+    );
+    if (title == null) {
       return;
     }
     await _runBusy(() async {
-      final project = await _vault.createProject(
+      final folder = await _vault.createFolder(
+        parentPath: _creationParentPath(),
         title: title,
-        template: _newProjectTemplate,
       );
-      _projectTitleController.clear();
-      final loaded = await _vault.readProject(project.id);
+      final resources = await _vault.listResources();
       setState(() {
-        _projects = [project, ..._projects];
-        _activeProject = loaded;
+        _resources = resources;
+        _selectedResource = _findResource(resources, folder.id) ?? folder;
+        _narrowSection = _WorkspaceSection.resources;
+      });
+    });
+  }
+
+  Future<void> _createNote() async {
+    final title = await _promptResourceName(title: '新建笔记', placeholder: '笔记名称');
+    if (title == null) {
+      return;
+    }
+    await _runBusy(() async {
+      final note = await _vault.createNote(
+        parentPath: _creationParentPath(),
+        title: title,
+      );
+      final loaded = await _vault.readNote(note.id);
+      final resources = await _vault.listResources();
+      setState(() {
+        _resources = resources;
+        _selectedResource = _findResource(resources, note.id);
+        _activeNote = loaded;
         _markdownController.text = loaded.markdown;
         _proposals = const [];
         _selectedSourceIds.clear();
@@ -297,6 +339,65 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
         _narrowSection = _WorkspaceSection.notes;
       });
     });
+  }
+
+  String _creationParentPath() {
+    final selected = _selectedResource;
+    if (selected == null) {
+      return '';
+    }
+    if (selected.isFolder) {
+      return selected.path;
+    }
+    return _parentPath(selected.path);
+  }
+
+  Future<String?> _promptResourceName({
+    required String title,
+    required String placeholder,
+  }) async {
+    final controller = TextEditingController();
+    try {
+      return await showCupertinoDialog<String>(
+        context: context,
+        builder: (context) => CupertinoAlertDialog(
+          title: Text(title),
+          content: Padding(
+            padding: const EdgeInsets.only(top: 12),
+            child: CupertinoTextField(
+              key: const Key('resource-name-input'),
+              controller: controller,
+              autofocus: true,
+              placeholder: placeholder,
+              onSubmitted: (value) {
+                final trimmed = value.trim();
+                if (trimmed.isNotEmpty) {
+                  Navigator.of(context).pop(trimmed);
+                }
+              },
+            ),
+          ),
+          actions: [
+            CupertinoDialogAction(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('取消'),
+            ),
+            CupertinoDialogAction(
+              isDefaultAction: true,
+              onPressed: () {
+                final trimmed = controller.text.trim();
+                if (trimmed.isNotEmpty) {
+                  Navigator.of(context).pop(trimmed);
+                }
+              },
+              child: const Text('创建'),
+            ),
+          ],
+        ),
+      );
+    } finally {
+      controller.dispose();
+    }
   }
 
   Future<void> _chooseVault() async {
@@ -311,38 +412,39 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     _resetServices(createDefaultVaultBackend(rootPath: path));
     setState(() {
       _vaultLabel = path;
-      _activeProject = null;
-      _projects = const [];
+      _activeNote = null;
+      _selectedResource = null;
+      _resources = const [];
       _proposals = const [];
       _selectedSourceIds.clear();
       _markdownController.clear();
       _previewMarkdown = false;
-      _narrowSection = _WorkspaceSection.projects;
+      _narrowSection = _WorkspaceSection.resources;
     });
-    await _loadProjects();
+    await _loadResources();
   }
 
   Future<void> _saveMarkdown() async {
-    final active = _activeProject;
+    final active = _activeNote;
     if (active == null) {
       return;
     }
     await _runBusy(() async {
       final updated = await _vault.updateMarkdown(
-        projectId: active.id,
+        noteId: active.id,
         markdown: _markdownController.text,
       );
       setState(() {
-        _activeProject = updated;
+        _activeNote = updated;
         _message = '笔记已保存';
       });
     });
   }
 
   Future<void> _addImageSource() async {
-    final active = _activeProject;
+    final active = _activeNote;
     if (active == null) {
-      setState(() => _message = '请先选择或创建项目');
+      setState(() => _message = '请先选择或创建笔记');
       return;
     }
     final image = await _imageInput.pickImage();
@@ -354,9 +456,9 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   }
 
   Future<void> _pasteImageSource() async {
-    final active = _activeProject;
+    final active = _activeNote;
     if (active == null) {
-      setState(() => _message = '请先选择或创建项目');
+      setState(() => _message = '请先选择或创建笔记');
       return;
     }
     await _runBusy(() async {
@@ -378,19 +480,19 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     required String message,
     bool wrapBusy = true,
   }) async {
-    final active = _activeProject;
+    final active = _activeNote;
     if (active == null) {
-      setState(() => _message = '请先选择或创建项目');
+      setState(() => _message = '请先选择或创建笔记');
       return;
     }
     Future<void> save() async {
       final source = await _vault.addImageSource(
-        projectId: active.id,
+        noteId: active.id,
         filename: image.filename,
         mimeType: image.mimeType,
         bytes: image.bytes,
       );
-      await _refreshActiveProject();
+      await _refreshActiveNote();
       setState(() {
         _selectedSourceIds.add(source.id);
         _narrowSection = _WorkspaceSection.sources;
@@ -408,7 +510,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   }
 
   Future<void> _generateProposal() async {
-    final active = _activeProject;
+    final active = _activeNote;
     if (active == null || _selectedSourceIds.isEmpty) {
       return;
     }
@@ -417,10 +519,10 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     }
     await _runBusy(() async {
       await _proposalService.createOutlineProposal(
-        projectId: active.id,
+        noteId: active.id,
         sourceIds: _selectedSourceIds.toList(),
       );
-      await _refreshActiveProjectMetadata();
+      await _refreshActiveNoteMetadata();
       await _refreshProposals(active.id);
     });
   }
@@ -464,6 +566,85 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     return confirmed ?? false;
   }
 
+  Future<void> _deleteResource(VaultResourceNode resource) async {
+    final confirmed = await _confirmDelete(
+      title: resource.isFolder ? '删除文件夹' : '删除笔记',
+      message: resource.isFolder
+          ? '将递归删除“${resource.title}”及其中所有子文件夹、笔记和素材。此操作不可撤销。'
+          : '将删除“${resource.title}”的 Markdown 文件和对应 assets 目录。此操作不可撤销。',
+    );
+    if (!confirmed) {
+      return;
+    }
+    await _runBusy(() async {
+      if (resource.isFolder) {
+        await _vault.deleteFolder(resource.path);
+      } else {
+        await _vault.deleteNote(resource.id);
+      }
+      await _refreshAfterResourceDeleted(
+        deleted: resource,
+        message: resource.isFolder ? '文件夹已删除' : '笔记已删除',
+      );
+    });
+  }
+
+  Future<void> _refreshAfterResourceDeleted({
+    required VaultResourceNode deleted,
+    required String message,
+  }) async {
+    final resources = await _vault.listResources();
+    final activeId = _activeNote?.id;
+    final activeWasDeleted =
+        activeId != null && _resourceContainsNote(deleted, activeId);
+
+    if (activeWasDeleted) {
+      final firstNote = _firstNote(resources);
+      if (firstNote == null) {
+        setState(() {
+          _resources = resources;
+          _selectedResource = null;
+          _activeNote = null;
+          _markdownController.clear();
+          _proposals = const [];
+          _searchResults = const [];
+          _selectedSourceIds.clear();
+          _previewMarkdown = false;
+          _narrowSection = _WorkspaceSection.resources;
+          _message = message;
+        });
+        return;
+      }
+      final loaded = await _vault.readNote(firstNote.id);
+      final proposals = await _vault.listProposals(firstNote.id);
+      setState(() {
+        _resources = resources;
+        _selectedResource = _findResource(resources, firstNote.id) ?? firstNote;
+        _activeNote = loaded;
+        _markdownController.text = loaded.markdown;
+        _proposals = proposals;
+        _searchResults = const [];
+        _selectedSourceIds.clear();
+        _previewMarkdown = false;
+        _narrowSection = _WorkspaceSection.notes;
+        _message = message;
+      });
+      return;
+    }
+
+    final currentSelected = _selectedResource;
+    final selectedWasDeleted =
+        currentSelected != null &&
+        _resourceContainsResource(deleted, currentSelected);
+    setState(() {
+      _resources = resources;
+      _selectedResource = currentSelected == null || selectedWasDeleted
+          ? null
+          : _findResource(resources, currentSelected.id);
+      _message = message;
+    });
+  }
+
   Future<void> _deleteSource(SourceItem source) async {
     final confirmed = await _confirmDelete(
       title: '删除图片素材',
@@ -474,7 +655,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     }
     await _runBusy(() async {
       await _vault.deleteSource(source);
-      await _refreshActiveProject();
+      await _refreshActiveNote();
       setState(() {
         _selectedSourceIds.remove(source.id);
         _message = '图片素材已删除';
@@ -492,7 +673,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     }
     await _runBusy(() async {
       await _vault.deleteProposal(proposal.id);
-      final active = _activeProject;
+      final active = _activeNote;
       if (active != null) {
         await _refreshProposals(active.id);
       }
@@ -501,7 +682,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   }
 
   Future<void> _search() async {
-    final active = _activeProject;
+    final active = _activeNote;
     final query = _searchController.text.trim();
     if (active == null || query.isEmpty) {
       return;
@@ -509,11 +690,11 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     await _runBusy(() async {
       await _searchCache.indexDocument(
         id: active.id,
-        projectId: active.id,
+        noteId: active.id,
         title: active.title,
         text: _markdownController.text,
       );
-      final results = await _searchCache.search(query, projectId: active.id);
+      final results = await _searchCache.search(query, noteId: active.id);
       setState(() {
         _searchResults = results;
         if (!_semanticSearchEnabled) {
@@ -594,29 +775,6 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     });
   }
 
-  Future<void> _chooseTemplate() async {
-    final selected = await showCupertinoModalPopup<StudyTemplate>(
-      context: context,
-      builder: (context) => CupertinoActionSheet(
-        title: const Text('选择项目模板'),
-        actions: [
-          for (final template in StudyTemplate.values)
-            CupertinoActionSheetAction(
-              onPressed: () => Navigator.of(context).pop(template),
-              child: Text(template.label),
-            ),
-        ],
-        cancelButton: CupertinoActionSheetAction(
-          onPressed: () => Navigator.of(context).pop(),
-          child: const Text('取消'),
-        ),
-      ),
-    );
-    if (selected != null) {
-      setState(() => _newProjectTemplate = selected);
-    }
-  }
-
   @override
   Widget build(BuildContext context) {
     return CupertinoPageScaffold(
@@ -643,7 +801,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
                   return Row(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
-                      SizedBox(width: 292, child: _buildProjectPane()),
+                      SizedBox(width: 292, child: _buildResourcePane()),
                       Expanded(child: _buildEditorPane()),
                       SizedBox(width: 380, child: _buildSourcePane()),
                     ],
@@ -684,7 +842,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
         ),
         Expanded(
           child: switch (_narrowSection) {
-            _WorkspaceSection.projects => _buildProjectPane(),
+            _WorkspaceSection.resources => _buildResourcePane(),
             _WorkspaceSection.notes => _buildEditorPane(),
             _WorkspaceSection.sources => _buildSourcePane(),
           },
@@ -693,63 +851,48 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     );
   }
 
-  Widget _buildProjectPane() {
+  Widget _buildResourcePane() {
     return _Pane(
-      key: const Key('project-pane'),
-      title: '项目',
+      key: const Key('resource-pane'),
+      title: '资源',
       icon: CupertinoIcons.folder,
       child: Column(
         children: [
           Row(
+            mainAxisAlignment: MainAxisAlignment.end,
             children: [
-              Expanded(
-                child: _CupertinoField(
-                  key: const Key('project-title-input'),
-                  controller: _projectTitleController,
-                  placeholder: '新学习项目',
-                  onSubmitted: (_) => _createProject(),
-                ),
-              ),
-              const SizedBox(width: 8),
-              _PillButton(
-                key: const Key('project-template-button'),
-                label: _newProjectTemplate.label,
-                icon: CupertinoIcons.square_grid_2x2,
-                onPressed: _chooseTemplate,
-              ),
-              const SizedBox(width: 8),
               _IconAction(
-                key: const Key('create-project-button'),
-                label: '创建项目',
-                icon: CupertinoIcons.add,
-                onPressed: _busy ? null : _createProject,
+                key: const Key('new-folder-button'),
+                label: '新建文件夹',
+                icon: CupertinoIcons.folder_badge_plus,
+                onPressed: _busy ? null : _createFolder,
+              ),
+              const SizedBox(width: 6),
+              _IconAction(
+                key: const Key('new-note-button'),
+                label: '新建笔记',
+                icon: CupertinoIcons.square_pencil,
+                onPressed: _busy ? null : _createNote,
               ),
             ],
           ),
           const SizedBox(height: 12),
           Expanded(
             flex: 2,
-            child: _projects.isEmpty
-                ? const _EmptyState(text: '暂无项目')
-                : ListView.separated(
-                    itemCount: _projects.length,
-                    separatorBuilder: (_, _) => const SizedBox(height: 8),
-                    itemBuilder: (context, index) {
-                      final project = _projects[index];
-                      return _ProjectRow(
-                        project: project,
-                        selected: project.id == _activeProject?.id,
-                        onTap: () => _selectProject(project),
-                      );
-                    },
-                  ),
+            child: _ResourceTree(
+              nodes: _resources,
+              selectedId: _selectedResource?.id,
+              onSelectRoot: _selectVaultRoot,
+              onSelect: _selectResource,
+              onDelete: _deleteResource,
+            ),
           ),
           const _SectionDivider(),
           const _PaneSubheading('大纲'),
           const SizedBox(height: 8),
           Expanded(
             flex: 3,
-            child: _OutlineTree(nodes: _activeProject?.outline ?? const []),
+            child: _OutlineTree(nodes: _activeNote?.outline ?? const []),
           ),
         ],
       ),
@@ -789,7 +932,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
             key: const Key('save-note-button'),
             label: '保存笔记',
             icon: CupertinoIcons.tray_arrow_down,
-            onPressed: _activeProject == null || _busy ? null : _saveMarkdown,
+            onPressed: _activeNote == null || _busy ? null : _saveMarkdown,
           ),
         ],
       ),
@@ -798,6 +941,10 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   }
 
   Widget _buildMarkdownPreview() {
+    final markdown = MarkdownDocument.parse(_markdownController.text).body;
+    final baseStyle = MarkdownStyleSheet.fromCupertinoTheme(
+      CupertinoTheme.of(context),
+    );
     return DecoratedBox(
       decoration: BoxDecoration(
         color: _surface,
@@ -805,10 +952,31 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
         borderRadius: _radius,
       ),
       child: Markdown(
-        data: _markdownController.text,
+        data: markdown,
         selectable: true,
         softLineBreak: true,
         styleSheetTheme: MarkdownStyleSheetBaseTheme.cupertino,
+        styleSheet: baseStyle.copyWith(
+          p: const TextStyle(fontSize: 14, height: 1.55, color: _text),
+          h1: const TextStyle(
+            fontSize: 20,
+            fontWeight: FontWeight.w600,
+            height: 1.35,
+            color: _text,
+          ),
+          h2: const TextStyle(
+            fontSize: 17,
+            fontWeight: FontWeight.w600,
+            height: 1.4,
+            color: _text,
+          ),
+          h3: const TextStyle(
+            fontSize: 15,
+            fontWeight: FontWeight.w600,
+            height: 1.45,
+            color: _text,
+          ),
+        ),
         padding: const EdgeInsets.all(16),
       ),
     );
@@ -818,14 +986,14 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     return CupertinoTextField(
       key: const Key('note-editor'),
       controller: _markdownController,
-      enabled: _activeProject != null,
+      enabled: _activeNote != null,
       readOnly: false,
       textAlignVertical: TextAlignVertical.top,
       expands: true,
       minLines: null,
       maxLines: null,
       padding: const EdgeInsets.all(16),
-      placeholder: '选择或创建项目后开始整理 Markdown',
+      placeholder: '选择或创建笔记后开始整理 Markdown',
       placeholderStyle: const TextStyle(color: _muted),
       style: const TextStyle(
         fontFamily: 'monospace',
@@ -841,7 +1009,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   }
 
   Widget _buildSourcePane() {
-    final sources = (_activeProject?.sources ?? const <SourceItem>[])
+    final sources = (_activeNote?.sources ?? const <SourceItem>[])
         .where((source) => source.type == SourceType.image)
         .toList();
     return _Pane(
@@ -980,6 +1148,54 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
 
 class _PasteImageIntent extends Intent {
   const _PasteImageIntent();
+}
+
+VaultResourceNode? _firstNote(List<VaultResourceNode> nodes) {
+  for (final node in nodes) {
+    if (node.isNote) {
+      return node;
+    }
+    final child = _firstNote(node.children);
+    if (child != null) {
+      return child;
+    }
+  }
+  return null;
+}
+
+VaultResourceNode? _findResource(List<VaultResourceNode> nodes, String id) {
+  for (final node in nodes) {
+    if (node.id == id) {
+      return node;
+    }
+    final child = _findResource(node.children, id);
+    if (child != null) {
+      return child;
+    }
+  }
+  return null;
+}
+
+String _parentPath(String path) {
+  final index = path.lastIndexOf('/');
+  return index < 0 ? '' : path.substring(0, index);
+}
+
+bool _resourceContainsNote(VaultResourceNode resource, String noteId) {
+  if (resource.isNote) {
+    return resource.id == noteId;
+  }
+  return noteId.startsWith('${resource.path}/');
+}
+
+bool _resourceContainsResource(
+  VaultResourceNode parent,
+  VaultResourceNode child,
+) {
+  if (parent.isNote) {
+    return parent.id == child.id;
+  }
+  return child.path == parent.path || child.path.startsWith('${parent.path}/');
 }
 
 class _Pane extends StatelessWidget {
@@ -1198,13 +1414,11 @@ class _CupertinoField extends StatelessWidget {
     super.key,
     required this.controller,
     required this.placeholder,
-    this.onSubmitted,
     this.obscureText = false,
   });
 
   final TextEditingController controller;
   final String placeholder;
-  final ValueChanged<String>? onSubmitted;
   final bool obscureText;
 
   @override
@@ -1215,7 +1429,6 @@ class _CupertinoField extends StatelessWidget {
       obscureText: obscureText,
       enableSuggestions: !obscureText,
       autocorrect: false,
-      onSubmitted: onSubmitted,
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
       decoration: BoxDecoration(
         color: _surface,
@@ -1226,57 +1439,168 @@ class _CupertinoField extends StatelessWidget {
   }
 }
 
-class _ProjectRow extends StatelessWidget {
-  const _ProjectRow({
-    required this.project,
-    required this.selected,
-    required this.onTap,
+class _ResourceTree extends StatelessWidget {
+  const _ResourceTree({
+    required this.nodes,
+    required this.selectedId,
+    required this.onSelectRoot,
+    required this.onSelect,
+    required this.onDelete,
   });
 
-  final Project project;
+  final List<VaultResourceNode> nodes;
+  final String? selectedId;
+  final VoidCallback onSelectRoot;
+  final ValueChanged<VaultResourceNode> onSelect;
+  final ValueChanged<VaultResourceNode> onDelete;
+
+  @override
+  Widget build(BuildContext context) {
+    return ListView(
+      padding: EdgeInsets.zero,
+      children: [
+        _VaultRootRow(selected: selectedId == null, onTap: onSelectRoot),
+        const SizedBox(height: 6),
+        if (nodes.isEmpty)
+          const Padding(
+            padding: EdgeInsets.symmetric(vertical: 18),
+            child: _EmptyState(text: '暂无资源'),
+          ),
+        for (final node in nodes) ..._buildNode(context, node: node, depth: 0),
+      ],
+    );
+  }
+
+  List<Widget> _buildNode(
+    BuildContext context, {
+    required VaultResourceNode node,
+    required int depth,
+  }) {
+    return [
+      _ResourceRow(
+        node: node,
+        depth: depth,
+        selected: node.id == selectedId,
+        onTap: () => onSelect(node),
+        onDelete: () => onDelete(node),
+      ),
+      for (final child in node.children)
+        ..._buildNode(context, node: child, depth: depth + 1),
+    ];
+  }
+}
+
+class _VaultRootRow extends StatelessWidget {
+  const _VaultRootRow({required this.selected, required this.onTap});
+
   final bool selected;
   final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
-      behavior: HitTestBehavior.opaque,
+    return _ResourceRowShell(
+      key: const Key('vault-root-row'),
+      depth: 0,
+      selected: selected,
       onTap: onTap,
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 160),
-        padding: const EdgeInsets.all(10),
-        decoration: BoxDecoration(
-          color: selected ? const Color(0xFFE8F2FF) : _surface,
-          border: Border.all(color: selected ? _primary : _softLine),
-          borderRadius: _radius,
-        ),
-        child: Row(
-          children: [
-            Icon(
-              CupertinoIcons.doc_text,
-              size: 18,
-              color: selected ? _primary : _muted,
+      child: const Row(
+        children: [
+          Icon(CupertinoIcons.archivebox, size: 18, color: _muted),
+          SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              'Vault 根目录',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(fontWeight: FontWeight.w700),
             ),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    project.title,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(fontWeight: FontWeight.w600),
-                  ),
-                  const SizedBox(height: 2),
-                  Text(
-                    project.template.label,
-                    style: const TextStyle(fontSize: 12, color: _muted),
-                  ),
-                ],
-              ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ResourceRow extends StatelessWidget {
+  const _ResourceRow({
+    required this.node,
+    required this.depth,
+    required this.selected,
+    required this.onTap,
+    required this.onDelete,
+  });
+
+  final VaultResourceNode node;
+  final int depth;
+  final bool selected;
+  final VoidCallback onTap;
+  final VoidCallback onDelete;
+
+  @override
+  Widget build(BuildContext context) {
+    return _ResourceRowShell(
+      depth: depth,
+      selected: selected,
+      onTap: onTap,
+      child: Row(
+        children: [
+          Icon(
+            node.isFolder ? CupertinoIcons.folder : CupertinoIcons.doc_text,
+            size: 18,
+            color: selected ? _primary : _muted,
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              node.title,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontWeight: FontWeight.w600),
             ),
-          ],
+          ),
+          _IconAction(
+            key: Key('delete-resource-${node.id}'),
+            label: node.isFolder ? '删除文件夹' : '删除笔记',
+            icon: CupertinoIcons.trash,
+            onPressed: onDelete,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ResourceRowShell extends StatelessWidget {
+  const _ResourceRowShell({
+    super.key,
+    required this.depth,
+    required this.selected,
+    required this.onTap,
+    required this.child,
+  });
+
+  final int depth;
+  final bool selected;
+  final VoidCallback onTap;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 6),
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: onTap,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 160),
+          height: 38,
+          padding: EdgeInsets.only(left: 8 + depth * 16, right: 8),
+          decoration: BoxDecoration(
+            color: selected ? const Color(0xFFE8F2FF) : _surface,
+            border: Border.all(color: selected ? _primary : _softLine),
+            borderRadius: _radius,
+          ),
+          child: child,
         ),
       ),
     );
@@ -1999,7 +2323,6 @@ class _SecondaryButton extends StatelessWidget {
 
 class _PillButton extends StatelessWidget {
   const _PillButton({
-    super.key,
     required this.label,
     required this.icon,
     required this.onPressed,
@@ -2056,17 +2379,20 @@ class _IconAction extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Semantics(
-      label: label,
-      button: true,
-      child: CupertinoButton(
-        minimumSize: const Size.square(34),
-        padding: EdgeInsets.zero,
-        onPressed: onPressed,
-        child: SizedBox(
-          width: 34,
-          height: 34,
-          child: Center(child: Icon(icon, size: 18)),
+    return Tooltip(
+      message: label,
+      child: Semantics(
+        label: label,
+        button: true,
+        child: CupertinoButton(
+          minimumSize: const Size.square(34),
+          padding: EdgeInsets.zero,
+          onPressed: onPressed,
+          child: SizedBox(
+            width: 34,
+            height: 34,
+            child: Center(child: Icon(icon, size: 18)),
+          ),
         ),
       ),
     );

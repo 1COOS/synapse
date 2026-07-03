@@ -1,8 +1,8 @@
-import '../../domain/study/project.dart';
+import '../../domain/vault/vault_resource.dart';
 
 abstract class AiProvider {
   Future<String> createOutlineProposal({
-    required String projectTitle,
+    required String noteTitle,
     required String currentMarkdown,
     required List<SourceItem> sources,
   });

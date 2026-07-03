@@ -1,4 +1,4 @@
-import '../../domain/study/project.dart';
+import '../../domain/vault/vault_resource.dart';
 
 abstract class ProviderConfigStore {
   bool get supportsSecureApiKey;

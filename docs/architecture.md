@@ -49,8 +49,8 @@ lib/
   domain/
     markdown/
       markdown_document.dart
-    study/
-      project.dart
+    vault/
+      vault_resource.dart
   infrastructure/
     ai/
       ai_provider.dart
@@ -76,8 +76,8 @@ test/
 
 `domain` 不依赖 Flutter UI 和平台文件系统。它定义核心模型和 Markdown 规则：
 
-- `Project`：学习项目摘要。
-- `ProjectContent`：项目摘要 + Markdown + 大纲 + 素材。
+- `VaultResourceNode`：资源树节点，表示文件夹或普通 Markdown 笔记。
+- `VaultNote` / `VaultNoteContent`：笔记摘要、Markdown、大纲和素材。
 - `SourceItem`：导入素材。
 - `OutlineNode`：由 Markdown 标题派生的大纲节点。
 - `AiProposal`：AI 建议。
@@ -88,7 +88,7 @@ test/
 
 `application` 负责用例编排，不直接关心 UI。当前有 `ProposalService`：
 
-- 读取项目和素材。
+- 读取当前笔记和素材。
 - 调用 `AiProvider.createOutlineProposal`。
 - 保存 `AiProposal`。
 - 用户确认后把 proposal 追加写入 Markdown。
@@ -117,7 +117,7 @@ test/
 当前 presentation 主要在 `main.dart`：
 
 - 顶栏：Vault 选择、搜索、状态消息。
-- 左栏：项目创建、项目列表、大纲树。
+- 左栏：新建文件夹、新建笔记、资源树、大纲树。
 - 中栏：Markdown 编辑和预览。
 - 右栏：素材录入、图片导入、proposal 列表和确认写入。
 
@@ -127,7 +127,7 @@ test/
 lib/presentation/workspace/
   synapse_workspace.dart
   workspace_controller.dart
-  project_pane.dart
+  resource_pane.dart
   editor_pane.dart
   source_pane.dart
   outline_tree.dart
@@ -136,14 +136,12 @@ lib/presentation/workspace/
 
 ## 5. 核心数据模型
 
-### 5.1 `StudyTemplate`
+### 5.1 `VaultResourceType`
 
 | 值 | 说明 |
 | --- | --- |
-| `scripture` | 经文学习 |
-| `book` | 书籍学习 |
-| `subject` | 学科学习 |
-| `custom` | 自定义主题 |
+| `folder` | Vault 文件夹 |
+| `note` | 普通 Markdown 笔记 |
 
 ### 5.2 `SourceType`
 
@@ -179,16 +177,18 @@ lib/presentation/workspace/
 
 ```text
 <vault-root>/
-  <project-title>/
-    index.md
+  读书/
+    心经.md
+    心经.assets/
+      attachments/
+        image-name-uuid.png
+      sources.json
+      proposals.json
+  笔记.md
+  笔记.assets/
     attachments/
       image-name-uuid.png
-    sources/
-      excerpt-title-source-id.md
-    .synapse/
-      sources.json
   .synapse-cache/
-    proposals.json
     search.sqlite
 ```
 
@@ -196,31 +196,30 @@ lib/presentation/workspace/
 
 | 路径 | 类型 | 是否真源 | 说明 |
 | --- | --- | --- | --- |
-| `<project>/index.md` | Markdown | 是 | 项目主笔记 |
-| `<project>/attachments/` | 文件 | 是 | 图片等附件 |
-| `<project>/sources/*.md` | Markdown | 是 | 文本素材原文 |
-| `<project>/.synapse/sources.json` | JSON | 过渡元数据 | 当前用于快速列出素材，后续应可从 `sources/` 和 `attachments/` 重建 |
-| `<vault>/.synapse-cache/proposals.json` | JSON | 否 | proposal 缓存和状态 |
+| `<folder>/<note>.md` | Markdown | 是 | 用户主笔记 |
+| `<note>.assets/attachments/` | 文件 | 是 | 图片等附件 |
+| `<note>.assets/sources.json` | JSON | 过渡元数据 | 当前用于快速列出素材，后续应可从附件和 Markdown 重建 |
+| `<note>.assets/proposals.json` | JSON | 否 | 当前笔记的 proposal 缓存和状态 |
 | `<vault>/.synapse-cache/search.sqlite` | SQLite | 否 | 搜索与 embedding 缓存 |
 
-### 6.3 `index.md` frontmatter
+### 6.3 笔记 frontmatter
 
-当前项目主笔记使用以下 frontmatter：
+当前普通 Markdown 笔记使用以下 frontmatter：
 
 ```yaml
 ---
-id: project-uuid
-title: 项目标题
-template: subject
-createdAt: 2026-07-01T00:00:00.000Z
-updatedAt: 2026-07-01T00:00:00.000Z
+title: 笔记标题
+createdAt: 2026-07-01 08:00
+updatedAt: 2026-07-01 08:00
 ---
 ```
+
+笔记 id 使用相对 Vault 的 Markdown 路径，例如 `读书/心经.md`。内部 id 不写入用户可见 Markdown。
 
 正文使用 Markdown 标题表达大纲：
 
 ```markdown
-# 项目标题
+# 笔记标题
 
 ## 学习框架
 
@@ -243,7 +242,7 @@ updatedAt: 2026-07-01T00:00:00.000Z
 
 ### 6.5 附件路径规则
 
-图片导入时写入项目内 `attachments/` 目录。保存到 `SourceItem.attachmentPath` 的路径使用 `/`，并保持相对路径：
+图片导入时写入当前笔记的同名 `.assets/attachments/` 目录。保存到 `SourceItem.attachmentPath` 的路径使用 `/`，并保持相对 assets 根目录：
 
 ```text
 attachments/filename-uuid.png
@@ -270,17 +269,21 @@ export 'default_vault_backend_web.dart'
 
 - 默认 Vault 是当前工作目录下的 `vault/`。
 - 用户可以通过 `file_selector` 选择 Vault 目录。
-- 创建项目时写入真实文件和目录。
-- 图片会复制到项目 `attachments/`。
+- 创建文件夹时写入真实目录。
+- 创建笔记时写入普通 `.md` 文件。
+- 图片会复制到同名 `.assets/attachments/`。
+- 删除笔记时删除 `.md` 和同名 `.assets/`。
+- 删除文件夹时递归删除该目录内所有子资源；禁止删除 Vault 根目录。
 
 ### 7.3 Web/H5
 
 Web/H5 使用 `MemoryVaultBackend`：
 
-- 启动时注入示例项目「心经学习」。
+- 启动时注入示例笔记「心经学习」。
 - 数据保存在内存中，刷新后重置。
 - 不尝试直接读写本机 Vault。
 - 默认适合 UI 预览、流程演示和 widget 调试。
+- 删除操作会同步清理内存中的笔记、素材、附件 bytes 和 proposal。
 
 ## 8. AI Provider 设计
 
@@ -291,7 +294,7 @@ Web/H5 使用 `MemoryVaultBackend`：
 ```dart
 abstract class AiProvider {
   Future<String> createOutlineProposal({
-    required String projectTitle,
+    required String noteTitle,
     required String currentMarkdown,
     required List<SourceItem> sources,
   });
@@ -348,16 +351,16 @@ sequenceDiagram
     participant AI as AiProvider
 
     U->>UI: 选择素材并点击生成建议
-    UI->>PS: createOutlineProposal(projectId, sourceIds)
-    PS->>V: readProject(projectId)
-    PS->>V: getSources(projectId, sourceIds)
+    UI->>PS: createOutlineProposal(noteId, sourceIds)
+    PS->>V: readNote(noteId)
+    PS->>V: getSources(noteId, sourceIds)
     PS->>AI: createOutlineProposal(...)
     AI-->>PS: proposedMarkdown
     PS->>V: saveProposal(proposal)
     V-->>UI: pending proposal
     U->>UI: 点击写入笔记
     UI->>PS: applyProposal(proposalId)
-    PS->>V: appendMarkdown(projectId, proposedMarkdown)
+    PS->>V: appendMarkdown(noteId, proposedMarkdown)
     PS->>V: updateProposal(applied)
 ```
 
@@ -376,7 +379,7 @@ sequenceDiagram
 ```json
 {
   "id": "proposal-id",
-  "projectId": "project-id",
+  "noteId": "读书/心经.md",
   "sourceIds": ["source-id"],
   "status": "pending",
   "changes": [
@@ -402,15 +405,15 @@ sequenceDiagram
 
 UI 当前使用 `MemorySearchCache`：
 
-- 保存当前项目 Markdown 的索引。
+- 保存当前笔记 Markdown 的索引。
 - 搜索时同时计算全文分数和语义分数。
 - 语义分数来自 `MockAiProvider.createEmbedding`。
 
 `SqliteSearchCache` 已实现：
 
 - SQLite 表 `documents`。
-- 保存 `id`、`project_id`、`title`、`body`、`embedding_json`、`updated_at`。
-- 支持按项目搜索。
+- 保存 `id`、`note_id`、`title`、`body`、`embedding_json`、`updated_at`。
+- 支持按笔记搜索。
 - 有独立测试覆盖。
 
 ### 10.2 目标搜索架构
@@ -439,7 +442,7 @@ Markdown / Source / Attachment
 
 ### 11.1 文件系统边界
 
-桌面端所有项目读写都应限制在用户选择的 Vault 根目录内。当前 `FileVaultBackend` 通过从根目录列出项目进行访问，后续新增任何按路径读取的 API 时必须增加路径穿越检查：
+桌面端所有笔记和资源读写都应限制在用户选择的 Vault 根目录内。当前 `FileVaultBackend` 通过递归列出资源树进行访问，任何按路径读取的 API 都必须增加路径穿越检查：
 
 - 解析真实路径。
 - 确认目标路径仍在 Vault root 下。

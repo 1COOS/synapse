@@ -1,5 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:synapse/domain/study/project.dart';
+import 'package:synapse/domain/vault/vault_resource.dart';
 
 void main() {
   test('serializes provider config and keeps api key optional', () {

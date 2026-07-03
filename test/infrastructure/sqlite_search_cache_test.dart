@@ -25,12 +25,12 @@ void main() {
     );
     await cache.indexDocument(
       id: 'doc-1',
-      projectId: 'project-1',
+      noteId: 'note-1.md',
       title: '慈悲实践',
       text: '布施、怜悯与利他行动',
     );
 
-    final results = await cache.search('慈悲的实践', projectId: 'project-1');
+    final results = await cache.search('慈悲的实践', noteId: 'note-1.md');
 
     expect(results.first.id, 'doc-1');
     expect(results.first.reasons, contains(SearchMatchReason.semantic));

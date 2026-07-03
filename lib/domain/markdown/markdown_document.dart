@@ -1,6 +1,6 @@
 import 'package:yaml/yaml.dart';
 
-import '../study/project.dart';
+import '../vault/vault_resource.dart';
 
 class MarkdownDocument {
   const MarkdownDocument({required this.frontmatter, required this.body});
@@ -36,6 +36,17 @@ class MarkdownDocument {
     buffer.write(body.trimLeft());
     return buffer.toString();
   }
+}
+
+String formatMarkdownTimestamp(DateTime value) {
+  final local = value.toLocal();
+  String twoDigits(int number) => number.toString().padLeft(2, '0');
+  final year = local.year.toString().padLeft(4, '0');
+  final month = twoDigits(local.month);
+  final day = twoDigits(local.day);
+  final hour = twoDigits(local.hour);
+  final minute = twoDigits(local.minute);
+  return '$year-$month-$day $hour:$minute';
 }
 
 List<OutlineNode> extractOutline(String markdown) {

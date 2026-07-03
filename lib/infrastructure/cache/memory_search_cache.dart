@@ -7,7 +7,7 @@ enum SearchMatchReason { fullText, semantic }
 class SearchResult {
   const SearchResult({
     required this.id,
-    required this.projectId,
+    required this.noteId,
     required this.title,
     required this.text,
     required this.score,
@@ -15,7 +15,7 @@ class SearchResult {
   });
 
   final String id;
-  final String projectId;
+  final String noteId;
   final String title;
   final String text;
   final double score;
@@ -31,7 +31,7 @@ class MemorySearchCache {
 
   Future<void> indexDocument({
     required String id,
-    required String projectId,
+    required String noteId,
     required String title,
     required String text,
   }) async {
@@ -42,7 +42,7 @@ class MemorySearchCache {
     _documents.add(
       _IndexedDocument(
         id: id,
-        projectId: projectId,
+        noteId: noteId,
         title: title,
         text: text,
         embedding: embedding,
@@ -50,16 +50,13 @@ class MemorySearchCache {
     );
   }
 
-  Future<List<SearchResult>> search(String query, {String? projectId}) async {
+  Future<List<SearchResult>> search(String query, {String? noteId}) async {
     final queryEmbedding = semanticSearchEnabled
         ? await aiProvider.createEmbedding(query)
         : null;
     final results =
         _documents
-            .where(
-              (document) =>
-                  projectId == null || document.projectId == projectId,
-            )
+            .where((document) => noteId == null || document.noteId == noteId)
             .map((document) {
               final haystack = '${document.title}\n${document.text}';
               final fullTextScore = haystack.contains(query)
@@ -78,7 +75,7 @@ class MemorySearchCache {
               }
               return SearchResult(
                 id: document.id,
-                projectId: document.projectId,
+                noteId: document.noteId,
                 title: document.title,
                 text: document.text,
                 score: fullTextScore + semanticScore,
@@ -95,14 +92,14 @@ class MemorySearchCache {
 class _IndexedDocument {
   const _IndexedDocument({
     required this.id,
-    required this.projectId,
+    required this.noteId,
     required this.title,
     required this.text,
     required this.embedding,
   });
 
   final String id;
-  final String projectId;
+  final String noteId;
   final String title;
   final String text;
   final List<double>? embedding;
