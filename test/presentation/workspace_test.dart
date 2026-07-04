@@ -344,6 +344,7 @@ void main() {
         return rootPath == firstPath ? firstVault : secondVault;
       },
     );
+    await _switchToSourceMode(tester);
     await tester.enterText(
       find.byKey(const Key('note-editor')),
       '# First\nchanged',
@@ -378,6 +379,7 @@ void main() {
         return rootPath == '/vault/first' ? firstVault : secondVault;
       },
     );
+    await _switchToSourceMode(tester);
     await tester.enterText(
       find.byKey(const Key('note-editor')),
       '# First\nchanged',
@@ -399,6 +401,7 @@ void main() {
     final vault = _CountingUpdateVaultBackend();
 
     await _pumpWorkspace(tester, vault: vault);
+    await _switchToSourceMode(tester);
     await tester.enterText(
       find.byKey(const Key('note-editor')),
       '# 心经学习\n自动保存内容',
@@ -423,6 +426,7 @@ void main() {
     await vault.createNote(parentPath: '', title: 'Draft');
 
     await _pumpWorkspace(tester, vault: vault);
+    await _switchToSourceMode(tester);
     await tester.enterText(
       find.byKey(const Key('note-editor')),
       '# Draft\nfirst',
@@ -450,6 +454,7 @@ void main() {
     await vault.createNote(parentPath: '', title: 'Second');
 
     await _pumpWorkspace(tester, vault: vault);
+    await _switchToSourceMode(tester);
     await tester.enterText(
       find.byKey(const Key('note-editor')),
       '# First\nchanged',
@@ -473,6 +478,7 @@ void main() {
     await vault.createNote(parentPath: '', title: 'Second');
 
     await _pumpWorkspace(tester, vault: vault);
+    await _switchToSourceMode(tester);
     await tester.enterText(
       find.byKey(const Key('note-editor')),
       '# First\nchanged before switch',
@@ -486,6 +492,9 @@ void main() {
       (await vault.readNote('First.md')).markdown,
       contains('changed before switch'),
     );
+    expect(find.byType(Markdown), findsOneWidget);
+    expect(find.byKey(const Key('note-editor')), findsNothing);
+    await _switchToSourceMode(tester);
     final noteEditor = tester.widget<CupertinoTextField>(
       find.byKey(const Key('note-editor')),
     );
@@ -496,6 +505,7 @@ void main() {
     final vault = _CountingUpdateVaultBackend();
 
     await _pumpWorkspace(tester, vault: vault);
+    await _switchToSourceMode(tester);
     await tester.enterText(
       find.byKey(const Key('note-editor')),
       '# 心经学习\nmanual save wins',
@@ -524,8 +534,10 @@ void main() {
     expect(find.text('笔记'), findsOneWidget);
     expect(find.text('素材'), findsOneWidget);
     expect(find.text('AI 建议'), findsOneWidget);
-    expect(find.text('编辑'), findsOneWidget);
-    expect(find.text('预览'), findsOneWidget);
+    expect(find.text('阅读'), findsOneWidget);
+    expect(find.text('源码'), findsOneWidget);
+    expect(find.text('编辑'), findsNothing);
+    expect(find.text('预览'), findsNothing);
     expect(find.byKey(const Key('settings-button')), findsOneWidget);
     expect(find.byKey(const Key('new-folder-button')), findsOneWidget);
     expect(find.byKey(const Key('new-note-button')), findsOneWidget);
@@ -770,6 +782,9 @@ void main() {
 
       expect(() => vault.readNote(first.id), throwsA(isA<StateError>()));
       expect((await vault.readNote(second.id)).title, 'Beta');
+      expect(find.byType(Markdown), findsOneWidget);
+      expect(find.byKey(const Key('note-editor')), findsNothing);
+      await _switchToSourceMode(tester);
       final noteEditor = tester.widget<CupertinoTextField>(
         find.byKey(const Key('note-editor')),
       );
@@ -879,6 +894,7 @@ void main() {
       final remaining = await vault.createNote(parentPath: '', title: '其他');
 
       await _pumpWorkspace(tester, vault: vault);
+      await _switchToSourceMode(tester);
       final beforeDelete = tester.widget<CupertinoTextField>(
         find.byKey(const Key('note-editor')),
       );
@@ -897,6 +913,9 @@ void main() {
       expect(() => vault.readNote(nested.id), throwsA(isA<StateError>()));
       expect((await vault.readNote(remaining.id)).title, '其他');
       expect((await vault.listResources()).single.title, '其他');
+      expect(find.byType(Markdown), findsOneWidget);
+      expect(find.byKey(const Key('note-editor')), findsNothing);
+      await _switchToSourceMode(tester);
       final afterDelete = tester.widget<CupertinoTextField>(
         find.byKey(const Key('note-editor')),
       );
@@ -905,23 +924,26 @@ void main() {
     },
   );
 
-  testWidgets('switches the note pane between edit and preview modes', (
+  testWidgets('defaults to reading mode and switches to editable source mode', (
     tester,
   ) async {
     await _pumpWorkspace(tester, vault: MemoryVaultBackend());
 
-    expect(find.byKey(const Key('note-editor')), findsOneWidget);
-    expect(find.byType(Markdown), findsNothing);
-
-    await tester.tap(find.byKey(const Key('note-mode-preview')));
-    await tester.pump(const Duration(milliseconds: 250));
-
+    expect(find.byKey(const Key('note-mode-reading')), findsOneWidget);
+    expect(find.byKey(const Key('note-mode-source')), findsOneWidget);
     expect(find.byKey(const Key('note-editor')), findsNothing);
     expect(find.byType(Markdown), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('note-mode-source')));
+    await tester.pump(const Duration(milliseconds: 250));
+
+    expect(find.byKey(const Key('note-editor')), findsOneWidget);
+    expect(find.byType(Markdown), findsNothing);
   });
 
   testWidgets('keeps the note editor editable and top aligned', (tester) async {
     await _pumpWorkspace(tester, vault: MemoryVaultBackend());
+    await _switchToSourceMode(tester);
 
     final noteEditorFinder = find.byKey(const Key('note-editor'));
     final noteEditor = tester.widget<CupertinoTextField>(noteEditorFinder);
@@ -940,9 +962,6 @@ void main() {
     tester,
   ) async {
     await _pumpWorkspace(tester, vault: MemoryVaultBackend());
-
-    await tester.tap(find.byKey(const Key('note-mode-preview')));
-    await tester.pump(const Duration(milliseconds: 250));
 
     final markdown = tester.widget<Markdown>(find.byType(Markdown));
     expect(markdown.softLineBreak, isTrue);
@@ -967,6 +986,7 @@ void main() {
     );
 
     await _pumpWorkspace(tester, vault: vault, imageInput: imageInput);
+    await _switchToSourceMode(tester);
     await tester.enterText(find.byKey(const Key('note-editor')), '# 心经学习\n正文');
     await tester.sendKeyDownEvent(LogicalKeyboardKey.metaLeft);
     await tester.sendKeyDownEvent(LogicalKeyboardKey.keyV);
@@ -993,6 +1013,7 @@ void main() {
     _mockClipboardText('普通剪贴板文本');
 
     await _pumpWorkspace(tester, vault: vault, imageInput: imageInput);
+    await _switchToSourceMode(tester);
     await tester.enterText(find.byKey(const Key('note-editor')), '# 心经学习\n');
     await tester.sendKeyDownEvent(LogicalKeyboardKey.metaLeft);
     await tester.sendKeyDownEvent(LogicalKeyboardKey.keyV);
@@ -1027,6 +1048,7 @@ void main() {
       vault: MemoryVaultBackend(seedExampleData: false),
       imageInput: imageInput,
     );
+    await _switchToSourceMode(tester);
     await tester.tap(find.byKey(const Key('note-editor-paste-target')));
     await tester.pump();
     await tester.sendKeyDownEvent(LogicalKeyboardKey.metaLeft);
@@ -1057,7 +1079,6 @@ void main() {
     );
 
     await _pumpWorkspace(tester, vault: vault);
-    await tester.tap(find.byKey(const Key('note-mode-preview')));
     await tester.pumpAndSettle();
 
     final previewImage = find.byKey(Key('preview-image-${source.id}'));
@@ -1088,7 +1109,6 @@ void main() {
     );
 
     await _pumpWorkspace(tester, vault: vault);
-    await tester.tap(find.byKey(const Key('note-mode-preview')));
     await tester.pumpAndSettle();
 
     expect(find.byKey(Key('preview-image-${source.id}')), findsOneWidget);
@@ -1114,7 +1134,6 @@ void main() {
     );
 
     await _pumpWorkspace(tester, vault: vault);
-    await tester.tap(find.byKey(const Key('note-mode-preview')));
     await tester.pumpAndSettle();
 
     expect(find.byKey(Key('preview-image-${source.id}')), findsOneWidget);
@@ -1184,7 +1203,6 @@ void main() {
     vault.lastSavedMarkdown = null;
 
     await _pumpWorkspace(tester, vault: vault);
-    await tester.tap(find.byKey(const Key('note-mode-preview')));
     await tester.pumpAndSettle();
     final previewImage = find.byKey(Key('preview-image-${source.id}'));
     expect(previewImage, findsOneWidget);
@@ -1225,7 +1243,6 @@ void main() {
     vault.lastSavedMarkdown = null;
 
     await _pumpWorkspace(tester, vault: vault);
-    await tester.tap(find.byKey(const Key('note-mode-preview')));
     await tester.pumpAndSettle();
 
     final handle = find.byKey(Key('image-resize-handle-${source.id}'));
@@ -1268,7 +1285,6 @@ void main() {
     vault.lastSavedMarkdown = null;
 
     await _pumpWorkspace(tester, vault: vault);
-    await tester.tap(find.byKey(const Key('note-mode-preview')));
     await tester.pumpAndSettle();
 
     await _dragPreviewImageToSide(
@@ -1316,7 +1332,6 @@ void main() {
     vault.lastSavedMarkdown = null;
 
     await _pumpWorkspace(tester, vault: vault);
-    await tester.tap(find.byKey(const Key('note-mode-preview')));
     await tester.pumpAndSettle();
 
     await _dragPreviewImageToSide(
@@ -1363,7 +1378,6 @@ void main() {
     vault.lastSavedMarkdown = null;
 
     await _pumpWorkspace(tester, vault: vault);
-    await tester.tap(find.byKey(const Key('note-mode-preview')));
     await tester.pumpAndSettle();
 
     await tester.drag(
@@ -1400,7 +1414,6 @@ void main() {
     vault.lastSavedMarkdown = null;
 
     await _pumpWorkspace(tester, vault: vault);
-    await tester.tap(find.byKey(const Key('note-mode-preview')));
     await tester.pumpAndSettle();
 
     final start = tester.getCenter(
@@ -1417,6 +1430,7 @@ void main() {
     tester,
   ) async {
     await _pumpWorkspace(tester, vault: MemoryVaultBackend());
+    await _switchToSourceMode(tester);
 
     final noteEditor = tester.widget<CupertinoTextField>(
       find.byKey(const Key('note-editor')),
@@ -1781,6 +1795,11 @@ Future<void> _pumpWorkspace(
       providerConfigTester: providerConfigTester,
     ),
   );
+  await tester.pump(const Duration(milliseconds: 250));
+}
+
+Future<void> _switchToSourceMode(WidgetTester tester) async {
+  await tester.tap(find.byKey(const Key('note-mode-source')));
   await tester.pump(const Duration(milliseconds: 250));
 }
 

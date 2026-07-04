@@ -55,6 +55,8 @@ enum _WorkspaceSection {
   final IconData icon;
 }
 
+enum _NoteMode { reading, source }
+
 enum _ImageDropSide { before, after }
 
 class SynapseWorkspace extends StatefulWidget {
@@ -103,8 +105,8 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   final Set<String> _selectedSourceIds = <String>{};
   final Set<String> _collapsedFolderIds = <String>{};
   _WorkspaceSection _narrowSection = _WorkspaceSection.resources;
+  _NoteMode _noteMode = _NoteMode.reading;
   bool _busy = false;
-  bool _previewMarkdown = false;
   bool _programmaticMarkdownChange = false;
   bool _autoSaving = false;
   String _message = '';
@@ -173,7 +175,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     _selectedSourceIds.clear();
     _setSelectedPreviewImageSrc(null);
     _replaceEditorMarkdown('');
-    _previewMarkdown = false;
+    _noteMode = _NoteMode.reading;
     _narrowSection = _WorkspaceSection.resources;
     _resetAiServices();
   }
@@ -363,7 +365,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     _searchResults = const [];
     _selectedSourceIds.clear();
     _replaceEditorMarkdown('');
-    _previewMarkdown = false;
+    _noteMode = _NoteMode.reading;
     _narrowSection = _WorkspaceSection.resources;
   }
 
@@ -531,7 +533,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
         _activeNote = loaded;
         _replaceEditorMarkdown(loaded.markdown);
         _selectedSourceIds.clear();
-        _previewMarkdown = false;
+        _noteMode = _NoteMode.reading;
         _narrowSection = _WorkspaceSection.notes;
       });
       await _refreshProposals(resource.id);
@@ -583,7 +585,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
         _proposals = const [];
         _selectedSourceIds.clear();
         _collapsedFolderIds.remove(parentPath);
-        _previewMarkdown = false;
+        _noteMode = _NoteMode.reading;
         _narrowSection = _WorkspaceSection.notes;
       });
     });
@@ -1217,7 +1219,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       _searchResults = const [];
       _selectedSourceIds.clear();
       _collapsedFolderIds.remove(_parentFolderPath(note.path));
-      _previewMarkdown = false;
+      _noteMode = _NoteMode.reading;
       _narrowSection = _WorkspaceSection.notes;
       _message = message;
     });
@@ -1249,6 +1251,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
         _selectedSourceIds.clear();
         _collapsedFolderIds.remove(before.id);
         _collapsedFolderIds.remove(after.id);
+        _noteMode = _NoteMode.reading;
         _message = '文件夹已重命名';
       });
       return;
@@ -1296,7 +1299,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
           _proposals = const [];
           _searchResults = const [];
           _selectedSourceIds.clear();
-          _previewMarkdown = false;
+          _noteMode = _NoteMode.reading;
           _narrowSection = _WorkspaceSection.resources;
           _message = message;
         });
@@ -1313,7 +1316,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
         _proposals = proposals;
         _searchResults = const [];
         _selectedSourceIds.clear();
-        _previewMarkdown = false;
+        _noteMode = _NoteMode.reading;
         _narrowSection = _WorkspaceSection.notes;
         _message = message;
       });
@@ -1624,23 +1627,23 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       trailing: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          CupertinoSlidingSegmentedControl<bool>(
-            groupValue: _previewMarkdown,
+          CupertinoSlidingSegmentedControl<_NoteMode>(
+            groupValue: _noteMode,
             children: const {
-              false: Padding(
-                key: Key('note-mode-edit'),
+              _NoteMode.reading: Padding(
+                key: Key('note-mode-reading'),
                 padding: EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                child: Text('编辑'),
+                child: Text('阅读'),
               ),
-              true: Padding(
-                key: Key('note-mode-preview'),
+              _NoteMode.source: Padding(
+                key: Key('note-mode-source'),
                 padding: EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                child: Text('预览'),
+                child: Text('源码'),
               ),
             },
             onValueChanged: (value) {
               if (value != null) {
-                setState(() => _previewMarkdown = value);
+                setState(() => _noteMode = value);
               }
             },
           ),
@@ -1655,7 +1658,9 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
           ),
         ],
       ),
-      child: _previewMarkdown ? _buildMarkdownPreview() : _buildNoteEditor(),
+      child: _noteMode == _NoteMode.reading
+          ? _buildMarkdownPreview()
+          : _buildNoteEditor(),
     );
   }
 
