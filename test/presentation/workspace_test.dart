@@ -1094,7 +1094,75 @@ void main() {
     expect(find.byKey(Key('preview-image-${source.id}')), findsOneWidget);
   });
 
-  testWidgets('updates pasted image width from the preview controls', (
+  testWidgets('selects a preview image and reveals resize hint only on hover', (
+    tester,
+  ) async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Image Study');
+    final source = await vault.addImageSource(
+      noteId: note.id,
+      filename: 'pasted.png',
+      mimeType: 'image/png',
+      bytes: _tinyPng,
+    );
+    await vault.updateMarkdown(
+      noteId: note.id,
+      markdown:
+          '# Image Study\n\n'
+          '<img src="Image Study.assets/attachments/pasted.png" '
+          'width="360">',
+    );
+
+    await _pumpWorkspace(tester, vault: vault);
+    await tester.tap(find.byKey(const Key('note-mode-preview')));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(Key('preview-image-${source.id}')), findsOneWidget);
+    expect(
+      find.byIcon(CupertinoIcons.arrow_down_right_arrow_up_left),
+      findsNothing,
+    );
+    expect(
+      _previewImageFrameBorderColor(tester, source),
+      const Color(0xFFE5E5EA),
+    );
+
+    await tester.tap(find.byKey(Key('preview-image-tap-${source.id}')));
+    await tester.pumpAndSettle();
+
+    expect(
+      _previewImageFrameBorderColor(tester, source),
+      CupertinoColors.activeBlue,
+    );
+
+    final rect = tester.getRect(
+      find.byKey(Key('preview-image-tap-${source.id}')),
+    );
+    final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+    await mouse.addPointer(location: rect.bottomRight - const Offset(8, 8));
+    await tester.pump();
+
+    expect(
+      find.byKey(Key('image-resize-handle-icon-${source.id}')),
+      findsOneWidget,
+    );
+    expect(
+      find.byIcon(CupertinoIcons.arrow_down_right_arrow_up_left),
+      findsOneWidget,
+    );
+
+    await mouse.moveTo(rect.topLeft + const Offset(8, 8));
+    await tester.pump();
+
+    expect(
+      find.byKey(Key('image-resize-handle-icon-${source.id}')),
+      findsNothing,
+    );
+
+    await mouse.removePointer();
+  });
+
+  testWidgets('updates pasted image width by dragging the preview handle', (
     tester,
   ) async {
     final vault = _CountingUpdateVaultBackend(seedExampleData: false);
@@ -1120,16 +1188,229 @@ void main() {
     await tester.pumpAndSettle();
     final previewImage = find.byKey(Key('preview-image-${source.id}'));
     expect(previewImage, findsOneWidget);
+    expect(find.byType(CupertinoSlider), findsNothing);
+    expect(find.byKey(Key('decrease-image-width-${source.id}')), findsNothing);
+    expect(find.byKey(Key('increase-image-width-${source.id}')), findsNothing);
 
-    final slider = tester.widget<CupertinoSlider>(
-      find.byKey(Key('image-width-slider-${source.id}')),
+    await tester.drag(
+      find.byKey(Key('image-resize-handle-${source.id}')),
+      const Offset(280, 0),
     );
-    slider.onChanged?.call(640);
     await tester.pumpAndSettle();
 
     expect(vault.updateCalls, greaterThanOrEqualTo(1));
     expect(vault.lastSavedMarkdown, contains('width="640"'));
     expect((await vault.readNote(note.id)).markdown, contains('width="640"'));
+  });
+
+  testWidgets('clamps dragged preview image width to the allowed range', (
+    tester,
+  ) async {
+    final vault = _CountingUpdateVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Image Study');
+    final source = await vault.addImageSource(
+      noteId: note.id,
+      filename: 'pasted.png',
+      mimeType: 'image/png',
+      bytes: _tinyPng,
+    );
+    await vault.updateMarkdown(
+      noteId: note.id,
+      markdown:
+          '# Image Study\n\n'
+          '<img src="Image Study.assets/attachments/pasted.png" '
+          'width="360" alt="pasted.png">',
+    );
+    vault.updateCalls = 0;
+    vault.lastSavedMarkdown = null;
+
+    await _pumpWorkspace(tester, vault: vault);
+    await tester.tap(find.byKey(const Key('note-mode-preview')));
+    await tester.pumpAndSettle();
+
+    final handle = find.byKey(Key('image-resize-handle-${source.id}'));
+    await tester.drag(handle, const Offset(-1000, 0));
+    await tester.pumpAndSettle();
+    expect(vault.lastSavedMarkdown, contains('width="120"'));
+
+    await tester.drag(handle, const Offset(2000, 0));
+    await tester.pumpAndSettle();
+    expect(vault.lastSavedMarkdown, contains('width="1200"'));
+    expect((await vault.readNote(note.id)).markdown, contains('width="1200"'));
+  });
+
+  testWidgets('drags a preview image to the right of another image row', (
+    tester,
+  ) async {
+    final vault = _CountingUpdateVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Image Study');
+    final first = await vault.addImageSource(
+      noteId: note.id,
+      filename: 'first.png',
+      mimeType: 'image/png',
+      bytes: _tinyPng,
+    );
+    final second = await vault.addImageSource(
+      noteId: note.id,
+      filename: 'second.png',
+      mimeType: 'image/png',
+      bytes: _tinyPng,
+    );
+    const firstTag =
+        '<img src="Image Study.assets/attachments/first.png" width="320">';
+    const secondTag =
+        '<img src="Image Study.assets/attachments/second.png" width="320">';
+    await vault.updateMarkdown(
+      noteId: note.id,
+      markdown: '# Image Study\n\n$firstTag\n\n$secondTag',
+    );
+    vault.updateCalls = 0;
+    vault.lastSavedMarkdown = null;
+
+    await _pumpWorkspace(tester, vault: vault);
+    await tester.tap(find.byKey(const Key('note-mode-preview')));
+    await tester.pumpAndSettle();
+
+    await _dragPreviewImageToSide(
+      tester,
+      from: first,
+      to: second,
+      side: _PreviewImageDropSide.right,
+    );
+
+    expect(vault.updateCalls, greaterThanOrEqualTo(1));
+    expect(vault.lastSavedMarkdown, contains('$secondTag $firstTag'));
+    expect(vault.lastSavedMarkdown, isNot(contains('$firstTag\n\n$secondTag')));
+    expect(
+      (await vault.readNote(note.id)).markdown,
+      contains('$secondTag $firstTag'),
+    );
+  });
+
+  testWidgets('drags a preview image to the left of another image row', (
+    tester,
+  ) async {
+    final vault = _CountingUpdateVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Image Study');
+    final first = await vault.addImageSource(
+      noteId: note.id,
+      filename: 'first.png',
+      mimeType: 'image/png',
+      bytes: _tinyPng,
+    );
+    final second = await vault.addImageSource(
+      noteId: note.id,
+      filename: 'second.png',
+      mimeType: 'image/png',
+      bytes: _tinyPng,
+    );
+    const firstTag =
+        '<img src="Image Study.assets/attachments/first.png" width="320">';
+    const secondTag =
+        '<img src="Image Study.assets/attachments/second.png" width="320">';
+    await vault.updateMarkdown(
+      noteId: note.id,
+      markdown: '# Image Study\n\n$firstTag\n\n$secondTag',
+    );
+    vault.updateCalls = 0;
+    vault.lastSavedMarkdown = null;
+
+    await _pumpWorkspace(tester, vault: vault);
+    await tester.tap(find.byKey(const Key('note-mode-preview')));
+    await tester.pumpAndSettle();
+
+    await _dragPreviewImageToSide(
+      tester,
+      from: second,
+      to: first,
+      side: _PreviewImageDropSide.left,
+    );
+
+    expect(vault.updateCalls, greaterThanOrEqualTo(1));
+    expect(vault.lastSavedMarkdown, contains('$secondTag $firstTag'));
+    expect(
+      (await vault.readNote(note.id)).markdown,
+      contains('$secondTag $firstTag'),
+    );
+  });
+
+  testWidgets('dragging the resize handle does not move preview images', (
+    tester,
+  ) async {
+    final vault = _CountingUpdateVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Image Study');
+    final first = await vault.addImageSource(
+      noteId: note.id,
+      filename: 'first.png',
+      mimeType: 'image/png',
+      bytes: _tinyPng,
+    );
+    final second = await vault.addImageSource(
+      noteId: note.id,
+      filename: 'second.png',
+      mimeType: 'image/png',
+      bytes: _tinyPng,
+    );
+    const firstTag =
+        '<img src="Image Study.assets/attachments/first.png" width="320">';
+    const secondTag =
+        '<img src="Image Study.assets/attachments/second.png" width="320">';
+    await vault.updateMarkdown(
+      noteId: note.id,
+      markdown: '# Image Study\n\n$firstTag\n\n$secondTag',
+    );
+    vault.updateCalls = 0;
+    vault.lastSavedMarkdown = null;
+
+    await _pumpWorkspace(tester, vault: vault);
+    await tester.tap(find.byKey(const Key('note-mode-preview')));
+    await tester.pumpAndSettle();
+
+    await tester.drag(
+      find.byKey(Key('image-resize-handle-${first.id}')),
+      const Offset(80, 0),
+    );
+    await tester.pumpAndSettle();
+
+    expect(vault.lastSavedMarkdown, contains('first.png" width="400"'));
+    expect(vault.lastSavedMarkdown, contains('width="400">\n\n$secondTag'));
+    expect(vault.lastSavedMarkdown, isNot(contains('$firstTag $secondTag')));
+    expect(find.byKey(Key('preview-image-${second.id}')), findsOneWidget);
+  });
+
+  testWidgets('dragging onto a non Synapse image does not change markdown', (
+    tester,
+  ) async {
+    final vault = _CountingUpdateVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Image Study');
+    final source = await vault.addImageSource(
+      noteId: note.id,
+      filename: 'local.png',
+      mimeType: 'image/png',
+      bytes: _tinyPng,
+    );
+    const localTag =
+        '<img src="Image Study.assets/attachments/local.png" width="320">';
+    const remoteTag = '<img src="https://example.com/remote.png" width="320">';
+    await vault.updateMarkdown(
+      noteId: note.id,
+      markdown: '# Image Study\n\n$localTag\n\n$remoteTag',
+    );
+    vault.updateCalls = 0;
+    vault.lastSavedMarkdown = null;
+
+    await _pumpWorkspace(tester, vault: vault);
+    await tester.tap(find.byKey(const Key('note-mode-preview')));
+    await tester.pumpAndSettle();
+
+    final start = tester.getCenter(
+      find.byKey(Key('preview-image-tap-${source.id}')),
+    );
+    await tester.dragFrom(start, const Offset(260, 0));
+    await tester.pumpAndSettle();
+
+    expect(vault.updateCalls, 0);
+    expect((await vault.readNote(note.id)).markdown, contains(remoteTag));
   });
 
   testWidgets('does not expose internal ids in the note editor', (
@@ -1501,6 +1782,38 @@ Future<void> _pumpWorkspace(
     ),
   );
   await tester.pump(const Duration(milliseconds: 250));
+}
+
+enum _PreviewImageDropSide { left, right }
+
+Future<void> _dragPreviewImageToSide(
+  WidgetTester tester, {
+  required SourceItem from,
+  required SourceItem to,
+  required _PreviewImageDropSide side,
+}) async {
+  final fromFinder = find.byKey(Key('preview-image-tap-${from.id}'));
+  final toFinder = find.byKey(Key('preview-image-tap-${to.id}'));
+  final start = tester.getCenter(fromFinder);
+  final targetRect = tester.getRect(toFinder);
+  final drop = Offset(
+    side == _PreviewImageDropSide.left
+        ? targetRect.left + targetRect.width * 0.25
+        : targetRect.right - targetRect.width * 0.25,
+    targetRect.center.dy,
+  );
+  await tester.dragFrom(start, drop - start);
+  await tester.pumpAndSettle();
+}
+
+Color _previewImageFrameBorderColor(WidgetTester tester, SourceItem source) {
+  final tapTarget = tester.widget<GestureDetector>(
+    find.byKey(Key('preview-image-tap-${source.id}')),
+  );
+  final decoration =
+      (tapTarget.child! as DecoratedBox).decoration as BoxDecoration;
+  final border = decoration.border! as Border;
+  return border.top.color;
 }
 
 void _mockClipboardText(String? text) {
