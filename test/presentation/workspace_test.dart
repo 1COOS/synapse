@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:flutter/services.dart';
@@ -501,22 +502,180 @@ void main() {
     expect(noteEditor.controller?.text, contains('# Second'));
   });
 
-  testWidgets('manual save cancels the pending auto-save', (tester) async {
-    final vault = _CountingUpdateVaultBackend();
+  testWidgets(
+    'split controls live in the center titlebar without save button',
+    (tester) async {
+      await _pumpWorkspace(tester, vault: MemoryVaultBackend());
+
+      expect(find.byKey(const Key('split-workspace')), findsOneWidget);
+      expect(find.byKey(const Key('split-pane-left-button')), findsOneWidget);
+      expect(find.byKey(const Key('split-pane-right-button')), findsOneWidget);
+      expect(find.byKey(const Key('split-pane-up-button')), findsOneWidget);
+      expect(find.byKey(const Key('split-pane-down-button')), findsOneWidget);
+      expect(find.byKey(const Key('close-split-pane-button')), findsOneWidget);
+      expect(find.byKey(const Key('save-note-button')), findsNothing);
+      expect(
+        _iconsForKey(
+          tester,
+          const Key('split-pane-left-button'),
+        ).map((icon) => icon.icon),
+        containsAll([
+          CupertinoIcons.square_split_1x2,
+          CupertinoIcons.chevron_left,
+        ]),
+      );
+      expect(
+        _iconsForKey(
+          tester,
+          const Key('split-pane-right-button'),
+        ).map((icon) => icon.icon),
+        containsAll([
+          CupertinoIcons.square_split_1x2,
+          CupertinoIcons.chevron_right,
+        ]),
+      );
+      expect(
+        _iconsForKey(
+          tester,
+          const Key('split-pane-up-button'),
+        ).map((icon) => icon.icon),
+        containsAll([
+          CupertinoIcons.square_split_2x1,
+          CupertinoIcons.chevron_up,
+        ]),
+      );
+      expect(
+        _iconsForKey(
+          tester,
+          const Key('split-pane-down-button'),
+        ).map((icon) => icon.icon),
+        containsAll([
+          CupertinoIcons.square_split_2x1,
+          CupertinoIcons.chevron_down,
+        ]),
+      );
+      expect(
+        _iconForKey(tester, const Key('close-split-pane-button')).icon,
+        CupertinoIcons.xmark,
+      );
+      expect(_iconForKey(tester, const Key('note-mode-reading')).size, 16);
+      expect(_iconForKey(tester, const Key('note-mode-source')).size, 16);
+    },
+  );
+
+  testWidgets('splits right and opens resources in the focused pane', (
+    tester,
+  ) async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    await vault.createNote(parentPath: '', title: 'Alpha');
+    await vault.createNote(parentPath: '', title: 'Beta');
 
     await _pumpWorkspace(tester, vault: vault);
-    await _switchToSourceMode(tester);
+
+    expect(find.byKey(const Key('split-pane-pane-1')), findsOneWidget);
+    expect(
+      find.descendant(
+        of: find.byKey(const Key('split-pane-title-pane-1')),
+        matching: find.text('Alpha'),
+      ),
+      findsOneWidget,
+    );
+    expect(find.textContaining('Alpha'), findsWidgets);
+
+    await tester.tap(find.byKey(const Key('split-pane-right-button')));
+    await tester.pump(const Duration(milliseconds: 250));
+
+    expect(find.byKey(const Key('split-pane-pane-2')), findsOneWidget);
+    expect(find.byKey(const Key('split-divider-split-1')), findsOneWidget);
+    expect(
+      find.descendant(
+        of: find.byKey(const Key('split-pane-title-pane-2')),
+        matching: find.text('Alpha'),
+      ),
+      findsOneWidget,
+    );
+    expect(find.textContaining('Alpha'), findsWidgets);
+
+    await tester.tap(find.byKey(const Key('resource-row-Beta.md')));
+    await tester.pump(const Duration(milliseconds: 250));
+
+    expect(find.textContaining('Alpha'), findsWidgets);
+    expect(find.textContaining('Beta'), findsWidgets);
+    expect(
+      find.descendant(
+        of: find.byKey(const Key('split-pane-title-pane-2')),
+        matching: find.text('Beta'),
+      ),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('duplicate note panes share source edits', (tester) async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    await vault.createNote(parentPath: '', title: 'Alpha');
+
+    await _pumpWorkspace(tester, vault: vault);
+    await tester.tap(find.byKey(const Key('split-pane-right-button')));
+    await tester.pump(const Duration(milliseconds: 250));
+    await tester.tap(find.byKey(const Key('note-mode-source-pane-2')));
+    await tester.pump(const Duration(milliseconds: 250));
+    await tester.enterText(
+      find.byKey(const Key('note-editor-pane-2')),
+      '# Alpha\nshared edit',
+    );
+    await tester.pump();
+
+    expect(find.textContaining('shared edit'), findsWidgets);
+  });
+
+  testWidgets('does not close a dirty focused pane when save fails', (
+    tester,
+  ) async {
+    final vault = _FailingUpdateVaultBackend(seedExampleData: false);
+    await vault.createNote(parentPath: '', title: 'Alpha');
+    await vault.createNote(parentPath: '', title: 'Beta');
+
+    await _pumpWorkspace(tester, vault: vault);
+    await tester.tap(find.byKey(const Key('split-pane-right-button')));
+    await tester.pump(const Duration(milliseconds: 250));
+    await tester.tap(find.byKey(const Key('resource-row-Beta.md')));
+    await tester.pump(const Duration(milliseconds: 250));
+    await tester.tap(find.byKey(const Key('note-mode-source-pane-2')));
+    await tester.pump(const Duration(milliseconds: 250));
     await tester.enterText(
       find.byKey(const Key('note-editor')),
-      '# 心经学习\nmanual save wins',
+      '# Beta\nunsaved split edit',
     );
+    await tester.pump();
+    vault.failUpdates = true;
 
-    await tester.tap(find.byKey(const Key('save-note-button')));
+    await tester.tap(find.byKey(const Key('close-split-pane-button')));
     await tester.pump(const Duration(milliseconds: 250));
-    await tester.pump(const Duration(milliseconds: 1000));
 
-    expect(vault.updateCalls, 1);
-    expect(vault.lastSavedMarkdown, contains('manual save wins'));
+    expect(find.byKey(const Key('split-pane-pane-2')), findsOneWidget);
+    expect(find.textContaining('save failed'), findsOneWidget);
+  });
+
+  testWidgets('dragging a split divider resizes adjacent panes', (
+    tester,
+  ) async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    await vault.createNote(parentPath: '', title: 'Alpha');
+
+    await _pumpWorkspace(tester, vault: vault);
+
+    await tester.tap(find.byKey(const Key('split-pane-right-button')));
+    await tester.pump(const Duration(milliseconds: 250));
+    final before = tester.getRect(find.byKey(const Key('split-pane-pane-1')));
+
+    await tester.drag(
+      find.byKey(const Key('split-divider-split-1')),
+      const Offset(120, 0),
+    );
+    await tester.pump(const Duration(milliseconds: 250));
+
+    final after = tester.getRect(find.byKey(const Key('split-pane-pane-1')));
+    expect(after.width, greaterThan(before.width));
   });
 
   testWidgets('uses a Cupertino app shell and shows the desktop workbench', (
@@ -529,13 +688,17 @@ void main() {
     expect(find.byKey(const Key('resource-pane')), findsOneWidget);
     expect(find.byKey(const Key('note-pane')), findsOneWidget);
     expect(find.byKey(const Key('source-pane')), findsOneWidget);
-    expect(find.text('Synapse'), findsOneWidget);
-    expect(find.text('资源'), findsOneWidget);
-    expect(find.text('笔记'), findsOneWidget);
-    expect(find.text('素材'), findsOneWidget);
+    expect(find.byKey(const Key('workspace-titlebar')), findsOneWidget);
+    expect(find.byKey(const Key('left-pane-mode-resources')), findsOneWidget);
+    expect(find.byKey(const Key('left-pane-mode-search')), findsOneWidget);
+    expect(find.byKey(const Key('center-pane-title-icon')), findsNothing);
+    expect(find.byKey(const Key('right-pane-title-icon')), findsOneWidget);
+    expect(find.text('Synapse'), findsNothing);
     expect(find.text('AI 建议'), findsOneWidget);
-    expect(find.text('阅读'), findsOneWidget);
-    expect(find.text('源码'), findsOneWidget);
+    expect(find.byKey(const Key('note-mode-reading')), findsOneWidget);
+    expect(find.byKey(const Key('note-mode-source')), findsOneWidget);
+    expect(find.byTooltip('阅读'), findsOneWidget);
+    expect(find.byTooltip('源码'), findsOneWidget);
     expect(find.text('编辑'), findsNothing);
     expect(find.text('预览'), findsNothing);
     expect(find.byKey(const Key('settings-button')), findsOneWidget);
@@ -553,6 +716,82 @@ void main() {
     expect(find.text('pending'), findsNothing);
     expect(find.text('粘贴文本素材'), findsNothing);
     expect(find.text('加入文本'), findsNothing);
+  });
+
+  testWidgets('keeps macOS titlebar controls aligned with the left pane', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+    try {
+      await _pumpWorkspace(tester, vault: MemoryVaultBackend());
+
+      final leftPaneRight = tester
+          .getRect(find.byKey(const Key('resource-pane')))
+          .right;
+      final collapseCenter = tester.getCenter(
+        find.byKey(const Key('collapse-left-pane-button')),
+      );
+
+      expect(collapseCenter.dx, lessThan(leftPaneRight));
+      expect(find.byKey(const Key('center-pane-title-icon')), findsNothing);
+    } finally {
+      debugDefaultTargetPlatformOverride = null;
+    }
+  });
+
+  testWidgets('collapses side panes to icon rails and keeps footer actions', (
+    tester,
+  ) async {
+    await _pumpWorkspace(tester, vault: MemoryVaultBackend());
+
+    await tester.tap(find.byKey(const Key('collapse-left-pane-button')));
+    await tester.pump(const Duration(milliseconds: 250));
+
+    expect(find.byKey(const Key('resource-pane')), findsNothing);
+    expect(find.byKey(const Key('left-pane-collapsed-rail')), findsOneWidget);
+    expect(find.byKey(const Key('expand-left-pane-button')), findsOneWidget);
+    expect(find.byKey(const Key('vault-location-button')), findsOneWidget);
+    expect(find.byKey(const Key('settings-button')), findsOneWidget);
+    expect(find.byKey(const Key('note-pane')), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('expand-left-pane-button')));
+    await tester.pump(const Duration(milliseconds: 250));
+    expect(find.byKey(const Key('resource-pane')), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('collapse-right-pane-button')));
+    await tester.pump(const Duration(milliseconds: 250));
+
+    expect(find.byKey(const Key('source-pane')), findsNothing);
+    expect(find.byKey(const Key('right-pane-collapsed-rail')), findsOneWidget);
+    expect(find.byKey(const Key('expand-right-pane-button')), findsOneWidget);
+    expect(find.byKey(const Key('note-pane')), findsOneWidget);
+  });
+
+  testWidgets('searches the whole vault from the left pane and opens results', (
+    tester,
+  ) async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final alpha = await vault.createNote(parentPath: '', title: 'Alpha');
+    await vault.updateMarkdown(noteId: alpha.id, markdown: '# Alpha\n普通内容');
+    final beta = await vault.createNote(parentPath: '', title: 'Beta');
+    await vault.updateMarkdown(noteId: beta.id, markdown: '# Beta\n独特问题线索');
+
+    await _pumpWorkspace(tester, vault: vault);
+
+    await tester.tap(find.byKey(const Key('left-pane-mode-search')));
+    await tester.pump(const Duration(milliseconds: 250));
+    await tester.enterText(
+      find.byKey(const Key('workspace-search-field')),
+      '独特问题',
+    );
+    await tester.tap(find.byKey(const Key('workspace-search-submit-button')));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('search-result-Beta.md')), findsOneWidget);
+    await tester.tap(find.byKey(const Key('search-result-Beta.md')));
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('独特问题线索'), findsOneWidget);
   });
 
   testWidgets('uses Cupertino section navigation in narrow windows', (
@@ -1833,6 +2072,20 @@ Color _previewImageFrameBorderColor(WidgetTester tester, SourceItem source) {
       (tapTarget.child! as DecoratedBox).decoration as BoxDecoration;
   final border = decoration.border! as Border;
   return border.top.color;
+}
+
+Icon _iconForKey(WidgetTester tester, Key key) {
+  return tester.widget<Icon>(
+    find.descendant(of: find.byKey(key), matching: find.byType(Icon)).first,
+  );
+}
+
+List<Icon> _iconsForKey(WidgetTester tester, Key key) {
+  return tester
+      .widgetList<Icon>(
+        find.descendant(of: find.byKey(key), matching: find.byType(Icon)),
+      )
+      .toList();
 }
 
 void _mockClipboardText(String? text) {

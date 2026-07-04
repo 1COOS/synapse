@@ -39,6 +39,11 @@ const _text = CupertinoColors.label;
 const _muted = CupertinoColors.secondaryLabel;
 const _danger = CupertinoColors.systemRed;
 const _radius = BorderRadius.all(Radius.circular(8));
+const _titlebarHeight = 52.0;
+const _leftPaneWidth = 292.0;
+const _rightPaneWidth = 380.0;
+const _collapsedPaneWidth = 52.0;
+const _macTitlebarControlReserve = 148.0;
 const _defaultPastedImageWidth = 480;
 const _minPastedImageWidth = 120.0;
 const _maxPastedImageWidth = 1200.0;
@@ -55,9 +60,68 @@ enum _WorkspaceSection {
   final IconData icon;
 }
 
+enum _LeftPaneMode { resources, search }
+
 enum _NoteMode { reading, source }
 
 enum _ImageDropSide { before, after }
+
+enum _SplitAxis { horizontal, vertical }
+
+enum _SplitDirection { left, right, up, down }
+
+abstract class _SplitNode {
+  const _SplitNode({required this.id});
+
+  final String id;
+}
+
+class _SplitLeaf extends _SplitNode {
+  _SplitLeaf({required this.paneId, this.noteId, this.mode = _NoteMode.reading})
+    : super(id: paneId);
+
+  final String paneId;
+  String? noteId;
+  _NoteMode mode;
+}
+
+class _SplitBranch extends _SplitNode {
+  _SplitBranch({
+    required super.id,
+    required this.axis,
+    required this.first,
+    required this.second,
+  });
+
+  final _SplitAxis axis;
+  _SplitNode first;
+  _SplitNode second;
+  double ratio = 0.5;
+}
+
+class _NoteSession {
+  _NoteSession({required this.note, required VoidCallback onEdited})
+    : controller = TextEditingController(text: note.markdown) {
+    _onEdited = onEdited;
+    controller.addListener(_onEdited);
+  }
+
+  VaultNoteContent note;
+  final TextEditingController controller;
+  final Set<String> selectedSourceIds = <String>{};
+  List<AiProposal> proposals = const [];
+  Timer? autoSaveTimer;
+  Future<bool>? markdownSaveInFlight;
+  late final VoidCallback _onEdited;
+
+  bool get isDirty => controller.text != note.markdown;
+
+  void dispose() {
+    autoSaveTimer?.cancel();
+    controller.removeListener(_onEdited);
+    controller.dispose();
+  }
+}
 
 class SynapseWorkspace extends StatefulWidget {
   const SynapseWorkspace({
@@ -92,20 +156,27 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   late ImageInputService _imageInput;
   late AiProvider _aiProvider;
 
-  final _markdownController = TextEditingController();
+  final _emptyMarkdownController = TextEditingController();
+  final Map<String, _NoteSession> _noteSessions = <String, _NoteSession>{};
+  late _SplitNode _splitRoot;
+  String _focusedPaneId = '';
+  int _nextPaneNumber = 1;
+  int _nextSplitNumber = 1;
   final _searchController = TextEditingController();
   final _editorPasteFocusNode = FocusNode();
   final _sourcePaneFocusNode = FocusNode();
 
   List<VaultResourceNode> _resources = const [];
   VaultResourceNode? _selectedResource;
-  VaultNoteContent? _activeNote;
-  List<AiProposal> _proposals = const [];
   List<SearchResult> _searchResults = const [];
-  final Set<String> _selectedSourceIds = <String>{};
+  final Set<String> _inactiveSelectedSourceIds = <String>{};
+  List<AiProposal> _inactiveProposals = const [];
   final Set<String> _collapsedFolderIds = <String>{};
+  final Map<String, String> _searchIndexFingerprints = <String, String>{};
   _WorkspaceSection _narrowSection = _WorkspaceSection.resources;
-  _NoteMode _noteMode = _NoteMode.reading;
+  _LeftPaneMode _leftPaneMode = _LeftPaneMode.resources;
+  bool _leftPaneCollapsed = false;
+  bool _rightPaneCollapsed = false;
   bool _busy = false;
   bool _programmaticMarkdownChange = false;
   bool _autoSaving = false;
@@ -117,12 +188,11 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   VaultLocationStore? _vaultLocationStore;
   ProviderConfig? _providerConfig;
   bool _usesInjectedAiProvider = false;
-  Timer? _autoSaveTimer;
-  Future<bool>? _markdownSaveInFlight;
 
   @override
   void initState() {
     super.initState();
+    _resetSplitWorkspace(disposeSessions: false);
     _imageInput = widget.imageInput ?? const PlatformImageInputService();
     _usesInjectedAiProvider = widget.aiProvider != null;
     _aiProvider = widget.aiProvider ?? const MissingConfigAiProvider();
@@ -134,15 +204,15 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       _resetServices(createDefaultVaultBackend());
       _vaultLabel = 'H5 预览库';
     }
-    _markdownController.addListener(_handleMarkdownEdited);
     _initializeWorkspace();
   }
 
   @override
   void dispose() {
-    _autoSaveTimer?.cancel();
-    _markdownController.removeListener(_handleMarkdownEdited);
-    _markdownController.dispose();
+    for (final session in _noteSessions.values) {
+      session.dispose();
+    }
+    _emptyMarkdownController.dispose();
     _searchController.dispose();
     _editorPasteFocusNode.dispose();
     _sourcePaneFocusNode.dispose();
@@ -167,17 +237,234 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     _proposalService = null;
     _vaultRootPath = null;
     _vaultLabel = supportsDirectoryVault ? '选择仓库' : 'H5 预览库';
-    _activeNote = null;
     _selectedResource = null;
     _resources = const [];
-    _proposals = const [];
     _searchResults = const [];
-    _selectedSourceIds.clear();
+    _resetSplitWorkspace();
     _setSelectedPreviewImageSrc(null);
-    _replaceEditorMarkdown('');
-    _noteMode = _NoteMode.reading;
+    _leftPaneMode = _LeftPaneMode.resources;
+    _leftPaneCollapsed = false;
+    _rightPaneCollapsed = false;
     _narrowSection = _WorkspaceSection.resources;
     _resetAiServices();
+  }
+
+  void _resetSplitWorkspace({bool disposeSessions = true}) {
+    if (disposeSessions) {
+      for (final session in _noteSessions.values) {
+        session.dispose();
+      }
+      _noteSessions.clear();
+    }
+    _inactiveSelectedSourceIds.clear();
+    _inactiveProposals = const [];
+    _nextPaneNumber = 1;
+    _nextSplitNumber = 1;
+    final pane = _SplitLeaf(paneId: _createPaneId());
+    _splitRoot = pane;
+    _focusedPaneId = pane.paneId;
+  }
+
+  String _createPaneId() {
+    return 'pane-${_nextPaneNumber++}';
+  }
+
+  String _createSplitId() {
+    return 'split-${_nextSplitNumber++}';
+  }
+
+  _NoteSession _upsertNoteSession(VaultNoteContent note) {
+    final existing = _noteSessions[note.id];
+    if (existing != null) {
+      final wasClean = !existing.isDirty;
+      existing.note = note;
+      if (wasClean) {
+        _replaceSessionMarkdown(existing, note.markdown);
+      }
+      return existing;
+    }
+    late final _NoteSession session;
+    session = _NoteSession(
+      note: note,
+      onEdited: () => _handleSessionMarkdownEdited(session),
+    );
+    _noteSessions[note.id] = session;
+    return session;
+  }
+
+  void _discardUnusedSessions() {
+    final openNoteIds = _splitLeaves(
+      _splitRoot,
+    ).map((pane) => pane.noteId).whereType<String>().toSet();
+    final staleIds = _noteSessions.keys
+        .where((noteId) => !openNoteIds.contains(noteId))
+        .toList();
+    for (final noteId in staleIds) {
+      _noteSessions.remove(noteId)?.dispose();
+    }
+  }
+
+  _SplitLeaf? _findSplitLeaf(_SplitNode node, String paneId) {
+    if (node is _SplitLeaf) {
+      return node.paneId == paneId ? node : null;
+    }
+    final branch = node as _SplitBranch;
+    return _findSplitLeaf(branch.first, paneId) ??
+        _findSplitLeaf(branch.second, paneId);
+  }
+
+  Iterable<_SplitLeaf> _splitLeaves(_SplitNode node) sync* {
+    if (node is _SplitLeaf) {
+      yield node;
+      return;
+    }
+    final branch = node as _SplitBranch;
+    yield* _splitLeaves(branch.first);
+    yield* _splitLeaves(branch.second);
+  }
+
+  int _splitLeafCount() {
+    return _splitLeaves(_splitRoot).length;
+  }
+
+  int _splitLeafCountForNote(String noteId) {
+    return _splitLeaves(
+      _splitRoot,
+    ).where((pane) => pane.noteId == noteId).length;
+  }
+
+  void _focusPane(String paneId) {
+    final pane = _findSplitLeaf(_splitRoot, paneId);
+    if (pane == null) {
+      return;
+    }
+    _focusedPaneId = pane.paneId;
+    _selectedResource = pane.noteId == null
+        ? null
+        : _findResource(_resources, pane.noteId!);
+    _setSelectedPreviewImageSrc(null);
+  }
+
+  void _syncFocusedPaneSelection() {
+    final noteId = _focusedPane?.noteId;
+    _selectedResource = noteId == null
+        ? null
+        : _findResource(_resources, noteId);
+  }
+
+  void _splitFocusedPane(_SplitDirection direction) {
+    final focused = _focusedPane;
+    if (focused == null) {
+      return;
+    }
+    final newPane = _SplitLeaf(
+      paneId: _createPaneId(),
+      noteId: focused.noteId,
+      mode: focused.mode,
+    );
+    final axis =
+        direction == _SplitDirection.left || direction == _SplitDirection.right
+        ? _SplitAxis.horizontal
+        : _SplitAxis.vertical;
+    final newBranch = _SplitBranch(
+      id: _createSplitId(),
+      axis: axis,
+      first:
+          direction == _SplitDirection.left || direction == _SplitDirection.up
+          ? newPane
+          : focused,
+      second:
+          direction == _SplitDirection.left || direction == _SplitDirection.up
+          ? focused
+          : newPane,
+    );
+    setState(() {
+      _replaceSplitNode(focused.paneId, newBranch);
+      _focusedPaneId = newPane.paneId;
+      _syncFocusedPaneSelection();
+    });
+  }
+
+  void _replaceSplitNode(String nodeId, _SplitNode replacement) {
+    if (_splitRoot.id == nodeId) {
+      _splitRoot = replacement;
+      return;
+    }
+    _replaceSplitNodeInBranch(_splitRoot, nodeId, replacement);
+  }
+
+  bool _replaceSplitNodeInBranch(
+    _SplitNode node,
+    String nodeId,
+    _SplitNode replacement,
+  ) {
+    if (node is! _SplitBranch) {
+      return false;
+    }
+    if (node.first.id == nodeId) {
+      node.first = replacement;
+      return true;
+    }
+    if (node.second.id == nodeId) {
+      node.second = replacement;
+      return true;
+    }
+    return _replaceSplitNodeInBranch(node.first, nodeId, replacement) ||
+        _replaceSplitNodeInBranch(node.second, nodeId, replacement);
+  }
+
+  Future<void> _closeFocusedPane() async {
+    if (_splitLeafCount() <= 1) {
+      return;
+    }
+    final focused = _focusedPane;
+    if (focused == null) {
+      return;
+    }
+    final noteId = focused.noteId;
+    if (noteId != null && _splitLeafCountForNote(noteId) == 1) {
+      final session = _noteSessions[noteId];
+      if (session != null &&
+          !await _flushSessionMarkdown(session, successMessage: '笔记已保存')) {
+        return;
+      }
+    }
+    setState(() {
+      final nextRoot = _removeSplitLeaf(_splitRoot, focused.paneId);
+      if (nextRoot != null) {
+        _splitRoot = nextRoot;
+      }
+      _focusedPaneId = _splitLeaves(_splitRoot).first.paneId;
+      _discardUnusedSessions();
+      _syncFocusedPaneSelection();
+    });
+  }
+
+  _SplitNode? _removeSplitLeaf(_SplitNode node, String paneId) {
+    if (node is _SplitLeaf) {
+      return node.paneId == paneId ? null : node;
+    }
+    final branch = node as _SplitBranch;
+    final first = _removeSplitLeaf(branch.first, paneId);
+    final second = _removeSplitLeaf(branch.second, paneId);
+    if (first == null) {
+      return second;
+    }
+    if (second == null) {
+      return first;
+    }
+    branch.first = first;
+    branch.second = second;
+    return branch;
+  }
+
+  void _resizeSplitBranch(_SplitBranch branch, double delta, double extent) {
+    if (extent <= 0) {
+      return;
+    }
+    setState(() {
+      branch.ratio = (branch.ratio + delta / extent).clamp(0.15, 0.85);
+    });
   }
 
   void _resetAiServices() {
@@ -189,6 +476,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       _aiProvider,
       semanticSearchEnabled: _semanticSearchEnabled,
     );
+    _searchIndexFingerprints.clear();
   }
 
   bool get _semanticSearchEnabled {
@@ -198,44 +486,111 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
 
   bool get _hasVault => _vault != null;
 
-  bool get _hasDirtyMarkdown {
-    final active = _activeNote;
-    return active != null && _markdownController.text != active.markdown;
+  bool get _usesNativeMacTitlebar {
+    return !kIsWeb && defaultTargetPlatform == TargetPlatform.macOS;
   }
 
-  void _handleMarkdownEdited() {
+  _SplitLeaf? get _focusedPane => _findSplitLeaf(_splitRoot, _focusedPaneId);
+
+  _NoteSession? get _activeSession {
+    final noteId = _focusedPane?.noteId;
+    if (noteId == null) {
+      return null;
+    }
+    return _noteSessions[noteId];
+  }
+
+  VaultNoteContent? get _activeNote => _activeSession?.note;
+
+  set _activeNote(VaultNoteContent? note) {
+    final pane = _focusedPane;
+    if (pane == null) {
+      return;
+    }
+    if (note == null) {
+      pane.noteId = null;
+      return;
+    }
+    _upsertNoteSession(note);
+    pane.noteId = note.id;
+  }
+
+  TextEditingController get _markdownController {
+    return _activeSession?.controller ?? _emptyMarkdownController;
+  }
+
+  Set<String> get _selectedSourceIds {
+    return _activeSession?.selectedSourceIds ?? _inactiveSelectedSourceIds;
+  }
+
+  List<AiProposal> get _proposals {
+    return _activeSession?.proposals ?? _inactiveProposals;
+  }
+
+  set _proposals(List<AiProposal> value) {
+    final session = _activeSession;
+    if (session == null) {
+      _inactiveProposals = value;
+      return;
+    }
+    session.proposals = value;
+  }
+
+  set _noteMode(_NoteMode value) {
+    final pane = _focusedPane;
+    if (pane != null) {
+      pane.mode = value;
+    }
+  }
+
+  bool _hasDirtySession(_NoteSession session) {
+    return session.controller.text != session.note.markdown;
+  }
+
+  void _handleSessionMarkdownEdited(_NoteSession session) {
     if (_programmaticMarkdownChange) {
       return;
     }
-    if (_activeNote == null) {
-      _cancelPendingAutoSave();
+    if (!_hasDirtySession(session)) {
+      _cancelPendingAutoSave(session);
+      if (mounted) {
+        setState(() {});
+      }
       return;
     }
-    if (!_hasDirtyMarkdown) {
-      _cancelPendingAutoSave();
-      return;
+    _scheduleAutoSave(session);
+    if (mounted) {
+      setState(() {});
     }
-    _scheduleAutoSave();
   }
 
   void _replaceEditorMarkdown(String markdown) {
-    _cancelPendingAutoSave();
+    final session = _activeSession;
+    if (session == null) {
+      return;
+    }
+    _replaceSessionMarkdown(session, markdown);
+  }
+
+  void _replaceSessionMarkdown(_NoteSession session, String markdown) {
+    _cancelPendingAutoSave(session);
     _programmaticMarkdownChange = true;
-    _markdownController.text = markdown;
+    session.controller.text = markdown;
     _programmaticMarkdownChange = false;
   }
 
-  void _cancelPendingAutoSave() {
-    _autoSaveTimer?.cancel();
-    _autoSaveTimer = null;
+  void _cancelPendingAutoSave(_NoteSession session) {
+    session.autoSaveTimer?.cancel();
+    session.autoSaveTimer = null;
   }
 
-  void _scheduleAutoSave() {
-    _cancelPendingAutoSave();
-    _autoSaveTimer = Timer(_autoSaveDelay, () {
-      _autoSaveTimer = null;
+  void _scheduleAutoSave(_NoteSession session) {
+    _cancelPendingAutoSave(session);
+    session.autoSaveTimer = Timer(_autoSaveDelay, () {
+      session.autoSaveTimer = null;
       unawaited(
-        _saveCurrentMarkdown(
+        _saveSessionMarkdown(
+          session,
           successMessage: '笔记已自动保存',
           automatic: true,
           rescheduleIfDirty: true,
@@ -358,14 +713,14 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     _resetServices(_createVaultBackend(location.rootPath));
     _vaultRootPath = location.rootPath;
     _vaultLabel = _formatVaultLabel(location.rootPath);
-    _activeNote = null;
     _selectedResource = null;
     _resources = const [];
-    _proposals = const [];
     _searchResults = const [];
-    _selectedSourceIds.clear();
-    _replaceEditorMarkdown('');
-    _noteMode = _NoteMode.reading;
+    _resetSplitWorkspace();
+    _searchIndexFingerprints.clear();
+    _leftPaneMode = _LeftPaneMode.resources;
+    _leftPaneCollapsed = false;
+    _rightPaneCollapsed = false;
     _narrowSection = _WorkspaceSection.resources;
   }
 
@@ -685,40 +1040,34 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     }
   }
 
-  Future<void> _saveMarkdown() async {
-    final active = _activeNote;
-    if (active == null) {
-      return;
+  Future<bool> _flushPendingMarkdown({String? successMessage}) async {
+    final session = _activeSession;
+    if (session == null) {
+      return true;
     }
-    setState(() {
-      _busy = true;
-      _message = '';
-    });
-    try {
-      await _flushPendingMarkdown(successMessage: '笔记已保存');
-    } finally {
-      if (mounted) {
-        setState(() => _busy = false);
-      }
-    }
+    return _flushSessionMarkdown(session, successMessage: successMessage);
   }
 
-  Future<bool> _flushPendingMarkdown({String? successMessage}) async {
-    _cancelPendingAutoSave();
+  Future<bool> _flushSessionMarkdown(
+    _NoteSession session, {
+    String? successMessage,
+  }) async {
+    _cancelPendingAutoSave(session);
     while (true) {
-      final inFlight = _markdownSaveInFlight;
+      final inFlight = session.markdownSaveInFlight;
       if (inFlight != null) {
         final saved = await inFlight;
         if (!saved) {
           return false;
         }
-        _cancelPendingAutoSave();
+        _cancelPendingAutoSave(session);
         continue;
       }
-      if (!_hasDirtyMarkdown) {
+      if (!_hasDirtySession(session)) {
         return true;
       }
-      final saved = await _saveCurrentMarkdown(
+      final saved = await _saveSessionMarkdown(
+        session,
         successMessage: successMessage,
         automatic: false,
         rescheduleIfDirty: false,
@@ -734,34 +1083,53 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     required bool rescheduleIfDirty,
     String? successMessage,
   }) {
-    final inFlight = _markdownSaveInFlight;
+    final session = _activeSession;
+    if (session == null) {
+      return Future.value(true);
+    }
+    return _saveSessionMarkdown(
+      session,
+      automatic: automatic,
+      rescheduleIfDirty: rescheduleIfDirty,
+      successMessage: successMessage,
+    );
+  }
+
+  Future<bool> _saveSessionMarkdown(
+    _NoteSession session, {
+    required bool automatic,
+    required bool rescheduleIfDirty,
+    String? successMessage,
+  }) {
+    final inFlight = session.markdownSaveInFlight;
     if (inFlight != null) {
       return inFlight;
     }
-    final active = _activeNote;
-    if (active == null || !_hasDirtyMarkdown) {
+    if (!_hasDirtySession(session)) {
       return Future.value(true);
     }
-    final noteId = active.id;
-    final markdown = _markdownController.text;
+    final noteId = session.note.id;
+    final markdown = session.controller.text;
     late final Future<bool> saveFuture;
     saveFuture =
         _performMarkdownSave(
+          session: session,
           noteId: noteId,
           markdown: markdown,
           successMessage: successMessage,
           automatic: automatic,
           rescheduleIfDirty: rescheduleIfDirty,
         ).whenComplete(() {
-          if (identical(_markdownSaveInFlight, saveFuture)) {
-            _markdownSaveInFlight = null;
+          if (identical(session.markdownSaveInFlight, saveFuture)) {
+            session.markdownSaveInFlight = null;
           }
         });
-    _markdownSaveInFlight = saveFuture;
+    session.markdownSaveInFlight = saveFuture;
     return saveFuture;
   }
 
   Future<bool> _performMarkdownSave({
+    required _NoteSession session,
     required String noteId,
     required String markdown,
     required bool automatic,
@@ -779,19 +1147,18 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       if (!mounted) {
         return true;
       }
-      final activeStillOpen = _activeNote?.id == noteId;
-      final stillDirty =
-          activeStillOpen && _markdownController.text != markdown;
+      final stillOpen = _noteSessions[noteId] == session;
+      final stillDirty = stillOpen && session.controller.text != markdown;
       setState(() {
-        if (activeStillOpen) {
-          _activeNote = updated;
+        if (stillOpen) {
+          session.note = updated;
         }
         if (successMessage != null && !stillDirty) {
           _message = successMessage;
         }
       });
       if (stillDirty && rescheduleIfDirty) {
-        _scheduleAutoSave();
+        _scheduleAutoSave(session);
       }
       return true;
     } catch (error) {
@@ -1376,26 +1743,75 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   }
 
   Future<void> _search() async {
-    final active = _activeNote;
     final query = _searchController.text.trim();
-    if (active == null || query.isEmpty) {
+    if (!_hasVault || query.isEmpty) {
       return;
     }
     await _runBusy(() async {
-      await _searchCache.indexDocument(
-        id: active.id,
-        noteId: active.id,
-        title: active.title,
-        text: _markdownController.text,
-      );
-      final results = await _searchCache.search(query, noteId: active.id);
+      await _indexVaultForSearch();
+      final results = await _searchCache.search(query);
       setState(() {
+        _leftPaneMode = _LeftPaneMode.search;
         _searchResults = results;
         if (!_semanticSearchEnabled) {
           _message = '未配置 Embedding，已使用全文搜索';
         }
       });
     });
+  }
+
+  Future<void> _indexVaultForSearch() async {
+    final vault = _requireVault();
+    final resources = await vault.listResources();
+    final notes = _flattenNoteResources(resources).toList();
+    final liveIds = notes.map((note) => note.id).toSet();
+    if (_searchIndexFingerprints.keys.any((id) => !liveIds.contains(id))) {
+      _resetAiServices();
+    }
+    for (final note in notes) {
+      final loaded = await vault.readNote(note.id);
+      final fingerprint = _searchFingerprint(loaded);
+      if (_searchIndexFingerprints[loaded.id] == fingerprint) {
+        continue;
+      }
+      await _searchCache.indexDocument(
+        id: loaded.id,
+        noteId: loaded.id,
+        title: loaded.title,
+        text: MarkdownDocument.parse(loaded.markdown).body,
+      );
+      _searchIndexFingerprints[loaded.id] = fingerprint;
+    }
+  }
+
+  Iterable<VaultResourceNode> _flattenNoteResources(
+    List<VaultResourceNode> nodes,
+  ) sync* {
+    for (final node in nodes) {
+      if (node.isNote) {
+        yield node;
+      }
+      yield* _flattenNoteResources(node.children);
+    }
+  }
+
+  String _searchFingerprint(VaultNoteContent note) {
+    return '${note.updatedAt.microsecondsSinceEpoch}:'
+        '${note.markdown.length}:${note.markdown.hashCode}';
+  }
+
+  Future<void> _openSearchResult(SearchResult result) async {
+    var resource = _findResource(_resources, result.noteId);
+    if (resource == null) {
+      final resources = await _requireVault().listResources();
+      resource = _findResource(resources, result.noteId);
+      setState(() => _resources = resources);
+    }
+    if (resource == null) {
+      setState(() => _message = '搜索结果已失效：${result.title}');
+      return;
+    }
+    await _selectResource(resource);
   }
 
   Future<String> _testProviderConfig(ProviderConfig config) async {
@@ -1474,38 +1890,252 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     return CupertinoPageScaffold(
       backgroundColor: _background,
       child: SafeArea(
+        top: false,
         bottom: false,
-        child: Column(
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final narrow = constraints.maxWidth < 900;
+            return Column(
+              children: [
+                narrow
+                    ? _buildNarrowWorkspaceTitlebar()
+                    : _buildWorkspaceTitlebar(),
+                Expanded(
+                  child: narrow ? _buildNarrowLayout() : _buildWideLayout(),
+                ),
+              ],
+            );
+          },
+        ),
+      ),
+    );
+  }
+
+  Widget _buildWideLayout() {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (_leftPaneCollapsed)
+          SizedBox(width: _collapsedPaneWidth, child: _buildLeftCollapsedRail())
+        else
+          SizedBox(width: _leftPaneWidth, child: _buildResourcePane()),
+        Expanded(child: _buildEditorPane()),
+        if (_rightPaneCollapsed)
+          SizedBox(
+            width: _collapsedPaneWidth,
+            child: _buildRightCollapsedRail(),
+          )
+        else
+          SizedBox(width: _rightPaneWidth, child: _buildSourcePane()),
+      ],
+    );
+  }
+
+  Widget _buildWorkspaceTitlebar() {
+    final leftWidth = _leftPaneCollapsed ? _collapsedPaneWidth : _leftPaneWidth;
+    final rightWidth = _rightPaneCollapsed
+        ? _collapsedPaneWidth
+        : _rightPaneWidth;
+    return Container(
+      key: const Key('workspace-titlebar'),
+      height: _titlebarHeight,
+      decoration: const BoxDecoration(
+        color: _surface,
+        border: Border(bottom: BorderSide(color: _line)),
+      ),
+      child: Row(
+        children: [
+          SizedBox(width: leftWidth, child: _buildLeftTitlebar()),
+          Expanded(child: _buildCenterTitlebar()),
+          SizedBox(width: rightWidth, child: _buildRightTitlebar()),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildNarrowWorkspaceTitlebar() {
+    return Container(
+      key: const Key('workspace-titlebar'),
+      height: _titlebarHeight,
+      padding: const EdgeInsets.symmetric(horizontal: 12),
+      decoration: const BoxDecoration(
+        color: _surface,
+        border: Border(bottom: BorderSide(color: _line)),
+      ),
+      child: Row(
+        children: [
+          _IconAction(
+            key: const Key('left-pane-mode-resources'),
+            label: '资源列表',
+            icon: CupertinoIcons.folder,
+            onPressed: () {
+              setState(() {
+                _leftPaneMode = _LeftPaneMode.resources;
+                _narrowSection = _WorkspaceSection.resources;
+              });
+            },
+          ),
+          const SizedBox(width: 6),
+          _IconAction(
+            key: const Key('left-pane-mode-search'),
+            label: '搜索',
+            icon: CupertinoIcons.search,
+            onPressed: () {
+              setState(() {
+                _leftPaneMode = _LeftPaneMode.search;
+                _narrowSection = _WorkspaceSection.resources;
+              });
+            },
+          ),
+          const Spacer(),
+          _IconAction(
+            key: const Key('settings-button'),
+            label: '设置模型',
+            icon: CupertinoIcons.gear,
+            onPressed: _busy || _autoSaving ? null : _openProviderSettings,
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildLeftTitlebar() {
+    if (_leftPaneCollapsed) {
+      if (_usesNativeMacTitlebar) {
+        return const SizedBox.shrink();
+      }
+      return _TitlebarStrip(
+        child: _IconAction(
+          key: const Key('titlebar-expand-left-pane-button'),
+          label: '展开左栏',
+          icon: CupertinoIcons.sidebar_left,
+          onPressed: () => setState(() => _leftPaneCollapsed = false),
+        ),
+      );
+    }
+    final leadingInset = _usesNativeMacTitlebar
+        ? _macTitlebarControlReserve
+        : 10.0;
+    return Padding(
+      padding: EdgeInsets.only(left: leadingInset, right: 10),
+      child: Align(
+        alignment: Alignment.center,
+        child: Row(
           children: [
-            _TopBar(
-              vaultLabel: _vaultLabel,
-              vaultTooltip: _vaultRootPath ?? _vaultLabel,
-              busy: _busy || _autoSaving,
-              message: _message,
-              searchController: _searchController,
-              onSearch: _search,
-              onChooseVault: _chooseVault,
-              onOpenSettings: _openProviderSettings,
+            _ModeIconAction(
+              key: const Key('left-pane-mode-resources'),
+              label: '资源列表',
+              icon: CupertinoIcons.folder,
+              selected: _leftPaneMode == _LeftPaneMode.resources,
+              onPressed: () =>
+                  setState(() => _leftPaneMode = _LeftPaneMode.resources),
             ),
-            Expanded(
-              child: LayoutBuilder(
-                builder: (context, constraints) {
-                  if (constraints.maxWidth < 900) {
-                    return _buildNarrowLayout();
-                  }
-                  return Row(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      SizedBox(width: 292, child: _buildResourcePane()),
-                      Expanded(child: _buildEditorPane()),
-                      SizedBox(width: 380, child: _buildSourcePane()),
-                    ],
-                  );
-                },
-              ),
+            const SizedBox(width: 6),
+            _ModeIconAction(
+              key: const Key('left-pane-mode-search'),
+              label: '搜索',
+              icon: CupertinoIcons.search,
+              selected: _leftPaneMode == _LeftPaneMode.search,
+              onPressed: () =>
+                  setState(() => _leftPaneMode = _LeftPaneMode.search),
+            ),
+            const Spacer(),
+            _IconAction(
+              key: const Key('collapse-left-pane-button'),
+              label: '折叠左栏',
+              icon: CupertinoIcons.sidebar_left,
+              onPressed: () => setState(() => _leftPaneCollapsed = true),
             ),
           ],
         ),
+      ),
+    );
+  }
+
+  Widget _buildCenterTitlebar() {
+    final controlsDisabled = _busy || _autoSaving || !_hasVault;
+    return _TitlebarStrip(
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.end,
+        children: [
+          _SplitIconAction(
+            key: const Key('split-pane-left-button'),
+            label: '向左分屏',
+            direction: _SplitDirection.left,
+            onPressed: controlsDisabled
+                ? null
+                : () => _splitFocusedPane(_SplitDirection.left),
+          ),
+          const SizedBox(width: 6),
+          _SplitIconAction(
+            key: const Key('split-pane-right-button'),
+            label: '向右分屏',
+            direction: _SplitDirection.right,
+            onPressed: controlsDisabled
+                ? null
+                : () => _splitFocusedPane(_SplitDirection.right),
+          ),
+          const SizedBox(width: 6),
+          _SplitIconAction(
+            key: const Key('split-pane-up-button'),
+            label: '向上分屏',
+            direction: _SplitDirection.up,
+            onPressed: controlsDisabled
+                ? null
+                : () => _splitFocusedPane(_SplitDirection.up),
+          ),
+          const SizedBox(width: 6),
+          _SplitIconAction(
+            key: const Key('split-pane-down-button'),
+            label: '向下分屏',
+            direction: _SplitDirection.down,
+            onPressed: controlsDisabled
+                ? null
+                : () => _splitFocusedPane(_SplitDirection.down),
+          ),
+          const SizedBox(width: 10),
+          _ModeIconAction(
+            key: const Key('close-split-pane-button'),
+            label: '关闭分屏',
+            icon: CupertinoIcons.xmark,
+            selected: false,
+            onPressed: controlsDisabled || _splitLeafCount() <= 1
+                ? null
+                : () => unawaited(_closeFocusedPane()),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildRightTitlebar() {
+    if (_rightPaneCollapsed) {
+      return _TitlebarStrip(
+        child: _IconAction(
+          key: const Key('titlebar-expand-right-pane-button'),
+          label: '展开右栏',
+          icon: CupertinoIcons.sidebar_right,
+          onPressed: () => setState(() => _rightPaneCollapsed = false),
+        ),
+      );
+    }
+    return _TitlebarStrip(
+      child: Row(
+        children: [
+          const Icon(
+            CupertinoIcons.photo_on_rectangle,
+            key: Key('right-pane-title-icon'),
+            size: 20,
+            color: _muted,
+          ),
+          const Spacer(),
+          _IconAction(
+            key: const Key('collapse-right-pane-button'),
+            label: '折叠右栏',
+            icon: CupertinoIcons.sidebar_right,
+            onPressed: () => setState(() => _rightPaneCollapsed = true),
+          ),
+        ],
       ),
     );
   }
@@ -1537,7 +2167,9 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
         ),
         Expanded(
           child: switch (_narrowSection) {
-            _WorkspaceSection.resources => _buildResourcePane(),
+            _WorkspaceSection.resources => _buildResourcePane(
+              showFooter: false,
+            ),
             _WorkspaceSection.notes => _buildEditorPane(),
             _WorkspaceSection.sources => _buildSourcePane(),
           },
@@ -1546,127 +2178,435 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     );
   }
 
-  Widget _buildResourcePane() {
+  Widget _buildResourcePane({bool showFooter = true}) {
     return _Pane(
       key: const Key('resource-pane'),
-      title: '资源',
-      icon: CupertinoIcons.folder,
       child: Column(
         children: [
-          Row(
-            mainAxisAlignment: MainAxisAlignment.end,
-            children: [
-              _IconAction(
-                key: const Key('new-folder-button'),
-                label: '新建文件夹',
-                icon: CupertinoIcons.folder_badge_plus,
-                onPressed: _busy || !_hasVault ? null : () => _createFolder(),
-              ),
-              const SizedBox(width: 6),
-              _IconAction(
-                key: const Key('new-note-button'),
-                label: '新建笔记',
-                icon: CupertinoIcons.square_pencil,
-                onPressed: _busy || !_hasVault ? null : () => _createNote(),
-              ),
-            ],
+          Expanded(
+            child: _leftPaneMode == _LeftPaneMode.search
+                ? _buildSearchPane()
+                : _buildResourceBrowserPane(),
           ),
-          const SizedBox(height: 12),
-          if (!_hasVault)
-            Expanded(
-              child: _VaultLocationEmptyState(
-                onChooseVault: _busy ? null : _chooseVault,
-              ),
-            )
-          else ...[
-            Expanded(
-              flex: 2,
-              child: _ResourceTree(
-                nodes: _resources,
-                selectedId: _selectedResource?.id,
-                collapsedFolderIds: _collapsedFolderIds,
-                onSelect: _selectResource,
-                onToggleFolder: (folder) {
-                  setState(() {
-                    if (_collapsedFolderIds.contains(folder.id)) {
-                      _collapsedFolderIds.remove(folder.id);
-                    } else {
-                      _collapsedFolderIds.add(folder.id);
-                    }
-                  });
-                },
-                onCreateFolder: (folder) =>
-                    _createFolder(parentPath: folder.path),
-                onCreateNote: (folder) => _createNote(parentPath: folder.path),
-                onCreateSiblingNote: _createSiblingNote,
-                onRenameFolder: _renameFolder,
-                onRenameNote: _renameNote,
-                onCopyNote: _copyNote,
-                onMoveNote: _moveNote,
-                onDelete: _deleteResource,
-              ),
-            ),
-            const _SectionDivider(),
-            const _PaneSubheading('大纲'),
-            const SizedBox(height: 8),
-            Expanded(
-              flex: 3,
-              child: _OutlineTree(nodes: _activeNote?.outline ?? const []),
-            ),
-          ],
+          if (showFooter) ...[const _SectionDivider(), _buildLeftPaneFooter()],
         ],
       ),
+    );
+  }
+
+  Widget _buildResourceBrowserPane() {
+    return Column(
+      children: [
+        Row(
+          mainAxisAlignment: MainAxisAlignment.end,
+          children: [
+            _IconAction(
+              key: const Key('new-folder-button'),
+              label: '新建文件夹',
+              icon: CupertinoIcons.folder_badge_plus,
+              onPressed: _busy || !_hasVault ? null : () => _createFolder(),
+            ),
+            const SizedBox(width: 6),
+            _IconAction(
+              key: const Key('new-note-button'),
+              label: '新建笔记',
+              icon: CupertinoIcons.square_pencil,
+              onPressed: _busy || !_hasVault ? null : () => _createNote(),
+            ),
+          ],
+        ),
+        const SizedBox(height: 12),
+        if (!_hasVault)
+          Expanded(
+            child: _VaultLocationEmptyState(
+              onChooseVault: _busy ? null : _chooseVault,
+            ),
+          )
+        else ...[
+          Expanded(
+            flex: 2,
+            child: _ResourceTree(
+              nodes: _resources,
+              selectedId: _selectedResource?.id,
+              collapsedFolderIds: _collapsedFolderIds,
+              onSelect: _selectResource,
+              onToggleFolder: (folder) {
+                setState(() {
+                  if (_collapsedFolderIds.contains(folder.id)) {
+                    _collapsedFolderIds.remove(folder.id);
+                  } else {
+                    _collapsedFolderIds.add(folder.id);
+                  }
+                });
+              },
+              onCreateFolder: (folder) =>
+                  _createFolder(parentPath: folder.path),
+              onCreateNote: (folder) => _createNote(parentPath: folder.path),
+              onCreateSiblingNote: _createSiblingNote,
+              onRenameFolder: _renameFolder,
+              onRenameNote: _renameNote,
+              onCopyNote: _copyNote,
+              onMoveNote: _moveNote,
+              onDelete: _deleteResource,
+            ),
+          ),
+          const _SectionDivider(),
+          const _PaneSubheading('大纲'),
+          const SizedBox(height: 8),
+          Expanded(
+            flex: 3,
+            child: _OutlineTree(nodes: _activeNote?.outline ?? const []),
+          ),
+        ],
+      ],
+    );
+  }
+
+  Widget _buildSearchPane() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _SearchField(
+          textFieldKey: const Key('workspace-search-field'),
+          submitButtonKey: const Key('workspace-search-submit-button'),
+          controller: _searchController,
+          busy: _busy || _autoSaving || !_hasVault,
+          onSearch: _search,
+        ),
+        const SizedBox(height: 12),
+        if (!_hasVault)
+          Expanded(
+            child: _VaultLocationEmptyState(
+              onChooseVault: _busy ? null : _chooseVault,
+            ),
+          )
+        else if (_searchResults.isEmpty)
+          const Expanded(child: _EmptyState(text: '输入关键词搜索整个仓库'))
+        else
+          Expanded(
+            child: ListView(
+              padding: EdgeInsets.zero,
+              children: [
+                for (final result in _searchResults)
+                  _SearchResultRow(
+                    key: Key('search-result-${result.noteId}'),
+                    result: result,
+                    onTap: () => _openSearchResult(result),
+                  ),
+              ],
+            ),
+          ),
+      ],
+    );
+  }
+
+  Widget _buildLeftPaneFooter() {
+    final busy = _busy || _autoSaving;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Row(
+          children: [
+            Expanded(
+              child: _PillButton(
+                key: const Key('vault-location-button'),
+                label: _vaultLabel,
+                tooltip: _vaultRootPath ?? _vaultLabel,
+                icon: CupertinoIcons.folder,
+                maxLabelWidth: 156,
+                onPressed: busy ? null : _chooseVault,
+              ),
+            ),
+            const SizedBox(width: 8),
+            _IconAction(
+              key: const Key('settings-button'),
+              label: '设置模型',
+              icon: CupertinoIcons.gear,
+              onPressed: busy ? null : _openProviderSettings,
+            ),
+          ],
+        ),
+        if (busy || _message.isNotEmpty) ...[
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              if (busy) const CupertinoActivityIndicator(radius: 8),
+              if (busy && _message.isNotEmpty) const SizedBox(width: 8),
+              if (_message.isNotEmpty)
+                Expanded(
+                  child: Text(
+                    _message,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontSize: 12, color: _muted),
+                  ),
+                ),
+            ],
+          ),
+        ],
+      ],
+    );
+  }
+
+  Widget _buildLeftCollapsedRail() {
+    final busy = _busy || _autoSaving;
+    return _CollapsedRail(
+      key: const Key('left-pane-collapsed-rail'),
+      children: [
+        _IconAction(
+          key: const Key('expand-left-pane-button'),
+          label: '展开左栏',
+          icon: CupertinoIcons.sidebar_left,
+          onPressed: () => setState(() => _leftPaneCollapsed = false),
+        ),
+        const SizedBox(height: 8),
+        _IconAction(
+          label: '资源列表',
+          icon: CupertinoIcons.folder,
+          onPressed: () {
+            setState(() {
+              _leftPaneCollapsed = false;
+              _leftPaneMode = _LeftPaneMode.resources;
+            });
+          },
+        ),
+        const SizedBox(height: 8),
+        _IconAction(
+          label: '搜索',
+          icon: CupertinoIcons.search,
+          onPressed: () {
+            setState(() {
+              _leftPaneCollapsed = false;
+              _leftPaneMode = _LeftPaneMode.search;
+            });
+          },
+        ),
+        const Spacer(),
+        _IconAction(
+          key: const Key('vault-location-button'),
+          label: '选择仓库',
+          icon: CupertinoIcons.folder,
+          onPressed: busy ? null : _chooseVault,
+        ),
+        const SizedBox(height: 8),
+        _IconAction(
+          key: const Key('settings-button'),
+          label: '设置模型',
+          icon: CupertinoIcons.gear,
+          onPressed: busy ? null : _openProviderSettings,
+        ),
+      ],
+    );
+  }
+
+  Widget _buildRightCollapsedRail() {
+    return _CollapsedRail(
+      key: const Key('right-pane-collapsed-rail'),
+      children: [
+        _IconAction(
+          key: const Key('expand-right-pane-button'),
+          label: '展开右栏',
+          icon: CupertinoIcons.sidebar_right,
+          onPressed: () => setState(() => _rightPaneCollapsed = false),
+        ),
+        const SizedBox(height: 8),
+        const Icon(CupertinoIcons.photo_on_rectangle, size: 20, color: _muted),
+      ],
     );
   }
 
   Widget _buildEditorPane() {
-    return _Pane(
+    return Container(
       key: const Key('note-pane'),
-      title: '笔记',
-      icon: CupertinoIcons.square_pencil,
-      trailing: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          CupertinoSlidingSegmentedControl<_NoteMode>(
-            groupValue: _noteMode,
-            children: const {
-              _NoteMode.reading: Padding(
-                key: Key('note-mode-reading'),
-                padding: EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                child: Text('阅读'),
-              ),
-              _NoteMode.source: Padding(
-                key: Key('note-mode-source'),
-                padding: EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                child: Text('源码'),
-              ),
-            },
-            onValueChanged: (value) {
-              if (value != null) {
-                setState(() => _noteMode = value);
-              }
-            },
-          ),
-          const SizedBox(width: 8),
-          _IconAction(
-            key: const Key('save-note-button'),
-            label: '保存笔记',
-            icon: CupertinoIcons.tray_arrow_down,
-            onPressed: _activeNote == null || _busy || _autoSaving
-                ? null
-                : _saveMarkdown,
-          ),
-        ],
+      decoration: const BoxDecoration(
+        color: _secondarySurface,
+        border: Border(right: BorderSide(color: _softLine)),
       ),
-      child: _noteMode == _NoteMode.reading
-          ? _buildMarkdownPreview()
-          : _buildNoteEditor(),
+      child: KeyedSubtree(
+        key: const Key('split-workspace'),
+        child: _buildSplitNode(_splitRoot),
+      ),
     );
   }
 
-  Widget _buildMarkdownPreview() {
+  Widget _buildSplitNode(_SplitNode node) {
+    if (node is _SplitLeaf) {
+      return _buildSplitLeaf(node);
+    }
+    final branch = node as _SplitBranch;
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final horizontal = branch.axis == _SplitAxis.horizontal;
+        final extent = horizontal
+            ? constraints.maxWidth
+            : constraints.maxHeight;
+        final dividerExtent = 6.0;
+        final firstExtent = ((extent - dividerExtent) * branch.ratio).clamp(
+          0.0,
+          extent,
+        );
+        final secondExtent = (extent - dividerExtent - firstExtent).clamp(
+          0.0,
+          extent,
+        );
+        final children = <Widget>[
+          SizedBox(
+            width: horizontal ? firstExtent : null,
+            height: horizontal ? null : firstExtent,
+            child: _buildSplitNode(branch.first),
+          ),
+          _SplitDivider(
+            key: Key('split-divider-${branch.id}'),
+            axis: branch.axis,
+            onDragDelta: (delta) => _resizeSplitBranch(branch, delta, extent),
+          ),
+          SizedBox(
+            width: horizontal ? secondExtent : null,
+            height: horizontal ? null : secondExtent,
+            child: _buildSplitNode(branch.second),
+          ),
+        ];
+        return horizontal
+            ? Row(children: children)
+            : Column(children: children);
+      },
+    );
+  }
+
+  Widget _buildSplitLeaf(_SplitLeaf pane) {
+    final focused = pane.paneId == _focusedPaneId;
+    final session = pane.noteId == null ? null : _noteSessions[pane.noteId!];
+    return GestureDetector(
+      key: Key('split-pane-${pane.paneId}'),
+      behavior: HitTestBehavior.opaque,
+      onTap: () => setState(() => _focusPane(pane.paneId)),
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: _surface,
+          border: Border.all(color: focused ? _primary : _line),
+        ),
+        child: Stack(
+          children: [
+            Positioned.fill(
+              child: pane.mode == _NoteMode.reading
+                  ? session == null
+                        ? const _EmptyState(text: '选择或创建笔记后开始整理 Markdown')
+                        : _buildMarkdownPreview(session: session)
+                  : _buildNoteEditor(session: session, pane: pane),
+            ),
+            Positioned(
+              top: 10,
+              left: 12,
+              right: 10,
+              child: _buildPaneHeader(pane, session: session, focused: focused),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildPaneHeader(
+    _SplitLeaf pane, {
+    required _NoteSession? session,
+    required bool focused,
+  }) {
+    return SizedBox(
+      height: 28,
+      child: Stack(
+        alignment: Alignment.center,
+        children: [
+          Center(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 92),
+              child: Container(
+                key: Key('split-pane-title-${pane.paneId}'),
+                constraints: const BoxConstraints(maxWidth: 360),
+                child: Text(
+                  session?.note.title ?? '未选择笔记',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                    color: _muted,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+            ),
+          ),
+          Positioned(
+            top: 0,
+            right: 0,
+            bottom: 0,
+            child: _buildPaneModeControls(pane, focused: focused),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildPaneModeControls(_SplitLeaf pane, {required bool focused}) {
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: _surface.withValues(alpha: 0.92),
+        border: Border.all(color: _softLine),
+        borderRadius: _radius,
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _paneModeButton(
+            pane: pane,
+            focused: focused,
+            mode: _NoteMode.reading,
+            label: '阅读',
+            icon: CupertinoIcons.book,
+          ),
+          _paneModeButton(
+            pane: pane,
+            focused: focused,
+            mode: _NoteMode.source,
+            label: '源码',
+            icon: CupertinoIcons.chevron_left_slash_chevron_right,
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _paneModeButton({
+    required _SplitLeaf pane,
+    required bool focused,
+    required _NoteMode mode,
+    required String label,
+    required IconData icon,
+  }) {
+    final suffix = mode == _NoteMode.reading ? 'reading' : 'source';
+    final button = _PaneModeIconAction(
+      key: Key('note-mode-$suffix-${pane.paneId}'),
+      label: label,
+      icon: icon,
+      selected: pane.mode == mode,
+      onPressed: () {
+        setState(() {
+          _focusPane(pane.paneId);
+          pane.mode = mode;
+        });
+      },
+    );
+    if (!focused) {
+      return button;
+    }
+    return KeyedSubtree(key: Key('note-mode-$suffix'), child: button);
+  }
+
+  Widget _buildMarkdownPreview({_NoteSession? session}) {
     final markdown = _markdownPreviewData(
-      MarkdownDocument.parse(_markdownController.text).body,
+      MarkdownDocument.parse(
+        (session ?? _activeSession)?.controller.text ?? '',
+      ).body,
     );
     final baseStyle = MarkdownStyleSheet.fromCupertinoTheme(
       CupertinoTheme.of(context),
@@ -1704,7 +2644,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
             color: _text,
           ),
         ),
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.fromLTRB(16, 54, 16, 16),
       ),
     );
   }
@@ -1962,7 +2902,10 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     return _clampImageWidth(parsed ?? _defaultPastedImageWidth);
   }
 
-  Widget _buildNoteEditor() {
+  Widget _buildNoteEditor({_NoteSession? session, _SplitLeaf? pane}) {
+    final resolvedSession = session ?? _activeSession;
+    final resolvedPane = pane ?? _focusedPane;
+    final focused = resolvedPane?.paneId == _focusedPaneId;
     return Focus(
       focusNode: _editorPasteFocusNode,
       onKeyEvent: _handleEmptyNoteEditorKeyEvent,
@@ -1974,34 +2917,41 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
               unawaited(_pasteIntoNoteEditor()),
         },
         child: GestureDetector(
-          key: const Key('note-editor-paste-target'),
+          key: focused
+              ? const Key('note-editor-paste-target')
+              : resolvedPane == null
+              ? const Key('note-editor-paste-target')
+              : Key('note-editor-paste-target-${resolvedPane.paneId}'),
           behavior: HitTestBehavior.opaque,
           onTap: () {
-            if (_activeNote == null) {
-              _editorPasteFocusNode.requestFocus();
+            if (resolvedPane != null) {
+              setState(() => _focusPane(resolvedPane.paneId));
             }
+            _editorPasteFocusNode.requestFocus();
           },
-          child: CupertinoTextField(
-            key: const Key('note-editor'),
-            controller: _markdownController,
-            enabled: _activeNote != null,
-            readOnly: false,
-            textAlignVertical: TextAlignVertical.top,
-            expands: true,
-            minLines: null,
-            maxLines: null,
-            padding: const EdgeInsets.all(16),
-            placeholder: '选择或创建笔记后开始整理 Markdown',
-            placeholderStyle: const TextStyle(color: _muted),
-            style: const TextStyle(
-              fontFamily: 'monospace',
-              fontSize: 13,
-              height: 1.55,
-            ),
-            decoration: BoxDecoration(
-              color: _surface,
-              border: Border.all(color: _line),
-              borderRadius: _radius,
+          child: KeyedSubtree(
+            key: resolvedPane == null
+                ? const Key('note-editor-pane')
+                : Key('note-editor-${resolvedPane.paneId}'),
+            child: CupertinoTextField(
+              key: focused ? const Key('note-editor') : null,
+              controller:
+                  resolvedSession?.controller ?? _emptyMarkdownController,
+              enabled: resolvedSession != null,
+              readOnly: false,
+              textAlignVertical: TextAlignVertical.top,
+              expands: true,
+              minLines: null,
+              maxLines: null,
+              padding: const EdgeInsets.fromLTRB(16, 54, 16, 16),
+              placeholder: '选择或创建笔记后开始整理 Markdown',
+              placeholderStyle: const TextStyle(color: _muted),
+              style: const TextStyle(
+                fontFamily: 'monospace',
+                fontSize: 13,
+                height: 1.55,
+              ),
+              decoration: const BoxDecoration(color: _surface),
             ),
           ),
         ),
@@ -2026,8 +2976,6 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
         .toList();
     return _Pane(
       key: const Key('source-pane'),
-      title: '素材',
-      icon: CupertinoIcons.photo_on_rectangle,
       child: Focus(
         focusNode: _sourcePaneFocusNode,
         onKeyEvent: _handleSourcePaneKeyEvent,
@@ -2125,11 +3073,6 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
                   onCopy: () => _copyProposal(_proposals[index]),
                   onDelete: () => _deleteProposal(_proposals[index]),
                 ),
-              if (_searchResults.isNotEmpty) ...[
-                const _SectionDivider(),
-                for (final result in _searchResults)
-                  _SearchResultRow(result: result),
-              ],
             ],
           ),
         ),
@@ -2302,18 +3245,9 @@ int _clampTextOffset(int value, int length) {
 }
 
 class _Pane extends StatelessWidget {
-  const _Pane({
-    super.key,
-    required this.title,
-    required this.icon,
-    required this.child,
-    this.trailing,
-  });
+  const _Pane({super.key, required this.child});
 
-  final String title;
-  final IconData icon;
   final Widget child;
-  final Widget? trailing;
 
   @override
   Widget build(BuildContext context) {
@@ -2323,178 +3257,254 @@ class _Pane extends StatelessWidget {
         color: _secondarySurface,
         border: Border(right: BorderSide(color: _softLine)),
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Row(
-            children: [
-              Icon(icon, size: 18, color: _muted),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Text(
-                  title,
-                  style: const TextStyle(
-                    fontSize: 15,
-                    fontWeight: FontWeight.w700,
-                    color: _text,
-                  ),
-                ),
+      child: child,
+    );
+  }
+}
+
+class _SplitDivider extends StatelessWidget {
+  const _SplitDivider({
+    super.key,
+    required this.axis,
+    required this.onDragDelta,
+  });
+
+  final _SplitAxis axis;
+  final ValueChanged<double> onDragDelta;
+
+  @override
+  Widget build(BuildContext context) {
+    final horizontal = axis == _SplitAxis.horizontal;
+    return MouseRegion(
+      cursor: horizontal
+          ? SystemMouseCursors.resizeColumn
+          : SystemMouseCursors.resizeRow,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onHorizontalDragUpdate: horizontal
+            ? (details) => onDragDelta(details.delta.dx)
+            : null,
+        onVerticalDragUpdate: horizontal
+            ? null
+            : (details) => onDragDelta(details.delta.dy),
+        child: SizedBox(
+          width: horizontal ? 6 : double.infinity,
+          height: horizontal ? double.infinity : 6,
+          child: Center(
+            child: DecoratedBox(
+              decoration: const BoxDecoration(color: _softLine),
+              child: SizedBox(
+                width: horizontal ? 1 : double.infinity,
+                height: horizontal ? double.infinity : 1,
               ),
-              ?trailing,
-            ],
+            ),
           ),
-          const SizedBox(height: 12),
-          Expanded(child: child),
+        ),
+      ),
+    );
+  }
+}
+
+class _TitlebarStrip extends StatelessWidget {
+  const _TitlebarStrip({required this.child});
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 10),
+      child: Align(alignment: Alignment.center, child: child),
+    );
+  }
+}
+
+class _CollapsedRail extends StatelessWidget {
+  const _CollapsedRail({super.key, required this.children});
+
+  final List<Widget> children;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 12),
+      decoration: const BoxDecoration(
+        color: _secondarySurface,
+        border: Border(right: BorderSide(color: _softLine)),
+      ),
+      child: Column(children: children),
+    );
+  }
+}
+
+class _ModeIconAction extends StatelessWidget {
+  const _ModeIconAction({
+    super.key,
+    required this.label,
+    required this.icon,
+    required this.selected,
+    required this.onPressed,
+  });
+
+  final String label;
+  final IconData icon;
+  final bool selected;
+  final VoidCallback? onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return Tooltip(
+      message: label,
+      child: Semantics(
+        label: label,
+        button: true,
+        selected: selected,
+        child: CupertinoButton(
+          minimumSize: const Size.square(34),
+          padding: EdgeInsets.zero,
+          color: selected ? const Color(0xFFE9E9EE) : null,
+          borderRadius: _radius,
+          onPressed: onPressed,
+          child: SizedBox(
+            width: 34,
+            height: 34,
+            child: Center(
+              child: Icon(icon, size: 20, color: selected ? _text : _muted),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _SplitIconAction extends StatelessWidget {
+  const _SplitIconAction({
+    super.key,
+    required this.label,
+    required this.direction,
+    required this.onPressed,
+  });
+
+  final String label;
+  final _SplitDirection direction;
+  final VoidCallback? onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return Tooltip(
+      message: label,
+      child: Semantics(
+        label: label,
+        button: true,
+        child: CupertinoButton(
+          minimumSize: const Size.square(34),
+          padding: EdgeInsets.zero,
+          borderRadius: _radius,
+          onPressed: onPressed,
+          child: SizedBox(
+            width: 34,
+            height: 34,
+            child: Center(child: _SplitDirectionGlyph(direction: direction)),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _SplitDirectionGlyph extends StatelessWidget {
+  const _SplitDirectionGlyph({required this.direction});
+
+  final _SplitDirection direction;
+
+  @override
+  Widget build(BuildContext context) {
+    final horizontal =
+        direction == _SplitDirection.left || direction == _SplitDirection.right;
+    final baseIcon = horizontal
+        ? CupertinoIcons.square_split_1x2
+        : CupertinoIcons.square_split_2x1;
+    final chevronIcon = switch (direction) {
+      _SplitDirection.left => CupertinoIcons.chevron_left,
+      _SplitDirection.right => CupertinoIcons.chevron_right,
+      _SplitDirection.up => CupertinoIcons.chevron_up,
+      _SplitDirection.down => CupertinoIcons.chevron_down,
+    };
+    return SizedBox(
+      width: 22,
+      height: 22,
+      child: Stack(
+        alignment: Alignment.center,
+        clipBehavior: Clip.none,
+        children: [
+          const SizedBox(width: 22, height: 22),
+          Icon(baseIcon, size: 18, color: _muted),
+          Positioned(
+            left: direction == _SplitDirection.left ? -1 : null,
+            right: direction == _SplitDirection.right ? -1 : null,
+            top: direction == _SplitDirection.up ? -1 : null,
+            bottom: direction == _SplitDirection.down ? -1 : null,
+            child: Icon(chevronIcon, size: 9, color: _text),
+          ),
         ],
       ),
     );
   }
 }
 
-class _TopBar extends StatelessWidget {
-  const _TopBar({
-    required this.vaultLabel,
-    required this.vaultTooltip,
-    required this.busy,
-    required this.message,
-    required this.searchController,
-    required this.onSearch,
-    required this.onChooseVault,
-    required this.onOpenSettings,
+class _PaneModeIconAction extends StatelessWidget {
+  const _PaneModeIconAction({
+    super.key,
+    required this.label,
+    required this.icon,
+    required this.selected,
+    required this.onPressed,
   });
 
-  final String vaultLabel;
-  final String vaultTooltip;
-  final bool busy;
-  final String message;
-  final TextEditingController searchController;
-  final VoidCallback onSearch;
-  final VoidCallback onChooseVault;
-  final VoidCallback onOpenSettings;
+  final String label;
+  final IconData icon;
+  final bool selected;
+  final VoidCallback? onPressed;
 
   @override
   Widget build(BuildContext context) {
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final compact = constraints.maxWidth < 860;
-        return Container(
-          height: compact ? 104 : 58,
-          padding: const EdgeInsets.symmetric(horizontal: 12),
-          decoration: const BoxDecoration(
-            color: _surface,
-            border: Border(bottom: BorderSide(color: _line)),
-          ),
-          child: compact ? _buildCompact(context) : _buildWide(context),
-        );
-      },
-    );
-  }
-
-  Widget _buildWide(BuildContext context) {
-    return Row(
-      children: [
-        const Icon(CupertinoIcons.link_circle, color: _primary),
-        const SizedBox(width: 8),
-        const Text(
-          'Synapse',
-          style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800),
-        ),
-        const SizedBox(width: 16),
-        _PillButton(
-          key: const Key('vault-location-button'),
-          label: vaultLabel,
-          tooltip: vaultTooltip,
-          icon: CupertinoIcons.folder,
-          maxLabelWidth: 220,
-          onPressed: busy ? null : onChooseVault,
-        ),
-        const SizedBox(width: 8),
-        _IconAction(
-          key: const Key('settings-button'),
-          label: '设置模型',
-          icon: CupertinoIcons.gear,
-          onPressed: busy ? null : onOpenSettings,
-        ),
-        const SizedBox(width: 16),
-        SizedBox(
-          width: 320,
-          child: _SearchField(
-            controller: searchController,
-            busy: busy,
-            onSearch: onSearch,
+    return Tooltip(
+      message: label,
+      child: Semantics(
+        label: label,
+        button: true,
+        selected: selected,
+        child: CupertinoButton(
+          minimumSize: const Size.square(28),
+          padding: EdgeInsets.zero,
+          color: selected ? const Color(0xFFE9E9EE) : null,
+          borderRadius: _radius,
+          onPressed: onPressed,
+          child: SizedBox(
+            width: 28,
+            height: 28,
+            child: Center(
+              child: Icon(icon, size: 16, color: selected ? _text : _muted),
+            ),
           ),
         ),
-        const SizedBox(width: 12),
-        if (busy) const CupertinoActivityIndicator(radius: 9),
-        if (message.isNotEmpty) ...[
-          const SizedBox(width: 12),
-          Expanded(child: Text(message, overflow: TextOverflow.ellipsis)),
-        ] else
-          const Spacer(),
-      ],
-    );
-  }
-
-  Widget _buildCompact(BuildContext context) {
-    return Column(
-      mainAxisAlignment: MainAxisAlignment.center,
-      children: [
-        Row(
-          children: [
-            const Icon(CupertinoIcons.link_circle, color: _primary),
-            const SizedBox(width: 8),
-            const Text(
-              'Synapse',
-              style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800),
-            ),
-            const Spacer(),
-            if (busy) const CupertinoActivityIndicator(radius: 9),
-            const SizedBox(width: 8),
-            _IconAction(
-              key: const Key('settings-button'),
-              label: '设置模型',
-              icon: CupertinoIcons.gear,
-              onPressed: busy ? null : onOpenSettings,
-            ),
-          ],
-        ),
-        const SizedBox(height: 8),
-        Row(
-          children: [
-            _PillButton(
-              key: const Key('vault-location-button'),
-              label: vaultLabel,
-              tooltip: vaultTooltip,
-              icon: CupertinoIcons.folder,
-              maxLabelWidth: 170,
-              onPressed: busy ? null : onChooseVault,
-            ),
-            const SizedBox(width: 8),
-            Expanded(
-              child: _SearchField(
-                controller: searchController,
-                busy: busy,
-                onSearch: onSearch,
-              ),
-            ),
-            if (message.isNotEmpty) ...[
-              const SizedBox(width: 8),
-              Expanded(child: Text(message, overflow: TextOverflow.ellipsis)),
-            ],
-          ],
-        ),
-      ],
+      ),
     );
   }
 }
 
 class _SearchField extends StatelessWidget {
   const _SearchField({
+    this.textFieldKey,
+    this.submitButtonKey,
     required this.controller,
     required this.busy,
     required this.onSearch,
   });
 
+  final Key? textFieldKey;
+  final Key? submitButtonKey;
   final TextEditingController controller;
   final bool busy;
   final VoidCallback onSearch;
@@ -2502,6 +3512,7 @@ class _SearchField extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return CupertinoTextField(
+      key: textFieldKey,
       controller: controller,
       placeholder: '全文 + 语义搜索',
       prefix: const Padding(
@@ -2509,6 +3520,7 @@ class _SearchField extends StatelessWidget {
         child: Icon(CupertinoIcons.search, size: 16, color: _muted),
       ),
       suffix: CupertinoButton(
+        key: submitButtonKey,
         minimumSize: const Size.square(30),
         padding: const EdgeInsets.symmetric(horizontal: 8),
         onPressed: busy ? null : onSearch,
@@ -3968,37 +4980,50 @@ class _ProviderSettingsSheetState extends State<_ProviderSettingsSheet> {
 }
 
 class _SearchResultRow extends StatelessWidget {
-  const _SearchResultRow({required this.result});
+  const _SearchResultRow({
+    super.key,
+    required this.result,
+    required this.onTap,
+  });
 
   final SearchResult result;
+  final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      margin: const EdgeInsets.only(bottom: 8),
-      padding: const EdgeInsets.all(10),
-      decoration: BoxDecoration(
-        color: _surface,
-        border: Border.all(color: _softLine),
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: CupertinoButton(
+        minimumSize: const Size.fromHeight(44),
+        padding: EdgeInsets.zero,
         borderRadius: _radius,
-      ),
-      child: Row(
-        children: [
-          const Icon(CupertinoIcons.search, size: 16, color: _muted),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(result.title, overflow: TextOverflow.ellipsis),
-                Text(
-                  result.reasons.map((reason) => reason.name).join(' + '),
-                  style: const TextStyle(color: _muted, fontSize: 12),
-                ),
-              ],
-            ),
+        onPressed: onTap,
+        child: Container(
+          padding: const EdgeInsets.all(10),
+          decoration: BoxDecoration(
+            color: _surface,
+            border: Border.all(color: _softLine),
+            borderRadius: _radius,
           ),
-        ],
+          child: Row(
+            children: [
+              const Icon(CupertinoIcons.search, size: 16, color: _muted),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(result.title, overflow: TextOverflow.ellipsis),
+                    Text(
+                      result.reasons.map((reason) => reason.name).join(' + '),
+                      style: const TextStyle(color: _muted, fontSize: 12),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }

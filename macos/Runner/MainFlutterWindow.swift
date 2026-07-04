@@ -3,6 +3,11 @@ import FlutterMacOS
 
 class MainFlutterWindow: NSWindow {
   override func awakeFromNib() {
+    titleVisibility = .hidden
+    titlebarAppearsTransparent = true
+    styleMask.insert(.fullSizeContentView)
+    isMovableByWindowBackground = true
+
     let flutterViewController = FlutterViewController()
     let windowFrame = self.frame
     self.contentViewController = flutterViewController
