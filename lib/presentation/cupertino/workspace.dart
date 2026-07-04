@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart'
     show MenuAnchor, MenuController, MenuItemButton, Tooltip;
 import 'package:flutter/services.dart';
@@ -54,6 +55,8 @@ enum _WorkspaceSection {
   final IconData icon;
 }
 
+enum _ImageDropSide { before, after }
+
 class SynapseWorkspace extends StatefulWidget {
   const SynapseWorkspace({
     super.key,
@@ -105,7 +108,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   bool _programmaticMarkdownChange = false;
   bool _autoSaving = false;
   String _message = '';
-  String? _selectedPreviewImageSrc;
+  final _selectedPreviewImageSrcNotifier = ValueNotifier<String?>(null);
   String _vaultLabel = supportsDirectoryVault ? '选择仓库' : 'H5 预览库';
   String? _vaultRootPath;
   ProviderConfigStore? _providerConfigStore;
@@ -141,7 +144,15 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     _searchController.dispose();
     _editorPasteFocusNode.dispose();
     _sourcePaneFocusNode.dispose();
+    _selectedPreviewImageSrcNotifier.dispose();
     super.dispose();
+  }
+
+  void _setSelectedPreviewImageSrc(String? src) {
+    final normalized = src == null ? null : _normalizeImageSrc(src);
+    if (_selectedPreviewImageSrcNotifier.value != normalized) {
+      _selectedPreviewImageSrcNotifier.value = normalized;
+    }
   }
 
   void _resetServices(VaultBackend vault) {
@@ -160,7 +171,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     _proposals = const [];
     _searchResults = const [];
     _selectedSourceIds.clear();
-    _selectedPreviewImageSrc = null;
+    _setSelectedPreviewImageSrc(null);
     _replaceEditorMarkdown('');
     _previewMarkdown = false;
     _narrowSection = _WorkspaceSection.resources;
@@ -849,7 +860,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     }
     setState(() {
       _selectedSourceIds.add(source.id);
-      _selectedPreviewImageSrc = _markdownAttachmentSrc(active, source);
+      _setSelectedPreviewImageSrc(_markdownAttachmentSrc(active, source));
     });
   }
 
@@ -1721,19 +1732,56 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     final width = _clampImageWidth(
       (config.width ?? _defaultPastedImageWidth.toDouble()).round(),
     ).toDouble();
-    final selected = _selectedPreviewImageSrc == _normalizeImageSrc(src);
     return _PreviewImageBlock(
       key: Key('preview-image-${source.id}'),
       source: source,
+      src: src,
       width: width,
-      selected: selected,
+      selectedImageSrc: _selectedPreviewImageSrcNotifier,
       imageBytes: _requireVault().readSourceAttachment(source),
-      onTap: () {
-        setState(() => _selectedPreviewImageSrc = _normalizeImageSrc(src));
-      },
+      onTap: () => _setSelectedPreviewImageSrc(src),
       onWidthChanged: (value) {
         _applyImageWidth(src: src, width: _clampImageWidth(value.round()));
       },
+      onImageDropped: (draggedSrc, targetSrc, side) {
+        unawaited(
+          _applyImageDrop(
+            draggedSrc: draggedSrc,
+            targetSrc: targetSrc,
+            beforeTarget: side == _ImageDropSide.before,
+          ),
+        );
+      },
+    );
+  }
+
+  Future<void> _applyImageDrop({
+    required String draggedSrc,
+    required String targetSrc,
+    required bool beforeTarget,
+  }) async {
+    if (_normalizeImageSrc(draggedSrc) == _normalizeImageSrc(targetSrc) ||
+        _imageSourceForMarkdownSrc(draggedSrc) == null ||
+        _imageSourceForMarkdownSrc(targetSrc) == null) {
+      return;
+    }
+    final updated = _moveImageTagInMarkdown(
+      markdown: _markdownController.text,
+      draggedSrc: draggedSrc,
+      targetSrc: targetSrc,
+      beforeTarget: beforeTarget,
+    );
+    if (updated == _markdownController.text) {
+      return;
+    }
+    setState(() {
+      _setSelectedPreviewImageSrc(draggedSrc);
+      _replaceEditorMarkdown(updated);
+    });
+    await _saveCurrentMarkdown(
+      successMessage: '图片位置已更新',
+      automatic: false,
+      rescheduleIfDirty: false,
     );
   }
 
@@ -1750,7 +1798,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       return;
     }
     setState(() {
-      _selectedPreviewImageSrc = _normalizeImageSrc(src);
+      _setSelectedPreviewImageSrc(src);
       _replaceEditorMarkdown(updated);
     });
     await _saveCurrentMarkdown(
@@ -1758,6 +1806,104 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       automatic: false,
       rescheduleIfDirty: false,
     );
+  }
+
+  String _moveImageTagInMarkdown({
+    required String markdown,
+    required String draggedSrc,
+    required String targetSrc,
+    required bool beforeTarget,
+  }) {
+    final draggedMatch = _findImageTagMatch(markdown, draggedSrc);
+    final targetMatch = _findImageTagMatch(markdown, targetSrc);
+    if (draggedMatch == null ||
+        targetMatch == null ||
+        draggedMatch.start == targetMatch.start) {
+      return markdown;
+    }
+    final draggedTag = draggedMatch.group(0)!;
+    final withoutDragged = _removeImageTagAt(
+      markdown: markdown,
+      start: draggedMatch.start,
+      end: draggedMatch.end,
+    );
+    final updatedTargetMatch = _findImageTagMatch(withoutDragged, targetSrc);
+    if (updatedTargetMatch == null) {
+      return markdown;
+    }
+    final insertionIndex = beforeTarget
+        ? updatedTargetMatch.start
+        : updatedTargetMatch.end;
+    final insertion = _inlineImageInsertion(
+      text: withoutDragged,
+      index: insertionIndex,
+      tag: draggedTag,
+      beforeTarget: beforeTarget,
+    );
+    return _trimTrailingWhitespaceOnLines(
+      withoutDragged.replaceRange(insertionIndex, insertionIndex, insertion),
+    );
+  }
+
+  RegExpMatch? _findImageTagMatch(String markdown, String src) {
+    final wanted = _normalizeImageSrc(src);
+    for (final match in _htmlImageTagPattern.allMatches(markdown)) {
+      final tag = match.group(0)!;
+      if (_normalizeImageSrc(_htmlAttribute(tag, 'src')) == wanted &&
+          _imageSourceForMarkdownSrc(_htmlAttribute(tag, 'src')) != null) {
+        return match;
+      }
+    }
+    return null;
+  }
+
+  String _removeImageTagAt({
+    required String markdown,
+    required int start,
+    required int end,
+  }) {
+    var before = markdown.substring(0, start);
+    var after = markdown.substring(end);
+    if (before.endsWith('\n\n') && after.startsWith('\n\n')) {
+      after = after.substring(2);
+    } else if (before.endsWith('\n') && after.startsWith('\n')) {
+      after = after.substring(1);
+    }
+    if ((before.isEmpty || before.endsWith('\n')) && after.startsWith(' ')) {
+      after = after.substring(1);
+    }
+    if (before.endsWith(' ') && (after.isEmpty || after.startsWith('\n'))) {
+      before = before.substring(0, before.length - 1);
+    }
+    if (before.endsWith(' ') && after.startsWith(' ')) {
+      after = after.substring(1);
+    }
+    return _trimTrailingWhitespaceOnLines(before + after);
+  }
+
+  String _inlineImageInsertion({
+    required String text,
+    required int index,
+    required String tag,
+    required bool beforeTarget,
+  }) {
+    if (beforeTarget) {
+      final leading = index > 0 && !_isWhitespace(text.codeUnitAt(index - 1))
+          ? ' '
+          : '';
+      return '$leading$tag ';
+    }
+    final trailing =
+        index < text.length && !_isWhitespace(text.codeUnitAt(index))
+        ? ' '
+        : '';
+    return ' $tag$trailing';
+  }
+
+  String _trimTrailingWhitespaceOnLines(String value) {
+    return value
+        .replaceAll(RegExp(r'[ \t]+\n'), '\n')
+        .replaceAll(RegExp(r'[ \t]+$'), '');
   }
 
   String _replaceImageWidthInMarkdown({
@@ -2131,6 +2277,13 @@ int _clampImageWidth(int value) {
     return _maxPastedImageWidth.toInt();
   }
   return value;
+}
+
+bool _isWhitespace(int codeUnit) {
+  return codeUnit == 0x20 ||
+      codeUnit == 0x09 ||
+      codeUnit == 0x0A ||
+      codeUnit == 0x0D;
 }
 
 int _clampTextOffset(int value, int length) {
@@ -2872,128 +3025,388 @@ class _ResourceRowShell extends StatelessWidget {
   }
 }
 
-class _PreviewImageBlock extends StatelessWidget {
+class _PreviewImageBlock extends StatefulWidget {
   const _PreviewImageBlock({
     super.key,
     required this.source,
+    required this.src,
     required this.width,
-    required this.selected,
+    required this.selectedImageSrc,
     required this.imageBytes,
     required this.onTap,
     required this.onWidthChanged,
+    required this.onImageDropped,
   });
 
   final SourceItem source;
+  final String src;
   final double width;
-  final bool selected;
+  final ValueListenable<String?> selectedImageSrc;
   final Future<List<int>> imageBytes;
   final VoidCallback onTap;
   final ValueChanged<double> onWidthChanged;
+  final void Function(String draggedSrc, String targetSrc, _ImageDropSide side)
+  onImageDropped;
+
+  @override
+  State<_PreviewImageBlock> createState() => _PreviewImageBlockState();
+}
+
+class _PreviewImageBlockState extends State<_PreviewImageBlock> {
+  double? _previewWidth;
+  double? _resizeStartGlobalX;
+  double? _resizeStartWidth;
+  int? _resizePointer;
+  bool _dragging = false;
+  bool _resizeHandleHovered = false;
+  _ImageDropSide? _dropSide;
+
+  double get _effectiveWidth => _previewWidth ?? widget.width;
+  bool get _selected =>
+      widget.selectedImageSrc.value == _normalizeImageSrc(widget.src);
+
+  @override
+  void initState() {
+    super.initState();
+    widget.selectedImageSrc.addListener(_handleSelectionChanged);
+  }
+
+  @override
+  void didUpdateWidget(covariant _PreviewImageBlock oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.selectedImageSrc != widget.selectedImageSrc) {
+      oldWidget.selectedImageSrc.removeListener(_handleSelectionChanged);
+      widget.selectedImageSrc.addListener(_handleSelectionChanged);
+    }
+    if (!_dragging && oldWidget.width != widget.width) {
+      _previewWidth = null;
+    }
+  }
+
+  @override
+  void dispose() {
+    widget.selectedImageSrc.removeListener(_handleSelectionChanged);
+    super.dispose();
+  }
+
+  void _handleSelectionChanged() {
+    if (mounted) {
+      setState(() {});
+    }
+  }
+
+  void _startResize(PointerDownEvent event) {
+    if (_resizePointer != null) {
+      return;
+    }
+    setState(() {
+      _dragging = true;
+      _previewWidth = _effectiveWidth;
+      _resizePointer = event.pointer;
+      _resizeStartGlobalX = event.position.dx;
+      _resizeStartWidth = _effectiveWidth;
+    });
+  }
+
+  void _updateResize(PointerMoveEvent event) {
+    if (event.pointer != _resizePointer ||
+        _resizeStartGlobalX == null ||
+        _resizeStartWidth == null) {
+      return;
+    }
+    final delta = event.position.dx - _resizeStartGlobalX!;
+    final nextWidth = _clampImageWidth(
+      (_resizeStartWidth! + delta).round(),
+    ).toDouble();
+    if (nextWidth == _effectiveWidth) {
+      return;
+    }
+    setState(() => _previewWidth = nextWidth);
+  }
+
+  void _endResize() {
+    final width = _clampImageWidth(_effectiveWidth.round()).toDouble();
+    setState(() {
+      _dragging = false;
+      _previewWidth = width;
+      _resizePointer = null;
+      _resizeStartGlobalX = null;
+      _resizeStartWidth = null;
+    });
+    if (width.round() != widget.width.round()) {
+      widget.onWidthChanged(width);
+    }
+  }
+
+  void _cancelResize() {
+    setState(() {
+      _dragging = false;
+      _previewWidth = null;
+      _resizeHandleHovered = false;
+      _resizePointer = null;
+      _resizeStartGlobalX = null;
+      _resizeStartWidth = null;
+    });
+  }
+
+  void _handleDragMove(DragTargetDetails<String> details) {
+    final next = _dropSideForGlobalOffset(details.offset);
+    if (next == _dropSide) {
+      return;
+    }
+    setState(() => _dropSide = next);
+  }
+
+  void _handleDragLeave(String? data) {
+    if (_dropSide == null) {
+      return;
+    }
+    setState(() => _dropSide = null);
+  }
+
+  void _handleImageDrop(DragTargetDetails<String> details) {
+    final side = _dropSideForGlobalOffset(details.offset);
+    setState(() => _dropSide = null);
+    widget.onImageDropped(details.data, widget.src, side);
+  }
+
+  _ImageDropSide _dropSideForGlobalOffset(Offset globalOffset) {
+    final renderObject = context.findRenderObject();
+    if (renderObject is! RenderBox || !renderObject.hasSize) {
+      return _ImageDropSide.after;
+    }
+    final local = renderObject.globalToLocal(globalOffset);
+    return local.dx < renderObject.size.width / 2
+        ? _ImageDropSide.before
+        : _ImageDropSide.after;
+  }
 
   @override
   Widget build(BuildContext context) {
     return SelectionContainer.disabled(
       child: LayoutBuilder(
         builder: (context, constraints) {
+          final width = _effectiveWidth;
           final displayWidth =
               constraints.maxWidth.isFinite && constraints.maxWidth < width
               ? constraints.maxWidth
               : width;
           return SizedBox(
             width: displayWidth,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
+            child: Stack(
+              clipBehavior: Clip.none,
               children: [
-                GestureDetector(
-                  key: Key('preview-image-tap-${source.id}'),
-                  behavior: HitTestBehavior.opaque,
-                  onTap: onTap,
-                  child: DecoratedBox(
-                    decoration: BoxDecoration(
-                      border: Border.all(
-                        color: selected ? _primary : _softLine,
-                      ),
-                      borderRadius: _radius,
-                    ),
-                    child: ClipRRect(
-                      borderRadius: _radius,
-                      child: ConstrainedBox(
-                        constraints: const BoxConstraints(minHeight: 96),
-                        child: FutureBuilder<List<int>>(
-                          future: imageBytes,
-                          builder: (context, snapshot) {
-                            if (snapshot.connectionState !=
-                                ConnectionState.done) {
-                              return const SizedBox(
-                                height: 96,
-                                child: Center(
-                                  child: CupertinoActivityIndicator(),
-                                ),
-                              );
-                            }
-                            if (snapshot.hasError || !snapshot.hasData) {
-                              return const SizedBox(
-                                height: 96,
-                                child: Center(
-                                  child: Icon(
-                                    CupertinoIcons.exclamationmark_triangle,
-                                    color: _danger,
-                                  ),
-                                ),
-                              );
-                            }
-                            return Image.memory(
-                              Uint8List.fromList(snapshot.data!),
-                              fit: BoxFit.contain,
-                              gaplessPlayback: true,
-                              errorBuilder: (context, error, stackTrace) =>
-                                  const SizedBox(
-                                    height: 96,
-                                    child: Center(
-                                      child: Icon(
-                                        CupertinoIcons.exclamationmark_triangle,
-                                        color: _danger,
-                                      ),
-                                    ),
-                                  ),
-                            );
-                          },
-                        ),
-                      ),
-                    ),
-                  ),
+                DragTarget<String>(
+                  onWillAcceptWithDetails: (details) =>
+                      details.data != widget.src,
+                  onMove: _handleDragMove,
+                  onLeave: _handleDragLeave,
+                  onAcceptWithDetails: _handleImageDrop,
+                  builder: (context, candidateData, rejectedData) {
+                    final image = _buildImageBody();
+                    return Draggable<String>(
+                      data: widget.src,
+                      dragAnchorStrategy: pointerDragAnchorStrategy,
+                      feedback: _PreviewImageDragFeedback(width: displayWidth),
+                      childWhenDragging: Opacity(opacity: 0.45, child: image),
+                      child: image,
+                    );
+                  },
                 ),
-                const SizedBox(height: 6),
-                Row(
-                  children: [
-                    _TileAction(
-                      key: Key('decrease-image-width-${source.id}'),
-                      label: '缩小图片',
-                      icon: CupertinoIcons.minus,
-                      onPressed: () => onWidthChanged(width - 80),
-                    ),
-                    Expanded(
-                      child: CupertinoSlider(
-                        key: Key('image-width-slider-${source.id}'),
-                        min: _minPastedImageWidth,
-                        max: _maxPastedImageWidth,
-                        value: width,
-                        onChanged: onWidthChanged,
-                      ),
-                    ),
-                    _TileAction(
-                      key: Key('increase-image-width-${source.id}'),
-                      label: '放大图片',
-                      icon: CupertinoIcons.plus,
-                      onPressed: () => onWidthChanged(width + 80),
-                    ),
-                  ],
-                ),
+                _buildResizeHandle(),
               ],
             ),
           );
         },
+      ),
+    );
+  }
+
+  Widget _buildResizeHandle() {
+    final showHint = _resizeHandleHovered || _dragging;
+    return Positioned(
+      right: 0,
+      bottom: 0,
+      child: MouseRegion(
+        cursor: SystemMouseCursors.resizeUpLeftDownRight,
+        onEnter: (_) {
+          if (!_resizeHandleHovered) {
+            setState(() => _resizeHandleHovered = true);
+          }
+        },
+        onExit: (_) {
+          if (_resizeHandleHovered) {
+            setState(() => _resizeHandleHovered = false);
+          }
+        },
+        child: Listener(
+          key: Key('image-resize-handle-${widget.source.id}'),
+          behavior: HitTestBehavior.opaque,
+          onPointerDown: (event) {
+            widget.onTap();
+            _startResize(event);
+          },
+          onPointerMove: _updateResize,
+          onPointerUp: (event) {
+            if (event.pointer == _resizePointer) {
+              _endResize();
+            }
+          },
+          onPointerCancel: (event) {
+            if (event.pointer == _resizePointer) {
+              _cancelResize();
+            }
+          },
+          child: SizedBox(
+            width: 28,
+            height: 28,
+            child: Align(
+              alignment: Alignment.bottomRight,
+              child: showHint
+                  ? DecoratedBox(
+                      key: Key('image-resize-handle-icon-${widget.source.id}'),
+                      decoration: BoxDecoration(
+                        color: _surface.withValues(alpha: 0.72),
+                        border: Border.all(
+                          color: _primary.withValues(alpha: 0.38),
+                        ),
+                        borderRadius: BorderRadius.circular(7),
+                      ),
+                      child: const SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: Icon(
+                          CupertinoIcons.arrow_down_right_arrow_up_left,
+                          size: 11,
+                          color: _primary,
+                        ),
+                      ),
+                    )
+                  : const SizedBox.shrink(),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildImageBody() {
+    final highlighted = _selected || _dragging || _dropSide != null;
+    Widget body = SizedBox(
+      width: double.infinity,
+      child: Listener(
+        onPointerDown: (_) => widget.onTap(),
+        child: GestureDetector(
+          key: Key('preview-image-tap-${widget.source.id}'),
+          behavior: HitTestBehavior.opaque,
+          onTap: widget.onTap,
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              border: Border.all(color: highlighted ? _primary : _softLine),
+              borderRadius: _radius,
+            ),
+            child: ClipRRect(
+              borderRadius: _radius,
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(minHeight: 96),
+                child: FutureBuilder<List<int>>(
+                  future: widget.imageBytes,
+                  builder: (context, snapshot) {
+                    if (snapshot.connectionState != ConnectionState.done) {
+                      return const SizedBox(
+                        height: 96,
+                        child: Center(child: CupertinoActivityIndicator()),
+                      );
+                    }
+                    if (snapshot.hasError || !snapshot.hasData) {
+                      return const SizedBox(
+                        height: 96,
+                        child: Center(
+                          child: Icon(
+                            CupertinoIcons.exclamationmark_triangle,
+                            color: _danger,
+                          ),
+                        ),
+                      );
+                    }
+                    return Image.memory(
+                      Uint8List.fromList(snapshot.data!),
+                      fit: BoxFit.contain,
+                      gaplessPlayback: true,
+                      errorBuilder: (context, error, stackTrace) =>
+                          const SizedBox(
+                            height: 96,
+                            child: Center(
+                              child: Icon(
+                                CupertinoIcons.exclamationmark_triangle,
+                                color: _danger,
+                              ),
+                            ),
+                          ),
+                    );
+                  },
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    final dropSide = _dropSide;
+    if (dropSide == null) {
+      return body;
+    }
+    return Stack(
+      children: [
+        body,
+        Positioned(
+          top: 6,
+          bottom: 6,
+          left: dropSide == _ImageDropSide.before ? 3 : null,
+          right: dropSide == _ImageDropSide.after ? 3 : null,
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              color: _primary,
+              borderRadius: BorderRadius.circular(2),
+            ),
+            child: const SizedBox(width: 3),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _PreviewImageDragFeedback extends StatelessWidget {
+  const _PreviewImageDragFeedback({required this.width});
+
+  final double width;
+
+  @override
+  Widget build(BuildContext context) {
+    final feedbackWidth = width < 160 ? width : 160.0;
+    return Opacity(
+      opacity: 0.82,
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: _surface,
+          border: Border.all(color: _primary),
+          borderRadius: _radius,
+          boxShadow: const [
+            BoxShadow(
+              color: Color(0x26000000),
+              blurRadius: 14,
+              offset: Offset(0, 8),
+            ),
+          ],
+        ),
+        child: SizedBox(
+          width: feedbackWidth,
+          height: 96,
+          child: const Center(
+            child: Icon(CupertinoIcons.photo, size: 28, color: _primary),
+          ),
+        ),
       ),
     );
   }
