@@ -44,6 +44,7 @@ const _leftPaneWidth = 292.0;
 const _rightPaneWidth = 380.0;
 const _collapsedPaneWidth = 52.0;
 const _macTitlebarControlReserve = 148.0;
+const _noteWorkspaceGutter = 12.0;
 const _defaultPastedImageWidth = 480;
 const _minPastedImageWidth = 120.0;
 const _maxPastedImageWidth = 1200.0;
@@ -2422,8 +2423,9 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
         color: _secondarySurface,
         border: Border(right: BorderSide(color: _softLine)),
       ),
-      child: KeyedSubtree(
+      child: Padding(
         key: const Key('split-workspace'),
+        padding: const EdgeInsets.all(_noteWorkspaceGutter),
         child: _buildSplitNode(_splitRoot),
       ),
     );
@@ -2440,7 +2442,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
         final extent = horizontal
             ? constraints.maxWidth
             : constraints.maxHeight;
-        final dividerExtent = 6.0;
+        const dividerExtent = _noteWorkspaceGutter;
         final firstExtent = ((extent - dividerExtent) * branch.ratio).clamp(
           0.0,
           extent,
@@ -2484,23 +2486,31 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
         decoration: BoxDecoration(
           color: _surface,
           border: Border.all(color: focused ? _primary : _line),
+          borderRadius: _radius,
         ),
-        child: Stack(
-          children: [
-            Positioned.fill(
-              child: pane.mode == _NoteMode.reading
-                  ? session == null
-                        ? const _EmptyState(text: '选择或创建笔记后开始整理 Markdown')
-                        : _buildMarkdownPreview(session: session)
-                  : _buildNoteEditor(session: session, pane: pane),
-            ),
-            Positioned(
-              top: 10,
-              left: 12,
-              right: 10,
-              child: _buildPaneHeader(pane, session: session, focused: focused),
-            ),
-          ],
+        child: ClipRRect(
+          borderRadius: _radius,
+          child: Stack(
+            children: [
+              Positioned.fill(
+                child: pane.mode == _NoteMode.reading
+                    ? session == null
+                          ? const _EmptyState(text: '选择或创建笔记后开始整理 Markdown')
+                          : _buildMarkdownPreview(session: session)
+                    : _buildNoteEditor(session: session, pane: pane),
+              ),
+              Positioned(
+                top: 10,
+                left: 12,
+                right: 10,
+                child: _buildPaneHeader(
+                  pane,
+                  session: session,
+                  focused: focused,
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -2611,41 +2621,34 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     final baseStyle = MarkdownStyleSheet.fromCupertinoTheme(
       CupertinoTheme.of(context),
     );
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: _surface,
-        border: Border.all(color: _line),
-        borderRadius: _radius,
-      ),
-      child: Markdown(
-        data: markdown,
-        selectable: false,
-        softLineBreak: true,
-        sizedImageBuilder: _buildPreviewImage,
-        styleSheetTheme: MarkdownStyleSheetBaseTheme.cupertino,
-        styleSheet: baseStyle.copyWith(
-          p: const TextStyle(fontSize: 14, height: 1.55, color: _text),
-          h1: const TextStyle(
-            fontSize: 20,
-            fontWeight: FontWeight.w600,
-            height: 1.35,
-            color: _text,
-          ),
-          h2: const TextStyle(
-            fontSize: 17,
-            fontWeight: FontWeight.w600,
-            height: 1.4,
-            color: _text,
-          ),
-          h3: const TextStyle(
-            fontSize: 15,
-            fontWeight: FontWeight.w600,
-            height: 1.45,
-            color: _text,
-          ),
+    return Markdown(
+      data: markdown,
+      selectable: false,
+      softLineBreak: true,
+      sizedImageBuilder: _buildPreviewImage,
+      styleSheetTheme: MarkdownStyleSheetBaseTheme.cupertino,
+      styleSheet: baseStyle.copyWith(
+        p: const TextStyle(fontSize: 14, height: 1.55, color: _text),
+        h1: const TextStyle(
+          fontSize: 20,
+          fontWeight: FontWeight.w600,
+          height: 1.35,
+          color: _text,
         ),
-        padding: const EdgeInsets.fromLTRB(16, 54, 16, 16),
+        h2: const TextStyle(
+          fontSize: 17,
+          fontWeight: FontWeight.w600,
+          height: 1.4,
+          color: _text,
+        ),
+        h3: const TextStyle(
+          fontSize: 15,
+          fontWeight: FontWeight.w600,
+          height: 1.45,
+          color: _text,
+        ),
       ),
+      padding: const EdgeInsets.fromLTRB(16, 54, 16, 16),
     );
   }
 
@@ -3288,17 +3291,9 @@ class _SplitDivider extends StatelessWidget {
             ? null
             : (details) => onDragDelta(details.delta.dy),
         child: SizedBox(
-          width: horizontal ? 6 : double.infinity,
-          height: horizontal ? double.infinity : 6,
-          child: Center(
-            child: DecoratedBox(
-              decoration: const BoxDecoration(color: _softLine),
-              child: SizedBox(
-                width: horizontal ? 1 : double.infinity,
-                height: horizontal ? double.infinity : 1,
-              ),
-            ),
-          ),
+          width: horizontal ? _noteWorkspaceGutter : double.infinity,
+          height: horizontal ? double.infinity : _noteWorkspaceGutter,
+          child: const SizedBox.expand(),
         ),
       ),
     );

@@ -678,6 +678,94 @@ void main() {
     expect(after.width, greaterThan(before.width));
   });
 
+  testWidgets('keeps a uniform gutter around the note workspace', (
+    tester,
+  ) async {
+    await _pumpWorkspace(tester, vault: MemoryVaultBackend());
+
+    final notePane = tester.getRect(find.byKey(const Key('note-pane')));
+    final splitPane = tester.getRect(
+      find.byKey(const Key('split-pane-pane-1')),
+    );
+
+    expect(splitPane.left - notePane.left, closeTo(12, 1));
+    expect(splitPane.top - notePane.top, closeTo(12, 1));
+    expect(notePane.right - splitPane.right, closeTo(12, 1));
+    expect(notePane.bottom - splitPane.bottom, closeTo(12, 1));
+  });
+
+  testWidgets('keeps a uniform horizontal gutter between split panes', (
+    tester,
+  ) async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    await vault.createNote(parentPath: '', title: 'Alpha');
+
+    await _pumpWorkspace(tester, vault: vault);
+    await tester.tap(find.byKey(const Key('split-pane-right-button')));
+    await tester.pump(const Duration(milliseconds: 250));
+
+    final firstPane = tester.getRect(
+      find.byKey(const Key('split-pane-pane-1')),
+    );
+    final divider = tester.getRect(
+      find.byKey(const Key('split-divider-split-1')),
+    );
+    final secondPane = tester.getRect(
+      find.byKey(const Key('split-pane-pane-2')),
+    );
+
+    expect(divider.left - firstPane.right, 0);
+    expect(secondPane.left - divider.right, 0);
+    expect(divider.width, 12);
+  });
+
+  testWidgets('keeps a uniform vertical gutter between split panes', (
+    tester,
+  ) async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    await vault.createNote(parentPath: '', title: 'Alpha');
+
+    await _pumpWorkspace(tester, vault: vault);
+    await tester.tap(find.byKey(const Key('split-pane-down-button')));
+    await tester.pump(const Duration(milliseconds: 250));
+
+    final firstPane = tester.getRect(
+      find.byKey(const Key('split-pane-pane-1')),
+    );
+    final divider = tester.getRect(
+      find.byKey(const Key('split-divider-split-1')),
+    );
+    final secondPane = tester.getRect(
+      find.byKey(const Key('split-pane-pane-2')),
+    );
+
+    expect(divider.top - firstPane.bottom, 0);
+    expect(secondPane.top - divider.bottom, 0);
+    expect(divider.height, 12);
+  });
+
+  testWidgets('does not draw a visible line between split panes', (
+    tester,
+  ) async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    await vault.createNote(parentPath: '', title: 'Alpha');
+
+    await _pumpWorkspace(tester, vault: vault);
+    await tester.tap(find.byKey(const Key('split-pane-right-button')));
+    await tester.pump(const Duration(milliseconds: 250));
+
+    final dividerLine = find.descendant(
+      of: find.byKey(const Key('split-divider-split-1')),
+      matching: find.byWidgetPredicate((widget) {
+        final decoration = widget is DecoratedBox ? widget.decoration : null;
+        return decoration is BoxDecoration &&
+            decoration.color == const Color(0xFFE5E5EA);
+      }),
+    );
+
+    expect(dividerLine, findsNothing);
+  });
+
   testWidgets('uses a Cupertino app shell and shows the desktop workbench', (
     tester,
   ) async {
