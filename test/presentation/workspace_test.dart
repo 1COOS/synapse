@@ -9,6 +9,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:synapse/domain/vault/vault_resource.dart';
 import 'package:synapse/infrastructure/config/provider_config_store.dart';
+import 'package:synapse/infrastructure/config/settings_store.dart';
+import 'package:synapse/infrastructure/config/synapse_settings.dart';
 import 'package:synapse/infrastructure/config/vault_location_store.dart';
 import 'package:synapse/infrastructure/input/image_input_service.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
@@ -1268,6 +1270,58 @@ void main() {
     expect(find.byType(Markdown), findsNothing);
   });
 
+  testWidgets('uses source mode when workspace preferences request it', (
+    tester,
+  ) async {
+    await _pumpWorkspace(
+      tester,
+      vault: MemoryVaultBackend(),
+      settingsStore: _FakeSettingsStore(
+        initialSettings: const SynapseSettings(
+          preferences: WorkspacePreferences(
+            defaultNoteMode: WorkspaceDefaultNoteMode.source,
+            semanticSearchEnabled: true,
+            pastedImageWidth: 480,
+            autoSaveDelayMillis: 1000,
+          ),
+        ),
+      ),
+    );
+
+    expect(find.byKey(const Key('note-editor')), findsOneWidget);
+    expect(find.byType(Markdown), findsNothing);
+  });
+
+  testWidgets('uses the configured auto-save delay', (tester) async {
+    final vault = _CountingUpdateVaultBackend();
+
+    await _pumpWorkspace(
+      tester,
+      vault: vault,
+      settingsStore: _FakeSettingsStore(
+        initialSettings: const SynapseSettings(
+          preferences: WorkspacePreferences(
+            defaultNoteMode: WorkspaceDefaultNoteMode.source,
+            semanticSearchEnabled: true,
+            pastedImageWidth: 480,
+            autoSaveDelayMillis: 1500,
+          ),
+        ),
+      ),
+    );
+
+    await tester.enterText(
+      find.byKey(const Key('note-editor')),
+      '# 心经学习\n延迟保存',
+    );
+    await tester.pump(const Duration(milliseconds: 1000));
+    expect(vault.updateCalls, 0);
+
+    await tester.pump(const Duration(milliseconds: 500));
+    await tester.pump();
+    expect(vault.lastSavedMarkdown, contains('延迟保存'));
+  });
+
   testWidgets('keeps the note editor editable and top aligned', (tester) async {
     await _pumpWorkspace(tester, vault: MemoryVaultBackend());
     await _switchToSourceMode(tester);
@@ -1330,6 +1384,42 @@ void main() {
     expect(note.markdown, contains(expectedImageTag));
     expect(note.markdown, isNot(contains(' alt=')));
     expect(find.textContaining('图片已粘贴到笔记：1783082971508.png'), findsOneWidget);
+  });
+
+  testWidgets('uses the configured pasted image width', (tester) async {
+    final vault = _CountingUpdateVaultBackend();
+    final imageInput = _FakeImageInputService(
+      pastedImage: const ImportedImage(
+        filename: 'clipboard-1783082971508.png',
+        mimeType: 'image/png',
+        bytes: _tinyPng,
+      ),
+    );
+
+    await _pumpWorkspace(
+      tester,
+      vault: vault,
+      imageInput: imageInput,
+      settingsStore: _FakeSettingsStore(
+        initialSettings: const SynapseSettings(
+          preferences: WorkspacePreferences(
+            defaultNoteMode: WorkspaceDefaultNoteMode.source,
+            semanticSearchEnabled: true,
+            pastedImageWidth: 720,
+            autoSaveDelayMillis: 1000,
+          ),
+        ),
+      ),
+    );
+    await tester.enterText(find.byKey(const Key('note-editor')), '# 心经学习\n正文');
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.metaLeft);
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.keyV);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.keyV);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.metaLeft);
+    await tester.pumpAndSettle();
+
+    final note = await vault.readNote('preview-note.md');
+    expect(note.markdown, contains('width="720"'));
   });
 
   testWidgets('falls back to text paste when the clipboard has no image', (
@@ -2010,16 +2100,68 @@ void main() {
     expect(find.textContaining('请先在设置中配置模型'), findsOneWidget);
   });
 
-  testWidgets('saves provider config from the settings sheet', (tester) async {
-    final configStore = _FakeProviderConfigStore();
+  testWidgets('opens a general settings panel with model as one section', (
+    tester,
+  ) async {
+    await _pumpWorkspace(tester, vault: MemoryVaultBackend());
+
+    await tester.tap(find.byKey(const Key('settings-button')));
+    await tester.pumpAndSettle();
+
+    expect(find.text('设置'), findsOneWidget);
+    expect(find.text('通用'), findsWidgets);
+    expect(find.text('AI 模型'), findsWidgets);
+    expect(find.text('仓库'), findsWidgets);
+    expect(find.text('搜索'), findsWidgets);
+    expect(find.text('图片'), findsWidgets);
+    expect(find.text('关于'), findsWidgets);
+  });
+
+  testWidgets('saves workflow preferences from the settings panel', (
+    tester,
+  ) async {
+    final settingsStore = _FakeSettingsStore();
 
     await _pumpWorkspace(
       tester,
       vault: MemoryVaultBackend(),
-      configStore: configStore,
+      settingsStore: settingsStore,
     );
 
     await tester.tap(find.byKey(const Key('settings-button')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('settings-default-mode-source')));
+    await tester.enterText(
+      find.byKey(const Key('settings-auto-save-delay')),
+      '1500',
+    );
+    await tester.enterText(
+      find.byKey(const Key('settings-pasted-image-width')),
+      '720',
+    );
+    await tester.tap(find.byKey(const Key('settings-semantic-search-toggle')));
+    await tester.tap(find.text('保存设置'));
+    await tester.pumpAndSettle();
+
+    final preferences = settingsStore.savedSettings.last.preferences;
+    expect(preferences.defaultNoteMode, WorkspaceDefaultNoteMode.source);
+    expect(preferences.autoSaveDelayMillis, 1500);
+    expect(preferences.pastedImageWidth, 720);
+    expect(preferences.semanticSearchEnabled, isFalse);
+  });
+
+  testWidgets('saves provider config from the settings panel', (tester) async {
+    final settingsStore = _FakeSettingsStore();
+
+    await _pumpWorkspace(
+      tester,
+      vault: MemoryVaultBackend(),
+      settingsStore: settingsStore,
+    );
+
+    await tester.tap(find.byKey(const Key('settings-button')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('settings-nav-models')));
     await tester.pumpAndSettle();
     await tester.enterText(
       find.byKey(const Key('provider-base-url')),
@@ -2044,12 +2186,9 @@ void main() {
     await tester.tap(find.text('保存设置'));
     await tester.pumpAndSettle();
 
-    expect(configStore.savedConfig, isNotNull);
-    expect(
-      configStore.savedConfig!.normalizedBaseUrl,
-      'https://api.example.com/v1',
-    );
-    expect(configStore.savedConfig!.apiKey, 'secret-key');
+    final savedConfig = settingsStore.savedSettings.last.providerConfig;
+    expect(savedConfig.normalizedBaseUrl, 'https://api.example.com/v1');
+    expect(savedConfig.apiKey, 'secret-key');
     expect(find.textContaining('模型设置已保存'), findsOneWidget);
   });
 
@@ -2059,7 +2198,7 @@ void main() {
     await _pumpWorkspace(
       tester,
       vault: MemoryVaultBackend(),
-      configStore: _FakeProviderConfigStore(),
+      settingsStore: _FakeSettingsStore(),
       providerConfigTester: (config) async {
         testedConfig = config;
         return '连接成功：chat-model';
@@ -2067,6 +2206,8 @@ void main() {
     );
 
     await tester.tap(find.byKey(const Key('settings-button')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('settings-nav-models')));
     await tester.pumpAndSettle();
     await tester.enterText(
       find.byKey(const Key('provider-base-url')),
@@ -2101,6 +2242,7 @@ Future<void> _pumpWorkspace(
   required MemoryVaultBackend? vault,
   ImageInputService? imageInput,
   ProviderConfigStore? configStore,
+  SettingsStore? settingsStore,
   VaultLocationStore? vaultLocationStore,
   Future<String?> Function()? directoryPicker,
   VaultBackend Function(String rootPath)? vaultBackendFactory,
@@ -2115,6 +2257,7 @@ Future<void> _pumpWorkspace(
     SynapseApp(
       vault: vault,
       imageInput: imageInput,
+      settingsStore: settingsStore,
       providerConfigStore: configStore ?? _FakeProviderConfigStore(),
       vaultLocationStore: vaultLocationStore,
       directoryPicker: directoryPicker,
@@ -2217,6 +2360,37 @@ class _FakeVaultLocationStore implements VaultLocationStore {
   @override
   Future<bool> exists(VaultLocation location) async {
     return existingPaths.contains(location.rootPath);
+  }
+}
+
+class _FakeSettingsStore implements SettingsStore {
+  _FakeSettingsStore({
+    SynapseSettings initialSettings = SynapseSettings.defaults,
+  }) : currentSettings = initialSettings;
+
+  SynapseSettings currentSettings;
+  final savedSettings = <SynapseSettings>[];
+
+  @override
+  bool get supportsPersistence => true;
+
+  @override
+  String get unavailableMessage => '';
+
+  @override
+  Future<SynapseSettings> load() async {
+    return currentSettings;
+  }
+
+  @override
+  Future<void> save(SynapseSettings settings) async {
+    currentSettings = settings;
+    savedSettings.add(settings);
+  }
+
+  @override
+  Future<bool> vaultExists(VaultLocation location) async {
+    return true;
   }
 }
 

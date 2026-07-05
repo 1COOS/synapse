@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'infrastructure/ai/ai_provider.dart';
 import 'infrastructure/config/provider_config_store.dart';
+import 'infrastructure/config/settings_store.dart';
 import 'infrastructure/config/vault_location_store.dart';
 import 'infrastructure/input/image_input_service.dart';
 import 'infrastructure/vault/vault_backend.dart';
@@ -17,6 +18,7 @@ class SynapseApp extends StatelessWidget {
     super.key,
     this.vault,
     this.imageInput,
+    this.settingsStore,
     this.providerConfigStore,
     this.vaultLocationStore,
     this.aiProvider,
@@ -27,6 +29,7 @@ class SynapseApp extends StatelessWidget {
 
   final VaultBackend? vault;
   final ImageInputService? imageInput;
+  final SettingsStore? settingsStore;
   final ProviderConfigStore? providerConfigStore;
   final VaultLocationStore? vaultLocationStore;
   final AiProvider? aiProvider;
@@ -48,6 +51,7 @@ class SynapseApp extends StatelessWidget {
         home: SynapseWorkspace(
           initialVault: vault,
           imageInput: imageInput,
+          settingsStore: settingsStore,
           providerConfigStore: providerConfigStore,
           vaultLocationStore: vaultLocationStore,
           aiProvider: aiProvider,

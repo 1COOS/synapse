@@ -15,9 +15,10 @@ import '../../infrastructure/ai/ai_provider.dart';
 import '../../infrastructure/ai/missing_config_ai_provider.dart';
 import '../../infrastructure/ai/openai_compatible_provider.dart';
 import '../../infrastructure/cache/memory_search_cache.dart';
-import '../../infrastructure/config/default_provider_config_store.dart';
-import '../../infrastructure/config/default_vault_location_store.dart';
+import '../../infrastructure/config/default_settings_store.dart';
 import '../../infrastructure/config/provider_config_store.dart';
+import '../../infrastructure/config/settings_store.dart';
+import '../../infrastructure/config/synapse_settings.dart';
 import '../../infrastructure/config/vault_directory_access.dart';
 import '../../infrastructure/config/vault_location_store.dart';
 import '../../infrastructure/input/image_input_service.dart';
@@ -28,7 +29,6 @@ typedef ProviderConfigTester = Future<String> Function(ProviderConfig config);
 typedef DirectoryPicker = Future<String?> Function();
 typedef VaultBackendFactory = VaultBackend Function(String rootPath);
 
-const _autoSaveDelay = Duration(milliseconds: 1000);
 const _background = Color(0xFFF5F5F7);
 const _surface = Color(0xFFFFFFFF);
 const _secondarySurface = Color(0xFFF9F9FB);
@@ -129,6 +129,7 @@ class SynapseWorkspace extends StatefulWidget {
     super.key,
     this.initialVault,
     this.imageInput,
+    this.settingsStore,
     this.providerConfigStore,
     this.vaultLocationStore,
     this.aiProvider,
@@ -139,6 +140,7 @@ class SynapseWorkspace extends StatefulWidget {
 
   final VaultBackend? initialVault;
   final ImageInputService? imageInput;
+  final SettingsStore? settingsStore;
   final ProviderConfigStore? providerConfigStore;
   final VaultLocationStore? vaultLocationStore;
   final AiProvider? aiProvider;
@@ -185,8 +187,9 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   final _selectedPreviewImageSrcNotifier = ValueNotifier<String?>(null);
   String _vaultLabel = supportsDirectoryVault ? '选择仓库' : 'H5 预览库';
   String? _vaultRootPath;
-  ProviderConfigStore? _providerConfigStore;
-  VaultLocationStore? _vaultLocationStore;
+  SettingsStore? _settingsStore;
+  SynapseSettings _settings = SynapseSettings.defaults;
+  WorkspacePreferences _workspacePreferences = WorkspacePreferences.defaults;
   ProviderConfig? _providerConfig;
   bool _usesInjectedAiProvider = false;
 
@@ -261,7 +264,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     _inactiveProposals = const [];
     _nextPaneNumber = 1;
     _nextSplitNumber = 1;
-    final pane = _SplitLeaf(paneId: _createPaneId());
+    final pane = _SplitLeaf(paneId: _createPaneId(), mode: _preferredNoteMode);
     _splitRoot = pane;
     _focusedPaneId = pane.paneId;
   }
@@ -481,8 +484,16 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   }
 
   bool get _semanticSearchEnabled {
-    return _usesInjectedAiProvider ||
-        (_providerConfig?.hasEmbeddingConfig ?? false);
+    return _workspacePreferences.semanticSearchEnabled &&
+        (_usesInjectedAiProvider ||
+            (_providerConfig?.hasEmbeddingConfig ?? false));
+  }
+
+  String get _semanticSearchFallbackMessage {
+    if (!_workspacePreferences.semanticSearchEnabled) {
+      return '语义搜索已关闭，已使用全文搜索';
+    }
+    return '未配置 Embedding，已使用全文搜索';
   }
 
   bool get _hasVault => _vault != null;
@@ -544,6 +555,13 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     }
   }
 
+  _NoteMode get _preferredNoteMode {
+    return _workspacePreferences.defaultNoteMode ==
+            WorkspaceDefaultNoteMode.source
+        ? _NoteMode.source
+        : _NoteMode.reading;
+  }
+
   bool _hasDirtySession(_NoteSession session) {
     return session.controller.text != session.note.markdown;
   }
@@ -587,17 +605,20 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
 
   void _scheduleAutoSave(_NoteSession session) {
     _cancelPendingAutoSave(session);
-    session.autoSaveTimer = Timer(_autoSaveDelay, () {
-      session.autoSaveTimer = null;
-      unawaited(
-        _saveSessionMarkdown(
-          session,
-          successMessage: '笔记已自动保存',
-          automatic: true,
-          rescheduleIfDirty: true,
-        ),
-      );
-    });
+    session.autoSaveTimer = Timer(
+      Duration(milliseconds: _workspacePreferences.autoSaveDelayMillis),
+      () {
+        session.autoSaveTimer = null;
+        unawaited(
+          _saveSessionMarkdown(
+            session,
+            successMessage: '笔记已自动保存',
+            automatic: true,
+            rescheduleIfDirty: true,
+          ),
+        );
+      },
+    );
   }
 
   VaultBackend _requireVault() {
@@ -648,27 +669,82 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   }
 
   Future<void> _initializeWorkspace() async {
+    await _loadSettings();
     if (_hasVault) {
       await _loadResources();
     } else if (supportsDirectoryVault) {
       await _loadSavedVaultLocation();
     }
-    await _loadProviderConfig();
   }
 
-  Future<VaultLocationStore> _getVaultLocationStore() async {
+  Future<SettingsStore> _getSettingsStore() async {
     final store =
-        _vaultLocationStore ??
-        widget.vaultLocationStore ??
-        await createDefaultVaultLocationStore();
-    _vaultLocationStore = store;
+        _settingsStore ??
+        widget.settingsStore ??
+        _legacySettingsStore() ??
+        await createDefaultSettingsStore();
+    _settingsStore = store;
     return store;
+  }
+
+  SettingsStore? _legacySettingsStore() {
+    final providerStore = widget.providerConfigStore;
+    final vaultStore = widget.vaultLocationStore;
+    if (providerStore == null && vaultStore == null) {
+      return null;
+    }
+    return _LegacySettingsStore(
+      providerConfigStore: providerStore,
+      vaultLocationStore: vaultStore,
+    );
+  }
+
+  Future<void> _loadSettings() async {
+    try {
+      final store = await _getSettingsStore();
+      final settings = await store.load();
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _settings = settings;
+        _workspacePreferences = settings.preferences;
+        _providerConfig = settings.providerConfig;
+        for (final pane in _splitLeaves(_splitRoot)) {
+          if (pane.noteId == null) {
+            pane.mode = _preferredNoteMode;
+          }
+        }
+        if (!_usesInjectedAiProvider) {
+          _useAiProvider(
+            settings.providerConfig.isComplete
+                ? OpenAICompatibleProvider(config: settings.providerConfig)
+                : const MissingConfigAiProvider(),
+          );
+        } else {
+          _resetAiServices();
+        }
+        if (_message.isEmpty) {
+          _message = _modelConfigurationMessage();
+        }
+      });
+    } catch (error) {
+      if (mounted) {
+        setState(() => _message = '设置读取失败：$error');
+      }
+    }
+  }
+
+  Future<void> _saveSettings(SynapseSettings settings) async {
+    final store = await _getSettingsStore();
+    await store.save(settings);
+    _settings = settings;
   }
 
   Future<void> _loadSavedVaultLocation() async {
     try {
-      final store = await _getVaultLocationStore();
-      var location = await store.load();
+      final store = await _getSettingsStore();
+      var location = _settings.vaultLocation;
       if (!mounted) {
         return;
       }
@@ -677,7 +753,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
         return;
       }
       final restoredLocation = await _restoreVaultAccess(location);
-      if (!await store.exists(restoredLocation)) {
+      if (!await store.vaultExists(restoredLocation)) {
         if (mounted) {
           setState(() => _message = '仓库位置不可用：${restoredLocation.rootPath}');
         }
@@ -690,7 +766,9 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       try {
         _setVaultLocation(restoredLocation);
         await _loadResourcesFromCurrentVault(message: '仓库已打开');
-        await store.save(restoredLocation);
+        await _saveSettings(
+          _settings.copyWith(vaultLocation: restoredLocation),
+        );
       } catch (error) {
         if (mounted) {
           setState(() {
@@ -725,37 +803,6 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     _narrowSection = _WorkspaceSection.resources;
   }
 
-  Future<void> _loadProviderConfig() async {
-    if (_usesInjectedAiProvider) {
-      return;
-    }
-    try {
-      final store =
-          widget.providerConfigStore ??
-          await createDefaultProviderConfigStore();
-      final config = await store.load();
-      if (!mounted) {
-        return;
-      }
-      setState(() {
-        _providerConfigStore = store;
-        _providerConfig = config;
-        _useAiProvider(
-          config?.isComplete == true
-              ? OpenAICompatibleProvider(config: config!)
-              : const MissingConfigAiProvider(),
-        );
-        if (_message.isEmpty) {
-          _message = _modelConfigurationMessage();
-        }
-      });
-    } catch (error) {
-      if (mounted) {
-        setState(() => _message = '模型设置读取失败：$error');
-      }
-    }
-  }
-
   Future<void> _runBusy(Future<void> Function() action) async {
     setState(() {
       _busy = true;
@@ -780,8 +827,8 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     if (_usesInjectedAiProvider) {
       return '';
     }
-    final store = _providerConfigStore;
-    if (store != null && !store.supportsSecureApiKey) {
+    final store = _settingsStore;
+    if (store != null && !store.supportsPersistence) {
       return store.unavailableMessage;
     }
     if (_providerConfig?.isComplete == true) {
@@ -889,7 +936,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
         _activeNote = loaded;
         _replaceEditorMarkdown(loaded.markdown);
         _selectedSourceIds.clear();
-        _noteMode = _NoteMode.reading;
+        _noteMode = _preferredNoteMode;
         _narrowSection = _WorkspaceSection.notes;
       });
       await _refreshProposals(resource.id);
@@ -941,7 +988,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
         _proposals = const [];
         _selectedSourceIds.clear();
         _collapsedFolderIds.remove(parentPath);
-        _noteMode = _NoteMode.reading;
+        _noteMode = _preferredNoteMode;
         _narrowSection = _WorkspaceSection.notes;
       });
     });
@@ -1018,10 +1065,9 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       return;
     }
     await _runBusy(() async {
-      final store = await _getVaultLocationStore();
       var location = pickedLocation!;
-      await store.save(location);
-      location = await store.load() ?? location;
+      await _saveSettings(_settings.copyWith(vaultLocation: location));
+      location = _settings.vaultLocation ?? location;
       _setVaultLocation(location);
       await _loadResourcesFromCurrentVault(message: '仓库已切换');
     });
@@ -1237,7 +1283,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   String _imageMarkdownTag(VaultNoteContent note, SourceItem source) {
     final src = _markdownAttachmentSrc(note, source);
     return '<img src="${_escapeHtmlAttribute(src)}" '
-        'width="$_defaultPastedImageWidth">';
+        'width="${_workspacePreferences.pastedImageWidth}">';
   }
 
   String _noteEditorPastedImageFilename(String filename) {
@@ -1587,7 +1633,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       _searchResults = const [];
       _selectedSourceIds.clear();
       _collapsedFolderIds.remove(_parentFolderPath(note.path));
-      _noteMode = _NoteMode.reading;
+      _noteMode = _preferredNoteMode;
       _narrowSection = _WorkspaceSection.notes;
       _message = message;
     });
@@ -1619,7 +1665,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
         _selectedSourceIds.clear();
         _collapsedFolderIds.remove(before.id);
         _collapsedFolderIds.remove(after.id);
-        _noteMode = _NoteMode.reading;
+        _noteMode = _preferredNoteMode;
         _message = '文件夹已重命名';
       });
       return;
@@ -1667,7 +1713,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
           _proposals = const [];
           _searchResults = const [];
           _selectedSourceIds.clear();
-          _noteMode = _NoteMode.reading;
+          _noteMode = _preferredNoteMode;
           _narrowSection = _WorkspaceSection.resources;
           _message = message;
         });
@@ -1684,7 +1730,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
         _proposals = proposals;
         _searchResults = const [];
         _selectedSourceIds.clear();
-        _noteMode = _NoteMode.reading;
+        _noteMode = _preferredNoteMode;
         _narrowSection = _WorkspaceSection.notes;
         _message = message;
       });
@@ -1755,7 +1801,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
         _leftPaneMode = _LeftPaneMode.search;
         _searchResults = results;
         if (!_semanticSearchEnabled) {
-          _message = '未配置 Embedding，已使用全文搜索';
+          _message = _semanticSearchFallbackMessage;
         }
       });
     });
@@ -1832,55 +1878,43 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     return '模型连接成功：$shortSummary';
   }
 
-  Future<void> _openProviderSettings() async {
-    final store =
-        _providerConfigStore ??
-        widget.providerConfigStore ??
-        await createDefaultProviderConfigStore();
-    _providerConfigStore = store;
-    if (!store.supportsSecureApiKey) {
-      if (!mounted) {
-        return;
-      }
-      await showCupertinoDialog<void>(
-        context: context,
-        builder: (context) => CupertinoAlertDialog(
-          title: const Text('模型设置'),
-          content: Text(store.unavailableMessage),
-          actions: [
-            CupertinoDialogAction(
-              onPressed: () => Navigator.of(context).pop(),
-              child: const Text('关闭'),
-            ),
-          ],
-        ),
-      );
-      return;
-    }
-    final initialConfig =
-        _providerConfig ?? await store.load() ?? ProviderConfig.empty;
+  Future<void> _openSettings() async {
+    final store = await _getSettingsStore();
+    final initialSettings = _settings.copyWith(
+      providerConfig: _providerConfig ?? ProviderConfig.empty,
+      preferences: _workspacePreferences,
+    );
     if (!mounted) {
       return;
     }
-    final savedConfig = await showCupertinoDialog<ProviderConfig>(
+    final savedSettings = await showCupertinoDialog<SynapseSettings>(
       context: context,
-      builder: (context) => _ProviderSettingsSheet(
-        initialConfig: initialConfig,
+      builder: (context) => _SettingsSheet(
+        initialSettings: initialSettings,
+        currentVaultLabel: _vaultRootPath ?? _vaultLabel,
+        canSave: store.supportsPersistence,
+        unavailableMessage: store.unavailableMessage,
         onTestConfig: widget.providerConfigTester ?? _testProviderConfig,
       ),
     );
-    if (savedConfig == null) {
+    if (savedSettings == null) {
       return;
     }
     await _runBusy(() async {
-      await store.save(savedConfig);
+      await _saveSettings(savedSettings);
       setState(() {
-        _providerConfig = savedConfig;
-        _useAiProvider(
-          savedConfig.isComplete
-              ? OpenAICompatibleProvider(config: savedConfig)
-              : const MissingConfigAiProvider(),
-        );
+        _settings = savedSettings;
+        _workspacePreferences = savedSettings.preferences;
+        _providerConfig = savedSettings.providerConfig;
+        if (!_usesInjectedAiProvider) {
+          _useAiProvider(
+            savedSettings.providerConfig.isComplete
+                ? OpenAICompatibleProvider(config: savedSettings.providerConfig)
+                : const MissingConfigAiProvider(),
+          );
+        } else {
+          _resetAiServices();
+        }
         _message = _modelConfigurationMessage();
       });
     });
@@ -1991,9 +2025,9 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
           const Spacer(),
           _IconAction(
             key: const Key('settings-button'),
-            label: '设置模型',
+            label: '设置',
             icon: CupertinoIcons.gear,
-            onPressed: _busy || _autoSaving ? null : _openProviderSettings,
+            onPressed: _busy || _autoSaving ? null : _openSettings,
           ),
         ],
       ),
@@ -2321,9 +2355,9 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
             const SizedBox(width: 8),
             _IconAction(
               key: const Key('settings-button'),
-              label: '设置模型',
+              label: '设置',
               icon: CupertinoIcons.gear,
-              onPressed: busy ? null : _openProviderSettings,
+              onPressed: busy ? null : _openSettings,
             ),
           ],
         ),
@@ -2392,9 +2426,9 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
         const SizedBox(height: 8),
         _IconAction(
           key: const Key('settings-button'),
-          label: '设置模型',
+          label: '设置',
           icon: CupertinoIcons.gear,
-          onPressed: busy ? null : _openProviderSettings,
+          onPressed: busy ? null : _openSettings,
         ),
       ],
     );
@@ -4757,32 +4791,59 @@ class _SelectableTextBlockState extends State<_SelectableTextBlock> {
   }
 }
 
-class _ProviderSettingsSheet extends StatefulWidget {
-  const _ProviderSettingsSheet({
-    required this.initialConfig,
+enum _SettingsSection {
+  general('通用', CupertinoIcons.slider_horizontal_3),
+  models('AI 模型', CupertinoIcons.sparkles),
+  vault('仓库', CupertinoIcons.folder),
+  search('搜索', CupertinoIcons.search),
+  images('图片', CupertinoIcons.photo),
+  about('关于', CupertinoIcons.info_circle);
+
+  const _SettingsSection(this.label, this.icon);
+
+  final String label;
+  final IconData icon;
+}
+
+class _SettingsSheet extends StatefulWidget {
+  const _SettingsSheet({
+    required this.initialSettings,
+    required this.currentVaultLabel,
+    required this.canSave,
+    required this.unavailableMessage,
     required this.onTestConfig,
   });
 
-  final ProviderConfig initialConfig;
+  final SynapseSettings initialSettings;
+  final String currentVaultLabel;
+  final bool canSave;
+  final String unavailableMessage;
   final ProviderConfigTester onTestConfig;
 
   @override
-  State<_ProviderSettingsSheet> createState() => _ProviderSettingsSheetState();
+  State<_SettingsSheet> createState() => _SettingsSheetState();
 }
 
-class _ProviderSettingsSheetState extends State<_ProviderSettingsSheet> {
+class _SettingsSheetState extends State<_SettingsSheet> {
   late final TextEditingController _baseUrlController;
   late final TextEditingController _apiKeyController;
   late final TextEditingController _chatModelController;
   late final TextEditingController _visionModelController;
   late final TextEditingController _embeddingModelController;
+  late final TextEditingController _autoSaveDelayController;
+  late final TextEditingController _pastedImageWidthController;
+  late WorkspaceDefaultNoteMode _defaultNoteMode;
+  late bool _semanticSearchEnabled;
+  _SettingsSection _section = _SettingsSection.general;
   bool _testing = false;
   String _testMessage = '';
 
   @override
   void initState() {
     super.initState();
-    final config = widget.initialConfig;
+    final settings = widget.initialSettings;
+    final config = settings.providerConfig;
+    final preferences = settings.preferences;
     _baseUrlController = TextEditingController(text: config.baseUrl);
     _apiKeyController = TextEditingController(text: config.apiKey);
     _chatModelController = TextEditingController(text: config.chatModel);
@@ -4790,6 +4851,14 @@ class _ProviderSettingsSheetState extends State<_ProviderSettingsSheet> {
     _embeddingModelController = TextEditingController(
       text: config.embeddingModel,
     );
+    _autoSaveDelayController = TextEditingController(
+      text: preferences.autoSaveDelayMillis.toString(),
+    );
+    _pastedImageWidthController = TextEditingController(
+      text: preferences.pastedImageWidth.toString(),
+    );
+    _defaultNoteMode = preferences.defaultNoteMode;
+    _semanticSearchEnabled = preferences.semanticSearchEnabled;
   }
 
   @override
@@ -4799,6 +4868,8 @@ class _ProviderSettingsSheetState extends State<_ProviderSettingsSheet> {
     _chatModelController.dispose();
     _visionModelController.dispose();
     _embeddingModelController.dispose();
+    _autoSaveDelayController.dispose();
+    _pastedImageWidthController.dispose();
     super.dispose();
   }
 
@@ -4809,82 +4880,77 @@ class _ProviderSettingsSheetState extends State<_ProviderSettingsSheet> {
       child: CupertinoPopupSurface(
         child: ConstrainedBox(
           constraints: BoxConstraints(
-            maxWidth: 520,
+            maxWidth: 760,
             maxHeight: size.height * 0.86,
           ),
           child: Container(
             color: _surface,
-            padding: const EdgeInsets.all(18),
             child: Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                const Text(
-                  '模型设置',
-                  style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800),
-                ),
-                const SizedBox(height: 16),
-                Flexible(
-                  child: SingleChildScrollView(
-                    child: Column(
-                      children: [
-                        _settingsField(
-                          key: const Key('provider-base-url'),
-                          controller: _baseUrlController,
-                          label: 'Base URL',
-                          placeholder: 'https://api.openai.com/v1',
-                        ),
-                        _settingsField(
-                          key: const Key('provider-api-key'),
-                          controller: _apiKeyController,
-                          label: 'API Key',
-                          obscureText: true,
-                        ),
-                        _settingsField(
-                          key: const Key('provider-chat-model'),
-                          controller: _chatModelController,
-                          label: 'Chat Model',
-                        ),
-                        _settingsField(
-                          key: const Key('provider-vision-model'),
-                          controller: _visionModelController,
-                          label: 'Vision Model',
-                        ),
-                        _settingsField(
-                          key: const Key('provider-embedding-model'),
-                          controller: _embeddingModelController,
-                          label: 'Embedding Model',
-                          placeholder: '可选；留空时只使用全文搜索',
-                        ),
-                        if (_testMessage.isNotEmpty)
-                          Align(
-                            alignment: Alignment.centerLeft,
-                            child: Padding(
-                              padding: const EdgeInsets.only(top: 4),
-                              child: Text(
-                                _testMessage,
-                                style: TextStyle(
-                                  color: _testMessage.startsWith('测试失败')
-                                      ? _danger
-                                      : _primary,
-                                  fontWeight: FontWeight.w600,
-                                ),
-                              ),
-                            ),
-                          ),
-                      ],
-                    ),
+                const Padding(
+                  padding: EdgeInsets.fromLTRB(18, 16, 18, 12),
+                  child: Text(
+                    '设置',
+                    style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800),
                   ),
                 ),
-                const SizedBox(height: 16),
+                if (!widget.canSave && widget.unavailableMessage.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(18, 0, 18, 12),
+                    child: Text(
+                      widget.unavailableMessage,
+                      style: const TextStyle(color: _muted, fontSize: 13),
+                    ),
+                  ),
+                Flexible(
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      SizedBox(
+                        width: 164,
+                        child: DecoratedBox(
+                          decoration: const BoxDecoration(
+                            color: _secondarySurface,
+                            border: Border(right: BorderSide(color: _softLine)),
+                          ),
+                          child: ListView(
+                            padding: const EdgeInsets.all(10),
+                            children: [
+                              for (final section in _SettingsSection.values)
+                                _SettingsNavButton(
+                                  key: Key('settings-nav-${section.name}'),
+                                  section: section,
+                                  selected: _section == section,
+                                  onPressed: () =>
+                                      setState(() => _section = section),
+                                ),
+                            ],
+                          ),
+                        ),
+                      ),
+                      Expanded(
+                        child: SingleChildScrollView(
+                          padding: const EdgeInsets.all(18),
+                          child: _buildSection(),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 1, child: ColoredBox(color: _softLine)),
+                const SizedBox(height: 12),
                 Row(
                   children: [
-                    _SecondaryButton(
-                      label: '测试模型',
-                      icon: CupertinoIcons.antenna_radiowaves_left_right,
-                      busy: _testing,
-                      onPressed: _testing ? null : _testConfig,
-                    ),
+                    const SizedBox(width: 18),
+                    if (_section == _SettingsSection.models)
+                      _SecondaryButton(
+                        label: '测试模型',
+                        icon: CupertinoIcons.antenna_radiowaves_left_right,
+                        busy: _testing,
+                        onPressed: _testing ? null : _testConfig,
+                      ),
                     const Spacer(),
                     CupertinoButton(
                       padding: const EdgeInsets.symmetric(horizontal: 12),
@@ -4894,17 +4960,210 @@ class _ProviderSettingsSheetState extends State<_ProviderSettingsSheet> {
                     _PrimaryButton(
                       label: '保存设置',
                       icon: CupertinoIcons.tray_arrow_down,
-                      onPressed: () {
-                        Navigator.of(context).pop(_currentConfig());
-                      },
+                      onPressed: widget.canSave
+                          ? () => Navigator.of(context).pop(_currentSettings())
+                          : null,
                     ),
+                    const SizedBox(width: 18),
                   ],
                 ),
+                const SizedBox(height: 12),
               ],
             ),
           ),
         ),
       ),
+    );
+  }
+
+  Widget _buildSection() {
+    switch (_section) {
+      case _SettingsSection.general:
+        return _buildGeneralSection();
+      case _SettingsSection.models:
+        return _buildModelSection();
+      case _SettingsSection.vault:
+        return _statusSection(
+          title: '仓库',
+          rows: [
+            ('当前仓库', widget.currentVaultLabel),
+            ('保存位置', widget.canSave ? '桌面端 settings.json' : 'H5 预览不保存'),
+          ],
+        );
+      case _SettingsSection.search:
+        return _statusSection(
+          title: '搜索',
+          rows: [
+            ('语义搜索', _semanticSearchEnabled ? '开启' : '关闭'),
+            (
+              'Embedding Model',
+              _embeddingModelController.text.trim().isEmpty
+                  ? '未配置'
+                  : _embeddingModelController.text.trim(),
+            ),
+          ],
+        );
+      case _SettingsSection.images:
+        return _statusSection(
+          title: '图片',
+          rows: [('粘贴图片默认宽度', '${_pastedImageWidthController.text.trim()} px')],
+        );
+      case _SettingsSection.about:
+        return _statusSection(
+          title: '关于',
+          rows: const [('产品', 'Synapse'), ('定位', '本地优先学习资料整理工作台')],
+        );
+    }
+  }
+
+  Widget _buildGeneralSection() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text(
+          '通用',
+          style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800),
+        ),
+        const SizedBox(height: 14),
+        const Text('打开笔记默认模式', style: TextStyle(color: _muted, fontSize: 12)),
+        const SizedBox(height: 8),
+        Row(
+          children: [
+            _PreferenceChoice(
+              key: const Key('settings-default-mode-reading'),
+              label: '阅读',
+              selected: _defaultNoteMode == WorkspaceDefaultNoteMode.reading,
+              onPressed: () => setState(
+                () => _defaultNoteMode = WorkspaceDefaultNoteMode.reading,
+              ),
+            ),
+            const SizedBox(width: 8),
+            _PreferenceChoice(
+              key: const Key('settings-default-mode-source'),
+              label: '源码',
+              selected: _defaultNoteMode == WorkspaceDefaultNoteMode.source,
+              onPressed: () => setState(
+                () => _defaultNoteMode = WorkspaceDefaultNoteMode.source,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 16),
+        _settingsField(
+          key: const Key('settings-auto-save-delay'),
+          controller: _autoSaveDelayController,
+          label: '自动保存延迟（毫秒）',
+          placeholder: '1000',
+        ),
+        _settingsField(
+          key: const Key('settings-pasted-image-width'),
+          controller: _pastedImageWidthController,
+          label: '粘贴图片默认宽度',
+          placeholder: '480',
+        ),
+        Row(
+          children: [
+            const Expanded(
+              child: Text(
+                '语义搜索',
+                style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+              ),
+            ),
+            CupertinoSwitch(
+              key: const Key('settings-semantic-search-toggle'),
+              value: _semanticSearchEnabled,
+              onChanged: (value) =>
+                  setState(() => _semanticSearchEnabled = value),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  Widget _buildModelSection() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const Text(
+          'AI 模型',
+          style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800),
+        ),
+        const SizedBox(height: 14),
+        _settingsField(
+          key: const Key('provider-base-url'),
+          controller: _baseUrlController,
+          label: 'Base URL',
+          placeholder: 'https://api.openai.com/v1',
+        ),
+        _settingsField(
+          key: const Key('provider-api-key'),
+          controller: _apiKeyController,
+          label: 'API Key',
+          obscureText: true,
+        ),
+        _settingsField(
+          key: const Key('provider-chat-model'),
+          controller: _chatModelController,
+          label: 'Chat Model',
+        ),
+        _settingsField(
+          key: const Key('provider-vision-model'),
+          controller: _visionModelController,
+          label: 'Vision Model',
+        ),
+        _settingsField(
+          key: const Key('provider-embedding-model'),
+          controller: _embeddingModelController,
+          label: 'Embedding Model',
+          placeholder: '可选；留空时只使用全文搜索',
+        ),
+        if (_testMessage.isNotEmpty)
+          Text(
+            _testMessage,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              color: _testMessage.startsWith('测试失败') ? _danger : _primary,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+      ],
+    );
+  }
+
+  Widget _statusSection({
+    required String title,
+    required List<(String, String)> rows,
+  }) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          title,
+          style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w800),
+        ),
+        const SizedBox(height: 14),
+        for (final row in rows)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 10),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                SizedBox(
+                  width: 116,
+                  child: Text(
+                    row.$1,
+                    style: const TextStyle(color: _muted, fontSize: 12),
+                  ),
+                ),
+                Expanded(
+                  child: Text(row.$2, style: const TextStyle(fontSize: 13)),
+                ),
+              ],
+            ),
+          ),
+      ],
     );
   }
 
@@ -4915,6 +5174,22 @@ class _ProviderSettingsSheetState extends State<_ProviderSettingsSheet> {
       chatModel: _chatModelController.text.trim(),
       visionModel: _visionModelController.text.trim(),
       embeddingModel: _embeddingModelController.text.trim(),
+    );
+  }
+
+  SynapseSettings _currentSettings() {
+    return widget.initialSettings.copyWith(
+      providerConfig: _currentConfig(),
+      preferences: WorkspacePreferences(
+        defaultNoteMode: _defaultNoteMode,
+        semanticSearchEnabled: _semanticSearchEnabled,
+        pastedImageWidth:
+            int.tryParse(_pastedImageWidthController.text.trim()) ??
+            WorkspacePreferences.defaults.pastedImageWidth,
+        autoSaveDelayMillis:
+            int.tryParse(_autoSaveDelayController.text.trim()) ??
+            WorkspacePreferences.defaults.autoSaveDelayMillis,
+      ),
     );
   }
 
@@ -4971,6 +5246,145 @@ class _ProviderSettingsSheetState extends State<_ProviderSettingsSheet> {
         ],
       ),
     );
+  }
+}
+
+class _SettingsNavButton extends StatelessWidget {
+  const _SettingsNavButton({
+    super.key,
+    required this.section,
+    required this.selected,
+    required this.onPressed,
+  });
+
+  final _SettingsSection section;
+  final bool selected;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 6),
+      child: CupertinoButton(
+        minimumSize: const Size(34, 34),
+        padding: EdgeInsets.zero,
+        borderRadius: BorderRadius.circular(7),
+        onPressed: onPressed,
+        child: Container(
+          height: 34,
+          padding: const EdgeInsets.symmetric(horizontal: 10),
+          decoration: BoxDecoration(
+            color: selected ? _primary.withValues(alpha: 0.12) : null,
+            borderRadius: BorderRadius.circular(7),
+          ),
+          child: Row(
+            children: [
+              Icon(section.icon, size: 16, color: selected ? _primary : _muted),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  section.label,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: selected ? _primary : _text,
+                    fontSize: 13,
+                    fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _PreferenceChoice extends StatelessWidget {
+  const _PreferenceChoice({
+    super.key,
+    required this.label,
+    required this.selected,
+    required this.onPressed,
+  });
+
+  final String label;
+  final bool selected;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return CupertinoButton(
+      minimumSize: const Size(34, 34),
+      padding: EdgeInsets.zero,
+      borderRadius: BorderRadius.circular(7),
+      onPressed: onPressed,
+      child: Container(
+        height: 34,
+        padding: const EdgeInsets.symmetric(horizontal: 14),
+        decoration: BoxDecoration(
+          color: selected ? _primary : _secondarySurface,
+          border: Border.all(color: selected ? _primary : _softLine),
+          borderRadius: BorderRadius.circular(7),
+        ),
+        alignment: Alignment.center,
+        child: Text(
+          label,
+          style: TextStyle(
+            color: selected ? CupertinoColors.white : _text,
+            fontSize: 13,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _LegacySettingsStore implements SettingsStore {
+  _LegacySettingsStore({
+    required this.providerConfigStore,
+    required this.vaultLocationStore,
+  });
+
+  final ProviderConfigStore? providerConfigStore;
+  final VaultLocationStore? vaultLocationStore;
+  WorkspacePreferences _preferences = WorkspacePreferences.defaults;
+
+  @override
+  bool get supportsPersistence =>
+      providerConfigStore?.supportsSecureApiKey ?? true;
+
+  @override
+  String get unavailableMessage =>
+      providerConfigStore?.unavailableMessage ?? '';
+
+  @override
+  Future<SynapseSettings> load() async {
+    return SynapseSettings(
+      providerConfig: await providerConfigStore?.load() ?? ProviderConfig.empty,
+      vaultLocation: await vaultLocationStore?.load(),
+      preferences: _preferences,
+    );
+  }
+
+  @override
+  Future<void> save(SynapseSettings settings) async {
+    _preferences = settings.preferences;
+    final providerStore = providerConfigStore;
+    if (providerStore != null) {
+      await providerStore.save(settings.providerConfig);
+    }
+    final vaultStore = vaultLocationStore;
+    final vaultLocation = settings.vaultLocation;
+    if (vaultStore != null && vaultLocation != null) {
+      await vaultStore.save(vaultLocation);
+    }
+  }
+
+  @override
+  Future<bool> vaultExists(VaultLocation location) async {
+    return await vaultLocationStore?.exists(location) ?? false;
   }
 }
 
