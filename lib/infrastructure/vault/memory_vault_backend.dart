@@ -78,12 +78,13 @@ class MemoryVaultBackend implements VaultBackend {
 
     for (final note in _notes.values) {
       final parent = _dirname(note.path);
+      final title = _titleFor(note);
       childrenByParent
           .putIfAbsent(parent, () => <VaultResourceNode>[])
           .add(
             VaultResourceNode(
               id: note.id,
-              title: note.title,
+              title: title,
               path: note.path,
               type: VaultResourceType.note,
             ),
@@ -116,7 +117,7 @@ class MemoryVaultBackend implements VaultBackend {
     final document = MarkdownDocument.parse(markdown);
     return VaultNoteContent(
       id: note.id,
-      title: note.title,
+      title: document.visibleTitle,
       path: note.path,
       markdownPath: note.markdownPath,
       assetsPath: note.assetsPath,
@@ -193,7 +194,6 @@ class MemoryVaultBackend implements VaultBackend {
     _notes[copied.id] = copied;
     _markdown[copied.id] = _retitleMarkdown(
       _markdown[note.id] ?? _initialMarkdown(note),
-      oldTitle: note.title,
       newTitle: title,
       updatedAt: now,
     );
@@ -514,6 +514,14 @@ class MemoryVaultBackend implements VaultBackend {
     return note;
   }
 
+  String _titleFor(VaultNote note) {
+    final markdown = _markdown[note.id];
+    if (markdown == null) {
+      return note.title;
+    }
+    return MarkdownDocument.parse(markdown).visibleTitle;
+  }
+
   void _touch(String noteId) {
     final note = _note(noteId);
     _notes[noteId] = note.copyWith(updatedAt: DateTime.now().toUtc());
@@ -539,7 +547,6 @@ class MemoryVaultBackend implements VaultBackend {
     final markdown = _markdown.remove(note.id) ?? _initialMarkdown(note);
     _markdown[moved.id] = _retitleMarkdown(
       markdown,
-      oldTitle: note.title,
       newTitle: title,
       updatedAt: now,
     );
@@ -761,31 +768,16 @@ String _initialMarkdown(VaultNote note) {
 
 String _retitleMarkdown(
   String markdown, {
-  required String oldTitle,
   required String newTitle,
   required DateTime updatedAt,
 }) {
   final document = MarkdownDocument.parse(markdown);
-  final frontmatter = <String, Object?>{
-    ...document.frontmatter,
-    'title': newTitle,
-    'updatedAt': formatMarkdownTimestamp(updatedAt),
-  };
-  final lines = document.body.split('\n');
-  for (var index = 0; index < lines.length; index += 1) {
-    final match = RegExp(r'^#\s+(.+?)\s*$').firstMatch(lines[index]);
-    if (match == null) {
-      continue;
-    }
-    if (match.group(1) == oldTitle) {
-      lines[index] = '# $newTitle';
-    }
-    break;
-  }
-  return MarkdownDocument(
-    frontmatter: frontmatter,
-    body: lines.join('\n'),
-  ).toMarkdown();
+  return document
+      .copyWithSyncedBody(
+        markdownBodyWithTitle(document.body, newTitle),
+        updatedAt: updatedAt,
+      )
+      .toMarkdown();
 }
 
 String _normalizeFolderPath(String path) {

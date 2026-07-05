@@ -8,6 +8,8 @@ class MarkdownDocument {
   final Map<String, Object?> frontmatter;
   final String body;
 
+  String get visibleTitle => noteTitleFromMarkdownBody(body);
+
   List<OutlineNode> get outline => extractOutline(body);
 
   static MarkdownDocument parse(String markdown) {
@@ -36,7 +38,18 @@ class MarkdownDocument {
     buffer.write(body.trimLeft());
     return buffer.toString();
   }
+
+  MarkdownDocument copyWithSyncedBody(String body, {DateTime? updatedAt}) {
+    final syncedFrontmatter = <String, Object?>{
+      ...frontmatter,
+      'title': noteTitleFromMarkdownBody(body),
+      if (updatedAt != null) 'updatedAt': formatMarkdownTimestamp(updatedAt),
+    };
+    return MarkdownDocument(frontmatter: syncedFrontmatter, body: body);
+  }
 }
+
+const untitledNoteTitle = '未命名';
 
 String formatMarkdownTimestamp(DateTime value) {
   final local = value.toLocal();
@@ -47,6 +60,38 @@ String formatMarkdownTimestamp(DateTime value) {
   final hour = twoDigits(local.hour);
   final minute = twoDigits(local.minute);
   return '$year-$month-$day $hour:$minute';
+}
+
+String noteTitleFromMarkdownBody(String body) {
+  for (final line in body.split(RegExp(r'\r?\n'))) {
+    if (line.trim().isEmpty) {
+      continue;
+    }
+    final match = RegExp(r'^#\s+(.+?)\s*$').firstMatch(line);
+    if (match == null) {
+      return untitledNoteTitle;
+    }
+    final title = match.group(1)!.replaceAll(RegExp(r'\s+#+$'), '').trim();
+    return title.isEmpty ? untitledNoteTitle : title;
+  }
+  return untitledNoteTitle;
+}
+
+String markdownBodyWithTitle(String body, String title) {
+  final cleanTitle = title.trim().isEmpty ? untitledNoteTitle : title.trim();
+  final lines = body.split('\n');
+  for (var index = 0; index < lines.length; index += 1) {
+    final line = lines[index];
+    if (line.trim().isEmpty) {
+      continue;
+    }
+    if (RegExp(r'^#\s+.+?\s*$').hasMatch(line)) {
+      lines[index] = '# $cleanTitle';
+      return lines.join('\n');
+    }
+    return '# $cleanTitle\n\n${body.trimLeft()}';
+  }
+  return '# $cleanTitle\n';
 }
 
 List<OutlineNode> extractOutline(String markdown) {

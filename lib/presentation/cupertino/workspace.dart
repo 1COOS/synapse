@@ -125,7 +125,9 @@ class _SplitBranch extends _SplitNode {
 
 class _NoteSession {
   _NoteSession({required this.note, required VoidCallback onEdited})
-    : controller = TextEditingController(text: note.markdown) {
+    : controller = TextEditingController(
+        text: _visibleMarkdownBody(note.markdown),
+      ) {
     _onEdited = onEdited;
     controller.addListener(_onEdited);
   }
@@ -138,7 +140,7 @@ class _NoteSession {
   Future<bool>? markdownSaveInFlight;
   late final VoidCallback _onEdited;
 
-  bool get isDirty => controller.text != note.markdown;
+  bool get isDirty => controller.text != _visibleMarkdownBody(note.markdown);
 
   void dispose() {
     autoSaveTimer?.cancel();
@@ -317,6 +319,14 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     );
     _noteSessions[note.id] = session;
     return session;
+  }
+
+  void _replaceOpenNoteId(String before, String after) {
+    for (final pane in _splitLeaves(_splitRoot)) {
+      if (pane.noteId == before) {
+        pane.noteId = after;
+      }
+    }
   }
 
   void _discardUnusedSessions() {
@@ -586,7 +596,8 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   }
 
   bool _hasDirtySession(_NoteSession session) {
-    return session.controller.text != session.note.markdown;
+    return session.controller.text !=
+        _visibleMarkdownBody(session.note.markdown);
   }
 
   void _handleSessionMarkdownEdited(_NoteSession session) {
@@ -617,7 +628,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   void _replaceSessionMarkdown(_NoteSession session, String markdown) {
     _cancelPendingAutoSave(session);
     _programmaticMarkdownChange = true;
-    session.controller.text = markdown;
+    session.controller.text = _visibleMarkdownBody(markdown);
     _programmaticMarkdownChange = false;
   }
 
@@ -991,16 +1002,15 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   }
 
   Future<void> _createNote({String parentPath = ''}) async {
-    final title = await _promptResourceName(title: '新建笔记', placeholder: '笔记名称');
-    if (title == null) {
-      return;
-    }
     await _runBusy(() async {
       if (!await _flushPendingMarkdown()) {
         return;
       }
       final vault = _requireVault();
-      final note = await vault.createNote(parentPath: parentPath, title: title);
+      final note = await vault.createNote(
+        parentPath: parentPath,
+        title: untitledNoteTitle,
+      );
       final loaded = await vault.readNote(note.id);
       final resources = await vault.listResources();
       setState(() {
@@ -1015,6 +1025,15 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
         _narrowSection = _WorkspaceSection.notes;
       });
     });
+  }
+
+  String _newNoteParentPath() {
+    final selected = _selectedResource;
+    if (selected != null && selected.isFolder) {
+      return selected.path;
+    }
+    final active = _activeNote;
+    return active == null ? '' : _parentFolderPath(active.path);
   }
 
   Future<String?> _promptResourceName({
@@ -1179,12 +1198,14 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       return Future.value(true);
     }
     final noteId = session.note.id;
-    final markdown = session.controller.text;
+    final body = session.controller.text;
+    final markdown = _markdownForVisibleBody(session.note, body);
     late final Future<bool> saveFuture;
     saveFuture =
         _performMarkdownSave(
           session: session,
           noteId: noteId,
+          body: body,
           markdown: markdown,
           successMessage: successMessage,
           automatic: automatic,
@@ -1201,6 +1222,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   Future<bool> _performMarkdownSave({
     required _NoteSession session,
     required String noteId,
+    required String body,
     required String markdown,
     required bool automatic,
     required bool rescheduleIfDirty,
@@ -1210,18 +1232,49 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       setState(() => _autoSaving = true);
     }
     try {
-      final updated = await _requireVault().updateMarkdown(
+      final vault = _requireVault();
+      var updated = await vault.updateMarkdown(
         noteId: noteId,
         markdown: markdown,
       );
+      List<VaultResourceNode>? resources;
+      var noteIdChanged = false;
+      if (updated.title != session.note.title) {
+        final renamed = await vault.renameNote(
+          noteId: noteId,
+          title: updated.title,
+        );
+        updated = await vault.readNote(renamed.id);
+        resources = await vault.listResources();
+        noteIdChanged = updated.id != noteId;
+        _resetAiServices();
+      }
       if (!mounted) {
         return true;
       }
-      final stillOpen = _noteSessions[noteId] == session;
-      final stillDirty = stillOpen && session.controller.text != markdown;
+      final stillOpen =
+          _noteSessions[noteId] == session ||
+          _noteSessions[updated.id] == session;
+      final stillDirty = stillOpen && session.controller.text != body;
       setState(() {
+        if (resources != null) {
+          _resources = resources;
+        }
         if (stillOpen) {
+          if (noteIdChanged) {
+            _noteSessions.remove(noteId);
+            _noteSessions[updated.id] = session;
+            _replaceOpenNoteId(noteId, updated.id);
+          }
           session.note = updated;
+          if (!stillDirty &&
+              session.controller.text !=
+                  _visibleMarkdownBody(updated.markdown)) {
+            _replaceSessionMarkdown(session, updated.markdown);
+          }
+          if (resources != null) {
+            _selectedResource = _findResource(_resources, updated.id);
+          }
         }
         if (successMessage != null && !stillDirty) {
           _message = successMessage;
@@ -1569,31 +1622,6 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       return;
     }
     await _createNote(parentPath: _parentFolderPath(note.path));
-  }
-
-  Future<void> _renameNote(VaultResourceNode note) async {
-    if (!note.isNote) {
-      return;
-    }
-    final title = await _promptResourceName(
-      title: '重命名笔记',
-      placeholder: '笔记名称',
-      initialValue: note.title,
-      actionLabel: '重命名',
-    );
-    if (title == null) {
-      return;
-    }
-    await _runBusy(() async {
-      if (!await _flushPendingMarkdown()) {
-        return;
-      }
-      final renamed = await _requireVault().renameNote(
-        noteId: note.id,
-        title: title,
-      );
-      await _openNoteAfterMutation(renamed, message: '笔记已重命名');
-    });
   }
 
   Future<void> _copyNote(VaultResourceNode note) async {
@@ -2269,7 +2297,9 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
               key: const Key('new-note-button'),
               label: '新建笔记',
               icon: CupertinoIcons.square_pencil,
-              onPressed: _busy || !_hasVault ? null : () => _createNote(),
+              onPressed: _busy || !_hasVault
+                  ? null
+                  : () => _createNote(parentPath: _newNoteParentPath()),
             ),
           ],
         ),
@@ -2302,7 +2332,6 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
               onCreateNote: (folder) => _createNote(parentPath: folder.path),
               onCreateSiblingNote: _createSiblingNote,
               onRenameFolder: _renameFolder,
-              onRenameNote: _renameNote,
               onCopyNote: _copyNote,
               onMoveNote: _moveNote,
               onDelete: _deleteResource,
@@ -3184,6 +3213,16 @@ VaultResourceNode? _findResource(List<VaultResourceNode> nodes, String id) {
   return null;
 }
 
+String _visibleMarkdownBody(String markdown) {
+  return MarkdownDocument.parse(markdown).body.trimLeft();
+}
+
+String _markdownForVisibleBody(VaultNoteContent note, String body) {
+  return MarkdownDocument.parse(
+    note.markdown,
+  ).copyWithSyncedBody(body, updatedAt: DateTime.now().toUtc()).toMarkdown();
+}
+
 bool _resourceContainsNote(VaultResourceNode resource, String noteId) {
   if (resource.isNote) {
     return resource.id == noteId;
@@ -3781,7 +3820,6 @@ class _ResourceTree extends StatelessWidget {
     required this.onCreateNote,
     required this.onCreateSiblingNote,
     required this.onRenameFolder,
-    required this.onRenameNote,
     required this.onCopyNote,
     required this.onMoveNote,
     required this.onDelete,
@@ -3796,7 +3834,6 @@ class _ResourceTree extends StatelessWidget {
   final ValueChanged<VaultResourceNode> onCreateNote;
   final ValueChanged<VaultResourceNode> onCreateSiblingNote;
   final ValueChanged<VaultResourceNode> onRenameFolder;
-  final ValueChanged<VaultResourceNode> onRenameNote;
   final ValueChanged<VaultResourceNode> onCopyNote;
   final ValueChanged<VaultResourceNode> onMoveNote;
   final ValueChanged<VaultResourceNode> onDelete;
@@ -3835,7 +3872,6 @@ class _ResourceTree extends StatelessWidget {
         onCreateNote: () => onCreateNote(node),
         onCreateSiblingNote: () => onCreateSiblingNote(node),
         onRenameFolder: () => onRenameFolder(node),
-        onRenameNote: () => onRenameNote(node),
         onCopyNote: () => onCopyNote(node),
         onMoveNote: () => onMoveNote(node),
         onDelete: () => onDelete(node),
@@ -3860,7 +3896,6 @@ class _ResourceRow extends StatelessWidget {
     required this.onCreateNote,
     required this.onCreateSiblingNote,
     required this.onRenameFolder,
-    required this.onRenameNote,
     required this.onCopyNote,
     required this.onMoveNote,
     required this.onDelete,
@@ -3877,7 +3912,6 @@ class _ResourceRow extends StatelessWidget {
   final VoidCallback onCreateNote;
   final VoidCallback onCreateSiblingNote;
   final VoidCallback onRenameFolder;
-  final VoidCallback onRenameNote;
   final VoidCallback onCopyNote;
   final VoidCallback onMoveNote;
   final VoidCallback onDelete;
@@ -4002,11 +4036,6 @@ class _ResourceRow extends StatelessWidget {
             ),
             _ResourceMenuSeparator(
               key: Key('resource-menu-separator-${node.id}-0'),
-            ),
-            _ResourceMenuAction(
-              itemKey: Key('note-menu-rename-${node.id}'),
-              label: '重命名',
-              onPressed: _closeMenuAndRun(menuController, onRenameNote),
             ),
             _ResourceMenuAction(
               itemKey: Key('note-menu-delete-${node.id}'),

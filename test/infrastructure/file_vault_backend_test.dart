@@ -49,6 +49,30 @@ void main() {
     expect(File('${root.path}/读书/佛学/心经.md').existsSync(), isTrue);
   });
 
+  test('uses the visible first heading as the note title', () async {
+    final backend = FileVaultBackend(root.path);
+    final note = await backend.createNote(parentPath: '', title: '文件名标题');
+    await backend.updateMarkdown(
+      noteId: note.id,
+      markdown: '''---
+title: 隐藏标题
+createdAt: 2026-07-03 12:00
+updatedAt: 2026-07-03 12:00
+---
+
+# 可见标题
+
+正文
+''',
+    );
+
+    final loaded = await backend.readNote(note.id);
+    final resources = await backend.listResources();
+
+    expect(loaded.title, '可见标题');
+    expect(resources.single.title, '可见标题');
+  });
+
   test('hides assets directories and legacy project packages', () async {
     final backend = FileVaultBackend(root.path);
     await Directory(p.join(root.path, '心经.assets')).create(recursive: true);

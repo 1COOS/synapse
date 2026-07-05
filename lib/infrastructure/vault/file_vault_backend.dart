@@ -140,12 +140,7 @@ class FileVaultBackend implements VaultBackend {
     final copiedId = _relativePath(target.path);
     final copiedTitle = p.basenameWithoutExtension(target.path);
     await target.writeAsString(
-      _retitleMarkdown(
-        markdown,
-        oldTitle: note.title,
-        newTitle: copiedTitle,
-        updatedAt: now,
-      ),
+      _retitleMarkdown(markdown, newTitle: copiedTitle, updatedAt: now),
     );
 
     final assets = Directory(_assetsDirectoryPathForFile(file));
@@ -515,16 +510,22 @@ $text
     final updatedAt =
         _parseMarkdownTime(doc.frontmatter['updatedAt']) ??
         stat.modified.toUtc();
-    return _noteFromFile(file, createdAt: createdAt, updatedAt: updatedAt);
+    return _noteFromFile(
+      file,
+      createdAt: createdAt,
+      updatedAt: updatedAt,
+      title: doc.visibleTitle,
+    );
   }
 
   VaultNote _noteFromFile(
     File file, {
     required DateTime createdAt,
     required DateTime updatedAt,
+    String? title,
   }) {
     final id = _relativePath(file.path);
-    final parsedTitle = _titleFromFile(file);
+    final parsedTitle = title ?? _titleFromFile(file);
     return VaultNote(
       id: id,
       title: parsedTitle,
@@ -543,9 +544,7 @@ $text
     }
     try {
       final doc = MarkdownDocument.parse(file.readAsStringSync());
-      return doc.frontmatter['title']?.toString().trim().isNotEmpty == true
-          ? doc.frontmatter['title'].toString()
-          : base;
+      return doc.visibleTitle;
     } catch (_) {
       return base;
     }
@@ -703,15 +702,12 @@ $text
     required String title,
   }) async {
     final markdown = await file.readAsString();
-    final doc = MarkdownDocument.parse(markdown);
-    final note = await _noteFromExistingFile(file, doc);
     final now = DateTime.now().toUtc();
     final target = await _uniqueNoteFile(parent, title, excludePath: file.path);
     final movedId = _relativePath(target.path);
     final movedTitle = p.basenameWithoutExtension(target.path);
     final updatedMarkdown = _retitleMarkdown(
       markdown,
-      oldTitle: note.title,
       newTitle: movedTitle,
       updatedAt: now,
     );
@@ -868,31 +864,16 @@ String _initialMarkdown(VaultNote note) {
 
 String _retitleMarkdown(
   String markdown, {
-  required String oldTitle,
   required String newTitle,
   required DateTime updatedAt,
 }) {
   final document = MarkdownDocument.parse(markdown);
-  final frontmatter = <String, Object?>{
-    ...document.frontmatter,
-    'title': newTitle,
-    'updatedAt': formatMarkdownTimestamp(updatedAt),
-  };
-  final lines = document.body.split('\n');
-  for (var index = 0; index < lines.length; index += 1) {
-    final match = RegExp(r'^#\s+(.+?)\s*$').firstMatch(lines[index]);
-    if (match == null) {
-      continue;
-    }
-    if (match.group(1) == oldTitle) {
-      lines[index] = '# $newTitle';
-    }
-    break;
-  }
-  return MarkdownDocument(
-    frontmatter: frontmatter,
-    body: lines.join('\n'),
-  ).toMarkdown();
+  return document
+      .copyWithSyncedBody(
+        markdownBodyWithTitle(document.body, newTitle),
+        updatedAt: updatedAt,
+      )
+      .toMarkdown();
 }
 
 String _normalizeFolderPath(String path) {

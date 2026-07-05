@@ -451,6 +451,71 @@ void main() {
     expect(vault.lastSavedMarkdown, isNot(contains('first')));
   });
 
+  testWidgets('auto-renames a note from the first heading after save', (
+    tester,
+  ) async {
+    final vault = _CountingUpdateVaultBackend(seedExampleData: false);
+    await vault.createNote(parentPath: '', title: '心经');
+
+    await _pumpWorkspace(tester, vault: vault);
+    await _switchToSourceMode(tester);
+    await tester.enterText(find.byKey(const Key('note-editor')), '# 金刚经\n正文');
+
+    await tester.pump(const Duration(milliseconds: 1000));
+    await tester.pump();
+
+    expect(vault.updateCalls, 1);
+    expect(() => vault.readNote('心经.md'), throwsA(isA<StateError>()));
+    final renamed = await vault.readNote('金刚经.md');
+    expect(renamed.title, '金刚经');
+    expect(renamed.markdown, contains('title: 金刚经'));
+    expect(renamed.markdown, contains('# 金刚经'));
+    expect(find.byKey(const Key('resource-row-心经.md')), findsNothing);
+    expect(find.byKey(const Key('resource-row-金刚经.md')), findsOneWidget);
+    expect(
+      find.descendant(
+        of: find.byKey(const Key('split-pane-title-pane-1')),
+        matching: find.text('金刚经'),
+      ),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('keeps duplicate split panes open after title rename', (
+    tester,
+  ) async {
+    final vault = _CountingUpdateVaultBackend(seedExampleData: false);
+    await vault.createNote(parentPath: '', title: '心经');
+
+    await _pumpWorkspace(tester, vault: vault);
+    await tester.tap(find.byKey(const Key('split-pane-right-button')));
+    await tester.pumpAndSettle();
+    await _switchToSourceMode(tester);
+    await tester.enterText(find.byKey(const Key('note-editor')), '# 金刚经\n共享正文');
+
+    await tester.pump(const Duration(milliseconds: 1000));
+    await tester.pump();
+
+    expect(() => vault.readNote('心经.md'), throwsA(isA<StateError>()));
+    expect((await vault.readNote('金刚经.md')).markdown, contains('共享正文'));
+    expect(
+      find.descendant(
+        of: find.byKey(const Key('split-pane-title-pane-1')),
+        matching: find.text('金刚经'),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(
+        of: find.byKey(const Key('split-pane-title-pane-2')),
+        matching: find.text('金刚经'),
+      ),
+      findsOneWidget,
+    );
+    expect(find.byKey(const Key('split-pane-pane-1')), findsOneWidget);
+    expect(find.byKey(const Key('split-pane-pane-2')), findsOneWidget);
+  });
+
   testWidgets('does not switch notes when auto-save fails', (tester) async {
     final vault = _FailingUpdateVaultBackend(seedExampleData: false);
     await vault.createNote(parentPath: '', title: 'First');
@@ -904,7 +969,9 @@ void main() {
     expect(find.text('AI 建议'), findsOneWidget);
   });
 
-  testWidgets('creates root-level resources from the toolbar', (tester) async {
+  testWidgets('creates notes in the selected folder from the toolbar', (
+    tester,
+  ) async {
     final vault = MemoryVaultBackend(seedExampleData: false);
 
     await _pumpWorkspace(tester, vault: vault);
@@ -918,18 +985,62 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.byKey(const Key('new-note-button')));
     await tester.pumpAndSettle();
-    await tester.enterText(find.byKey(const Key('resource-name-input')), '心经');
-    await tester.tap(find.text('创建'));
+
+    final resources = await vault.listResources();
+    final note = await vault.readNote('读书/未命名.md');
+    expect(find.text('读书'), findsOneWidget);
+    expect(find.byKey(const Key('resource-name-input')), findsNothing);
+    expect(find.text('未命名'), findsWidgets);
+    expect(resources.map((resource) => resource.title), ['读书']);
+    expect(resources.single.children.single.type, VaultResourceType.note);
+    expect(note.markdown, contains('# 未命名'));
+  });
+
+  testWidgets('creates a root note when no note or folder is active', (
+    tester,
+  ) async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+
+    await _pumpWorkspace(tester, vault: vault);
+    await tester.tap(find.byKey(const Key('new-note-button')));
     await tester.pumpAndSettle();
 
     final resources = await vault.listResources();
-    final note = await vault.readNote('心经.md');
-    expect(find.text('读书'), findsOneWidget);
-    expect(find.text('心经'), findsWidgets);
-    expect(resources.map((resource) => resource.title), ['读书', '心经']);
-    expect(resources.first.children, isEmpty);
-    expect(resources.last.type, VaultResourceType.note);
-    expect(note.markdown, contains('# 心经'));
+    final note = await vault.readNote('未命名.md');
+    expect(find.byKey(const Key('resource-name-input')), findsNothing);
+    expect(resources.single.title, '未命名');
+    expect(note.markdown, contains('# 未命名'));
+  });
+
+  testWidgets('creates toolbar notes beside the active note', (tester) async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final folder = await vault.createFolder(parentPath: '', title: '读书');
+    final note = await vault.createNote(parentPath: folder.path, title: '心经');
+
+    await _pumpWorkspace(tester, vault: vault);
+    await tester.tap(find.byKey(Key('resource-row-${note.id}')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('new-note-button')));
+    await tester.pumpAndSettle();
+
+    final created = await vault.readNote('读书/未命名.md');
+    expect(created.title, '未命名');
+    expect((await vault.readNote(note.id)).title, '心经');
+  });
+
+  testWidgets('uses the backend unique name when untitled notes conflict', (
+    tester,
+  ) async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+
+    await _pumpWorkspace(tester, vault: vault);
+    await tester.tap(find.byKey(const Key('new-note-button')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('new-note-button')));
+    await tester.pumpAndSettle();
+
+    expect((await vault.readNote('未命名.md')).title, '未命名');
+    expect((await vault.readNote('未命名 2.md')).title, '未命名 2');
   });
 
   testWidgets(
@@ -968,14 +1079,9 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(find.byKey(const Key('folder-menu-new-note-读书')));
       await tester.pumpAndSettle();
-      await tester.enterText(
-        find.byKey(const Key('resource-name-input')),
-        '心经',
-      );
-      await tester.tap(find.text('创建'));
-      await tester.pumpAndSettle();
 
-      expect((await vault.readNote('读书/心经.md')).title, '心经');
+      expect(find.byKey(const Key('resource-name-input')), findsNothing);
+      expect((await vault.readNote('读书/未命名.md')).title, '未命名');
       expect((await vault.listResources()).single.children.length, 2);
 
       await tester.tap(
@@ -994,7 +1100,7 @@ void main() {
 
       expect(find.text('读书'), findsNothing);
       expect(find.text('课程'), findsOneWidget);
-      expect((await vault.readNote('课程/心经.md')).title, '心经');
+      expect((await vault.readNote('课程/未命名.md')).title, '未命名');
 
       await tester.tap(
         find.byKey(const Key('resource-row-课程')),
@@ -1248,52 +1354,32 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.byKey(Key('note-menu-new-note-${note.id}')), findsOneWidget);
-    expect(find.byKey(Key('note-menu-rename-${note.id}')), findsOneWidget);
+    expect(find.byKey(Key('note-menu-rename-${note.id}')), findsNothing);
     expect(find.byKey(Key('note-menu-copy-${note.id}')), findsOneWidget);
     expect(find.byKey(Key('note-menu-move-${note.id}')), findsOneWidget);
     expect(find.byKey(Key('note-menu-delete-${note.id}')), findsOneWidget);
 
     await tester.tap(find.byKey(Key('note-menu-new-note-${note.id}')));
     await tester.pumpAndSettle();
-    await tester.enterText(find.byKey(const Key('resource-name-input')), '金刚经');
-    await tester.tap(find.text('创建'));
-    await tester.pumpAndSettle();
-
-    expect((await vault.readNote('读书/金刚经.md')).title, '金刚经');
+    expect(find.byKey(const Key('resource-name-input')), findsNothing);
+    expect((await vault.readNote('读书/未命名.md')).title, '未命名');
 
     await tester.tap(
       find.byKey(Key('resource-row-${note.id}')),
       buttons: kSecondaryMouseButton,
     );
     await tester.pumpAndSettle();
-    await tester.tap(find.byKey(Key('note-menu-rename-${note.id}')));
-    await tester.pumpAndSettle();
-    await tester.enterText(
-      find.byKey(const Key('resource-name-input')),
-      '心经重命名',
-    );
-    await tester.tap(find.text('重命名'));
+    await tester.tap(find.byKey(Key('note-menu-copy-${note.id}')));
     await tester.pumpAndSettle();
 
-    expect(() => vault.readNote(note.id), throwsA(isA<StateError>()));
-    expect((await vault.readNote('读书/心经重命名.md')).title, '心经重命名');
+    expect((await vault.readNote('读书/心经 2.md')).title, '心经 2');
 
     await tester.tap(
-      find.byKey(const Key('resource-row-读书/心经重命名.md')),
+      find.byKey(Key('resource-row-${note.id}')),
       buttons: kSecondaryMouseButton,
     );
     await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const Key('note-menu-copy-读书/心经重命名.md')));
-    await tester.pumpAndSettle();
-
-    expect((await vault.readNote('读书/心经重命名 2.md')).title, '心经重命名 2');
-
-    await tester.tap(
-      find.byKey(const Key('resource-row-读书/心经重命名.md')),
-      buttons: kSecondaryMouseButton,
-    );
-    await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const Key('note-menu-move-读书/心经重命名.md')));
+    await tester.tap(find.byKey(Key('note-menu-move-${note.id}')));
     await tester.pumpAndSettle();
     expect(find.text('移动笔记'), findsOneWidget);
     await tester.tap(find.byKey(Key('move-target-folder-${targetFolder.id}')));
@@ -1301,20 +1387,20 @@ void main() {
     await tester.tap(find.text('移动'));
     await tester.pumpAndSettle();
 
-    expect(() => vault.readNote('读书/心经重命名.md'), throwsA(isA<StateError>()));
-    expect((await vault.readNote('课程/心经重命名.md')).title, '心经重命名');
+    expect(() => vault.readNote(note.id), throwsA(isA<StateError>()));
+    expect((await vault.readNote('课程/心经.md')).title, '心经');
 
     await tester.tap(
-      find.byKey(const Key('resource-row-课程/心经重命名.md')),
+      find.byKey(const Key('resource-row-课程/心经.md')),
       buttons: kSecondaryMouseButton,
     );
     await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const Key('note-menu-delete-课程/心经重命名.md')));
+    await tester.tap(find.byKey(const Key('note-menu-delete-课程/心经.md')));
     await tester.pumpAndSettle();
     await tester.tap(find.text('删除'));
     await tester.pumpAndSettle();
 
-    expect(() => vault.readNote('课程/心经重命名.md'), throwsA(isA<StateError>()));
+    expect(() => vault.readNote('课程/心经.md'), throwsA(isA<StateError>()));
   });
 
   testWidgets(
@@ -1949,21 +2035,39 @@ void main() {
     expect((await vault.readNote(note.id)).markdown, contains(remoteTag));
   });
 
-  testWidgets('does not expose internal ids in the note editor', (
+  testWidgets('hides frontmatter in the note editor but keeps it on save', (
     tester,
   ) async {
-    await _pumpWorkspace(tester, vault: MemoryVaultBackend());
+    final vault = _CountingUpdateVaultBackend();
+
+    await _pumpWorkspace(tester, vault: vault);
     await _switchToSourceMode(tester);
 
     final noteEditor = tester.widget<CupertinoTextField>(
       find.byKey(const Key('note-editor')),
     );
 
+    expect(noteEditor.controller?.text.trimLeft().startsWith('# 心经学习'), isTrue);
+    expect(noteEditor.controller?.text, isNot(contains('---')));
+    expect(noteEditor.controller?.text, isNot(contains('title:')));
+    expect(noteEditor.controller?.text, isNot(contains('createdAt:')));
+    expect(noteEditor.controller?.text, isNot(contains('updatedAt:')));
     expect(noteEditor.controller?.text, isNot(contains('id:')));
+
+    await tester.enterText(
+      find.byKey(const Key('note-editor')),
+      '# 心经学习\n隐藏元信息保存',
+    );
+    await tester.pump(const Duration(milliseconds: 1000));
+    await tester.pump();
+
+    expect(vault.lastSavedMarkdown?.trimLeft().startsWith('---'), isTrue);
+    expect(vault.lastSavedMarkdown, contains('title: 心经学习'));
     expect(
-      noteEditor.controller?.text,
+      vault.lastSavedMarkdown,
       matches(RegExp(r'createdAt: \d{4}-\d{2}-\d{2} \d{2}:\d{2}')),
     );
+    expect(vault.lastSavedMarkdown, contains('# 心经学习\n隐藏元信息保存'));
   });
 
   testWidgets('does not overflow the source pane in a compact desktop window', (
