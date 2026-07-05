@@ -3,7 +3,7 @@ import 'dart:async';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart'
-    show MenuAnchor, MenuController, MenuItemButton, Tooltip;
+    show MenuAnchor, MenuController, MenuStyle, Tooltip, WidgetStatePropertyAll;
 import 'package:flutter/services.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:path/path.dart' as p;
@@ -39,6 +39,29 @@ const _text = CupertinoColors.label;
 const _muted = CupertinoColors.secondaryLabel;
 const _danger = CupertinoColors.systemRed;
 const _radius = BorderRadius.all(Radius.circular(8));
+const _resourceTitleStyle = TextStyle(
+  fontSize: 14,
+  fontWeight: FontWeight.w500,
+  height: 1.2,
+);
+const _resourceCountStyle = TextStyle(
+  color: _muted,
+  fontSize: 12,
+  fontWeight: FontWeight.w500,
+  height: 1.2,
+);
+const _resourceMenuBackground = Color(0xE65F5F5F);
+const _resourceMenuText = Color(0xFFF2F2F7);
+const _resourceMenuHover = Color(0x26FFFFFF);
+const _resourceMenuLine = Color(0xFF777777);
+const _resourceMenuRadius = BorderRadius.all(Radius.circular(18));
+const _resourceMenuAnchorStyle = MenuStyle(
+  backgroundColor: WidgetStatePropertyAll(Color(0x00000000)),
+  elevation: WidgetStatePropertyAll(0),
+  padding: WidgetStatePropertyAll(EdgeInsets.zero),
+  shadowColor: WidgetStatePropertyAll(Color(0x00000000)),
+  surfaceTintColor: WidgetStatePropertyAll(Color(0x00000000)),
+);
 const _titlebarHeight = 52.0;
 const _leftPaneWidth = 292.0;
 const _rightPaneWidth = 380.0;
@@ -3866,30 +3889,36 @@ class _ResourceRow extends StatelessWidget {
       return MenuAnchor(
         controller: menuController,
         consumeOutsideTap: true,
+        clipBehavior: Clip.none,
+        style: _resourceMenuAnchorStyle,
         menuChildren: [
-          MenuItemButton(
-            key: Key('folder-menu-new-folder-${node.id}'),
-            leadingIcon: const Icon(CupertinoIcons.folder_badge_plus, size: 16),
-            onPressed: onCreateFolder,
-            child: const Text('新建文件夹'),
-          ),
-          MenuItemButton(
-            key: Key('folder-menu-new-note-${node.id}'),
-            leadingIcon: const Icon(CupertinoIcons.square_pencil, size: 16),
-            onPressed: onCreateNote,
-            child: const Text('新建笔记'),
-          ),
-          MenuItemButton(
-            key: Key('folder-menu-rename-${node.id}'),
-            leadingIcon: const Icon(CupertinoIcons.pencil, size: 16),
-            onPressed: onRenameFolder,
-            child: const Text('重命名文件夹'),
-          ),
-          MenuItemButton(
-            key: Key('folder-menu-delete-${node.id}'),
-            leadingIcon: const Icon(CupertinoIcons.trash, size: 16),
-            onPressed: onDelete,
-            child: const Text('删除文件夹'),
+          _ResourceContextMenu(
+            resourceId: node.id,
+            children: [
+              _ResourceMenuAction(
+                itemKey: Key('folder-menu-new-folder-${node.id}'),
+                label: '新建文件夹',
+                onPressed: _closeMenuAndRun(menuController, onCreateFolder),
+              ),
+              _ResourceMenuAction(
+                itemKey: Key('folder-menu-new-note-${node.id}'),
+                label: '新建笔记',
+                onPressed: _closeMenuAndRun(menuController, onCreateNote),
+              ),
+              _ResourceMenuSeparator(
+                key: Key('resource-menu-separator-${node.id}-0'),
+              ),
+              _ResourceMenuAction(
+                itemKey: Key('folder-menu-rename-${node.id}'),
+                label: '重命名',
+                onPressed: _closeMenuAndRun(menuController, onRenameFolder),
+              ),
+              _ResourceMenuAction(
+                itemKey: Key('folder-menu-delete-${node.id}'),
+                label: '删除',
+                onPressed: _closeMenuAndRun(menuController, onDelete),
+              ),
+            ],
           ),
         ],
         child: _ResourceRowShell(
@@ -3932,20 +3961,13 @@ class _ResourceRow extends StatelessWidget {
                   node.title,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    fontSize: 15,
-                    fontWeight: FontWeight.w600,
-                  ),
+                  style: _resourceTitleStyle,
                 ),
               ),
               Text(
                 '$noteCount',
                 key: Key('resource-count-${node.id}'),
-                style: const TextStyle(
-                  color: _muted,
-                  fontSize: 14,
-                  fontWeight: FontWeight.w600,
-                ),
+                style: _resourceCountStyle,
               ),
             ],
           ),
@@ -3957,36 +3979,41 @@ class _ResourceRow extends StatelessWidget {
     return MenuAnchor(
       controller: menuController,
       consumeOutsideTap: true,
+      clipBehavior: Clip.none,
+      style: _resourceMenuAnchorStyle,
       menuChildren: [
-        MenuItemButton(
-          key: Key('note-menu-new-note-${node.id}'),
-          leadingIcon: const Icon(CupertinoIcons.square_pencil, size: 16),
-          onPressed: onCreateSiblingNote,
-          child: const Text('新建笔记'),
-        ),
-        MenuItemButton(
-          key: Key('note-menu-rename-${node.id}'),
-          leadingIcon: const Icon(CupertinoIcons.pencil, size: 16),
-          onPressed: onRenameNote,
-          child: const Text('重命名笔记'),
-        ),
-        MenuItemButton(
-          key: Key('note-menu-copy-${node.id}'),
-          leadingIcon: const Icon(CupertinoIcons.doc_on_doc, size: 16),
-          onPressed: onCopyNote,
-          child: const Text('复制笔记'),
-        ),
-        MenuItemButton(
-          key: Key('note-menu-move-${node.id}'),
-          leadingIcon: const Icon(CupertinoIcons.folder, size: 16),
-          onPressed: onMoveNote,
-          child: const Text('移动笔记'),
-        ),
-        MenuItemButton(
-          key: Key('note-menu-delete-${node.id}'),
-          leadingIcon: const Icon(CupertinoIcons.trash, size: 16),
-          onPressed: onDelete,
-          child: const Text('删除笔记'),
+        _ResourceContextMenu(
+          resourceId: node.id,
+          children: [
+            _ResourceMenuAction(
+              itemKey: Key('note-menu-new-note-${node.id}'),
+              label: '新建笔记',
+              onPressed: _closeMenuAndRun(menuController, onCreateSiblingNote),
+            ),
+            _ResourceMenuAction(
+              itemKey: Key('note-menu-copy-${node.id}'),
+              label: '创建副本',
+              onPressed: _closeMenuAndRun(menuController, onCopyNote),
+            ),
+            _ResourceMenuAction(
+              itemKey: Key('note-menu-move-${node.id}'),
+              label: '移动到...',
+              onPressed: _closeMenuAndRun(menuController, onMoveNote),
+            ),
+            _ResourceMenuSeparator(
+              key: Key('resource-menu-separator-${node.id}-0'),
+            ),
+            _ResourceMenuAction(
+              itemKey: Key('note-menu-rename-${node.id}'),
+              label: '重命名',
+              onPressed: _closeMenuAndRun(menuController, onRenameNote),
+            ),
+            _ResourceMenuAction(
+              itemKey: Key('note-menu-delete-${node.id}'),
+              label: '删除',
+              onPressed: _closeMenuAndRun(menuController, onDelete),
+            ),
+          ],
         ),
       ],
       child: _ResourceRowShell(
@@ -4012,13 +4039,23 @@ class _ResourceRow extends StatelessWidget {
                 node.title,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
-                style: const TextStyle(fontWeight: FontWeight.w600),
+                style: _resourceTitleStyle,
               ),
             ),
           ],
         ),
       ),
     );
+  }
+
+  VoidCallback _closeMenuAndRun(
+    MenuController menuController,
+    VoidCallback action,
+  ) {
+    return () {
+      menuController.close();
+      action();
+    };
   }
 }
 
@@ -4030,6 +4067,111 @@ int _noteCount(VaultResourceNode node) {
     0,
     (count, child) => count + _noteCount(child),
   );
+}
+
+class _ResourceContextMenu extends StatelessWidget {
+  const _ResourceContextMenu({
+    required this.resourceId,
+    required this.children,
+  });
+
+  final String resourceId;
+  final List<Widget> children;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      key: Key('resource-context-menu-$resourceId'),
+      width: 188,
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: _resourceMenuBackground,
+        borderRadius: _resourceMenuRadius,
+        border: Border.all(color: const Color(0xFF8A8A8A), width: 1),
+        boxShadow: const [
+          BoxShadow(
+            color: Color(0x33000000),
+            blurRadius: 24,
+            offset: Offset(0, 12),
+          ),
+        ],
+      ),
+      child: Column(mainAxisSize: MainAxisSize.min, children: children),
+    );
+  }
+}
+
+class _ResourceMenuAction extends StatefulWidget {
+  const _ResourceMenuAction({
+    required this.itemKey,
+    required this.label,
+    required this.onPressed,
+  });
+
+  final Key itemKey;
+  final String label;
+  final VoidCallback onPressed;
+
+  @override
+  State<_ResourceMenuAction> createState() => _ResourceMenuActionState();
+}
+
+class _ResourceMenuActionState extends State<_ResourceMenuAction> {
+  bool _hovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      key: widget.itemKey,
+      behavior: HitTestBehavior.opaque,
+      onTap: widget.onPressed,
+      child: MouseRegion(
+        cursor: SystemMouseCursors.click,
+        onEnter: (_) => setState(() => _hovered = true),
+        onExit: (_) => setState(() => _hovered = false),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 80),
+          curve: Curves.easeOut,
+          height: 34,
+          padding: const EdgeInsets.symmetric(horizontal: 8),
+          decoration: BoxDecoration(
+            color: _hovered ? _resourceMenuHover : const Color(0x00000000),
+            borderRadius: BorderRadius.circular(7),
+          ),
+          child: Align(
+            alignment: Alignment.centerLeft,
+            child: Text(
+              widget.label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                color: _resourceMenuText,
+                fontSize: 14,
+                fontWeight: FontWeight.w600,
+                height: 1.2,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _ResourceMenuSeparator extends StatelessWidget {
+  const _ResourceMenuSeparator({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return const Padding(
+      padding: EdgeInsets.symmetric(vertical: 7),
+      child: SizedBox(
+        height: 1,
+        width: double.infinity,
+        child: ColoredBox(color: _resourceMenuLine),
+      ),
+    );
+  }
 }
 
 class _ResourceRowShell extends StatelessWidget {

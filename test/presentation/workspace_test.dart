@@ -1011,6 +1011,112 @@ void main() {
     },
   );
 
+  testWidgets('resource context menus use a dark text-only style', (
+    tester,
+  ) async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final folder = await vault.createFolder(parentPath: '', title: '读书');
+    final note = await vault.createNote(parentPath: folder.path, title: '心经');
+
+    await _pumpWorkspace(tester, vault: vault);
+
+    await tester.tap(
+      find.byKey(Key('resource-row-${note.id}')),
+      buttons: kSecondaryMouseButton,
+    );
+    await tester.pumpAndSettle();
+
+    final noteMenu = find.byKey(Key('resource-context-menu-${note.id}'));
+    expect(noteMenu, findsOneWidget);
+    expect(
+      find.descendant(of: noteMenu, matching: find.byType(Icon)),
+      findsNothing,
+    );
+    expect(
+      find.byKey(Key('resource-menu-separator-${note.id}-0')),
+      findsOneWidget,
+    );
+
+    final noteMenuContainer = tester.widget<Container>(noteMenu);
+    final noteMenuDecoration = noteMenuContainer.decoration! as BoxDecoration;
+    expect(tester.getSize(noteMenu).width, 188);
+    expect(noteMenuDecoration.color, const Color(0xE65F5F5F));
+    expect(noteMenuDecoration.borderRadius, BorderRadius.circular(18));
+
+    final moveItem = find.byKey(Key('note-menu-move-${note.id}'));
+    final moveItemSurface = find.descendant(
+      of: moveItem,
+      matching: find.byType(AnimatedContainer),
+    );
+    final beforeHover = tester.widget<AnimatedContainer>(moveItemSurface);
+    expect(
+      (beforeHover.decoration! as BoxDecoration).color,
+      const Color(0x00000000),
+    );
+
+    final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+    await mouse.addPointer();
+    await mouse.moveTo(tester.getCenter(moveItem));
+    await tester.pumpAndSettle();
+
+    final afterHover = tester.widget<AnimatedContainer>(moveItemSurface);
+    expect(
+      (afterHover.decoration! as BoxDecoration).color,
+      const Color(0x26FFFFFF),
+    );
+    await mouse.removePointer();
+
+    await tester.tapAt(const Offset(1, 1));
+    await tester.pumpAndSettle();
+
+    await tester.tap(
+      find.byKey(Key('resource-row-${folder.id}')),
+      buttons: kSecondaryMouseButton,
+    );
+    await tester.pumpAndSettle();
+
+    final folderMenu = find.byKey(Key('resource-context-menu-${folder.id}'));
+    expect(folderMenu, findsOneWidget);
+    expect(
+      find.descendant(of: folderMenu, matching: find.byType(Icon)),
+      findsNothing,
+    );
+    expect(
+      find.byKey(Key('resource-menu-separator-${folder.id}-0')),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('folder and note names share the same resource title style', (
+    tester,
+  ) async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final folder = await vault.createFolder(parentPath: '', title: '读书');
+    final note = await vault.createNote(parentPath: folder.path, title: '心经');
+
+    await _pumpWorkspace(tester, vault: vault);
+
+    final folderTitle = tester.widget<Text>(
+      find.descendant(
+        of: find.byKey(Key('resource-row-${folder.id}')),
+        matching: find.text(folder.title),
+      ),
+    );
+    final noteTitle = tester.widget<Text>(
+      find.descendant(
+        of: find.byKey(Key('resource-row-${note.id}')),
+        matching: find.text(note.title),
+      ),
+    );
+
+    expect(folderTitle.style?.fontSize, 14);
+    expect(folderTitle.style?.fontWeight, FontWeight.w500);
+    expect(folderTitle.style?.height, 1.2);
+    expect(noteTitle.style?.fontSize, folderTitle.style?.fontSize);
+    expect(noteTitle.style?.fontWeight, folderTitle.style?.fontWeight);
+    expect(noteTitle.style?.height, folderTitle.style?.height);
+  });
+
   testWidgets('collapses folders and shows recursive note counts', (
     tester,
   ) async {
