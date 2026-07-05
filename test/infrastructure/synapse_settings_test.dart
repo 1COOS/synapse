@@ -7,7 +7,7 @@ void main() {
   test('workspace preferences default to the current workspace behavior', () {
     const preferences = WorkspacePreferences.defaults;
 
-    expect(preferences.defaultNoteMode, WorkspaceDefaultNoteMode.reading);
+    expect(preferences.defaultNoteMode, WorkspaceDefaultNoteMode.source);
     expect(preferences.semanticSearchEnabled, isTrue);
     expect(preferences.pastedImageWidth, 480);
     expect(preferences.autoSaveDelayMillis, 1000);
@@ -35,6 +35,7 @@ void main() {
     );
 
     final json = settings.toJson();
+    expect(json['schemaVersion'], 2);
     expect(json['providerConfig'], isNot(containsPair('apiKey', anything)));
 
     final restored = SynapseSettings.fromJson({
@@ -56,5 +57,38 @@ void main() {
     expect(restored.preferences.semanticSearchEnabled, isFalse);
     expect(restored.preferences.pastedImageWidth, 640);
     expect(restored.preferences.autoSaveDelayMillis, 1500);
+  });
+
+  test('migrates legacy settings to edit mode by default', () {
+    final restored = SynapseSettings.fromJson({
+      'preferences': {
+        'defaultNoteMode': WorkspaceDefaultNoteMode.reading.name,
+        'semanticSearchEnabled': true,
+        'pastedImageWidth': 480,
+        'autoSaveDelayMillis': 1000,
+      },
+    });
+
+    expect(
+      restored.preferences.defaultNoteMode,
+      WorkspaceDefaultNoteMode.source,
+    );
+  });
+
+  test('preserves reading mode from current schema settings', () {
+    final restored = SynapseSettings.fromJson({
+      'schemaVersion': 2,
+      'preferences': {
+        'defaultNoteMode': WorkspaceDefaultNoteMode.reading.name,
+        'semanticSearchEnabled': true,
+        'pastedImageWidth': 480,
+        'autoSaveDelayMillis': 1000,
+      },
+    });
+
+    expect(
+      restored.preferences.defaultNoteMode,
+      WorkspaceDefaultNoteMode.reading,
+    );
   });
 }

@@ -17,7 +17,7 @@ class WorkspacePreferences {
   final int autoSaveDelayMillis;
 
   static const defaults = WorkspacePreferences(
-    defaultNoteMode: WorkspaceDefaultNoteMode.reading,
+    defaultNoteMode: WorkspaceDefaultNoteMode.source,
     semanticSearchEnabled: true,
     pastedImageWidth: 480,
     autoSaveDelayMillis: 1000,
@@ -97,6 +97,8 @@ class SynapseSettings {
     this.preferences = WorkspacePreferences.defaults,
   });
 
+  static const currentSchemaVersion = 2;
+
   final ProviderConfig providerConfig;
   final VaultLocation? vaultLocation;
   final WorkspacePreferences preferences;
@@ -119,6 +121,7 @@ class SynapseSettings {
   }
 
   Map<String, Object?> toJson() => {
+    'schemaVersion': currentSchemaVersion,
     'providerConfig': providerConfig.toJson(includeApiKey: false),
     if (vaultLocation != null) 'vaultLocation': vaultLocation!.toJson(),
     'preferences': preferences.toJson(),
@@ -128,6 +131,15 @@ class SynapseSettings {
     final providerJson = json['providerConfig'];
     final vaultJson = json['vaultLocation'];
     final preferencesJson = json['preferences'];
+    final schemaVersion = WorkspacePreferences._readInt(json['schemaVersion']);
+    var preferences = preferencesJson is Map
+        ? WorkspacePreferences.fromJson(preferencesJson.cast<String, Object?>())
+        : WorkspacePreferences.defaults;
+    if ((schemaVersion ?? 1) < currentSchemaVersion) {
+      preferences = preferences.copyWith(
+        defaultNoteMode: WorkspaceDefaultNoteMode.source,
+      );
+    }
     return SynapseSettings(
       providerConfig: providerJson is Map
           ? ProviderConfig.fromJson(providerJson.cast<String, Object?>())
@@ -135,11 +147,7 @@ class SynapseSettings {
       vaultLocation: vaultJson is Map
           ? VaultLocation.fromJson(vaultJson.cast<String, Object?>())
           : null,
-      preferences: preferencesJson is Map
-          ? WorkspacePreferences.fromJson(
-              preferencesJson.cast<String, Object?>(),
-            )
-          : WorkspacePreferences.defaults,
+      preferences: preferences,
     );
   }
 

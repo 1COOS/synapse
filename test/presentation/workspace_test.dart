@@ -348,10 +348,7 @@ void main() {
       },
     );
     await _switchToSourceMode(tester);
-    await tester.enterText(
-      find.byKey(const Key('note-editor')),
-      '# First\nchanged',
-    );
+    await _enterTextInLiveMarkdownBlock(tester, '# First\nchanged');
     await tester.tap(find.byKey(const Key('vault-location-button')));
     await tester.pump(const Duration(milliseconds: 500));
 
@@ -383,10 +380,7 @@ void main() {
       },
     );
     await _switchToSourceMode(tester);
-    await tester.enterText(
-      find.byKey(const Key('note-editor')),
-      '# First\nchanged',
-    );
+    await _enterTextInLiveMarkdownBlock(tester, '# First\nchanged');
     firstVault.failUpdates = true;
     expect(locationStore.savedLocations.single.rootPath, '/vault/first');
     locationStore.savedLocations.clear();
@@ -405,10 +399,7 @@ void main() {
 
     await _pumpWorkspace(tester, vault: vault);
     await _switchToSourceMode(tester);
-    await tester.enterText(
-      find.byKey(const Key('note-editor')),
-      '# 心经学习\n自动保存内容',
-    );
+    await _enterTextInLiveMarkdownBlock(tester, '# 心经学习\n自动保存内容');
 
     await tester.pump(const Duration(milliseconds: 999));
     expect(vault.updateCalls, 0);
@@ -430,15 +421,9 @@ void main() {
 
     await _pumpWorkspace(tester, vault: vault);
     await _switchToSourceMode(tester);
-    await tester.enterText(
-      find.byKey(const Key('note-editor')),
-      '# Draft\nfirst',
-    );
+    await _enterTextInLiveMarkdownBlock(tester, '# Draft\nfirst');
     await tester.pump(const Duration(milliseconds: 600));
-    await tester.enterText(
-      find.byKey(const Key('note-editor')),
-      '# Draft\nfinal',
-    );
+    await _enterTextInLiveMarkdownBlock(tester, '# Draft\nfinal');
 
     await tester.pump(const Duration(milliseconds: 999));
     expect(vault.updateCalls, 0);
@@ -459,7 +444,7 @@ void main() {
 
     await _pumpWorkspace(tester, vault: vault);
     await _switchToSourceMode(tester);
-    await tester.enterText(find.byKey(const Key('note-editor')), '# 金刚经\n正文');
+    await _enterTextInLiveMarkdownBlock(tester, '# 金刚经\n正文');
 
     await tester.pump(const Duration(milliseconds: 1000));
     await tester.pump();
@@ -491,7 +476,7 @@ void main() {
     await tester.tap(find.byKey(const Key('split-pane-right-button')));
     await tester.pumpAndSettle();
     await _switchToSourceMode(tester);
-    await tester.enterText(find.byKey(const Key('note-editor')), '# 金刚经\n共享正文');
+    await _enterTextInLiveMarkdownBlock(tester, '# 金刚经\n共享正文', paneId: 2);
 
     await tester.pump(const Duration(milliseconds: 1000));
     await tester.pump();
@@ -523,18 +508,13 @@ void main() {
 
     await _pumpWorkspace(tester, vault: vault);
     await _switchToSourceMode(tester);
-    await tester.enterText(
-      find.byKey(const Key('note-editor')),
-      '# First\nchanged',
-    );
+    await _enterTextInLiveMarkdownBlock(tester, '# First\nchanged');
     vault.failUpdates = true;
 
     await tester.tap(find.byKey(const Key('resource-row-Second.md')));
     await tester.pump(const Duration(milliseconds: 250));
 
-    final noteEditor = tester.widget<CupertinoTextField>(
-      find.byKey(const Key('note-editor')),
-    );
+    final noteEditor = _activeLiveMarkdownTextField(tester);
     expect(noteEditor.controller?.text, contains('changed'));
     expect(noteEditor.controller?.text, isNot(contains('# Second')));
     expect(find.textContaining('save failed'), findsOneWidget);
@@ -547,8 +527,8 @@ void main() {
 
     await _pumpWorkspace(tester, vault: vault);
     await _switchToSourceMode(tester);
-    await tester.enterText(
-      find.byKey(const Key('note-editor')),
+    await _enterTextInLiveMarkdownBlock(
+      tester,
       '# First\nchanged before switch',
     );
 
@@ -560,12 +540,8 @@ void main() {
       (await vault.readNote('First.md')).markdown,
       contains('changed before switch'),
     );
-    expect(find.byType(Markdown), findsOneWidget);
-    expect(find.byKey(const Key('note-editor')), findsNothing);
-    await _switchToSourceMode(tester);
-    final noteEditor = tester.widget<CupertinoTextField>(
-      find.byKey(const Key('note-editor')),
-    );
+    await _activateLiveMarkdownBlock(tester);
+    final noteEditor = _activeLiveMarkdownTextField(tester);
     expect(noteEditor.controller?.text, contains('# Second'));
   });
 
@@ -686,9 +662,10 @@ void main() {
     await tester.pump(const Duration(milliseconds: 250));
     await tester.tap(find.byKey(const Key('note-mode-source-pane-2')));
     await tester.pump(const Duration(milliseconds: 250));
-    await tester.enterText(
-      find.byKey(const Key('note-editor-pane-2')),
+    await _enterTextInLiveMarkdownBlock(
+      tester,
       '# Alpha\nshared edit',
+      paneId: 2,
     );
     await tester.pump();
 
@@ -709,9 +686,10 @@ void main() {
     await tester.pump(const Duration(milliseconds: 250));
     await tester.tap(find.byKey(const Key('note-mode-source-pane-2')));
     await tester.pump(const Duration(milliseconds: 250));
-    await tester.enterText(
-      find.byKey(const Key('note-editor')),
+    await _enterTextInLiveMarkdownBlock(
+      tester,
       '# Beta\nunsaved split edit',
+      paneId: 2,
     );
     await tester.pump();
     vault.failUpdates = true;
@@ -853,8 +831,8 @@ void main() {
     expect(find.byKey(const Key('note-mode-reading')), findsOneWidget);
     expect(find.byKey(const Key('note-mode-source')), findsOneWidget);
     expect(find.byTooltip('阅读'), findsOneWidget);
-    expect(find.byTooltip('源码'), findsOneWidget);
-    expect(find.text('编辑'), findsNothing);
+    expect(find.byTooltip('编辑'), findsOneWidget);
+    expect(find.text('源码'), findsNothing);
     expect(find.text('预览'), findsNothing);
     expect(find.byKey(const Key('settings-button')), findsOneWidget);
     expect(find.byKey(const Key('new-folder-button')), findsOneWidget);
@@ -1323,12 +1301,8 @@ void main() {
 
       expect(() => vault.readNote(first.id), throwsA(isA<StateError>()));
       expect((await vault.readNote(second.id)).title, 'Beta');
-      expect(find.byType(Markdown), findsOneWidget);
-      expect(find.byKey(const Key('note-editor')), findsNothing);
-      await _switchToSourceMode(tester);
-      final noteEditor = tester.widget<CupertinoTextField>(
-        find.byKey(const Key('note-editor')),
-      );
+      await _activateLiveMarkdownBlock(tester);
+      final noteEditor = _activeLiveMarkdownTextField(tester);
       expect(noteEditor.controller?.text, contains('# Beta'));
       expect(find.text('Alpha'), findsNothing);
     },
@@ -1416,9 +1390,8 @@ void main() {
 
       await _pumpWorkspace(tester, vault: vault);
       await _switchToSourceMode(tester);
-      final beforeDelete = tester.widget<CupertinoTextField>(
-        find.byKey(const Key('note-editor')),
-      );
+      await _activateLiveMarkdownBlock(tester);
+      final beforeDelete = _activeLiveMarkdownTextField(tester);
       expect(beforeDelete.controller?.text, contains('# 心经'));
 
       await tester.tap(
@@ -1434,35 +1407,38 @@ void main() {
       expect(() => vault.readNote(nested.id), throwsA(isA<StateError>()));
       expect((await vault.readNote(remaining.id)).title, '其他');
       expect((await vault.listResources()).single.title, '其他');
-      expect(find.byType(Markdown), findsOneWidget);
-      expect(find.byKey(const Key('note-editor')), findsNothing);
-      await _switchToSourceMode(tester);
-      final afterDelete = tester.widget<CupertinoTextField>(
-        find.byKey(const Key('note-editor')),
-      );
+      await _activateLiveMarkdownBlock(tester);
+      final afterDelete = _activeLiveMarkdownTextField(tester);
       expect(afterDelete.controller?.text, contains('# 其他'));
       expect(find.text('读书'), findsNothing);
     },
   );
 
-  testWidgets('defaults to reading mode and switches to editable source mode', (
+  testWidgets('defaults to edit mode and switches to reading mode', (
     tester,
   ) async {
     await _pumpWorkspace(tester, vault: MemoryVaultBackend());
 
     expect(find.byKey(const Key('note-mode-reading')), findsOneWidget);
     expect(find.byKey(const Key('note-mode-source')), findsOneWidget);
+    expect(find.byTooltip('编辑'), findsOneWidget);
+    expect(
+      find.byKey(const Key('live-markdown-block-preview-0')),
+      findsOneWidget,
+    );
     expect(find.byKey(const Key('note-editor')), findsNothing);
-    expect(find.byType(Markdown), findsOneWidget);
 
-    await tester.tap(find.byKey(const Key('note-mode-source')));
+    await _activateLiveMarkdownBlock(tester);
+    expect(find.byKey(const Key('note-editor')), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('note-mode-reading')));
     await tester.pump(const Duration(milliseconds: 250));
 
-    expect(find.byKey(const Key('note-editor')), findsOneWidget);
-    expect(find.byType(Markdown), findsNothing);
+    expect(find.byKey(const Key('note-editor')), findsNothing);
+    expect(find.byType(Markdown), findsOneWidget);
   });
 
-  testWidgets('uses source mode when workspace preferences request it', (
+  testWidgets('uses reading mode when workspace preferences request it', (
     tester,
   ) async {
     await _pumpWorkspace(
@@ -1471,7 +1447,7 @@ void main() {
       settingsStore: _FakeSettingsStore(
         initialSettings: const SynapseSettings(
           preferences: WorkspacePreferences(
-            defaultNoteMode: WorkspaceDefaultNoteMode.source,
+            defaultNoteMode: WorkspaceDefaultNoteMode.reading,
             semanticSearchEnabled: true,
             pastedImageWidth: 480,
             autoSaveDelayMillis: 1000,
@@ -1480,8 +1456,246 @@ void main() {
       ),
     );
 
-    expect(find.byKey(const Key('note-editor')), findsOneWidget);
-    expect(find.byType(Markdown), findsNothing);
+    expect(find.byKey(const Key('note-editor')), findsNothing);
+    expect(find.byType(Markdown), findsOneWidget);
+  });
+
+  testWidgets('live editor hides markdown markers until a block is clicked', (
+    tester,
+  ) async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Alpha');
+    await vault.updateMarkdown(
+      noteId: note.id,
+      markdown: '# Alpha\n\nParagraph with **bold** text.\n\n- first\n',
+    );
+
+    await _pumpWorkspace(tester, vault: vault);
+
+    expect(find.byKey(const Key('live-markdown-block-editor-0')), findsNothing);
+    expect(
+      find.byKey(const Key('live-markdown-block-preview-2')),
+      findsOneWidget,
+    );
+    expect(find.textContaining('# Alpha'), findsNothing);
+    expect(find.textContaining('**bold**'), findsNothing);
+    expect(find.textContaining('bold'), findsWidgets);
+
+    await tester.tap(find.byKey(const Key('live-markdown-block-preview-2')));
+    await tester.pump(const Duration(milliseconds: 250));
+
+    final paragraphEditableText = tester.widget<EditableText>(
+      find.descendant(
+        of: find.byKey(const Key('live-markdown-block-editor-2')),
+        matching: find.byType(EditableText),
+      ),
+    );
+    expect(paragraphEditableText.style.color, isNot(const Color(0x00000000)));
+    final paragraphSpan = paragraphEditableText.controller.buildTextSpan(
+      context: tester.element(find.byType(EditableText).first),
+      style: paragraphEditableText.style,
+      withComposing: false,
+    );
+    expect(paragraphSpan.toPlainText(), contains('**bold**'));
+    expect(_spanHasBoldText(paragraphSpan, 'bold'), isTrue);
+
+    final paragraphEditor = tester.widget<CupertinoTextField>(
+      find.descendant(
+        of: find.byKey(const Key('live-markdown-block-editor-2')),
+        matching: find.byType(CupertinoTextField),
+      ),
+    );
+    expect(paragraphEditor.controller?.text, contains('**bold**'));
+    expect(
+      find.byKey(const Key('live-markdown-block-preview-0')),
+      findsOneWidget,
+    );
+
+    await tester.tap(find.byKey(const Key('live-markdown-block-preview-4')));
+    await tester.pump(const Duration(milliseconds: 250));
+
+    expect(find.byKey(const Key('live-markdown-block-editor-2')), findsNothing);
+  });
+
+  testWidgets(
+    'live editor keeps heading style while showing markdown markers',
+    (tester) async {
+      final vault = MemoryVaultBackend(seedExampleData: false);
+      final note = await vault.createNote(parentPath: '', title: 'Alpha');
+      await vault.updateMarkdown(noteId: note.id, markdown: '# Alpha\n');
+
+      await _pumpWorkspace(tester, vault: vault);
+
+      expect(find.textContaining('# Alpha'), findsNothing);
+
+      await tester.tap(find.byKey(const Key('live-markdown-block-preview-0')));
+      await tester.pump(const Duration(milliseconds: 250));
+
+      final headingEditableText = tester.widget<EditableText>(
+        find.descendant(
+          of: find.byKey(const Key('live-markdown-block-editor-0')),
+          matching: find.byType(EditableText),
+        ),
+      );
+      expect(headingEditableText.style.color, isNot(const Color(0x00000000)));
+      final headingSpan = headingEditableText.controller.buildTextSpan(
+        context: tester.element(find.byType(EditableText).first),
+        style: headingEditableText.style,
+        withComposing: false,
+      );
+      expect(headingSpan.toPlainText(), contains('# Alpha'));
+      expect(_spanHasTextStyle(headingSpan, 'Alpha', fontSize: 20), isTrue);
+      expect(
+        _spanHasTextStyle(headingSpan, 'Alpha', fontWeight: FontWeight.w600),
+        isTrue,
+      );
+    },
+  );
+
+  testWidgets('editing a live preview block saves the full markdown document', (
+    tester,
+  ) async {
+    final vault = _CountingUpdateVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Alpha');
+    await vault.updateMarkdown(
+      noteId: note.id,
+      markdown: '# Alpha\n\nold paragraph\n\n## Next\n',
+    );
+    vault.updateCalls = 0;
+    vault.lastSavedMarkdown = null;
+
+    await _pumpWorkspace(tester, vault: vault);
+    await tester.tap(find.byKey(const Key('live-markdown-block-preview-2')));
+    await tester.pump(const Duration(milliseconds: 250));
+
+    await tester.enterText(
+      find.byKey(const Key('note-editor')),
+      'new paragraph\n',
+    );
+    await tester.pump(const Duration(milliseconds: 1000));
+    await tester.pump();
+
+    expect(
+      vault.lastSavedMarkdown,
+      contains('# Alpha\n\nnew paragraph\n\n## Next\n'),
+    );
+    expect(vault.lastSavedMarkdown?.trimLeft().startsWith('---'), isTrue);
+  });
+
+  testWidgets('live editor shows image tags only after clicking the image', (
+    tester,
+  ) async {
+    final vault = _CountingUpdateVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Image Study');
+    final source = await vault.addImageSource(
+      noteId: note.id,
+      filename: 'pasted.png',
+      mimeType: 'image/png',
+      bytes: _tinyPng,
+    );
+    await vault.updateMarkdown(
+      noteId: note.id,
+      markdown:
+          '# Image Study\n\n'
+          '<img src="Image Study.assets/attachments/pasted.png" '
+          'width="360">',
+    );
+    vault.updateCalls = 0;
+    vault.lastSavedMarkdown = null;
+
+    await _pumpWorkspace(tester, vault: vault);
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(Key('preview-image-${source.id}')), findsOneWidget);
+    expect(find.textContaining('<img'), findsNothing);
+    expect(
+      find.byKey(const Key('live-markdown-image-tag-editor-2')),
+      findsNothing,
+    );
+
+    await tester.tap(find.byKey(Key('preview-image-tap-${source.id}')));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(Key('preview-image-${source.id}')), findsOneWidget);
+    expect(
+      find.byKey(const Key('live-markdown-image-preview-2')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(
+        of: find.byKey(const Key('live-markdown-image-preview-2')),
+        matching: find.byType(Image),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const Key('live-markdown-image-tag-editor-2')),
+      findsOneWidget,
+    );
+    expect(find.textContaining('<img'), findsOneWidget);
+
+    await tester.enterText(
+      find.byKey(const Key('note-editor')),
+      '<img src="Image Study.assets/attachments/pasted.png" width="640">',
+    );
+    await tester.pump(const Duration(milliseconds: 1000));
+    await tester.pump();
+
+    expect(vault.lastSavedMarkdown, contains('width="640"'));
+  });
+
+  testWidgets('live editor keeps image preview for mixed image blocks', (
+    tester,
+  ) async {
+    final vault = _CountingUpdateVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Image Study');
+    final first = await vault.addImageSource(
+      noteId: note.id,
+      filename: 'first.png',
+      mimeType: 'image/png',
+      bytes: _tinyPng,
+    );
+    final second = await vault.addImageSource(
+      noteId: note.id,
+      filename: 'second.png',
+      mimeType: 'image/png',
+      bytes: _tinyPng,
+    );
+    const firstTag =
+        '<img src="Image Study.assets/attachments/first.png" width="320">';
+    const secondTag =
+        '<img src="Image Study.assets/attachments/second.png" width="320">';
+    await vault.updateMarkdown(
+      noteId: note.id,
+      markdown: '# Image Study\n\n$firstTag $secondTag',
+    );
+
+    await _pumpWorkspace(tester, vault: vault);
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(Key('preview-image-${first.id}')), findsOneWidget);
+    expect(find.byKey(Key('preview-image-${second.id}')), findsOneWidget);
+    expect(find.textContaining('<img'), findsNothing);
+
+    await tester.tap(find.byKey(Key('preview-image-tap-${first.id}')));
+    await tester.pumpAndSettle();
+
+    expect(
+      find.byKey(const Key('live-markdown-image-preview-2')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(
+        of: find.byKey(const Key('live-markdown-image-preview-2')),
+        matching: find.byType(Image),
+      ),
+      findsNWidgets(2),
+    );
+    expect(
+      find.byKey(const Key('live-markdown-image-tag-editor-2')),
+      findsOneWidget,
+    );
+    expect(find.textContaining('<img'), findsOneWidget);
   });
 
   testWidgets('uses the configured auto-save delay', (tester) async {
@@ -1502,10 +1716,7 @@ void main() {
       ),
     );
 
-    await tester.enterText(
-      find.byKey(const Key('note-editor')),
-      '# 心经学习\n延迟保存',
-    );
+    await _enterTextInLiveMarkdownBlock(tester, '# 心经学习\n延迟保存');
     await tester.pump(const Duration(milliseconds: 1000));
     expect(vault.updateCalls, 0);
 
@@ -1517,9 +1728,10 @@ void main() {
   testWidgets('keeps the note editor editable and top aligned', (tester) async {
     await _pumpWorkspace(tester, vault: MemoryVaultBackend());
     await _switchToSourceMode(tester);
+    await _activateLiveMarkdownBlock(tester);
 
     final noteEditorFinder = find.byKey(const Key('note-editor'));
-    final noteEditor = tester.widget<CupertinoTextField>(noteEditorFinder);
+    final noteEditor = _activeLiveMarkdownTextField(tester);
 
     expect(noteEditor.enabled, isTrue);
     expect(noteEditor.readOnly, isFalse);
@@ -1528,13 +1740,15 @@ void main() {
     await tester.enterText(noteEditorFinder, '# 手动笔记\n正文');
     await tester.pump();
 
-    expect(find.text('# 手动笔记\n正文'), findsOneWidget);
+    expect(find.textContaining('正文'), findsWidgets);
   });
 
   testWidgets('renders note preview with Cupertino Markdown styling', (
     tester,
   ) async {
     await _pumpWorkspace(tester, vault: MemoryVaultBackend());
+    await tester.tap(find.byKey(const Key('note-mode-reading')));
+    await tester.pump(const Duration(milliseconds: 250));
 
     final markdown = tester.widget<Markdown>(find.byType(Markdown));
     expect(markdown.softLineBreak, isTrue);
@@ -1560,7 +1774,7 @@ void main() {
 
     await _pumpWorkspace(tester, vault: vault, imageInput: imageInput);
     await _switchToSourceMode(tester);
-    await tester.enterText(find.byKey(const Key('note-editor')), '# 心经学习\n正文');
+    await _enterTextInLiveMarkdownBlock(tester, '# 心经学习\n正文');
     await tester.sendKeyDownEvent(LogicalKeyboardKey.metaLeft);
     await tester.sendKeyDownEvent(LogicalKeyboardKey.keyV);
     await tester.sendKeyUpEvent(LogicalKeyboardKey.keyV);
@@ -1603,7 +1817,7 @@ void main() {
         ),
       ),
     );
-    await tester.enterText(find.byKey(const Key('note-editor')), '# 心经学习\n正文');
+    await _enterTextInLiveMarkdownBlock(tester, '# 心经学习\n正文');
     await tester.sendKeyDownEvent(LogicalKeyboardKey.metaLeft);
     await tester.sendKeyDownEvent(LogicalKeyboardKey.keyV);
     await tester.sendKeyUpEvent(LogicalKeyboardKey.keyV);
@@ -1623,16 +1837,14 @@ void main() {
 
     await _pumpWorkspace(tester, vault: vault, imageInput: imageInput);
     await _switchToSourceMode(tester);
-    await tester.enterText(find.byKey(const Key('note-editor')), '# 心经学习\n');
+    await _enterTextInLiveMarkdownBlock(tester, '# 心经学习\n');
     await tester.sendKeyDownEvent(LogicalKeyboardKey.metaLeft);
     await tester.sendKeyDownEvent(LogicalKeyboardKey.keyV);
     await tester.sendKeyUpEvent(LogicalKeyboardKey.keyV);
     await tester.sendKeyUpEvent(LogicalKeyboardKey.metaLeft);
-    await tester.pump();
+    await tester.pumpAndSettle();
 
-    final noteEditor = tester.widget<CupertinoTextField>(
-      find.byKey(const Key('note-editor')),
-    );
+    final noteEditor = _activeLiveMarkdownTextField(tester);
     expect(imageInput.pasteCalls, 1);
     expect(noteEditor.controller?.text, contains('普通剪贴板文本'));
 
@@ -1828,6 +2040,43 @@ void main() {
     expect(vault.updateCalls, greaterThanOrEqualTo(1));
     expect(vault.lastSavedMarkdown, contains('width="640"'));
     expect((await vault.readNote(note.id)).markdown, contains('width="640"'));
+  });
+
+  testWidgets('reading mode hides image resize controls', (tester) async {
+    final vault = _CountingUpdateVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Image Study');
+    final source = await vault.addImageSource(
+      noteId: note.id,
+      filename: 'pasted.png',
+      mimeType: 'image/png',
+      bytes: _tinyPng,
+    );
+    await vault.updateMarkdown(
+      noteId: note.id,
+      markdown:
+          '# Image Study\n\n'
+          '<img src="Image Study.assets/attachments/pasted.png" '
+          'width="360">',
+    );
+    vault.updateCalls = 0;
+    vault.lastSavedMarkdown = null;
+
+    await _pumpWorkspace(tester, vault: vault);
+    await tester.tap(find.byKey(const Key('note-mode-reading')));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(Key('preview-image-${source.id}')), findsOneWidget);
+    expect(find.byKey(Key('image-resize-handle-${source.id}')), findsNothing);
+    expect(
+      find.byKey(Key('image-resize-handle-icon-${source.id}')),
+      findsNothing,
+    );
+
+    await tester.tap(find.byKey(Key('preview-image-tap-${source.id}')));
+    await tester.pumpAndSettle();
+
+    expect(vault.updateCalls, 0);
+    expect(vault.lastSavedMarkdown, isNull);
   });
 
   testWidgets('clamps dragged preview image width to the allowed range', (
@@ -2042,10 +2291,9 @@ void main() {
 
     await _pumpWorkspace(tester, vault: vault);
     await _switchToSourceMode(tester);
+    await _activateLiveMarkdownBlock(tester);
 
-    final noteEditor = tester.widget<CupertinoTextField>(
-      find.byKey(const Key('note-editor')),
-    );
+    final noteEditor = _activeLiveMarkdownTextField(tester);
 
     expect(noteEditor.controller?.text.trimLeft().startsWith('# 心经学习'), isTrue);
     expect(noteEditor.controller?.text, isNot(contains('---')));
@@ -2340,7 +2588,7 @@ void main() {
 
     await tester.tap(find.byKey(const Key('settings-button')));
     await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const Key('settings-default-mode-source')));
+    await tester.tap(find.byKey(const Key('settings-default-mode-reading')));
     await tester.enterText(
       find.byKey(const Key('settings-auto-save-delay')),
       '1500',
@@ -2354,7 +2602,7 @@ void main() {
     await tester.pumpAndSettle();
 
     final preferences = settingsStore.savedSettings.last.preferences;
-    expect(preferences.defaultNoteMode, WorkspaceDefaultNoteMode.source);
+    expect(preferences.defaultNoteMode, WorkspaceDefaultNoteMode.reading);
     expect(preferences.autoSaveDelayMillis, 1500);
     expect(preferences.pastedImageWidth, 720);
     expect(preferences.semanticSearchEnabled, isFalse);
@@ -2483,6 +2731,63 @@ Future<void> _switchToSourceMode(WidgetTester tester) async {
   await tester.pump(const Duration(milliseconds: 250));
 }
 
+Finder _inNotePane(Finder finder, int? paneId) {
+  if (paneId == null) {
+    return finder;
+  }
+  return find.descendant(
+    of: find.byKey(Key('note-editor-pane-$paneId')),
+    matching: finder,
+  );
+}
+
+Future<void> _activateLiveMarkdownBlock(
+  WidgetTester tester, {
+  int blockIndex = 0,
+  int? paneId,
+}) async {
+  final existingEditor = _inNotePane(
+    find.byKey(const Key('note-editor')),
+    paneId,
+  );
+  if (existingEditor.evaluate().isNotEmpty) {
+    return;
+  }
+  await tester.tap(
+    _inNotePane(
+      find.byKey(Key('live-markdown-block-preview-$blockIndex')),
+      paneId,
+    ).first,
+  );
+  await tester.pump(const Duration(milliseconds: 250));
+}
+
+Future<void> _enterTextInLiveMarkdownBlock(
+  WidgetTester tester,
+  String text, {
+  int blockIndex = 0,
+  int? paneId,
+}) async {
+  await _activateLiveMarkdownBlock(
+    tester,
+    blockIndex: blockIndex,
+    paneId: paneId,
+  );
+  await tester.enterText(
+    _inNotePane(find.byKey(const Key('note-editor')), paneId).first,
+    text,
+  );
+}
+
+CupertinoTextField _activeLiveMarkdownTextField(
+  WidgetTester tester, {
+  int? paneId,
+}) {
+  return tester.widget<CupertinoTextField>(
+    _inNotePane(find.byKey(const Key('note-editor')), paneId).first,
+  );
+}
+
 enum _PreviewImageDropSide { left, right }
 
 Future<void> _dragPreviewImageToSide(
@@ -2513,6 +2818,43 @@ Color _previewImageFrameBorderColor(WidgetTester tester, SourceItem source) {
       (tapTarget.child! as DecoratedBox).decoration as BoxDecoration;
   final border = decoration.border! as Border;
   return border.top.color;
+}
+
+bool _spanHasBoldText(InlineSpan span, String text) {
+  if (span is TextSpan) {
+    if (span.text == text && span.style?.fontWeight == FontWeight.bold) {
+      return true;
+    }
+    return span.children?.any((child) => _spanHasBoldText(child, text)) ??
+        false;
+  }
+  return false;
+}
+
+bool _spanHasTextStyle(
+  InlineSpan span,
+  String text, {
+  double? fontSize,
+  FontWeight? fontWeight,
+}) {
+  if (span is TextSpan) {
+    final style = span.style;
+    if (span.text == text &&
+        (fontSize == null || style?.fontSize == fontSize) &&
+        (fontWeight == null || style?.fontWeight == fontWeight)) {
+      return true;
+    }
+    return span.children?.any(
+          (child) => _spanHasTextStyle(
+            child,
+            text,
+            fontSize: fontSize,
+            fontWeight: fontWeight,
+          ),
+        ) ??
+        false;
+  }
+  return false;
 }
 
 Icon _iconForKey(WidgetTester tester, Key key) {

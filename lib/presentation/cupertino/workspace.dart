@@ -24,6 +24,7 @@ import '../../infrastructure/config/vault_location_store.dart';
 import '../../infrastructure/input/image_input_service.dart';
 import '../../infrastructure/vault/default_vault_backend.dart';
 import '../../infrastructure/vault/vault_backend.dart';
+import 'markdown_live_blocks.dart';
 
 typedef ProviderConfigTester = Future<String> Function(ProviderConfig config);
 typedef DirectoryPicker = Future<String?> Function();
@@ -89,6 +90,8 @@ enum _LeftPaneMode { resources, search }
 enum _NoteMode { reading, source }
 
 enum _ImageDropSide { before, after }
+
+enum _ImagePreviewMode { reading, editing }
 
 enum _SplitAxis { horizontal, vertical }
 
@@ -2664,7 +2667,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
             pane: pane,
             focused: focused,
             mode: _NoteMode.source,
-            label: '源码',
+            label: '编辑',
             icon: CupertinoIcons.chevron_left_slash_chevron_right,
           ),
         ],
@@ -2704,37 +2707,63 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
         (session ?? _activeSession)?.controller.text ?? '',
       ).body,
     );
-    final baseStyle = MarkdownStyleSheet.fromCupertinoTheme(
-      CupertinoTheme.of(context),
-    );
     return Markdown(
       data: markdown,
       selectable: false,
       softLineBreak: true,
-      sizedImageBuilder: _buildPreviewImage,
+      sizedImageBuilder: (config) =>
+          _buildPreviewImage(config, mode: _ImagePreviewMode.reading),
       styleSheetTheme: MarkdownStyleSheetBaseTheme.cupertino,
-      styleSheet: baseStyle.copyWith(
-        p: const TextStyle(fontSize: 14, height: 1.55, color: _text),
-        h1: const TextStyle(
-          fontSize: 20,
-          fontWeight: FontWeight.w600,
-          height: 1.35,
-          color: _text,
-        ),
-        h2: const TextStyle(
-          fontSize: 17,
-          fontWeight: FontWeight.w600,
-          height: 1.4,
-          color: _text,
-        ),
-        h3: const TextStyle(
-          fontSize: 15,
-          fontWeight: FontWeight.w600,
-          height: 1.45,
-          color: _text,
-        ),
-      ),
+      styleSheet: _noteMarkdownStyleSheet(),
       padding: const EdgeInsets.fromLTRB(16, 54, 16, 16),
+    );
+  }
+
+  MarkdownStyleSheet _noteMarkdownStyleSheet() {
+    final baseStyle = MarkdownStyleSheet.fromCupertinoTheme(
+      CupertinoTheme.of(context),
+    );
+    return baseStyle.copyWith(
+      p: const TextStyle(fontSize: 14, height: 1.55, color: _text),
+      h1: const TextStyle(
+        fontSize: 20,
+        fontWeight: FontWeight.w600,
+        height: 1.35,
+        color: _text,
+      ),
+      h2: const TextStyle(
+        fontSize: 17,
+        fontWeight: FontWeight.w600,
+        height: 1.4,
+        color: _text,
+      ),
+      h3: const TextStyle(
+        fontSize: 15,
+        fontWeight: FontWeight.w600,
+        height: 1.45,
+        color: _text,
+      ),
+    );
+  }
+
+  Widget _buildLivePreviewMarkdownBlock(
+    String markdown, {
+    VoidCallback? onImageTap,
+  }) {
+    if (markdown.trim().isEmpty) {
+      return const SizedBox(height: 12);
+    }
+    return MarkdownBody(
+      data: _markdownPreviewData(markdown),
+      selectable: false,
+      softLineBreak: true,
+      sizedImageBuilder: (config) => _buildPreviewImage(
+        config,
+        mode: _ImagePreviewMode.editing,
+        onImageTap: onImageTap,
+      ),
+      styleSheetTheme: MarkdownStyleSheetBaseTheme.cupertino,
+      styleSheet: _noteMarkdownStyleSheet(),
     );
   }
 
@@ -2754,7 +2783,11 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     });
   }
 
-  Widget _buildPreviewImage(MarkdownImageConfig config) {
+  Widget _buildPreviewImage(
+    MarkdownImageConfig config, {
+    required _ImagePreviewMode mode,
+    VoidCallback? onImageTap,
+  }) {
     final src = _safeUriDecode(config.uri.toString());
     final source = _imageSourceForMarkdownSrc(src);
     if (source == null) {
@@ -2771,9 +2804,16 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       source: source,
       src: src,
       width: width,
+      editableControls: mode == _ImagePreviewMode.editing,
       selectedImageSrc: _selectedPreviewImageSrcNotifier,
       imageBytes: _requireVault().readSourceAttachment(source),
-      onTap: () => _setSelectedPreviewImageSrc(src),
+      onTap: () {
+        if (mode != _ImagePreviewMode.editing) {
+          return;
+        }
+        onImageTap?.call();
+        _setSelectedPreviewImageSrc(src);
+      },
       onWidthChanged: (value) {
         _applyImageWidth(src: src, width: _clampImageWidth(value.round()));
       },
@@ -3022,26 +3062,37 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
             key: resolvedPane == null
                 ? const Key('note-editor-pane')
                 : Key('note-editor-${resolvedPane.paneId}'),
-            child: CupertinoTextField(
-              key: focused ? const Key('note-editor') : null,
-              controller:
-                  resolvedSession?.controller ?? _emptyMarkdownController,
-              enabled: resolvedSession != null,
-              readOnly: false,
-              textAlignVertical: TextAlignVertical.top,
-              expands: true,
-              minLines: null,
-              maxLines: null,
-              padding: const EdgeInsets.fromLTRB(16, 54, 16, 16),
-              placeholder: '选择或创建笔记后开始整理 Markdown',
-              placeholderStyle: const TextStyle(color: _muted),
-              style: const TextStyle(
-                fontFamily: 'monospace',
-                fontSize: 13,
-                height: 1.55,
-              ),
-              decoration: const BoxDecoration(color: _surface),
-            ),
+            child: resolvedSession == null
+                ? CupertinoTextField(
+                    key: focused ? const Key('note-editor') : null,
+                    controller: _emptyMarkdownController,
+                    enabled: false,
+                    readOnly: false,
+                    textAlignVertical: TextAlignVertical.top,
+                    expands: true,
+                    minLines: null,
+                    maxLines: null,
+                    padding: const EdgeInsets.fromLTRB(16, 54, 16, 16),
+                    placeholder: '选择或创建笔记后开始整理 Markdown',
+                    placeholderStyle: const TextStyle(color: _muted),
+                    style: const TextStyle(
+                      fontFamily: 'monospace',
+                      fontSize: 13,
+                      height: 1.55,
+                    ),
+                    decoration: const BoxDecoration(color: _surface),
+                  )
+                : _LiveMarkdownEditor(
+                    controller: resolvedSession.controller,
+                    enabled: true,
+                    focused: focused,
+                    onFocusPane: () {
+                      if (resolvedPane != null) {
+                        setState(() => _focusPane(resolvedPane.paneId));
+                      }
+                    },
+                    previewBuilder: _buildLivePreviewMarkdownBlock,
+                  ),
           ),
         ),
       ),
@@ -3583,6 +3634,483 @@ class _PaneModeIconAction extends StatelessWidget {
       ),
     );
   }
+}
+
+class _LiveMarkdownEditor extends StatefulWidget {
+  const _LiveMarkdownEditor({
+    required this.controller,
+    required this.enabled,
+    required this.focused,
+    required this.onFocusPane,
+    required this.previewBuilder,
+  });
+
+  final TextEditingController controller;
+  final bool enabled;
+  final bool focused;
+  final VoidCallback onFocusPane;
+  final Widget Function(String markdown, {VoidCallback? onImageTap})
+  previewBuilder;
+
+  @override
+  State<_LiveMarkdownEditor> createState() => _LiveMarkdownEditorState();
+}
+
+class _LiveMarkdownEditorState extends State<_LiveMarkdownEditor> {
+  final _blockController = _MarkdownStyledTextEditingController();
+  int? _activeOffset;
+  var _syncingBlock = false;
+  var _updatingFullDocument = false;
+
+  @override
+  void initState() {
+    super.initState();
+    widget.controller.addListener(_handleFullDocumentChanged);
+  }
+
+  @override
+  void didUpdateWidget(_LiveMarkdownEditor oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.controller != widget.controller) {
+      oldWidget.controller.removeListener(_handleFullDocumentChanged);
+      widget.controller.addListener(_handleFullDocumentChanged);
+      _activeOffset = null;
+    }
+    _syncBlockController();
+  }
+
+  @override
+  void dispose() {
+    widget.controller.removeListener(_handleFullDocumentChanged);
+    _blockController.dispose();
+    super.dispose();
+  }
+
+  void _handleFullDocumentChanged() {
+    if (_updatingFullDocument || !mounted) {
+      return;
+    }
+    setState(() {
+      final activeOffset = _activeOffset;
+      if (activeOffset == null) {
+        return;
+      }
+      final selection = widget.controller.selection;
+      _activeOffset = selection.isValid
+          ? _clampOffset(selection.extentOffset, widget.controller.text.length)
+          : _clampOffset(activeOffset, widget.controller.text.length);
+      _syncBlockController();
+    });
+  }
+
+  void _activateBlock(MarkdownLiveBlock block) {
+    if (block.isBlank) {
+      _clearActiveBlock();
+      return;
+    }
+    widget.onFocusPane();
+    setState(() {
+      _activeOffset = block.start;
+      _updatingFullDocument = true;
+      widget.controller.selection = TextSelection.collapsed(
+        offset: block.start,
+      );
+      _updatingFullDocument = false;
+      _syncBlockController();
+    });
+  }
+
+  void _syncBlockController() {
+    final activeOffset = _activeOffset;
+    if (activeOffset == null) {
+      return;
+    }
+    final blocks = splitMarkdownLiveBlocks(widget.controller.text);
+    final index = markdownBlockIndexForOffset(blocks, activeOffset);
+    final block = blocks[index];
+    if (_blockController.text == block.text) {
+      return;
+    }
+    _syncingBlock = true;
+    final oldSelection = _blockController.selection;
+    final selectionOffset = oldSelection.isValid
+        ? _clampOffset(oldSelection.extentOffset, block.text.length)
+        : block.text.length;
+    _blockController.value = TextEditingValue(
+      text: block.text,
+      selection: TextSelection.collapsed(offset: selectionOffset),
+    );
+    _syncingBlock = false;
+  }
+
+  void _replaceActiveBlock(String text) {
+    final activeOffset = _activeOffset;
+    if (_syncingBlock || activeOffset == null) {
+      return;
+    }
+    final markdown = widget.controller.text;
+    final blocks = splitMarkdownLiveBlocks(markdown);
+    final index = markdownBlockIndexForOffset(blocks, activeOffset);
+    final block = blocks[index];
+    final blockSelection = _blockController.selection;
+    final nextOffset =
+        block.start +
+        (blockSelection.isValid
+            ? _clampOffset(blockSelection.extentOffset, text.length)
+            : text.length);
+    final updated = replaceMarkdownLiveBlock(
+      markdown: markdown,
+      block: block,
+      replacement: text,
+    );
+
+    _updatingFullDocument = true;
+    widget.controller.value = TextEditingValue(
+      text: updated,
+      selection: TextSelection.collapsed(
+        offset: _clampOffset(nextOffset, updated.length),
+      ),
+    );
+    _updatingFullDocument = false;
+    _activeOffset = _clampOffset(nextOffset, updated.length);
+    if (mounted) {
+      setState(() {});
+    }
+  }
+
+  void _clearActiveBlock() {
+    if (_activeOffset == null) {
+      return;
+    }
+    widget.onFocusPane();
+    FocusScope.of(context).unfocus();
+    setState(() => _activeOffset = null);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final blocks = splitMarkdownLiveBlocks(widget.controller.text);
+    final activeOffset = _activeOffset;
+    final activeIndex = activeOffset == null
+        ? null
+        : markdownBlockIndexForOffset(blocks, activeOffset);
+    _syncBlockController();
+
+    return GestureDetector(
+      behavior: HitTestBehavior.translucent,
+      onTap: _clearActiveBlock,
+      child: CupertinoScrollbar(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.fromLTRB(16, 54, 16, 16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              for (var index = 0; index < blocks.length; index += 1)
+                _buildBlock(blocks[index], index, activeIndex),
+              GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: _clearActiveBlock,
+                child: const SizedBox(height: 96),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildBlock(MarkdownLiveBlock block, int index, int? activeIndex) {
+    if (index == activeIndex) {
+      if (_blockHasPreviewImage(block)) {
+        return _buildImageBlockEditor(block, index);
+      }
+      return _buildTextBlockEditor(block, index);
+    }
+
+    return GestureDetector(
+      key: Key('live-markdown-block-preview-$index'),
+      behavior: HitTestBehavior.opaque,
+      onTap: () => _activateBlock(block),
+      child: Padding(
+        padding: block.isBlank
+            ? EdgeInsets.zero
+            : const EdgeInsets.symmetric(vertical: 3),
+        child: widget.previewBuilder(
+          block.text,
+          onImageTap: () => _activateBlock(block),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildTextBlockEditor(MarkdownLiveBlock block, int index) {
+    return KeyedSubtree(
+      key: Key('live-markdown-block-editor-$index'),
+      child: CupertinoTextField(
+        key: widget.focused ? const Key('note-editor') : null,
+        controller: _blockController,
+        enabled: widget.enabled,
+        readOnly: false,
+        autofocus: true,
+        textAlignVertical: TextAlignVertical.top,
+        minLines: 1,
+        maxLines: null,
+        padding: const EdgeInsets.symmetric(vertical: 3),
+        placeholder: '选择或创建笔记后开始整理 Markdown',
+        placeholderStyle: const TextStyle(color: _muted),
+        cursorColor: _primary,
+        style: const TextStyle(fontSize: 14, height: 1.55, color: _text),
+        decoration: const BoxDecoration(color: _surface),
+        onChanged: _replaceActiveBlock,
+        onTap: () => _updateActiveOffsetFromBlockSelection(block),
+      ),
+    );
+  }
+
+  Widget _buildImageBlockEditor(MarkdownLiveBlock block, int index) {
+    return KeyedSubtree(
+      key: Key('live-markdown-block-editor-$index'),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 3),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            KeyedSubtree(
+              key: Key('live-markdown-image-preview-$index'),
+              child: widget.previewBuilder(
+                block.text,
+                onImageTap: () => _activateBlock(block),
+              ),
+            ),
+            const SizedBox(height: 8),
+            KeyedSubtree(
+              key: Key('live-markdown-image-tag-editor-$index'),
+              child: CupertinoTextField(
+                key: widget.focused ? const Key('note-editor') : null,
+                controller: _blockController,
+                enabled: widget.enabled,
+                readOnly: false,
+                autofocus: true,
+                textAlignVertical: TextAlignVertical.top,
+                minLines: 1,
+                maxLines: null,
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 10,
+                  vertical: 8,
+                ),
+                style: const TextStyle(
+                  fontFamily: 'monospace',
+                  fontSize: 12,
+                  height: 1.45,
+                  color: _text,
+                ),
+                decoration: BoxDecoration(
+                  color: _secondarySurface,
+                  border: Border.all(color: _softLine),
+                  borderRadius: _radius,
+                ),
+                onChanged: _replaceActiveBlock,
+                onTap: () => _updateActiveOffsetFromBlockSelection(block),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _updateActiveOffsetFromBlockSelection(MarkdownLiveBlock block) {
+    widget.onFocusPane();
+    final selection = _blockController.selection;
+    if (selection.isValid) {
+      _activeOffset = _clampOffset(
+        block.start + selection.extentOffset,
+        widget.controller.text.length,
+      );
+    }
+  }
+
+  bool _blockHasPreviewImage(MarkdownLiveBlock block) {
+    return block.kind == MarkdownLiveBlockKind.image ||
+        _htmlImageTagPattern.hasMatch(block.text);
+  }
+}
+
+class _MarkdownStyledTextEditingController extends TextEditingController {
+  @override
+  TextSpan buildTextSpan({
+    required BuildContext context,
+    TextStyle? style,
+    required bool withComposing,
+  }) {
+    return _MarkdownSourceTextSpanBuilder.build(
+      text,
+      (style ?? DefaultTextStyle.of(context).style).copyWith(color: _text),
+    );
+  }
+}
+
+class _MarkdownSourceTextSpanBuilder {
+  static TextSpan build(String source, TextStyle baseStyle) {
+    return TextSpan(
+      style: baseStyle,
+      children: _buildMarkdownLineSpans(source, baseStyle),
+    );
+  }
+
+  static List<InlineSpan> _buildMarkdownLineSpans(
+    String source,
+    TextStyle baseStyle,
+  ) {
+    final spans = <InlineSpan>[];
+    final lines = source.split('\n');
+    for (var index = 0; index < lines.length; index += 1) {
+      spans.addAll(_buildMarkdownLineSpan(lines[index], baseStyle));
+      if (index < lines.length - 1) {
+        spans.add(const TextSpan(text: '\n'));
+      }
+    }
+    return spans;
+  }
+
+  static List<InlineSpan> _buildMarkdownLineSpan(
+    String line,
+    TextStyle baseStyle,
+  ) {
+    final headingMatch = RegExp(r'^(#{1,6})(\s+)(.*)$').firstMatch(line);
+    if (headingMatch != null) {
+      final level = headingMatch.group(1)!.length;
+      final headingStyle = _headingStyle(baseStyle, level);
+      final markerStyle = headingStyle.copyWith(
+        color: _muted,
+        fontWeight: FontWeight.w500,
+      );
+      return [
+        TextSpan(text: headingMatch.group(1), style: markerStyle),
+        TextSpan(text: headingMatch.group(2), style: markerStyle),
+        ..._buildInlineSpans(headingMatch.group(3)!, headingStyle),
+      ];
+    }
+
+    final blockMarkerMatch = RegExp(
+      r'^(\s*(?:>\s?|[-*+]\s+|\d+[.)]\s+|-\s+\[[ xX]\]\s+))(.*)$',
+    ).firstMatch(line);
+    if (blockMarkerMatch != null) {
+      return [
+        TextSpan(
+          text: blockMarkerMatch.group(1),
+          style: baseStyle.copyWith(color: _muted),
+        ),
+        ..._buildInlineSpans(blockMarkerMatch.group(2)!, baseStyle),
+      ];
+    }
+
+    return _buildInlineSpans(line, baseStyle);
+  }
+
+  static TextStyle _headingStyle(TextStyle baseStyle, int level) {
+    return baseStyle.copyWith(
+      fontSize: switch (level) {
+        1 => 20,
+        2 => 17,
+        _ => 15,
+      },
+      fontWeight: FontWeight.w600,
+      height: switch (level) {
+        1 => 1.35,
+        2 => 1.4,
+        _ => 1.45,
+      },
+    );
+  }
+
+  static List<InlineSpan> _buildInlineSpans(
+    String source,
+    TextStyle baseStyle,
+  ) {
+    final spans = <InlineSpan>[];
+    final markerStyle = baseStyle.copyWith(color: _muted);
+    var index = 0;
+    while (index < source.length) {
+      if (source.startsWith('**', index)) {
+        final end = source.indexOf('**', index + 2);
+        if (end != -1) {
+          spans.add(TextSpan(text: '**', style: markerStyle));
+          spans.add(
+            TextSpan(
+              text: source.substring(index + 2, end),
+              style: baseStyle.copyWith(fontWeight: FontWeight.bold),
+            ),
+          );
+          spans.add(TextSpan(text: '**', style: markerStyle));
+          index = end + 2;
+          continue;
+        }
+      }
+      if (source.startsWith('`', index)) {
+        final end = source.indexOf('`', index + 1);
+        if (end != -1) {
+          spans.add(TextSpan(text: '`', style: markerStyle));
+          spans.add(
+            TextSpan(
+              text: source.substring(index + 1, end),
+              style: baseStyle.copyWith(
+                fontFamily: 'monospace',
+                backgroundColor: _secondarySurface,
+              ),
+            ),
+          );
+          spans.add(TextSpan(text: '`', style: markerStyle));
+          index = end + 1;
+          continue;
+        }
+      }
+      if (source.startsWith('*', index) && !source.startsWith('**', index)) {
+        final end = source.indexOf('*', index + 1);
+        if (end != -1) {
+          spans.add(TextSpan(text: '*', style: markerStyle));
+          spans.add(
+            TextSpan(
+              text: source.substring(index + 1, end),
+              style: baseStyle.copyWith(fontStyle: FontStyle.italic),
+            ),
+          );
+          spans.add(TextSpan(text: '*', style: markerStyle));
+          index = end + 1;
+          continue;
+        }
+      }
+      final next = _nextInlineMarker(source, index + 1);
+      spans.add(
+        TextSpan(text: source.substring(index, next), style: baseStyle),
+      );
+      index = next;
+    }
+    return spans;
+  }
+
+  static int _nextInlineMarker(String source, int start) {
+    final candidates = <int>[
+      source.indexOf('**', start),
+      source.indexOf('`', start),
+      source.indexOf('*', start),
+    ].where((index) => index != -1).toList();
+    if (candidates.isEmpty) {
+      return source.length;
+    }
+    candidates.sort();
+    return candidates.first;
+  }
+}
+
+int _clampOffset(int offset, int length) {
+  if (offset < 0) {
+    return 0;
+  }
+  if (offset > length) {
+    return length;
+  }
+  return offset;
 }
 
 class _SearchField extends StatelessWidget {
@@ -4248,6 +4776,7 @@ class _PreviewImageBlock extends StatefulWidget {
     required this.source,
     required this.src,
     required this.width,
+    required this.editableControls,
     required this.selectedImageSrc,
     required this.imageBytes,
     required this.onTap,
@@ -4258,6 +4787,7 @@ class _PreviewImageBlock extends StatefulWidget {
   final SourceItem source;
   final String src;
   final double width;
+  final bool editableControls;
   final ValueListenable<String?> selectedImageSrc;
   final Future<List<int>> imageBytes;
   final VoidCallback onTap;
@@ -4280,6 +4810,7 @@ class _PreviewImageBlockState extends State<_PreviewImageBlock> {
 
   double get _effectiveWidth => _previewWidth ?? widget.width;
   bool get _selected =>
+      widget.editableControls &&
       widget.selectedImageSrc.value == _normalizeImageSrc(widget.src);
 
   @override
@@ -4313,6 +4844,9 @@ class _PreviewImageBlockState extends State<_PreviewImageBlock> {
   }
 
   void _startResize(PointerDownEvent event) {
+    if (!widget.editableControls) {
+      return;
+    }
     if (_resizePointer != null) {
       return;
     }
@@ -4326,6 +4860,9 @@ class _PreviewImageBlockState extends State<_PreviewImageBlock> {
   }
 
   void _updateResize(PointerMoveEvent event) {
+    if (!widget.editableControls) {
+      return;
+    }
     if (event.pointer != _resizePointer ||
         _resizeStartGlobalX == null ||
         _resizeStartWidth == null) {
@@ -4342,6 +4879,9 @@ class _PreviewImageBlockState extends State<_PreviewImageBlock> {
   }
 
   void _endResize() {
+    if (!widget.editableControls) {
+      return;
+    }
     final width = _clampImageWidth(_effectiveWidth.round()).toDouble();
     setState(() {
       _dragging = false;
@@ -4367,6 +4907,9 @@ class _PreviewImageBlockState extends State<_PreviewImageBlock> {
   }
 
   void _handleDragMove(DragTargetDetails<String> details) {
+    if (!widget.editableControls) {
+      return;
+    }
     final next = _dropSideForGlobalOffset(details.offset);
     if (next == _dropSide) {
       return;
@@ -4382,6 +4925,9 @@ class _PreviewImageBlockState extends State<_PreviewImageBlock> {
   }
 
   void _handleImageDrop(DragTargetDetails<String> details) {
+    if (!widget.editableControls) {
+      return;
+    }
     final side = _dropSideForGlobalOffset(details.offset);
     setState(() => _dropSide = null);
     widget.onImageDropped(details.data, widget.src, side);
@@ -4413,24 +4959,29 @@ class _PreviewImageBlockState extends State<_PreviewImageBlock> {
             child: Stack(
               clipBehavior: Clip.none,
               children: [
-                DragTarget<String>(
-                  onWillAcceptWithDetails: (details) =>
-                      details.data != widget.src,
-                  onMove: _handleDragMove,
-                  onLeave: _handleDragLeave,
-                  onAcceptWithDetails: _handleImageDrop,
-                  builder: (context, candidateData, rejectedData) {
-                    final image = _buildImageBody();
-                    return Draggable<String>(
-                      data: widget.src,
-                      dragAnchorStrategy: pointerDragAnchorStrategy,
-                      feedback: _PreviewImageDragFeedback(width: displayWidth),
-                      childWhenDragging: Opacity(opacity: 0.45, child: image),
-                      child: image,
-                    );
-                  },
-                ),
-                _buildResizeHandle(),
+                if (widget.editableControls)
+                  DragTarget<String>(
+                    onWillAcceptWithDetails: (details) =>
+                        details.data != widget.src,
+                    onMove: _handleDragMove,
+                    onLeave: _handleDragLeave,
+                    onAcceptWithDetails: _handleImageDrop,
+                    builder: (context, candidateData, rejectedData) {
+                      final image = _buildImageBody();
+                      return Draggable<String>(
+                        data: widget.src,
+                        dragAnchorStrategy: pointerDragAnchorStrategy,
+                        feedback: _PreviewImageDragFeedback(
+                          width: displayWidth,
+                        ),
+                        childWhenDragging: Opacity(opacity: 0.45, child: image),
+                        child: image,
+                      );
+                    },
+                  )
+                else
+                  _buildImageBody(),
+                if (widget.editableControls) _buildResizeHandle(),
               ],
             ),
           );
@@ -5211,7 +5762,7 @@ class _SettingsSheetState extends State<_SettingsSheet> {
             const SizedBox(width: 8),
             _PreferenceChoice(
               key: const Key('settings-default-mode-source'),
-              label: '源码',
+              label: '编辑',
               selected: _defaultNoteMode == WorkspaceDefaultNoteMode.source,
               onPressed: () => setState(
                 () => _defaultNoteMode = WorkspaceDefaultNoteMode.source,
