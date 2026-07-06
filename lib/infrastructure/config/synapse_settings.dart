@@ -3,24 +3,36 @@ import 'vault_location_store.dart';
 
 enum WorkspaceDefaultNoteMode { reading, source }
 
+enum WorkspaceAccentColor { blue, purple, pink, red, orange, green }
+
 class WorkspacePreferences {
   const WorkspacePreferences({
     required this.defaultNoteMode,
     required this.semanticSearchEnabled,
     required this.pastedImageWidth,
     required this.autoSaveDelayMillis,
+    this.accentColor = WorkspaceAccentColor.blue,
+    this.noteFontSize = defaultNoteFontSize,
   });
+
+  static const minNoteFontSize = 10;
+  static const defaultNoteFontSize = 14;
+  static const maxNoteFontSize = 28;
 
   final WorkspaceDefaultNoteMode defaultNoteMode;
   final bool semanticSearchEnabled;
   final int pastedImageWidth;
   final int autoSaveDelayMillis;
+  final WorkspaceAccentColor accentColor;
+  final int noteFontSize;
 
   static const defaults = WorkspacePreferences(
     defaultNoteMode: WorkspaceDefaultNoteMode.source,
     semanticSearchEnabled: true,
     pastedImageWidth: 480,
     autoSaveDelayMillis: 1000,
+    accentColor: WorkspaceAccentColor.blue,
+    noteFontSize: defaultNoteFontSize,
   );
 
   WorkspacePreferences copyWith({
@@ -28,6 +40,8 @@ class WorkspacePreferences {
     bool? semanticSearchEnabled,
     int? pastedImageWidth,
     int? autoSaveDelayMillis,
+    WorkspaceAccentColor? accentColor,
+    int? noteFontSize,
   }) {
     return WorkspacePreferences(
       defaultNoteMode: defaultNoteMode ?? this.defaultNoteMode,
@@ -35,6 +49,8 @@ class WorkspacePreferences {
           semanticSearchEnabled ?? this.semanticSearchEnabled,
       pastedImageWidth: pastedImageWidth ?? this.pastedImageWidth,
       autoSaveDelayMillis: autoSaveDelayMillis ?? this.autoSaveDelayMillis,
+      accentColor: accentColor ?? this.accentColor,
+      noteFontSize: _clampNoteFontSize(noteFontSize ?? this.noteFontSize),
     );
   }
 
@@ -43,6 +59,8 @@ class WorkspacePreferences {
     'semanticSearchEnabled': semanticSearchEnabled,
     'pastedImageWidth': pastedImageWidth,
     'autoSaveDelayMillis': autoSaveDelayMillis,
+    'accentColor': accentColor.name,
+    'noteFontSize': noteFontSize,
   };
 
   static WorkspacePreferences fromJson(Map<String, Object?> json) {
@@ -59,7 +77,19 @@ class WorkspacePreferences {
           _readInt(json['pastedImageWidth']) ?? defaults.pastedImageWidth,
       autoSaveDelayMillis:
           _readInt(json['autoSaveDelayMillis']) ?? defaults.autoSaveDelayMillis,
+      accentColor:
+          WorkspaceAccentColor.values.byNameOrNull(
+            json['accentColor']?.toString(),
+          ) ??
+          defaults.accentColor,
+      noteFontSize: _clampNoteFontSize(
+        _readInt(json['noteFontSize']) ?? defaults.noteFontSize,
+      ),
     );
+  }
+
+  static int _clampNoteFontSize(int value) {
+    return value.clamp(minNoteFontSize, maxNoteFontSize).toInt();
   }
 
   static int? _readInt(Object? value) {
@@ -78,7 +108,9 @@ class WorkspacePreferences {
         other.defaultNoteMode == defaultNoteMode &&
         other.semanticSearchEnabled == semanticSearchEnabled &&
         other.pastedImageWidth == pastedImageWidth &&
-        other.autoSaveDelayMillis == autoSaveDelayMillis;
+        other.autoSaveDelayMillis == autoSaveDelayMillis &&
+        other.accentColor == accentColor &&
+        other.noteFontSize == noteFontSize;
   }
 
   @override
@@ -87,6 +119,8 @@ class WorkspacePreferences {
     semanticSearchEnabled,
     pastedImageWidth,
     autoSaveDelayMillis,
+    accentColor,
+    noteFontSize,
   );
 }
 
@@ -165,6 +199,20 @@ class SynapseSettings {
 
 extension _NullableNoteModeLookup on List<WorkspaceDefaultNoteMode> {
   WorkspaceDefaultNoteMode? byNameOrNull(String? name) {
+    if (name == null) {
+      return null;
+    }
+    for (final value in this) {
+      if (value.name == name) {
+        return value;
+      }
+    }
+    return null;
+  }
+}
+
+extension _NullableAccentColorLookup on List<WorkspaceAccentColor> {
+  WorkspaceAccentColor? byNameOrNull(String? name) {
     if (name == null) {
       return null;
     }

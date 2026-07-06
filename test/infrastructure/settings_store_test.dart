@@ -45,6 +45,8 @@ void main() {
         semanticSearchEnabled: false,
         pastedImageWidth: 720,
         autoSaveDelayMillis: 1500,
+        accentColor: WorkspaceAccentColor.green,
+        noteFontSize: 22,
       ),
     );
 
@@ -66,6 +68,8 @@ void main() {
     expect(loaded.preferences.semanticSearchEnabled, isFalse);
     expect(loaded.preferences.pastedImageWidth, 720);
     expect(loaded.preferences.autoSaveDelayMillis, 1500);
+    expect(loaded.preferences.accentColor, WorkspaceAccentColor.green);
+    expect(loaded.preferences.noteFontSize, 22);
   });
 
   test('migrates legacy provider and vault files then deletes them', () async {

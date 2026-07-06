@@ -35,7 +35,6 @@ const _surface = Color(0xFFFFFFFF);
 const _secondarySurface = Color(0xFFF9F9FB);
 const _line = Color(0xFFD2D2D7);
 const _softLine = Color(0xFFE5E5EA);
-const _primary = CupertinoColors.activeBlue;
 const _text = CupertinoColors.label;
 const _muted = CupertinoColors.secondaryLabel;
 const _danger = CupertinoColors.systemRed;
@@ -84,6 +83,88 @@ enum _WorkspaceSection {
 
   final String label;
   final IconData icon;
+}
+
+class _WorkspaceAppearance {
+  const _WorkspaceAppearance({
+    required this.accentColor,
+    required this.noteFontSize,
+  });
+
+  factory _WorkspaceAppearance.fromPreferences(
+    WorkspacePreferences preferences,
+  ) {
+    return _WorkspaceAppearance(
+      accentColor: _accentColorFor(preferences.accentColor),
+      noteFontSize: preferences.noteFontSize.toDouble(),
+    );
+  }
+
+  static const defaults = _WorkspaceAppearance(
+    accentColor: CupertinoColors.activeBlue,
+    noteFontSize: 14,
+  );
+
+  final Color accentColor;
+  final double noteFontSize;
+
+  double get h1FontSize => headingFontSizeForBase(noteFontSize, 1);
+  double get h2FontSize => headingFontSizeForBase(noteFontSize, 2);
+  double get h3FontSize => headingFontSizeForBase(noteFontSize, 3);
+
+  static double headingFontSizeForBase(double baseFontSize, int level) {
+    return switch (level) {
+      1 => baseFontSize * 20 / WorkspacePreferences.defaultNoteFontSize,
+      2 => baseFontSize * 17 / WorkspacePreferences.defaultNoteFontSize,
+      _ => baseFontSize * 15 / WorkspacePreferences.defaultNoteFontSize,
+    };
+  }
+
+  static Color _accentColorFor(WorkspaceAccentColor color) {
+    return switch (color) {
+      WorkspaceAccentColor.blue => CupertinoColors.activeBlue,
+      WorkspaceAccentColor.purple => CupertinoColors.systemPurple,
+      WorkspaceAccentColor.pink => CupertinoColors.systemPink,
+      WorkspaceAccentColor.red => CupertinoColors.systemRed,
+      WorkspaceAccentColor.orange => CupertinoColors.systemOrange,
+      WorkspaceAccentColor.green => CupertinoColors.systemGreen,
+    };
+  }
+}
+
+class _WorkspaceAppearanceScope extends InheritedWidget {
+  const _WorkspaceAppearanceScope({
+    required this.appearance,
+    required super.child,
+  });
+
+  final _WorkspaceAppearance appearance;
+
+  static _WorkspaceAppearance of(BuildContext context) {
+    return context
+            .dependOnInheritedWidgetOfExactType<_WorkspaceAppearanceScope>()
+            ?.appearance ??
+        _WorkspaceAppearance.defaults;
+  }
+
+  @override
+  bool updateShouldNotify(_WorkspaceAppearanceScope oldWidget) {
+    return oldWidget.appearance.accentColor != appearance.accentColor ||
+        oldWidget.appearance.noteFontSize != appearance.noteFontSize;
+  }
+}
+
+extension _WorkspaceAccentColorLabel on WorkspaceAccentColor {
+  String get label {
+    return switch (this) {
+      WorkspaceAccentColor.blue => '蓝色',
+      WorkspaceAccentColor.purple => '紫色',
+      WorkspaceAccentColor.pink => '粉色',
+      WorkspaceAccentColor.red => '红色',
+      WorkspaceAccentColor.orange => '橙色',
+      WorkspaceAccentColor.green => '绿色',
+    };
+  }
 }
 
 enum _LeftPaneMode { resources, search }
@@ -221,6 +302,10 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   WorkspacePreferences _workspacePreferences = WorkspacePreferences.defaults;
   ProviderConfig? _providerConfig;
   bool _usesInjectedAiProvider = false;
+
+  _WorkspaceAppearance get _workspaceAppearance {
+    return _WorkspaceAppearance.fromPreferences(_workspacePreferences);
+  }
 
   @override
   void initState() {
@@ -1977,25 +2062,28 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
 
   @override
   Widget build(BuildContext context) {
-    return CupertinoPageScaffold(
-      backgroundColor: _background,
-      child: SafeArea(
-        top: false,
-        bottom: false,
-        child: LayoutBuilder(
-          builder: (context, constraints) {
-            final narrow = constraints.maxWidth < 900;
-            return Column(
-              children: [
-                narrow
-                    ? _buildNarrowWorkspaceTitlebar()
-                    : _buildWorkspaceTitlebar(),
-                Expanded(
-                  child: narrow ? _buildNarrowLayout() : _buildWideLayout(),
-                ),
-              ],
-            );
-          },
+    return _WorkspaceAppearanceScope(
+      appearance: _workspaceAppearance,
+      child: CupertinoPageScaffold(
+        backgroundColor: _background,
+        child: SafeArea(
+          top: false,
+          bottom: false,
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              final narrow = constraints.maxWidth < 900;
+              return Column(
+                children: [
+                  narrow
+                      ? _buildNarrowWorkspaceTitlebar()
+                      : _buildWorkspaceTitlebar(),
+                  Expanded(
+                    child: narrow ? _buildNarrowLayout() : _buildWideLayout(),
+                  ),
+                ],
+              );
+            },
+          ),
         ),
       ),
     );
@@ -2568,6 +2656,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   Widget _buildSplitLeaf(_SplitLeaf pane) {
     final focused = pane.paneId == _focusedPaneId;
     final session = pane.noteId == null ? null : _noteSessions[pane.noteId!];
+    final accentColor = _workspaceAppearance.accentColor;
     return GestureDetector(
       key: Key('split-pane-${pane.paneId}'),
       behavior: HitTestBehavior.opaque,
@@ -2575,7 +2664,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       child: DecoratedBox(
         decoration: BoxDecoration(
           color: _surface,
-          border: Border.all(color: focused ? _primary : _line),
+          border: Border.all(color: focused ? accentColor : _line),
           borderRadius: _radius,
         ),
         child: ClipRRect(
@@ -2721,27 +2810,43 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   }
 
   MarkdownStyleSheet _noteMarkdownStyleSheet() {
+    final appearance = _workspaceAppearance;
     final baseStyle = MarkdownStyleSheet.fromCupertinoTheme(
       CupertinoTheme.of(context),
     );
     return baseStyle.copyWith(
-      p: const TextStyle(fontSize: 14, height: 1.55, color: _text),
-      h1: const TextStyle(
-        fontSize: 20,
+      p: TextStyle(
+        fontSize: appearance.noteFontSize,
+        height: 1.55,
+        color: _text,
+      ),
+      h1: TextStyle(
+        fontSize: appearance.h1FontSize,
         fontWeight: FontWeight.w600,
         height: 1.35,
         color: _text,
       ),
-      h2: const TextStyle(
-        fontSize: 17,
+      h2: TextStyle(
+        fontSize: appearance.h2FontSize,
         fontWeight: FontWeight.w600,
         height: 1.4,
         color: _text,
       ),
-      h3: const TextStyle(
-        fontSize: 15,
+      h3: TextStyle(
+        fontSize: appearance.h3FontSize,
         fontWeight: FontWeight.w600,
         height: 1.45,
+        color: _text,
+      ),
+      tableHead: TextStyle(
+        fontSize: appearance.noteFontSize,
+        fontWeight: FontWeight.w600,
+        height: 1.35,
+        color: _text,
+      ),
+      tableBody: TextStyle(
+        fontSize: appearance.noteFontSize,
+        height: 1.35,
         color: _text,
       ),
     );
@@ -3036,6 +3141,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     final resolvedSession = session ?? _activeSession;
     final resolvedPane = pane ?? _focusedPane;
     final focused = resolvedPane?.paneId == _focusedPaneId;
+    final appearance = _workspaceAppearance;
     return Focus(
       focusNode: _editorPasteFocusNode,
       onKeyEvent: _handleEmptyNoteEditorKeyEvent,
@@ -3076,9 +3182,9 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
                     padding: const EdgeInsets.fromLTRB(16, 54, 16, 16),
                     placeholder: '选择或创建笔记后开始整理 Markdown',
                     placeholderStyle: const TextStyle(color: _muted),
-                    style: const TextStyle(
+                    style: TextStyle(
                       fontFamily: 'monospace',
-                      fontSize: 13,
+                      fontSize: appearance.noteFontSize,
                       height: 1.55,
                     ),
                     decoration: const BoxDecoration(color: _surface),
@@ -3904,6 +4010,7 @@ class _LiveMarkdownEditorState extends State<_LiveMarkdownEditor> {
   }
 
   Widget _buildTextBlockEditor(MarkdownLiveBlock block, int index) {
+    final appearance = _WorkspaceAppearanceScope.of(context);
     return KeyedSubtree(
       key: Key('live-markdown-block-editor-$index'),
       child: CupertinoTextField(
@@ -3918,8 +4025,12 @@ class _LiveMarkdownEditorState extends State<_LiveMarkdownEditor> {
         padding: const EdgeInsets.symmetric(vertical: 3),
         placeholder: '选择或创建笔记后开始整理 Markdown',
         placeholderStyle: const TextStyle(color: _muted),
-        cursorColor: _primary,
-        style: const TextStyle(fontSize: 14, height: 1.55, color: _text),
+        cursorColor: appearance.accentColor,
+        style: TextStyle(
+          fontSize: appearance.noteFontSize,
+          height: 1.55,
+          color: _text,
+        ),
         decoration: const BoxDecoration(color: _surface),
         onChanged: _replaceActiveBlock,
         onTap: () => _updateActiveOffsetFromBlockSelection(block),
@@ -4082,9 +4193,12 @@ class _LiveMarkdownTableEditorState extends State<_LiveMarkdownTableEditor> {
 
   Widget _buildTableCell(int rowIndex, int column, MarkdownLiveTableCell cell) {
     final selected = rowIndex == _selectedRow && column == _selectedColumn;
+    final appearance = _WorkspaceAppearanceScope.of(context);
     return DecoratedBox(
       decoration: BoxDecoration(
-        color: selected ? const Color(0xFFE8F2FF) : const Color(0x00000000),
+        color: selected
+            ? appearance.accentColor.withValues(alpha: 0.12)
+            : const Color(0x00000000),
       ),
       child: CupertinoTextField(
         key: Key(
@@ -4097,7 +4211,7 @@ class _LiveMarkdownTableEditorState extends State<_LiveMarkdownTableEditor> {
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
         textAlignVertical: TextAlignVertical.top,
         style: TextStyle(
-          fontSize: 13,
+          fontSize: appearance.noteFontSize,
           height: 1.35,
           fontWeight: rowIndex == 0 ? FontWeight.w600 : FontWeight.w400,
           color: _text,
@@ -4310,12 +4424,14 @@ class _MarkdownSourceTextSpanBuilder {
   }
 
   static TextStyle _headingStyle(TextStyle baseStyle, int level) {
+    final baseFontSize =
+        baseStyle.fontSize ??
+        WorkspacePreferences.defaultNoteFontSize.toDouble();
     return baseStyle.copyWith(
-      fontSize: switch (level) {
-        1 => 20,
-        2 => 17,
-        _ => 15,
-      },
+      fontSize: _WorkspaceAppearance.headingFontSizeForBase(
+        baseFontSize,
+        level,
+      ),
       fontWeight: FontWeight.w600,
       height: switch (level) {
         1 => 1.35,
@@ -4566,13 +4682,14 @@ class _MoveNoteTargetDialogState extends State<_MoveNoteTargetDialog> {
     required int depth,
   }) {
     final selected = _selectedPath == path;
+    final accentColor = _WorkspaceAppearanceScope.of(context).accentColor;
     return Padding(
       padding: const EdgeInsets.only(bottom: 2),
       child: CupertinoButton(
         key: key,
         minimumSize: const Size.fromHeight(34),
         padding: EdgeInsets.only(left: 8 + depth * 18, right: 8),
-        color: selected ? const Color(0xFFE8F2FF) : null,
+        color: selected ? accentColor.withValues(alpha: 0.12) : null,
         borderRadius: _radius,
         onPressed: () => setState(() => _selectedPath = path),
         child: Row(
@@ -4580,7 +4697,7 @@ class _MoveNoteTargetDialogState extends State<_MoveNoteTargetDialog> {
             Icon(
               path.isEmpty ? CupertinoIcons.archivebox : CupertinoIcons.folder,
               size: 18,
-              color: selected ? _primary : _muted,
+              color: selected ? accentColor : _muted,
             ),
             const SizedBox(width: 8),
             Expanded(
@@ -4596,10 +4713,10 @@ class _MoveNoteTargetDialogState extends State<_MoveNoteTargetDialog> {
               ),
             ),
             if (selected)
-              const Icon(
+              Icon(
                 CupertinoIcons.check_mark_circled_solid,
                 size: 18,
-                color: _primary,
+                color: accentColor,
               ),
           ],
         ),
@@ -4747,6 +4864,7 @@ class _ResourceRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final accentColor = _WorkspaceAppearanceScope.of(context).accentColor;
     if (node.isFolder) {
       final menuController = MenuController();
       return MenuAnchor(
@@ -4816,7 +4934,7 @@ class _ResourceRow extends StatelessWidget {
               Icon(
                 CupertinoIcons.folder,
                 size: 19,
-                color: selected ? _primary : _muted,
+                color: selected ? accentColor : _muted,
               ),
               const SizedBox(width: 8),
               Expanded(
@@ -4889,7 +5007,7 @@ class _ResourceRow extends StatelessWidget {
             Icon(
               CupertinoIcons.doc_text,
               size: 18,
-              color: selected ? _primary : _muted,
+              color: selected ? accentColor : _muted,
             ),
             const SizedBox(width: 8),
             Expanded(
@@ -5050,6 +5168,7 @@ class _ResourceRowShell extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final accentColor = _WorkspaceAppearanceScope.of(context).accentColor;
     return Padding(
       padding: const EdgeInsets.only(bottom: 2),
       child: GestureDetector(
@@ -5061,7 +5180,9 @@ class _ResourceRowShell extends StatelessWidget {
           height: 34,
           padding: EdgeInsets.only(left: 4 + depth * 18, right: 8),
           decoration: BoxDecoration(
-            color: selected ? const Color(0xFFE8F2FF) : const Color(0x00000000),
+            color: selected
+                ? accentColor.withValues(alpha: 0.12)
+                : const Color(0x00000000),
             borderRadius: _radius,
           ),
           child: child,
@@ -5293,6 +5414,7 @@ class _PreviewImageBlockState extends State<_PreviewImageBlock> {
 
   Widget _buildResizeHandle() {
     final showHint = _resizeHandleHovered || _dragging;
+    final accentColor = _WorkspaceAppearanceScope.of(context).accentColor;
     return Positioned(
       right: 0,
       bottom: 0,
@@ -5337,17 +5459,17 @@ class _PreviewImageBlockState extends State<_PreviewImageBlock> {
                       decoration: BoxDecoration(
                         color: _surface.withValues(alpha: 0.72),
                         border: Border.all(
-                          color: _primary.withValues(alpha: 0.38),
+                          color: accentColor.withValues(alpha: 0.38),
                         ),
                         borderRadius: BorderRadius.circular(7),
                       ),
-                      child: const SizedBox(
+                      child: SizedBox(
                         width: 18,
                         height: 18,
                         child: Icon(
                           CupertinoIcons.arrow_down_right_arrow_up_left,
                           size: 11,
-                          color: _primary,
+                          color: accentColor,
                         ),
                       ),
                     )
@@ -5361,6 +5483,7 @@ class _PreviewImageBlockState extends State<_PreviewImageBlock> {
 
   Widget _buildImageBody() {
     final highlighted = _selected || _dragging || _dropSide != null;
+    final accentColor = _WorkspaceAppearanceScope.of(context).accentColor;
     Widget body = SizedBox(
       width: double.infinity,
       child: Listener(
@@ -5371,7 +5494,7 @@ class _PreviewImageBlockState extends State<_PreviewImageBlock> {
           onTap: widget.onTap,
           child: DecoratedBox(
             decoration: BoxDecoration(
-              border: Border.all(color: highlighted ? _primary : _softLine),
+              border: Border.all(color: highlighted ? accentColor : _softLine),
               borderRadius: _radius,
             ),
             child: ClipRRect(
@@ -5435,7 +5558,7 @@ class _PreviewImageBlockState extends State<_PreviewImageBlock> {
           right: dropSide == _ImageDropSide.after ? 3 : null,
           child: DecoratedBox(
             decoration: BoxDecoration(
-              color: _primary,
+              color: accentColor,
               borderRadius: BorderRadius.circular(2),
             ),
             child: const SizedBox(width: 3),
@@ -5454,12 +5577,13 @@ class _PreviewImageDragFeedback extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final feedbackWidth = width < 160 ? width : 160.0;
+    final accentColor = _WorkspaceAppearanceScope.of(context).accentColor;
     return Opacity(
       opacity: 0.82,
       child: DecoratedBox(
         decoration: BoxDecoration(
           color: _surface,
-          border: Border.all(color: _primary),
+          border: Border.all(color: accentColor),
           borderRadius: _radius,
           boxShadow: const [
             BoxShadow(
@@ -5472,8 +5596,8 @@ class _PreviewImageDragFeedback extends StatelessWidget {
         child: SizedBox(
           width: feedbackWidth,
           height: 96,
-          child: const Center(
-            child: Icon(CupertinoIcons.photo, size: 28, color: _primary),
+          child: Center(
+            child: Icon(CupertinoIcons.photo, size: 28, color: accentColor),
           ),
         ),
       ),
@@ -5521,6 +5645,7 @@ class _ImageSourceTileState extends State<_ImageSourceTile> {
 
   @override
   Widget build(BuildContext context) {
+    final accentColor = _WorkspaceAppearanceScope.of(context).accentColor;
     return Semantics(
       label: widget.source.title,
       image: true,
@@ -5534,7 +5659,7 @@ class _ImageSourceTileState extends State<_ImageSourceTile> {
             color: _surface,
             borderRadius: _radius,
             border: Border.all(
-              color: widget.selected ? _primary : _line,
+              color: widget.selected ? accentColor : _line,
               width: widget.selected ? 2 : 1,
             ),
           ),
@@ -5574,15 +5699,15 @@ class _ImageSourceTileState extends State<_ImageSourceTile> {
                 if (widget.selected)
                   DecoratedBox(
                     decoration: BoxDecoration(
-                      color: _primary.withValues(alpha: 0.16),
+                      color: accentColor.withValues(alpha: 0.16),
                     ),
-                    child: const Align(
+                    child: Align(
                       alignment: Alignment.bottomLeft,
                       child: Padding(
-                        padding: EdgeInsets.all(6),
+                        padding: const EdgeInsets.all(6),
                         child: Icon(
                           CupertinoIcons.check_mark_circled_solid,
-                          color: _primary,
+                          color: accentColor,
                         ),
                       ),
                     ),
@@ -5817,6 +5942,7 @@ class _SelectableTextBlockState extends State<_SelectableTextBlock> {
 enum _SettingsSection {
   general('通用', CupertinoIcons.slider_horizontal_3),
   models('AI 模型', CupertinoIcons.sparkles),
+  appearance('外观', CupertinoIcons.paintbrush),
   vault('仓库', CupertinoIcons.folder),
   search('搜索', CupertinoIcons.search),
   images('图片', CupertinoIcons.photo),
@@ -5857,6 +5983,8 @@ class _SettingsSheetState extends State<_SettingsSheet> {
   late final TextEditingController _pastedImageWidthController;
   late WorkspaceDefaultNoteMode _defaultNoteMode;
   late bool _semanticSearchEnabled;
+  late WorkspaceAccentColor _accentColor;
+  late int _noteFontSize;
   _SettingsSection _section = _SettingsSection.general;
   bool _testing = false;
   String _testMessage = '';
@@ -5882,6 +6010,8 @@ class _SettingsSheetState extends State<_SettingsSheet> {
     );
     _defaultNoteMode = preferences.defaultNoteMode;
     _semanticSearchEnabled = preferences.semanticSearchEnabled;
+    _accentColor = preferences.accentColor;
+    _noteFontSize = preferences.noteFontSize;
   }
 
   @override
@@ -5899,99 +6029,114 @@ class _SettingsSheetState extends State<_SettingsSheet> {
   @override
   Widget build(BuildContext context) {
     final size = MediaQuery.sizeOf(context);
-    return Center(
-      child: CupertinoPopupSurface(
-        child: ConstrainedBox(
-          constraints: BoxConstraints(
-            maxWidth: 760,
-            maxHeight: size.height * 0.86,
-          ),
-          child: Container(
-            color: _surface,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                const Padding(
-                  padding: EdgeInsets.fromLTRB(18, 16, 18, 12),
-                  child: Text(
-                    '设置',
-                    style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800),
-                  ),
-                ),
-                if (!widget.canSave && widget.unavailableMessage.isNotEmpty)
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(18, 0, 18, 12),
+    return _WorkspaceAppearanceScope(
+      appearance: _WorkspaceAppearance(
+        accentColor: _WorkspaceAppearance._accentColorFor(_accentColor),
+        noteFontSize: _noteFontSize.toDouble(),
+      ),
+      child: Center(
+        child: CupertinoPopupSurface(
+          child: ConstrainedBox(
+            constraints: BoxConstraints(
+              maxWidth: 760,
+              maxHeight: size.height * 0.86,
+            ),
+            child: Container(
+              color: _surface,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  const Padding(
+                    padding: EdgeInsets.fromLTRB(18, 16, 18, 12),
                     child: Text(
-                      widget.unavailableMessage,
-                      style: const TextStyle(color: _muted, fontSize: 13),
+                      '设置',
+                      style: TextStyle(
+                        fontSize: 20,
+                        fontWeight: FontWeight.w800,
+                      ),
                     ),
                   ),
-                Flexible(
-                  child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                  if (!widget.canSave && widget.unavailableMessage.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(18, 0, 18, 12),
+                      child: Text(
+                        widget.unavailableMessage,
+                        style: const TextStyle(color: _muted, fontSize: 13),
+                      ),
+                    ),
+                  Flexible(
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        SizedBox(
+                          width: 164,
+                          child: DecoratedBox(
+                            decoration: const BoxDecoration(
+                              color: _secondarySurface,
+                              border: Border(
+                                right: BorderSide(color: _softLine),
+                              ),
+                            ),
+                            child: ListView(
+                              padding: const EdgeInsets.all(10),
+                              children: [
+                                for (final section in _SettingsSection.values)
+                                  _SettingsNavButton(
+                                    key: Key('settings-nav-${section.name}'),
+                                    section: section,
+                                    selected: _section == section,
+                                    onPressed: () =>
+                                        setState(() => _section = section),
+                                  ),
+                              ],
+                            ),
+                          ),
+                        ),
+                        Expanded(
+                          child: SingleChildScrollView(
+                            padding: const EdgeInsets.all(18),
+                            child: _buildSection(),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(
+                    height: 1,
+                    child: ColoredBox(color: _softLine),
+                  ),
+                  const SizedBox(height: 12),
+                  Row(
                     children: [
-                      SizedBox(
-                        width: 164,
-                        child: DecoratedBox(
-                          decoration: const BoxDecoration(
-                            color: _secondarySurface,
-                            border: Border(right: BorderSide(color: _softLine)),
-                          ),
-                          child: ListView(
-                            padding: const EdgeInsets.all(10),
-                            children: [
-                              for (final section in _SettingsSection.values)
-                                _SettingsNavButton(
-                                  key: Key('settings-nav-${section.name}'),
-                                  section: section,
-                                  selected: _section == section,
-                                  onPressed: () =>
-                                      setState(() => _section = section),
-                                ),
-                            ],
-                          ),
+                      const SizedBox(width: 18),
+                      if (_section == _SettingsSection.models)
+                        _SecondaryButton(
+                          label: '测试模型',
+                          icon: CupertinoIcons.antenna_radiowaves_left_right,
+                          busy: _testing,
+                          onPressed: _testing ? null : _testConfig,
                         ),
+                      const Spacer(),
+                      CupertinoButton(
+                        padding: const EdgeInsets.symmetric(horizontal: 12),
+                        onPressed: () => Navigator.of(context).pop(),
+                        child: const Text('取消'),
                       ),
-                      Expanded(
-                        child: SingleChildScrollView(
-                          padding: const EdgeInsets.all(18),
-                          child: _buildSection(),
-                        ),
+                      _PrimaryButton(
+                        label: '保存设置',
+                        icon: CupertinoIcons.tray_arrow_down,
+                        onPressed: widget.canSave
+                            ? () =>
+                                  Navigator.of(context).pop(_currentSettings())
+                            : null,
                       ),
+                      const SizedBox(width: 18),
                     ],
                   ),
-                ),
-                const SizedBox(height: 1, child: ColoredBox(color: _softLine)),
-                const SizedBox(height: 12),
-                Row(
-                  children: [
-                    const SizedBox(width: 18),
-                    if (_section == _SettingsSection.models)
-                      _SecondaryButton(
-                        label: '测试模型',
-                        icon: CupertinoIcons.antenna_radiowaves_left_right,
-                        busy: _testing,
-                        onPressed: _testing ? null : _testConfig,
-                      ),
-                    const Spacer(),
-                    CupertinoButton(
-                      padding: const EdgeInsets.symmetric(horizontal: 12),
-                      onPressed: () => Navigator.of(context).pop(),
-                      child: const Text('取消'),
-                    ),
-                    _PrimaryButton(
-                      label: '保存设置',
-                      icon: CupertinoIcons.tray_arrow_down,
-                      onPressed: widget.canSave
-                          ? () => Navigator.of(context).pop(_currentSettings())
-                          : null,
-                    ),
-                    const SizedBox(width: 18),
-                  ],
-                ),
-                const SizedBox(height: 12),
-              ],
+                  const SizedBox(height: 12),
+                ],
+              ),
             ),
           ),
         ),
@@ -6005,6 +6150,8 @@ class _SettingsSheetState extends State<_SettingsSheet> {
         return _buildGeneralSection();
       case _SettingsSection.models:
         return _buildModelSection();
+      case _SettingsSection.appearance:
+        return _buildAppearanceSection();
       case _SettingsSection.vault:
         return _statusSection(
           title: '仓库',
@@ -6105,6 +6252,7 @@ class _SettingsSheetState extends State<_SettingsSheet> {
   }
 
   Widget _buildModelSection() {
+    final accentColor = _WorkspaceAppearanceScope.of(context).accentColor;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -6147,10 +6295,66 @@ class _SettingsSheetState extends State<_SettingsSheet> {
             maxLines: 2,
             overflow: TextOverflow.ellipsis,
             style: TextStyle(
-              color: _testMessage.startsWith('测试失败') ? _danger : _primary,
+              color: _testMessage.startsWith('测试失败') ? _danger : accentColor,
               fontWeight: FontWeight.w600,
             ),
           ),
+      ],
+    );
+  }
+
+  Widget _buildAppearanceSection() {
+    final accentColor = _WorkspaceAppearanceScope.of(context).accentColor;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text(
+          '外观',
+          style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800),
+        ),
+        const SizedBox(height: 14),
+        const Text('主题色', style: TextStyle(color: _muted, fontSize: 12)),
+        const SizedBox(height: 8),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            for (final color in WorkspaceAccentColor.values)
+              _AccentColorButton(
+                key: Key('settings-accent-${color.name}'),
+                label: color.label,
+                color: _WorkspaceAppearance._accentColorFor(color),
+                selected: _accentColor == color,
+                onPressed: () => setState(() => _accentColor = color),
+              ),
+          ],
+        ),
+        const SizedBox(height: 18),
+        Row(
+          children: [
+            const Expanded(
+              child: Text(
+                '笔记内容字号',
+                style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+              ),
+            ),
+            Text(
+              '$_noteFontSize px',
+              style: const TextStyle(color: _muted, fontSize: 13),
+            ),
+          ],
+        ),
+        CupertinoSlider(
+          key: const Key('settings-note-font-size-slider'),
+          min: WorkspacePreferences.minNoteFontSize.toDouble(),
+          max: WorkspacePreferences.maxNoteFontSize.toDouble(),
+          divisions:
+              WorkspacePreferences.maxNoteFontSize -
+              WorkspacePreferences.minNoteFontSize,
+          value: _noteFontSize.toDouble(),
+          activeColor: accentColor,
+          onChanged: (value) => setState(() => _noteFontSize = value.round()),
+        ),
       ],
     );
   }
@@ -6212,6 +6416,8 @@ class _SettingsSheetState extends State<_SettingsSheet> {
         autoSaveDelayMillis:
             int.tryParse(_autoSaveDelayController.text.trim()) ??
             WorkspacePreferences.defaults.autoSaveDelayMillis,
+        accentColor: _accentColor,
+        noteFontSize: _noteFontSize,
       ),
     );
   }
@@ -6286,6 +6492,7 @@ class _SettingsNavButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final accentColor = _WorkspaceAppearanceScope.of(context).accentColor;
     return Padding(
       padding: const EdgeInsets.only(bottom: 6),
       child: CupertinoButton(
@@ -6297,19 +6504,23 @@ class _SettingsNavButton extends StatelessWidget {
           height: 34,
           padding: const EdgeInsets.symmetric(horizontal: 10),
           decoration: BoxDecoration(
-            color: selected ? _primary.withValues(alpha: 0.12) : null,
+            color: selected ? accentColor.withValues(alpha: 0.12) : null,
             borderRadius: BorderRadius.circular(7),
           ),
           child: Row(
             children: [
-              Icon(section.icon, size: 16, color: selected ? _primary : _muted),
+              Icon(
+                section.icon,
+                size: 16,
+                color: selected ? accentColor : _muted,
+              ),
               const SizedBox(width: 8),
               Expanded(
                 child: Text(
                   section.label,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
-                    color: selected ? _primary : _text,
+                    color: selected ? accentColor : _text,
                     fontSize: 13,
                     fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
                   ),
@@ -6337,6 +6548,7 @@ class _PreferenceChoice extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final accentColor = _WorkspaceAppearanceScope.of(context).accentColor;
     return CupertinoButton(
       minimumSize: const Size(34, 34),
       padding: EdgeInsets.zero,
@@ -6346,8 +6558,8 @@ class _PreferenceChoice extends StatelessWidget {
         height: 34,
         padding: const EdgeInsets.symmetric(horizontal: 14),
         decoration: BoxDecoration(
-          color: selected ? _primary : _secondarySurface,
-          border: Border.all(color: selected ? _primary : _softLine),
+          color: selected ? accentColor : _secondarySurface,
+          border: Border.all(color: selected ? accentColor : _softLine),
           borderRadius: BorderRadius.circular(7),
         ),
         alignment: Alignment.center,
@@ -6358,6 +6570,55 @@ class _PreferenceChoice extends StatelessWidget {
             fontSize: 13,
             fontWeight: FontWeight.w700,
           ),
+        ),
+      ),
+    );
+  }
+}
+
+class _AccentColorButton extends StatelessWidget {
+  const _AccentColorButton({
+    super.key,
+    required this.label,
+    required this.color,
+    required this.selected,
+    required this.onPressed,
+  });
+
+  final String label;
+  final Color color;
+  final bool selected;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      label: '主题色$label',
+      button: true,
+      selected: selected,
+      child: CupertinoButton(
+        minimumSize: const Size.square(34),
+        padding: EdgeInsets.zero,
+        borderRadius: BorderRadius.circular(17),
+        onPressed: onPressed,
+        child: Container(
+          width: 34,
+          height: 34,
+          decoration: BoxDecoration(
+            color: color,
+            shape: BoxShape.circle,
+            border: Border.all(
+              color: selected ? _text : _softLine,
+              width: selected ? 2 : 1,
+            ),
+          ),
+          child: selected
+              ? const Icon(
+                  CupertinoIcons.check_mark,
+                  size: 17,
+                  color: CupertinoColors.white,
+                )
+              : null,
         ),
       ),
     );
@@ -6508,13 +6769,14 @@ class _PrimaryButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final enabled = onPressed != null;
+    final accentColor = _WorkspaceAppearanceScope.of(context).accentColor;
     return Semantics(
       label: label,
       button: true,
       child: CupertinoButton(
         minimumSize: const Size(38, 38),
         padding: const EdgeInsets.symmetric(horizontal: 12),
-        color: enabled ? _primary : CupertinoColors.systemGrey4,
+        color: enabled ? accentColor : CupertinoColors.systemGrey4,
         borderRadius: _radius,
         onPressed: onPressed,
         child: Row(

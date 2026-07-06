@@ -2664,6 +2664,7 @@ void main() {
     expect(find.text('设置'), findsOneWidget);
     expect(find.text('通用'), findsWidgets);
     expect(find.text('AI 模型'), findsWidgets);
+    expect(find.text('外观'), findsWidgets);
     expect(find.text('仓库'), findsWidgets);
     expect(find.text('搜索'), findsWidgets);
     expect(find.text('图片'), findsWidgets);
@@ -2701,6 +2702,132 @@ void main() {
     expect(preferences.autoSaveDelayMillis, 1500);
     expect(preferences.pastedImageWidth, 720);
     expect(preferences.semanticSearchEnabled, isFalse);
+  });
+
+  testWidgets('saves appearance preferences from the settings panel', (
+    tester,
+  ) async {
+    final settingsStore = _FakeSettingsStore();
+
+    await _pumpWorkspace(
+      tester,
+      vault: MemoryVaultBackend(),
+      settingsStore: settingsStore,
+    );
+
+    await tester.tap(find.byKey(const Key('settings-button')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('settings-nav-appearance')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('settings-accent-purple')));
+    await tester.pump();
+    final fontSizeSlider = tester.widget<CupertinoSlider>(
+      find.byKey(const Key('settings-note-font-size-slider')),
+    );
+    fontSizeSlider.onChanged!(28);
+    await tester.pump();
+    await tester.tap(find.text('保存设置'));
+    await tester.pumpAndSettle();
+
+    final preferences = settingsStore.savedSettings.last.preferences;
+    expect(preferences.accentColor, WorkspaceAccentColor.purple);
+    expect(preferences.noteFontSize, 28);
+  });
+
+  testWidgets('canceling appearance preferences does not save settings', (
+    tester,
+  ) async {
+    final settingsStore = _FakeSettingsStore();
+
+    await _pumpWorkspace(
+      tester,
+      vault: MemoryVaultBackend(),
+      settingsStore: settingsStore,
+    );
+
+    await tester.tap(find.byKey(const Key('settings-button')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('settings-nav-appearance')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('settings-accent-purple')));
+    await tester.pump();
+    await tester.tap(find.text('取消'));
+    await tester.pumpAndSettle();
+
+    expect(settingsStore.savedSettings, isEmpty);
+  });
+
+  testWidgets('applies configured accent color to primary workspace controls', (
+    tester,
+  ) async {
+    await _pumpWorkspace(
+      tester,
+      vault: MemoryVaultBackend(),
+      settingsStore: _FakeSettingsStore(
+        initialSettings: const SynapseSettings(
+          preferences: WorkspacePreferences(
+            defaultNoteMode: WorkspaceDefaultNoteMode.source,
+            semanticSearchEnabled: true,
+            pastedImageWidth: 480,
+            autoSaveDelayMillis: 1000,
+            accentColor: WorkspaceAccentColor.purple,
+          ),
+        ),
+      ),
+    );
+
+    expect(
+      _primaryButtonColor(tester, const Key('add-image-button')),
+      CupertinoColors.systemPurple,
+    );
+  });
+
+  testWidgets('applies configured note font size to preview and editors', (
+    tester,
+  ) async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Alpha');
+    await vault.updateMarkdown(
+      noteId: note.id,
+      markdown:
+          '# Alpha\n\n'
+          '| A | B |\n'
+          '|---|---|\n'
+          '| 1 | 2 |\n',
+    );
+
+    await _pumpWorkspace(
+      tester,
+      vault: vault,
+      settingsStore: _FakeSettingsStore(
+        initialSettings: const SynapseSettings(
+          preferences: WorkspacePreferences(
+            defaultNoteMode: WorkspaceDefaultNoteMode.reading,
+            semanticSearchEnabled: true,
+            pastedImageWidth: 480,
+            autoSaveDelayMillis: 1000,
+            noteFontSize: 28,
+          ),
+        ),
+      ),
+    );
+
+    final markdown = tester.widget<Markdown>(find.byType(Markdown));
+    expect(markdown.styleSheet?.p?.fontSize, 28);
+    expect(markdown.styleSheet?.h1?.fontSize, 40);
+    expect(markdown.styleSheet?.tableHead?.fontSize, 28);
+    expect(markdown.styleSheet?.tableBody?.fontSize, 28);
+
+    await _switchToSourceMode(tester);
+    await _activateLiveMarkdownBlock(tester);
+    expect(_activeLiveMarkdownTextField(tester).style?.fontSize, 28);
+
+    await tester.tap(find.byKey(const Key('live-markdown-block-preview-2')));
+    await tester.pumpAndSettle();
+    final tableCell = tester.widget<CupertinoTextField>(
+      find.byKey(const Key('live-markdown-table-cell-2-0-0')),
+    );
+    expect(tableCell.style?.fontSize, 28);
   });
 
   testWidgets('saves provider config from the settings panel', (tester) async {
@@ -2913,6 +3040,16 @@ Color _previewImageFrameBorderColor(WidgetTester tester, SourceItem source) {
       (tapTarget.child! as DecoratedBox).decoration as BoxDecoration;
   final border = decoration.border! as Border;
   return border.top.color;
+}
+
+Color? _primaryButtonColor(WidgetTester tester, Key key) {
+  final button = tester.widget<CupertinoButton>(
+    find.descendant(
+      of: find.byKey(key),
+      matching: find.byType(CupertinoButton),
+    ),
+  );
+  return button.color;
 }
 
 bool _spanHasBoldText(InlineSpan span, String text) {
