@@ -73,6 +73,7 @@ const _defaultPastedImageWidth = 480;
 const _minPastedImageWidth = 120.0;
 const _maxPastedImageWidth = 1200.0;
 final _htmlImageTagPattern = RegExp(r'<img\s+[^>]*>', caseSensitive: false);
+final _markdownImageTagPattern = RegExp(r'!\[[^\]]*\]\([^)]+\)');
 
 enum _WorkspaceSection {
   resources('资源', CupertinoIcons.folder),
@@ -3778,6 +3779,30 @@ class _LiveMarkdownEditorState extends State<_LiveMarkdownEditor> {
     }
   }
 
+  void _replaceTableBlock(MarkdownLiveBlock block, MarkdownLiveTable table) {
+    final markdown = widget.controller.text;
+    final blocks = splitMarkdownLiveBlocks(markdown);
+    final index = markdownBlockIndexForOffset(blocks, block.start);
+    final currentBlock = blocks[index];
+    final updated = replaceMarkdownLiveBlock(
+      markdown: markdown,
+      block: currentBlock,
+      replacement: serializeMarkdownLiveTable(table),
+    );
+    _updatingFullDocument = true;
+    widget.controller.value = TextEditingValue(
+      text: updated,
+      selection: TextSelection.collapsed(
+        offset: _clampOffset(currentBlock.start, updated.length),
+      ),
+    );
+    _updatingFullDocument = false;
+    _activeOffset = _clampOffset(currentBlock.start, updated.length);
+    if (mounted) {
+      setState(() {});
+    }
+  }
+
   void _clearActiveBlock() {
     if (_activeOffset == null) {
       return;
@@ -3785,6 +3810,14 @@ class _LiveMarkdownEditorState extends State<_LiveMarkdownEditor> {
     widget.onFocusPane();
     FocusScope.of(context).unfocus();
     setState(() => _activeOffset = null);
+  }
+
+  void _handleImagePreviewTap() {
+    widget.onFocusPane();
+    FocusScope.of(context).unfocus();
+    if (_activeOffset != null) {
+      setState(() => _activeOffset = null);
+    }
   }
 
   @override
@@ -3820,26 +3853,53 @@ class _LiveMarkdownEditorState extends State<_LiveMarkdownEditor> {
   }
 
   Widget _buildBlock(MarkdownLiveBlock block, int index, int? activeIndex) {
-    if (index == activeIndex) {
-      if (_blockHasPreviewImage(block)) {
-        return _buildImageBlockEditor(block, index);
-      }
+    final hasPreviewImage = _blockHasPreviewImage(block);
+    final table = _tableForBlock(block);
+    if (index == activeIndex && table != null) {
+      return _buildTableBlockEditor(block, index, table);
+    }
+    if (index == activeIndex && !hasPreviewImage) {
       return _buildTextBlockEditor(block, index);
     }
 
     return GestureDetector(
       key: Key('live-markdown-block-preview-$index'),
       behavior: HitTestBehavior.opaque,
-      onTap: () => _activateBlock(block),
+      onTap: hasPreviewImage
+          ? _handleImagePreviewTap
+          : () => _activateBlock(block),
       child: Padding(
         padding: block.isBlank
             ? EdgeInsets.zero
             : const EdgeInsets.symmetric(vertical: 3),
-        child: widget.previewBuilder(
-          block.text,
-          onImageTap: () => _activateBlock(block),
-        ),
+        child: hasPreviewImage
+            ? KeyedSubtree(
+                key: Key('live-markdown-image-preview-$index'),
+                child: widget.previewBuilder(
+                  block.text,
+                  onImageTap: _handleImagePreviewTap,
+                ),
+              )
+            : widget.previewBuilder(
+                block.text,
+                onImageTap: () => _activateBlock(block),
+              ),
       ),
+    );
+  }
+
+  Widget _buildTableBlockEditor(
+    MarkdownLiveBlock block,
+    int index,
+    MarkdownLiveTable table,
+  ) {
+    return _LiveMarkdownTableEditor(
+      key: Key('live-markdown-table-editor-$index'),
+      blockIndex: index,
+      table: table,
+      enabled: widget.enabled,
+      onFocusPane: widget.onFocusPane,
+      onChanged: (table) => _replaceTableBlock(block, table),
     );
   }
 
@@ -3867,58 +3927,6 @@ class _LiveMarkdownEditorState extends State<_LiveMarkdownEditor> {
     );
   }
 
-  Widget _buildImageBlockEditor(MarkdownLiveBlock block, int index) {
-    return KeyedSubtree(
-      key: Key('live-markdown-block-editor-$index'),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 3),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            KeyedSubtree(
-              key: Key('live-markdown-image-preview-$index'),
-              child: widget.previewBuilder(
-                block.text,
-                onImageTap: () => _activateBlock(block),
-              ),
-            ),
-            const SizedBox(height: 8),
-            KeyedSubtree(
-              key: Key('live-markdown-image-tag-editor-$index'),
-              child: CupertinoTextField(
-                key: widget.focused ? const Key('note-editor') : null,
-                controller: _blockController,
-                enabled: widget.enabled,
-                readOnly: false,
-                autofocus: true,
-                textAlignVertical: TextAlignVertical.top,
-                minLines: 1,
-                maxLines: null,
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 10,
-                  vertical: 8,
-                ),
-                style: const TextStyle(
-                  fontFamily: 'monospace',
-                  fontSize: 12,
-                  height: 1.45,
-                  color: _text,
-                ),
-                decoration: BoxDecoration(
-                  color: _secondarySurface,
-                  border: Border.all(color: _softLine),
-                  borderRadius: _radius,
-                ),
-                onChanged: _replaceActiveBlock,
-                onTap: () => _updateActiveOffsetFromBlockSelection(block),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
   void _updateActiveOffsetFromBlockSelection(MarkdownLiveBlock block) {
     widget.onFocusPane();
     final selection = _blockController.selection;
@@ -3932,7 +3940,300 @@ class _LiveMarkdownEditorState extends State<_LiveMarkdownEditor> {
 
   bool _blockHasPreviewImage(MarkdownLiveBlock block) {
     return block.kind == MarkdownLiveBlockKind.image ||
-        _htmlImageTagPattern.hasMatch(block.text);
+        _htmlImageTagPattern.hasMatch(block.text) ||
+        _markdownImageTagPattern.hasMatch(block.text);
+  }
+
+  MarkdownLiveTable? _tableForBlock(MarkdownLiveBlock block) {
+    if (block.kind != MarkdownLiveBlockKind.table) {
+      return null;
+    }
+    return parseMarkdownLiveTable(block.text);
+  }
+}
+
+class _LiveMarkdownTableEditor extends StatefulWidget {
+  const _LiveMarkdownTableEditor({
+    super.key,
+    required this.blockIndex,
+    required this.table,
+    required this.enabled,
+    required this.onFocusPane,
+    required this.onChanged,
+  });
+
+  final int blockIndex;
+  final MarkdownLiveTable table;
+  final bool enabled;
+  final VoidCallback onFocusPane;
+  final ValueChanged<MarkdownLiveTable> onChanged;
+
+  @override
+  State<_LiveMarkdownTableEditor> createState() =>
+      _LiveMarkdownTableEditorState();
+}
+
+class _LiveMarkdownTableEditorState extends State<_LiveMarkdownTableEditor> {
+  final _controllers = <String, TextEditingController>{};
+  var _selectedRow = 0;
+  var _selectedColumn = 0;
+
+  @override
+  void didUpdateWidget(covariant _LiveMarkdownTableEditor oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    _selectedRow = _selectedRow.clamp(0, widget.table.rows.length).toInt();
+    _selectedColumn = _selectedColumn
+        .clamp(0, widget.table.columnCount - 1)
+        .toInt();
+    _syncControllers();
+  }
+
+  @override
+  void dispose() {
+    for (final controller in _controllers.values) {
+      controller.dispose();
+    }
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    _syncControllers();
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 3),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              _tableActionButton(
+                key: Key('add-table-row-${widget.blockIndex}'),
+                tooltip: '新增行',
+                icon: CupertinoIcons.plus_rectangle_on_rectangle,
+                onPressed: widget.enabled ? _insertRow : null,
+              ),
+              const SizedBox(width: 6),
+              _tableActionButton(
+                key: Key('delete-table-row-${widget.blockIndex}'),
+                tooltip: '删除行',
+                icon: CupertinoIcons.minus_rectangle,
+                onPressed: widget.enabled && _selectedRow > 0
+                    ? _deleteRow
+                    : null,
+              ),
+              const SizedBox(width: 12),
+              _tableActionButton(
+                key: Key('add-table-column-${widget.blockIndex}'),
+                tooltip: '新增列',
+                icon: CupertinoIcons.plus_square_on_square,
+                onPressed: widget.enabled ? _insertColumn : null,
+              ),
+              const SizedBox(width: 6),
+              _tableActionButton(
+                key: Key('delete-table-column-${widget.blockIndex}'),
+                tooltip: '删除列',
+                icon: CupertinoIcons.minus_square,
+                onPressed: widget.enabled && widget.table.columnCount > 1
+                    ? _deleteColumn
+                    : null,
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: Table(
+              defaultColumnWidth: const FixedColumnWidth(150),
+              border: TableBorder.all(color: _softLine),
+              defaultVerticalAlignment: TableCellVerticalAlignment.middle,
+              children: [
+                _buildTableRow(rowIndex: 0, cells: widget.table.header),
+                for (
+                  var rowIndex = 0;
+                  rowIndex < widget.table.rows.length;
+                  rowIndex += 1
+                )
+                  _buildTableRow(
+                    rowIndex: rowIndex + 1,
+                    cells: widget.table.rows[rowIndex],
+                  ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  TableRow _buildTableRow({
+    required int rowIndex,
+    required List<MarkdownLiveTableCell> cells,
+  }) {
+    return TableRow(
+      decoration: BoxDecoration(
+        color: rowIndex == 0 ? _secondarySurface : _surface,
+      ),
+      children: [
+        for (var column = 0; column < cells.length; column += 1)
+          _buildTableCell(rowIndex, column, cells[column]),
+      ],
+    );
+  }
+
+  Widget _buildTableCell(int rowIndex, int column, MarkdownLiveTableCell cell) {
+    final selected = rowIndex == _selectedRow && column == _selectedColumn;
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: selected ? const Color(0xFFE8F2FF) : const Color(0x00000000),
+      ),
+      child: CupertinoTextField(
+        key: Key(
+          'live-markdown-table-cell-${widget.blockIndex}-$rowIndex-$column',
+        ),
+        controller: _controllerFor(rowIndex, column, cell.plainText),
+        enabled: widget.enabled,
+        minLines: 1,
+        maxLines: null,
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+        textAlignVertical: TextAlignVertical.top,
+        style: TextStyle(
+          fontSize: 13,
+          height: 1.35,
+          fontWeight: rowIndex == 0 ? FontWeight.w600 : FontWeight.w400,
+          color: _text,
+        ),
+        decoration: const BoxDecoration(color: Color(0x00000000)),
+        onTap: () => _selectCell(rowIndex, column),
+        onChanged: (value) {
+          _selectCell(rowIndex, column);
+          widget.onChanged(
+            widget.table.replaceCell(
+              visualRow: rowIndex,
+              column: column,
+              plainText: value,
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _tableActionButton({
+    required Key key,
+    required String tooltip,
+    required IconData icon,
+    required VoidCallback? onPressed,
+  }) {
+    return Tooltip(
+      message: tooltip,
+      child: CupertinoButton(
+        key: key,
+        minimumSize: const Size.square(30),
+        padding: EdgeInsets.zero,
+        borderRadius: BorderRadius.circular(6),
+        color: onPressed == null ? _secondarySurface : _surface,
+        onPressed: onPressed,
+        child: Icon(icon, size: 16, color: onPressed == null ? _muted : _text),
+      ),
+    );
+  }
+
+  void _selectCell(int row, int column) {
+    widget.onFocusPane();
+    if (_selectedRow == row && _selectedColumn == column) {
+      return;
+    }
+    setState(() {
+      _selectedRow = row;
+      _selectedColumn = column;
+    });
+  }
+
+  void _insertRow() {
+    final next = widget.table.insertRow(afterVisualRow: _selectedRow);
+    setState(() {
+      _selectedRow = (_selectedRow + 1).clamp(1, next.rows.length).toInt();
+    });
+    widget.onChanged(next);
+  }
+
+  void _deleteRow() {
+    if (_selectedRow == 0) {
+      return;
+    }
+    final next = widget.table.deleteRow(visualRow: _selectedRow);
+    setState(() {
+      _selectedRow = _selectedRow.clamp(0, next.rows.length).toInt();
+    });
+    widget.onChanged(next);
+  }
+
+  void _insertColumn() {
+    final next = widget.table.insertColumn(afterColumn: _selectedColumn);
+    setState(() {
+      _selectedColumn = (_selectedColumn + 1)
+          .clamp(0, next.columnCount - 1)
+          .toInt();
+    });
+    widget.onChanged(next);
+  }
+
+  void _deleteColumn() {
+    if (widget.table.columnCount <= 1) {
+      return;
+    }
+    final next = widget.table.deleteColumn(column: _selectedColumn);
+    setState(() {
+      _selectedColumn = _selectedColumn.clamp(0, next.columnCount - 1).toInt();
+    });
+    widget.onChanged(next);
+  }
+
+  TextEditingController _controllerFor(int row, int column, String text) {
+    final key = '$row:$column';
+    return _controllers.putIfAbsent(
+      key,
+      () => TextEditingController(text: text),
+    );
+  }
+
+  void _syncControllers() {
+    final activeKeys = <String>{};
+    for (
+      var rowIndex = 0;
+      rowIndex <= widget.table.rows.length;
+      rowIndex += 1
+    ) {
+      final row = rowIndex == 0
+          ? widget.table.header
+          : widget.table.rows[rowIndex - 1];
+      for (var column = 0; column < row.length; column += 1) {
+        final key = '$rowIndex:$column';
+        activeKeys.add(key);
+        final controller = _controllers.putIfAbsent(
+          key,
+          () => TextEditingController(text: row[column].plainText),
+        );
+        final text = row[column].plainText;
+        if (controller.text != text) {
+          controller.value = TextEditingValue(
+            text: text,
+            selection: TextSelection.collapsed(
+              offset: _clampOffset(
+                controller.selection.extentOffset,
+                text.length,
+              ),
+            ),
+          );
+        }
+      }
+    }
+    final staleKeys = _controllers.keys
+        .where((key) => !activeKeys.contains(key))
+        .toList();
+    for (final key in staleKeys) {
+      _controllers.remove(key)?.dispose();
+    }
   }
 }
 

@@ -63,4 +63,45 @@ void main() {}
 
     expect(replaced, '# Title\n\nnew paragraph\n\n- first\n- second\n');
   });
+
+  test('parses and serializes markdown tables as stable pipe tables', () {
+    const markdown =
+        '| Name | Score |\n'
+        '|:---|---:|\n'
+        '| Alice \\| Bob | **10** |\n';
+
+    final table = parseMarkdownLiveTable(markdown)!;
+
+    expect(table.header.map((cell) => cell.plainText), ['Name', 'Score']);
+    expect(table.alignments, [
+      MarkdownLiveTableAlignment.left,
+      MarkdownLiveTableAlignment.right,
+    ]);
+    expect(table.rows[0].map((cell) => cell.plainText), ['Alice | Bob', '10']);
+    expect(
+      serializeMarkdownLiveTable(table),
+      '| Name | Score |\n'
+      '| :--- | ---: |\n'
+      '| Alice \\| Bob | **10** |\n',
+    );
+  });
+
+  test('updates markdown tables through visual row column operations', () {
+    const markdown = '| A | B |\n|---|---|\n| 1 | 2 |\n';
+    final table = parseMarkdownLiveTable(markdown)!;
+
+    final edited = table
+        .replaceCell(visualRow: 1, column: 0, plainText: 'A | B\nC')
+        .insertRow(afterVisualRow: 0)
+        .insertColumn(afterColumn: 0)
+        .deleteRow(visualRow: 2)
+        .deleteColumn(column: 2);
+
+    expect(
+      serializeMarkdownLiveTable(edited),
+      '| A |  |\n'
+      '| --- | --- |\n'
+      '|  |  |\n',
+    );
+  });
 }

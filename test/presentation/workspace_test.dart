@@ -1582,9 +1582,106 @@ void main() {
     expect(vault.lastSavedMarkdown?.trimLeft().startsWith('---'), isTrue);
   });
 
-  testWidgets('live editor shows image tags only after clicking the image', (
+  testWidgets('live editor keeps table style when a table is clicked', (
     tester,
   ) async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Table Study');
+    await vault.updateMarkdown(
+      noteId: note.id,
+      markdown:
+          '# Table Study\n\n'
+          '| A | B |\n'
+          '|---|---|\n'
+          '| 1 | 2 |\n',
+    );
+
+    await _pumpWorkspace(tester, vault: vault);
+    await tester.pumpAndSettle();
+
+    expect(
+      find.descendant(
+        of: find.byKey(const Key('live-markdown-block-preview-2')),
+        matching: find.byType(Table),
+      ),
+      findsOneWidget,
+    );
+    expect(find.textContaining('|---|---|'), findsNothing);
+    expect(find.textContaining('| A | B |'), findsNothing);
+
+    await tester.tap(find.byKey(const Key('live-markdown-block-preview-2')));
+    await tester.pumpAndSettle();
+
+    expect(
+      find.byKey(const Key('live-markdown-table-editor-2')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(
+        of: find.byKey(const Key('live-markdown-table-editor-2')),
+        matching: find.byType(Table),
+      ),
+      findsOneWidget,
+    );
+    expect(find.byKey(const Key('live-markdown-block-editor-2')), findsNothing);
+    expect(find.byKey(const Key('note-editor')), findsNothing);
+    expect(find.textContaining('|---|---|'), findsNothing);
+    expect(find.textContaining('| A | B |'), findsNothing);
+  });
+
+  testWidgets('visual table editing saves cells rows and columns', (
+    tester,
+  ) async {
+    final vault = _CountingUpdateVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Table Study');
+    await vault.updateMarkdown(
+      noteId: note.id,
+      markdown:
+          '# Table Study\n\n'
+          '| A | B |\n'
+          '|---|---|\n'
+          '| 1 | 2 |\n',
+    );
+    vault.updateCalls = 0;
+    vault.lastSavedMarkdown = null;
+
+    await _pumpWorkspace(tester, vault: vault);
+    await tester.tap(find.byKey(const Key('live-markdown-block-preview-2')));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('live-markdown-table-cell-2-1-1')));
+    await tester.enterText(
+      find.byKey(const Key('live-markdown-table-cell-2-1-1')),
+      'updated | value\nnext',
+    );
+    await tester.pump(const Duration(milliseconds: 1000));
+    await tester.pump();
+
+    expect(vault.lastSavedMarkdown, contains('| 1 | updated \\| value next |'));
+
+    await tester.tap(find.byKey(const Key('live-markdown-table-cell-2-0-0')));
+    await tester.tap(find.byKey(const Key('add-table-row-2')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('add-table-column-2')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('delete-table-row-2')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('delete-table-column-2')));
+    await tester.pump(const Duration(milliseconds: 1000));
+    await tester.pump();
+
+    expect(vault.updateCalls, greaterThanOrEqualTo(2));
+    expect(
+      vault.lastSavedMarkdown,
+      contains(
+        '| A | B |\n'
+        '| --- | --- |\n'
+        '| 1 | updated \\| value next |\n',
+      ),
+    );
+  });
+
+  testWidgets('live editor never shows image source tags', (tester) async {
     final vault = _CountingUpdateVaultBackend(seedExampleData: false);
     final note = await vault.createNote(parentPath: '', title: 'Image Study');
     final source = await vault.addImageSource(
@@ -1629,19 +1726,16 @@ void main() {
       findsOneWidget,
     );
     expect(
+      _previewImageFrameBorderColor(tester, source),
+      CupertinoColors.activeBlue,
+    );
+    expect(find.byKey(const Key('live-markdown-block-editor-2')), findsNothing);
+    expect(
       find.byKey(const Key('live-markdown-image-tag-editor-2')),
-      findsOneWidget,
+      findsNothing,
     );
-    expect(find.textContaining('<img'), findsOneWidget);
-
-    await tester.enterText(
-      find.byKey(const Key('note-editor')),
-      '<img src="Image Study.assets/attachments/pasted.png" width="640">',
-    );
-    await tester.pump(const Duration(milliseconds: 1000));
-    await tester.pump();
-
-    expect(vault.lastSavedMarkdown, contains('width="640"'));
+    expect(find.byKey(const Key('note-editor')), findsNothing);
+    expect(find.textContaining('<img'), findsNothing);
   });
 
   testWidgets('live editor keeps image preview for mixed image blocks', (
@@ -1693,9 +1787,10 @@ void main() {
     );
     expect(
       find.byKey(const Key('live-markdown-image-tag-editor-2')),
-      findsOneWidget,
+      findsNothing,
     );
-    expect(find.textContaining('<img'), findsOneWidget);
+    expect(find.byKey(const Key('note-editor')), findsNothing);
+    expect(find.textContaining('<img'), findsNothing);
   });
 
   testWidgets('uses the configured auto-save delay', (tester) async {

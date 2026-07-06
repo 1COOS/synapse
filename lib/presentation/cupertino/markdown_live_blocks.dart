@@ -153,6 +153,180 @@ String replaceMarkdownLiveBlock({
   return markdown.replaceRange(block.start, block.end, replacement);
 }
 
+enum MarkdownLiveTableAlignment { none, left, center, right }
+
+class MarkdownLiveTableCell {
+  const MarkdownLiveTableCell(this.source);
+
+  factory MarkdownLiveTableCell.fromPlainText(String text) {
+    return MarkdownLiveTableCell(_escapeMarkdownTablePlainText(text));
+  }
+
+  final String source;
+
+  String get plainText => _plainTextFromMarkdownTableCell(source);
+}
+
+class MarkdownLiveTable {
+  const MarkdownLiveTable({
+    required this.header,
+    required this.alignments,
+    required this.rows,
+    required this.trailingNewline,
+  });
+
+  final List<MarkdownLiveTableCell> header;
+  final List<MarkdownLiveTableAlignment> alignments;
+  final List<List<MarkdownLiveTableCell>> rows;
+  final bool trailingNewline;
+
+  int get columnCount => header.length;
+
+  MarkdownLiveTable replaceCell({
+    required int visualRow,
+    required int column,
+    required String plainText,
+  }) {
+    if (column < 0 || column >= columnCount) {
+      return this;
+    }
+    final nextCell = MarkdownLiveTableCell.fromPlainText(plainText);
+    if (visualRow == 0) {
+      final nextHeader = [...header];
+      nextHeader[column] = nextCell;
+      return _copyWith(header: nextHeader);
+    }
+    final rowIndex = visualRow - 1;
+    if (rowIndex < 0 || rowIndex >= rows.length) {
+      return this;
+    }
+    final nextRows = _copyRows(rows);
+    nextRows[rowIndex][column] = nextCell;
+    return _copyWith(rows: nextRows);
+  }
+
+  MarkdownLiveTable insertRow({required int afterVisualRow}) {
+    final insertAt = afterVisualRow <= 0
+        ? 0
+        : afterVisualRow.clamp(0, rows.length).toInt();
+    final nextRows = _copyRows(rows)
+      ..insert(insertAt, _emptyTableRow(columnCount));
+    return _copyWith(rows: nextRows);
+  }
+
+  MarkdownLiveTable deleteRow({required int visualRow}) {
+    final rowIndex = visualRow - 1;
+    if (rowIndex < 0 || rowIndex >= rows.length) {
+      return this;
+    }
+    final nextRows = _copyRows(rows)..removeAt(rowIndex);
+    return _copyWith(rows: nextRows);
+  }
+
+  MarkdownLiveTable insertColumn({required int afterColumn}) {
+    final insertAt = (afterColumn + 1).clamp(0, columnCount).toInt();
+    final nextHeader = [...header]
+      ..insert(insertAt, const MarkdownLiveTableCell(''));
+    final nextAlignments = [...alignments]
+      ..insert(insertAt, MarkdownLiveTableAlignment.none);
+    final nextRows = _copyRows(rows);
+    for (final row in nextRows) {
+      row.insert(insertAt, const MarkdownLiveTableCell(''));
+    }
+    return _copyWith(
+      header: nextHeader,
+      alignments: nextAlignments,
+      rows: nextRows,
+    );
+  }
+
+  MarkdownLiveTable deleteColumn({required int column}) {
+    if (columnCount <= 1 || column < 0 || column >= columnCount) {
+      return this;
+    }
+    final nextHeader = [...header]..removeAt(column);
+    final nextAlignments = [...alignments]..removeAt(column);
+    final nextRows = _copyRows(rows);
+    for (final row in nextRows) {
+      row.removeAt(column);
+    }
+    return _copyWith(
+      header: nextHeader,
+      alignments: nextAlignments,
+      rows: nextRows,
+    );
+  }
+
+  MarkdownLiveTable _copyWith({
+    List<MarkdownLiveTableCell>? header,
+    List<MarkdownLiveTableAlignment>? alignments,
+    List<List<MarkdownLiveTableCell>>? rows,
+  }) {
+    return MarkdownLiveTable(
+      header: List.unmodifiable(header ?? this.header),
+      alignments: List.unmodifiable(alignments ?? this.alignments),
+      rows: List<List<MarkdownLiveTableCell>>.unmodifiable(
+        (rows ?? this.rows).map(
+          (row) => List<MarkdownLiveTableCell>.unmodifiable(row),
+        ),
+      ),
+      trailingNewline: trailingNewline,
+    );
+  }
+}
+
+MarkdownLiveTable? parseMarkdownLiveTable(String markdown) {
+  if (markdown.trim().isEmpty) {
+    return null;
+  }
+  final trailingNewline = markdown.endsWith('\n');
+  final source = trailingNewline
+      ? markdown.substring(0, markdown.length - 1)
+      : markdown;
+  final lines = source
+      .split('\n')
+      .where((line) => line.trim().isNotEmpty)
+      .toList();
+  if (lines.length < 2) {
+    return null;
+  }
+
+  final header = _parseMarkdownTableRow(lines[0]);
+  final alignments = _parseMarkdownTableDelimiter(lines[1]);
+  if (header.isEmpty || alignments == null) {
+    return null;
+  }
+  final columnCount = [
+    header.length,
+    alignments.length,
+    for (final line in lines.skip(2)) _parseMarkdownTableRow(line).length,
+  ].reduce((a, b) => a > b ? a : b);
+
+  return MarkdownLiveTable(
+    header: List.unmodifiable(_normalizeTableRow(header, columnCount)),
+    alignments: List.unmodifiable(
+      _normalizeAlignments(alignments, columnCount),
+    ),
+    rows: List<List<MarkdownLiveTableCell>>.unmodifiable([
+      for (final line in lines.skip(2))
+        List<MarkdownLiveTableCell>.unmodifiable(
+          _normalizeTableRow(_parseMarkdownTableRow(line), columnCount),
+        ),
+    ]),
+    trailingNewline: trailingNewline,
+  );
+}
+
+String serializeMarkdownLiveTable(MarkdownLiveTable table) {
+  final lines = [
+    _serializeMarkdownTableRow(table.header),
+    _serializeMarkdownTableDelimiter(table.alignments),
+    for (final row in table.rows) _serializeMarkdownTableRow(row),
+  ];
+  final markdown = lines.join('\n');
+  return table.trailingNewline ? '$markdown\n' : markdown;
+}
+
 class _MarkdownLine {
   const _MarkdownLine({
     required this.index,
@@ -256,4 +430,146 @@ bool _isIndentedContinuation(String line) {
 
 bool _isBlockquoteLine(String trimmed) {
   return trimmed.startsWith('>');
+}
+
+List<MarkdownLiveTableCell> _parseMarkdownTableRow(String line) {
+  var source = line.trim();
+  if (source.startsWith('|')) {
+    source = source.substring(1);
+  }
+  if (source.endsWith('|') && !_isEscapedPipe(source, source.length - 1)) {
+    source = source.substring(0, source.length - 1);
+  }
+
+  final cells = <MarkdownLiveTableCell>[];
+  final buffer = StringBuffer();
+  for (var index = 0; index < source.length; index += 1) {
+    final char = source[index];
+    if (char == '|' && !_isEscapedPipe(source, index)) {
+      cells.add(MarkdownLiveTableCell(buffer.toString().trim()));
+      buffer.clear();
+      continue;
+    }
+    buffer.write(char);
+  }
+  cells.add(MarkdownLiveTableCell(buffer.toString().trim()));
+  return cells;
+}
+
+List<MarkdownLiveTableAlignment>? _parseMarkdownTableDelimiter(String line) {
+  final cells = _parseMarkdownTableRow(line);
+  if (cells.isEmpty) {
+    return null;
+  }
+  final alignments = <MarkdownLiveTableAlignment>[];
+  for (final cell in cells) {
+    final source = cell.source.replaceAll(' ', '');
+    if (!RegExp(r'^:?-{3,}:?$').hasMatch(source)) {
+      return null;
+    }
+    alignments.add(switch ((source.startsWith(':'), source.endsWith(':'))) {
+      (true, true) => MarkdownLiveTableAlignment.center,
+      (true, false) => MarkdownLiveTableAlignment.left,
+      (false, true) => MarkdownLiveTableAlignment.right,
+      _ => MarkdownLiveTableAlignment.none,
+    });
+  }
+  return alignments;
+}
+
+List<MarkdownLiveTableCell> _normalizeTableRow(
+  List<MarkdownLiveTableCell> row,
+  int columnCount,
+) {
+  return [
+    for (var column = 0; column < columnCount; column += 1)
+      column < row.length ? row[column] : const MarkdownLiveTableCell(''),
+  ];
+}
+
+List<MarkdownLiveTableAlignment> _normalizeAlignments(
+  List<MarkdownLiveTableAlignment> alignments,
+  int columnCount,
+) {
+  return [
+    for (var column = 0; column < columnCount; column += 1)
+      column < alignments.length
+          ? alignments[column]
+          : MarkdownLiveTableAlignment.none,
+  ];
+}
+
+String _serializeMarkdownTableRow(List<MarkdownLiveTableCell> cells) {
+  return '| ${cells.map((cell) => cell.source).join(' | ')} |';
+}
+
+String _serializeMarkdownTableDelimiter(
+  List<MarkdownLiveTableAlignment> alignments,
+) {
+  final cells = alignments.map((alignment) {
+    return switch (alignment) {
+      MarkdownLiveTableAlignment.left => ':---',
+      MarkdownLiveTableAlignment.center => ':---:',
+      MarkdownLiveTableAlignment.right => '---:',
+      MarkdownLiveTableAlignment.none => '---',
+    };
+  });
+  return '| ${cells.join(' | ')} |';
+}
+
+List<List<MarkdownLiveTableCell>> _copyRows(
+  List<List<MarkdownLiveTableCell>> rows,
+) {
+  return [
+    for (final row in rows) [...row],
+  ];
+}
+
+List<MarkdownLiveTableCell> _emptyTableRow(int columnCount) {
+  return [
+    for (var column = 0; column < columnCount; column += 1)
+      const MarkdownLiveTableCell(''),
+  ];
+}
+
+String _escapeMarkdownTablePlainText(String text) {
+  return text
+      .replaceAll(RegExp(r'\s*\r?\n\s*'), ' ')
+      .replaceAll('|', r'\|')
+      .trim();
+}
+
+String _plainTextFromMarkdownTableCell(String source) {
+  var text = source.replaceAll(r'\|', '|');
+  text = text.replaceAllMapped(
+    RegExp(r'\[([^\]]+)\]\([^)]+\)'),
+    (match) => match.group(1)!,
+  );
+  text = text.replaceAllMapped(
+    RegExp(r'!\[([^\]]*)\]\([^)]+\)'),
+    (match) => match.group(1)!,
+  );
+  text = text.replaceAllMapped(
+    RegExp(r'\*\*([^*]+)\*\*'),
+    (match) => match.group(1)!,
+  );
+  text = text.replaceAllMapped(
+    RegExp(r'`([^`]+)`'),
+    (match) => match.group(1)!,
+  );
+  text = text.replaceAllMapped(
+    RegExp(r'\*([^*]+)\*'),
+    (match) => match.group(1)!,
+  );
+  return text;
+}
+
+bool _isEscapedPipe(String source, int index) {
+  var slashCount = 0;
+  var cursor = index - 1;
+  while (cursor >= 0 && source[cursor] == r'\') {
+    slashCount += 1;
+    cursor -= 1;
+  }
+  return slashCount.isOdd;
 }
