@@ -9,6 +9,9 @@ enum MarkdownLiveBlockKind {
   blank,
 }
 
+const _minMarkdownTableColumnWidth = 64;
+const _maxMarkdownTableWidth = 1200;
+
 class MarkdownLiveBlock {
   const MarkdownLiveBlock({
     required this.kind,
@@ -78,6 +81,18 @@ List<MarkdownLiveBlock> splitMarkdownLiveBlocks(String markdown) {
     if (_isStandaloneImage(trimmed)) {
       index += 1;
       blocks.add(_block(MarkdownLiveBlockKind.image, lines, line.index, index));
+      continue;
+    }
+
+    if (_isSynapseTableWidthComment(trimmed) &&
+        index + 1 < lines.length &&
+        _isTableLine(lines[index + 1].text.trim())) {
+      index = _collectWhile(
+        lines,
+        index + 1,
+        (line) => _isTableLine(line.text.trim()),
+      );
+      blocks.add(_block(MarkdownLiveBlockKind.table, lines, line.index, index));
       continue;
     }
 
@@ -169,12 +184,14 @@ class MarkdownLiveTableCell {
 
 class MarkdownLiveTable {
   const MarkdownLiveTable({
+    this.width,
     required this.header,
     required this.alignments,
     required this.rows,
     required this.trailingNewline,
   });
 
+  final int? width;
   final List<MarkdownLiveTableCell> header;
   final List<MarkdownLiveTableAlignment> alignments;
   final List<List<MarkdownLiveTableCell>> rows;
@@ -258,11 +275,13 @@ class MarkdownLiveTable {
   }
 
   MarkdownLiveTable _copyWith({
+    int? width,
     List<MarkdownLiveTableCell>? header,
     List<MarkdownLiveTableAlignment>? alignments,
     List<List<MarkdownLiveTableCell>>? rows,
   }) {
     return MarkdownLiveTable(
+      width: width ?? this.width,
       header: List.unmodifiable(header ?? this.header),
       alignments: List.unmodifiable(alignments ?? this.alignments),
       rows: List<List<MarkdownLiveTableCell>>.unmodifiable(
@@ -270,6 +289,16 @@ class MarkdownLiveTable {
           (row) => List<MarkdownLiveTableCell>.unmodifiable(row),
         ),
       ),
+      trailingNewline: trailingNewline,
+    );
+  }
+
+  MarkdownLiveTable withWidth(int? width) {
+    return MarkdownLiveTable(
+      width: width,
+      header: header,
+      alignments: alignments,
+      rows: rows,
       trailingNewline: trailingNewline,
     );
   }
@@ -291,24 +320,37 @@ MarkdownLiveTable? parseMarkdownLiveTable(String markdown) {
     return null;
   }
 
-  final header = _parseMarkdownTableRow(lines[0]);
-  final alignments = _parseMarkdownTableDelimiter(lines[1]);
+  final width = _tableWidthFromComment(lines.first.trim());
+  final tableLines =
+      width != null || _isSynapseTableWidthComment(lines.first.trim())
+      ? lines.skip(1).toList()
+      : lines;
+  if (tableLines.length < 2) {
+    return null;
+  }
+
+  final header = _parseMarkdownTableRow(tableLines[0]);
+  final alignments = _parseMarkdownTableDelimiter(tableLines[1]);
   if (header.isEmpty || alignments == null) {
     return null;
   }
   final columnCount = [
     header.length,
     alignments.length,
-    for (final line in lines.skip(2)) _parseMarkdownTableRow(line).length,
+    for (final line in tableLines.skip(2)) _parseMarkdownTableRow(line).length,
   ].reduce((a, b) => a > b ? a : b);
+  final normalizedWidth = width == null
+      ? null
+      : _clampMarkdownTableWidth(width, columnCount);
 
   return MarkdownLiveTable(
+    width: normalizedWidth,
     header: List.unmodifiable(_normalizeTableRow(header, columnCount)),
     alignments: List.unmodifiable(
       _normalizeAlignments(alignments, columnCount),
     ),
     rows: List<List<MarkdownLiveTableCell>>.unmodifiable([
-      for (final line in lines.skip(2))
+      for (final line in tableLines.skip(2))
         List<MarkdownLiveTableCell>.unmodifiable(
           _normalizeTableRow(_parseMarkdownTableRow(line), columnCount),
         ),
@@ -319,6 +361,7 @@ MarkdownLiveTable? parseMarkdownLiveTable(String markdown) {
 
 String serializeMarkdownLiveTable(MarkdownLiveTable table) {
   final lines = [
+    if (table.width != null) '<!-- synapse-table width="${table.width}" -->',
     _serializeMarkdownTableRow(table.header),
     _serializeMarkdownTableDelimiter(table.alignments),
     for (final row in table.rows) _serializeMarkdownTableRow(row),
@@ -396,6 +439,7 @@ bool _startsSpecialBlock(String line) {
       _isFenceStart(trimmed) ||
       _isHeading(trimmed) ||
       _isStandaloneImage(trimmed) ||
+      _isSynapseTableWidthComment(trimmed) ||
       _isTableLine(trimmed) ||
       _isListLine(line) ||
       _isBlockquoteLine(trimmed);
@@ -412,6 +456,38 @@ bool _isHeading(String trimmed) {
 bool _isStandaloneImage(String trimmed) {
   return RegExp(r'^!\[[^\]]*\]\([^)]+\)\s*$').hasMatch(trimmed) ||
       RegExp(r'^<img\b[^>]*>\s*$', caseSensitive: false).hasMatch(trimmed);
+}
+
+bool _isSynapseTableWidthComment(String trimmed) {
+  return RegExp(
+    r'^<!--\s*synapse-table\s+width="[^"]*"\s*-->\s*$',
+    caseSensitive: false,
+  ).hasMatch(trimmed);
+}
+
+int? _tableWidthFromComment(String trimmed) {
+  final match = RegExp(
+    r'^<!--\s*synapse-table\s+width="(\d+)"\s*-->\s*$',
+    caseSensitive: false,
+  ).firstMatch(trimmed);
+  if (match == null) {
+    return null;
+  }
+  return int.tryParse(match.group(1)!);
+}
+
+int _clampMarkdownTableWidth(int width, int columnCount) {
+  final minimum = columnCount * _minMarkdownTableColumnWidth;
+  final maximum = minimum > _maxMarkdownTableWidth
+      ? minimum
+      : _maxMarkdownTableWidth;
+  if (width < minimum) {
+    return minimum;
+  }
+  if (width > maximum) {
+    return maximum;
+  }
+  return width;
 }
 
 bool _isTableLine(String trimmed) {

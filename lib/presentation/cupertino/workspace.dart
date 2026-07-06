@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart';
@@ -71,6 +72,10 @@ const _noteWorkspaceGutter = 12.0;
 const _defaultPastedImageWidth = 480;
 const _minPastedImageWidth = 120.0;
 const _maxPastedImageWidth = 1200.0;
+const _minTableColumnWidth = 64.0;
+const _maxTableWidth = 1200.0;
+const _tableCellHorizontalPadding = 20.0;
+const _tableCellEditingSlack = 8.0;
 final _htmlImageTagPattern = RegExp(r'<img\s+[^>]*>', caseSensitive: false);
 final _markdownImageTagPattern = RegExp(r'!\[[^\]]*\]\([^)]+\)');
 
@@ -2701,21 +2706,23 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     required bool focused,
   }) {
     return SizedBox(
-      height: 28,
-      child: Stack(
-        alignment: Alignment.center,
+      height: 24,
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
         children: [
-          Center(
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 92),
-              child: Container(
+          _buildPaneModeControls(pane, focused: focused),
+          const SizedBox(width: 8),
+          Flexible(
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: ConstrainedBox(
                 key: Key('split-pane-title-${pane.paneId}'),
                 constraints: const BoxConstraints(maxWidth: 360),
                 child: Text(
                   session?.note.title ?? '未选择笔记',
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  textAlign: TextAlign.center,
+                  textAlign: TextAlign.left,
                   style: const TextStyle(
                     color: _muted,
                     fontSize: 13,
@@ -2724,12 +2731,6 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
                 ),
               ),
             ),
-          ),
-          Positioned(
-            top: 0,
-            right: 0,
-            bottom: 0,
-            child: _buildPaneModeControls(pane, focused: focused),
           ),
         ],
       ),
@@ -2749,16 +2750,16 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
           _paneModeButton(
             pane: pane,
             focused: focused,
-            mode: _NoteMode.reading,
-            label: '阅读',
-            icon: CupertinoIcons.book,
+            mode: _NoteMode.source,
+            label: '编辑',
+            icon: CupertinoIcons.pencil,
           ),
           _paneModeButton(
             pane: pane,
             focused: focused,
-            mode: _NoteMode.source,
-            label: '编辑',
-            icon: CupertinoIcons.chevron_left_slash_chevron_right,
+            mode: _NoteMode.reading,
+            label: '阅读',
+            icon: CupertinoIcons.book,
           ),
         ],
       ),
@@ -2792,20 +2793,61 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   }
 
   Widget _buildMarkdownPreview({_NoteSession? session}) {
-    final markdown = _markdownPreviewData(
-      MarkdownDocument.parse(
-        (session ?? _activeSession)?.controller.text ?? '',
-      ).body,
+    final markdown = MarkdownDocument.parse(
+      (session ?? _activeSession)?.controller.text ?? '',
+    ).body;
+    final blocks = splitMarkdownLiveBlocks(markdown);
+    return CupertinoScrollbar(
+      child: SingleChildScrollView(
+        key: const Key('markdown-reading-preview'),
+        padding: const EdgeInsets.fromLTRB(16, 54, 16, 16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            for (var index = 0; index < blocks.length; index += 1)
+              _buildReadingMarkdownBlock(blocks[index], index),
+          ],
+        ),
+      ),
     );
-    return Markdown(
-      data: markdown,
+  }
+
+  Widget _buildReadingMarkdownBlock(MarkdownLiveBlock block, int index) {
+    if (block.isBlank) {
+      return const SizedBox(height: 12);
+    }
+    final table = block.kind == MarkdownLiveBlockKind.table
+        ? parseMarkdownLiveTable(block.text)
+        : null;
+    if (table != null) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 3),
+        child: _MarkdownTableFrame(
+          surfaceKey: Key('live-markdown-reading-table-$index'),
+          table: table,
+          cellBuilder: _buildReadOnlyTableCell,
+        ),
+      );
+    }
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 3),
+      child: _buildMarkdownBody(block.text, mode: _ImagePreviewMode.reading),
+    );
+  }
+
+  Widget _buildMarkdownBody(
+    String markdown, {
+    required _ImagePreviewMode mode,
+    VoidCallback? onImageTap,
+  }) {
+    return MarkdownBody(
+      data: _markdownPreviewData(markdown),
       selectable: false,
       softLineBreak: true,
       sizedImageBuilder: (config) =>
-          _buildPreviewImage(config, mode: _ImagePreviewMode.reading),
+          _buildPreviewImage(config, mode: mode, onImageTap: onImageTap),
       styleSheetTheme: MarkdownStyleSheetBaseTheme.cupertino,
       styleSheet: _noteMarkdownStyleSheet(),
-      padding: const EdgeInsets.fromLTRB(16, 54, 16, 16),
     );
   }
 
@@ -2859,17 +2901,38 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     if (markdown.trim().isEmpty) {
       return const SizedBox(height: 12);
     }
-    return MarkdownBody(
-      data: _markdownPreviewData(markdown),
-      selectable: false,
-      softLineBreak: true,
-      sizedImageBuilder: (config) => _buildPreviewImage(
-        config,
-        mode: _ImagePreviewMode.editing,
-        onImageTap: onImageTap,
+    final table = parseMarkdownLiveTable(markdown);
+    if (table != null) {
+      return _MarkdownTableFrame(
+        table: table,
+        cellBuilder: _buildReadOnlyTableCell,
+      );
+    }
+    return _buildMarkdownBody(
+      markdown,
+      mode: _ImagePreviewMode.editing,
+      onImageTap: onImageTap,
+    );
+  }
+
+  Widget _buildReadOnlyTableCell(
+    BuildContext context,
+    int rowIndex,
+    int column,
+    MarkdownLiveTableCell cell,
+  ) {
+    final appearance = _WorkspaceAppearanceScope.of(context);
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      child: Text(
+        cell.plainText,
+        style: TextStyle(
+          fontSize: appearance.noteFontSize,
+          height: 1.35,
+          fontWeight: rowIndex == 0 ? FontWeight.w600 : FontWeight.w400,
+          color: _text,
+        ),
       ),
-      styleSheetTheme: MarkdownStyleSheetBaseTheme.cupertino,
-      styleSheet: _noteMarkdownStyleSheet(),
     );
   }
 
@@ -3484,6 +3547,113 @@ int _clampImageWidth(int value) {
   return value;
 }
 
+double _clampTableWidth(double value, int columnCount) {
+  final minimum = columnCount * _minTableColumnWidth;
+  final maximum = math.max(_maxTableWidth, minimum);
+  if (value < minimum) {
+    return minimum;
+  }
+  if (value > maximum) {
+    return maximum;
+  }
+  return value;
+}
+
+List<double> _resolveTableColumnWidths({
+  required MarkdownLiveTable table,
+  required TextStyle headStyle,
+  required TextStyle bodyStyle,
+  required double? targetWidth,
+}) {
+  final natural = _naturalTableColumnWidths(
+    table: table,
+    headStyle: headStyle,
+    bodyStyle: bodyStyle,
+  );
+  if (targetWidth == null) {
+    return natural;
+  }
+  final target = _clampTableWidth(targetWidth, table.columnCount);
+  return _scaleTableColumnWidths(natural, target);
+}
+
+List<double> _naturalTableColumnWidths({
+  required MarkdownLiveTable table,
+  required TextStyle headStyle,
+  required TextStyle bodyStyle,
+}) {
+  return [
+    for (var column = 0; column < table.columnCount; column += 1)
+      math.max(
+        _minTableColumnWidth,
+        [
+          _measureTableTextWidth(table.header[column].plainText, headStyle),
+          for (final row in table.rows)
+            _measureTableTextWidth(row[column].plainText, bodyStyle),
+        ].reduce(math.max),
+      ),
+  ];
+}
+
+double _measureTableTextWidth(String text, TextStyle style) {
+  final painter = TextPainter(
+    text: TextSpan(text: text.isEmpty ? ' ' : text, style: style),
+    maxLines: 1,
+    textDirection: TextDirection.ltr,
+  )..layout();
+  return painter.width + _tableCellHorizontalPadding + _tableCellEditingSlack;
+}
+
+List<double> _scaleTableColumnWidths(List<double> natural, double targetWidth) {
+  if (natural.isEmpty) {
+    return const [];
+  }
+  final widths = List<double>.filled(natural.length, 0);
+  final locked = List<bool>.filled(natural.length, false);
+  var remainingWidth = targetWidth;
+  var remainingNatural = natural.fold<double>(0, (sum, width) => sum + width);
+
+  while (true) {
+    var changed = false;
+    final unlockedCount = locked.where((value) => !value).length;
+    if (unlockedCount == 0) {
+      break;
+    }
+    for (var index = 0; index < natural.length; index += 1) {
+      if (locked[index]) {
+        continue;
+      }
+      final width = remainingNatural <= 0
+          ? remainingWidth / unlockedCount
+          : natural[index] / remainingNatural * remainingWidth;
+      if (width < _minTableColumnWidth) {
+        widths[index] = _minTableColumnWidth;
+        locked[index] = true;
+        remainingWidth -= _minTableColumnWidth;
+        remainingNatural -= natural[index];
+        changed = true;
+      }
+    }
+    if (!changed) {
+      break;
+    }
+  }
+
+  final unlockedCount = locked.where((value) => !value).length;
+  for (var index = 0; index < natural.length; index += 1) {
+    if (locked[index]) {
+      continue;
+    }
+    widths[index] = remainingNatural <= 0
+        ? remainingWidth / unlockedCount
+        : natural[index] / remainingNatural * remainingWidth;
+  }
+  final diff =
+      targetWidth - widths.fold<double>(0, (sum, width) => sum + width);
+  widths[widths.length - 1] += diff;
+  return widths;
+}
+
 bool _isWhitespace(int codeUnit) {
   return codeUnit == 0x20 ||
       codeUnit == 0x09 ||
@@ -3725,16 +3895,16 @@ class _PaneModeIconAction extends StatelessWidget {
         button: true,
         selected: selected,
         child: CupertinoButton(
-          minimumSize: const Size.square(28),
+          minimumSize: const Size.square(24),
           padding: EdgeInsets.zero,
           color: selected ? const Color(0xFFE9E9EE) : null,
           borderRadius: _radius,
           onPressed: onPressed,
           child: SizedBox(
-            width: 28,
-            height: 28,
+            width: 24,
+            height: 24,
             child: Center(
-              child: Icon(icon, size: 16, color: selected ? _text : _muted),
+              child: Icon(icon, size: 14, color: selected ? _text : _muted),
             ),
           ),
         ),
@@ -4063,6 +4233,212 @@ class _LiveMarkdownEditorState extends State<_LiveMarkdownEditor> {
   }
 }
 
+typedef _MarkdownTableCellBuilder =
+    Widget Function(
+      BuildContext context,
+      int rowIndex,
+      int column,
+      MarkdownLiveTableCell cell,
+    );
+
+class _MarkdownTableFrame extends StatefulWidget {
+  const _MarkdownTableFrame({
+    this.surfaceKey,
+    this.resizeHandleKey,
+    required this.table,
+    required this.cellBuilder,
+    this.resizable = false,
+    this.onResizeStart,
+    this.onWidthChanged,
+  });
+
+  final Key? surfaceKey;
+  final Key? resizeHandleKey;
+  final MarkdownLiveTable table;
+  final _MarkdownTableCellBuilder cellBuilder;
+  final bool resizable;
+  final VoidCallback? onResizeStart;
+  final ValueChanged<int>? onWidthChanged;
+
+  @override
+  State<_MarkdownTableFrame> createState() => _MarkdownTableFrameState();
+}
+
+class _MarkdownTableFrameState extends State<_MarkdownTableFrame> {
+  double? _previewWidth;
+  double? _dragStartGlobalX;
+  double? _dragStartWidth;
+  double _lastTableWidth = 0;
+
+  @override
+  void didUpdateWidget(covariant _MarkdownTableFrame oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.table.width != widget.table.width ||
+        oldWidget.table.columnCount != widget.table.columnCount) {
+      _previewWidth = null;
+      _dragStartGlobalX = null;
+      _dragStartWidth = null;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final appearance = _WorkspaceAppearanceScope.of(context);
+    final headStyle = TextStyle(
+      fontSize: appearance.noteFontSize,
+      height: 1.35,
+      fontWeight: FontWeight.w600,
+      color: _text,
+    );
+    final bodyStyle = TextStyle(
+      fontSize: appearance.noteFontSize,
+      height: 1.35,
+      color: _text,
+    );
+    final columnWidths = _resolveTableColumnWidths(
+      table: widget.table,
+      headStyle: headStyle,
+      bodyStyle: bodyStyle,
+      targetWidth: _previewWidth ?? widget.table.width?.toDouble(),
+    );
+    final tableWidth = columnWidths.fold<double>(
+      0,
+      (sum, width) => sum + width,
+    );
+    _lastTableWidth = tableWidth;
+
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      child: Stack(
+        clipBehavior: Clip.none,
+        children: [
+          SizedBox(
+            key: widget.surfaceKey,
+            width: tableWidth,
+            child: Table(
+              columnWidths: {
+                for (var index = 0; index < columnWidths.length; index += 1)
+                  index: FixedColumnWidth(columnWidths[index]),
+              },
+              border: TableBorder.all(color: _softLine),
+              defaultVerticalAlignment: TableCellVerticalAlignment.middle,
+              children: [
+                _buildTableRow(
+                  context: context,
+                  rowIndex: 0,
+                  cells: widget.table.header,
+                ),
+                for (
+                  var rowIndex = 0;
+                  rowIndex < widget.table.rows.length;
+                  rowIndex += 1
+                )
+                  _buildTableRow(
+                    context: context,
+                    rowIndex: rowIndex + 1,
+                    cells: widget.table.rows[rowIndex],
+                  ),
+              ],
+            ),
+          ),
+          if (widget.resizable && widget.onWidthChanged != null)
+            Positioned(
+              top: 0,
+              right: 0,
+              bottom: 0,
+              child: _buildResizeHandle(),
+            ),
+        ],
+      ),
+    );
+  }
+
+  TableRow _buildTableRow({
+    required BuildContext context,
+    required int rowIndex,
+    required List<MarkdownLiveTableCell> cells,
+  }) {
+    return TableRow(
+      decoration: BoxDecoration(
+        color: rowIndex == 0 ? _secondarySurface : _surface,
+      ),
+      children: [
+        for (var column = 0; column < cells.length; column += 1)
+          widget.cellBuilder(context, rowIndex, column, cells[column]),
+      ],
+    );
+  }
+
+  Widget _buildResizeHandle() {
+    return MouseRegion(
+      cursor: SystemMouseCursors.resizeColumn,
+      child: GestureDetector(
+        key: widget.resizeHandleKey,
+        behavior: HitTestBehavior.opaque,
+        onHorizontalDragStart: _handleResizeStart,
+        onHorizontalDragUpdate: _handleResizeUpdate,
+        onHorizontalDragEnd: _handleResizeEnd,
+        onHorizontalDragCancel: _handleResizeCancel,
+        child: SizedBox(
+          width: 14,
+          child: Center(
+            child: Container(
+              width: 3,
+              decoration: BoxDecoration(
+                color: _muted.withValues(alpha: 0.45),
+                borderRadius: BorderRadius.circular(99),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _handleResizeStart(DragStartDetails details) {
+    widget.onResizeStart?.call();
+    setState(() {
+      _dragStartGlobalX = details.globalPosition.dx;
+      _dragStartWidth = _lastTableWidth;
+      _previewWidth = _lastTableWidth;
+    });
+  }
+
+  void _handleResizeUpdate(DragUpdateDetails details) {
+    final startX = _dragStartGlobalX;
+    final startWidth = _dragStartWidth;
+    if (startX == null || startWidth == null) {
+      return;
+    }
+    final next = _clampTableWidth(
+      startWidth + details.globalPosition.dx - startX,
+      widget.table.columnCount,
+    );
+    setState(() => _previewWidth = next);
+  }
+
+  void _handleResizeEnd(DragEndDetails details) {
+    final width = _clampTableWidth(
+      _previewWidth ?? _lastTableWidth,
+      widget.table.columnCount,
+    ).round();
+    setState(() {
+      _previewWidth = width.toDouble();
+      _dragStartGlobalX = null;
+      _dragStartWidth = null;
+    });
+    widget.onWidthChanged?.call(width);
+  }
+
+  void _handleResizeCancel() {
+    setState(() {
+      _previewWidth = null;
+      _dragStartGlobalX = null;
+      _dragStartWidth = null;
+    });
+  }
+}
+
 class _LiveMarkdownTableEditor extends StatefulWidget {
   const _LiveMarkdownTableEditor({
     super.key,
@@ -4151,47 +4527,31 @@ class _LiveMarkdownTableEditorState extends State<_LiveMarkdownTableEditor> {
             ],
           ),
           const SizedBox(height: 8),
-          SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            child: Table(
-              defaultColumnWidth: const FixedColumnWidth(150),
-              border: TableBorder.all(color: _softLine),
-              defaultVerticalAlignment: TableCellVerticalAlignment.middle,
-              children: [
-                _buildTableRow(rowIndex: 0, cells: widget.table.header),
-                for (
-                  var rowIndex = 0;
-                  rowIndex < widget.table.rows.length;
-                  rowIndex += 1
-                )
-                  _buildTableRow(
-                    rowIndex: rowIndex + 1,
-                    cells: widget.table.rows[rowIndex],
-                  ),
-              ],
+          _MarkdownTableFrame(
+            surfaceKey: Key('live-markdown-table-surface-${widget.blockIndex}'),
+            resizeHandleKey: Key(
+              'live-markdown-table-resize-handle-${widget.blockIndex}',
             ),
+            table: widget.table,
+            resizable: widget.enabled,
+            onResizeStart: widget.onFocusPane,
+            onWidthChanged: (width) {
+              widget.onFocusPane();
+              widget.onChanged(widget.table.withWidth(width));
+            },
+            cellBuilder: _buildTableCell,
           ),
         ],
       ),
     );
   }
 
-  TableRow _buildTableRow({
-    required int rowIndex,
-    required List<MarkdownLiveTableCell> cells,
-  }) {
-    return TableRow(
-      decoration: BoxDecoration(
-        color: rowIndex == 0 ? _secondarySurface : _surface,
-      ),
-      children: [
-        for (var column = 0; column < cells.length; column += 1)
-          _buildTableCell(rowIndex, column, cells[column]),
-      ],
-    );
-  }
-
-  Widget _buildTableCell(int rowIndex, int column, MarkdownLiveTableCell cell) {
+  Widget _buildTableCell(
+    BuildContext context,
+    int rowIndex,
+    int column,
+    MarkdownLiveTableCell cell,
+  ) {
     final selected = rowIndex == _selectedRow && column == _selectedColumn;
     final appearance = _WorkspaceAppearanceScope.of(context);
     return DecoratedBox(

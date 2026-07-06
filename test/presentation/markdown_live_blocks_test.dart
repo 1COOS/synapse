@@ -45,6 +45,30 @@ void main() {}
     expect(blocks[10].text.trimLeft(), startsWith('<img'));
   });
 
+  test('keeps Synapse table width comments with the following table block', () {
+    const markdown =
+        '# Title\n\n'
+        '<!-- synapse-table width="420" -->\n'
+        '| A | Longer |\n'
+        '|---|---|\n'
+        '| 1 | 2 |\n'
+        '\n'
+        'Next paragraph\n';
+
+    final blocks = splitMarkdownLiveBlocks(markdown);
+
+    expect(blocks.map((block) => block.kind), [
+      MarkdownLiveBlockKind.heading,
+      MarkdownLiveBlockKind.blank,
+      MarkdownLiveBlockKind.table,
+      MarkdownLiveBlockKind.blank,
+      MarkdownLiveBlockKind.paragraph,
+    ]);
+    expect(blocks[2].text, startsWith('<!-- synapse-table width="420" -->'));
+    expect(blocks[2].text, contains('| A | Longer |'));
+    expect(blocks.map((block) => block.text).join(), markdown);
+  });
+
   test('finds and replaces the block containing a text offset', () {
     const markdown = '# Title\n\nold paragraph\n\n- first\n- second\n';
     final blocks = splitMarkdownLiveBlocks(markdown);
@@ -72,6 +96,7 @@ void main() {}
 
     final table = parseMarkdownLiveTable(markdown)!;
 
+    expect(table.width, isNull);
     expect(table.header.map((cell) => cell.plainText), ['Name', 'Score']);
     expect(table.alignments, [
       MarkdownLiveTableAlignment.left,
@@ -84,6 +109,58 @@ void main() {}
       '| :--- | ---: |\n'
       '| Alice \\| Bob | **10** |\n',
     );
+  });
+
+  test('parses and serializes Synapse table width metadata', () {
+    const markdown =
+        '<!-- synapse-table width="420" -->\n'
+        '| Name | Description |\n'
+        '|---|---|\n'
+        '| A | Long text |\n';
+
+    final table = parseMarkdownLiveTable(markdown)!;
+
+    expect(table.width, 420);
+    expect(table.header.map((cell) => cell.plainText), ['Name', 'Description']);
+    expect(
+      serializeMarkdownLiveTable(
+        table.replaceCell(visualRow: 1, column: 1, plainText: 'Updated'),
+      ),
+      '<!-- synapse-table width="420" -->\n'
+      '| Name | Description |\n'
+      '| --- | --- |\n'
+      '| A | Updated |\n',
+    );
+  });
+
+  test('ignores invalid Synapse table width metadata', () {
+    const markdown =
+        '<!-- synapse-table width="wide" -->\n'
+        '| A | B |\n'
+        '|---|---|\n';
+
+    final table = parseMarkdownLiveTable(markdown)!;
+
+    expect(table.width, isNull);
+    expect(
+      serializeMarkdownLiveTable(table),
+      '| A | B |\n'
+      '| --- | --- |\n',
+    );
+  });
+
+  test('clamps Synapse table width metadata to the supported range', () {
+    const narrowMarkdown =
+        '<!-- synapse-table width="8" -->\n'
+        '| A | B |\n'
+        '|---|---|\n';
+    const wideMarkdown =
+        '<!-- synapse-table width="5000" -->\n'
+        '| A |\n'
+        '|---|\n';
+
+    expect(parseMarkdownLiveTable(narrowMarkdown)!.width, 128);
+    expect(parseMarkdownLiveTable(wideMarkdown)!.width, 1200);
   });
 
   test('updates markdown tables through visual row column operations', () {
