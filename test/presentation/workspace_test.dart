@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
+import 'package:flutter/material.dart' show SelectableText;
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -16,6 +17,7 @@ import 'package:synapse/infrastructure/input/image_input_service.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
 import 'package:synapse/infrastructure/vault/vault_backend.dart';
 import 'package:synapse/main.dart';
+import 'package:synapse/presentation/cupertino/browser_context_menu_guard.dart';
 
 const _tinyPng = <int>[
   137,
@@ -1149,6 +1151,24 @@ void main() {
     expect(noteMenuDecoration.borderRadius, BorderRadius.circular(18));
 
     final moveItem = find.byKey(Key('note-menu-move-${note.id}'));
+    expect(
+      _menuItemTextStyle(tester, Key('note-menu-move-${note.id}'))?.fontSize,
+      13,
+    );
+    expect(
+      _menuItemTextStyle(tester, Key('note-menu-move-${note.id}'))?.fontWeight,
+      FontWeight.w400,
+    );
+    expect(
+      _menuItemTextStyle(tester, Key('note-menu-move-${note.id}'))?.height,
+      1.15,
+    );
+    expect(tester.getSize(moveItem).height, 30);
+    expect(
+      _menuSeparatorHeight(tester, Key('resource-menu-separator-${note.id}-0')),
+      9,
+    );
+
     final moveItemSurface = find.descendant(
       of: moveItem,
       matching: find.byType(AnimatedContainer),
@@ -1167,7 +1187,7 @@ void main() {
     final afterHover = tester.widget<AnimatedContainer>(moveItemSurface);
     expect(
       (afterHover.decoration! as BoxDecoration).color,
-      const Color(0x26FFFFFF),
+      CupertinoColors.activeBlue,
     );
     await mouse.removePointer();
 
@@ -1191,6 +1211,56 @@ void main() {
       findsOneWidget,
     );
   });
+
+  testWidgets(
+    'resource context menu closes outside and uses accent hover color',
+    (tester) async {
+      final vault = MemoryVaultBackend(seedExampleData: false);
+      final note = await vault.createNote(parentPath: '', title: '主题菜单');
+
+      await _pumpWorkspace(
+        tester,
+        vault: vault,
+        settingsStore: _FakeSettingsStore(
+          initialSettings: const SynapseSettings(
+            preferences: WorkspacePreferences(
+              defaultNoteMode: WorkspaceDefaultNoteMode.source,
+              semanticSearchEnabled: true,
+              pastedImageWidth: 480,
+              autoSaveDelayMillis: 1000,
+              accentColor: WorkspaceAccentColor.purple,
+            ),
+          ),
+        ),
+      );
+
+      await tester.tap(
+        find.byKey(Key('resource-row-${note.id}')),
+        buttons: kSecondaryMouseButton,
+      );
+      await tester.pumpAndSettle();
+
+      final menu = find.byKey(Key('resource-context-menu-${note.id}'));
+      expect(menu, findsOneWidget);
+
+      final moveItem = find.byKey(Key('note-menu-move-${note.id}'));
+      final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+      await mouse.addPointer();
+      await mouse.moveTo(tester.getCenter(moveItem));
+      await tester.pumpAndSettle();
+
+      expect(
+        _menuItemHighlightColor(tester, Key('note-menu-move-${note.id}')),
+        CupertinoColors.systemPurple,
+      );
+      await mouse.removePointer();
+
+      await tester.tapAt(const Offset(1, 1));
+      await tester.pumpAndSettle();
+
+      expect(menu, findsNothing);
+    },
+  );
 
   testWidgets('folder and note names share the same resource title style', (
     tester,
@@ -1601,6 +1671,280 @@ void main() {
       contains('# Alpha\n\nnew paragraph\n\n## Next\n'),
     );
     expect(vault.lastSavedMarkdown?.trimLeft().startsWith('---'), isTrue);
+  });
+
+  testWidgets('workspace disables the browser context menu on web startup', (
+    tester,
+  ) async {
+    var disableCalls = 0;
+    debugBrowserContextMenuIsWebOverride = true;
+    debugBrowserContextMenuDisablerOverride = () async {
+      disableCalls += 1;
+    };
+    addTearDown(resetBrowserContextMenuDebugOverrides);
+
+    await _pumpWorkspace(
+      tester,
+      vault: MemoryVaultBackend(seedExampleData: false),
+    );
+    await tester.pump();
+
+    expect(disableCalls, 1);
+  });
+
+  testWidgets(
+    'note editor context menu opens from a preview block right click',
+    (tester) async {
+      final vault = MemoryVaultBackend(seedExampleData: false);
+      final note = await vault.createNote(parentPath: '', title: 'Menu Study');
+      await vault.updateMarkdown(noteId: note.id, markdown: 'Alpha beta\n');
+
+      await _pumpWorkspace(tester, vault: vault);
+      await _switchToSourceMode(tester);
+      expect(find.byKey(const Key('note-editor')), findsNothing);
+
+      await tester.tap(
+        find.byKey(const Key('live-markdown-block-preview-0')),
+        buttons: kSecondaryMouseButton,
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const Key('note-context-menu')), findsOneWidget);
+      expect(find.byKey(const Key('note-editor')), findsOneWidget);
+    },
+  );
+
+  testWidgets('note editor context menu shows dark disabled actions', (
+    tester,
+  ) async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Menu Study');
+    await vault.updateMarkdown(noteId: note.id, markdown: 'Alpha beta\n');
+
+    await _pumpWorkspace(tester, vault: vault);
+    await _switchToSourceMode(tester);
+    await _activateLiveMarkdownBlock(tester, blockIndex: 0);
+    await _openNoteContextMenu(tester);
+
+    final menu = find.byKey(const Key('note-context-menu'));
+    expect(menu, findsOneWidget);
+    expect(
+      find.descendant(of: menu, matching: find.byType(Icon)),
+      findsNothing,
+    );
+    expect(find.byKey(const Key('note-menu-separator-0')), findsOneWidget);
+    expect(find.byKey(const Key('note-menu-copy')), findsOneWidget);
+
+    final menuContainer = tester.widget<Container>(menu);
+    final decoration = menuContainer.decoration! as BoxDecoration;
+    expect(decoration.color, const Color(0xE65F5F5F));
+    expect(decoration.borderRadius, BorderRadius.circular(18));
+    expect(tester.getSize(find.byKey(const Key('note-menu-copy'))).height, 30);
+    expect(
+      tester.getSize(find.byKey(const Key('note-menu-separator-0'))).height,
+      9,
+    );
+
+    expect(
+      _noteMenuItemTextColor(tester, const Key('note-menu-copy')),
+      const Color(0x73F2F2F7),
+    );
+    final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+    await mouse.addPointer();
+    await mouse.moveTo(
+      tester.getCenter(find.byKey(const Key('note-menu-text-format'))),
+    );
+    await tester.pumpAndSettle();
+
+    final formatSurface = find.descendant(
+      of: find.byKey(const Key('note-menu-text-format')),
+      matching: find.byType(AnimatedContainer),
+    );
+    final highlightedFormatSurface = tester.widget<AnimatedContainer>(
+      formatSurface,
+    );
+    expect(
+      (highlightedFormatSurface.decoration! as BoxDecoration).color,
+      CupertinoColors.activeBlue,
+    );
+
+    expect(find.byKey(const Key('note-menu-highlight')), findsOneWidget);
+    expect(
+      find.descendant(
+        of: menu,
+        matching: find.byKey(const Key('note-menu-highlight')),
+      ),
+      findsNothing,
+    );
+    expect(find.byKey(const Key('note-submenu-text-format')), findsOneWidget);
+    expect(
+      _menuItemTextStyle(tester, const Key('note-menu-highlight'))?.fontSize,
+      13,
+    );
+    expect(
+      _menuItemTextStyle(tester, const Key('note-menu-highlight'))?.fontWeight,
+      FontWeight.w400,
+    );
+    expect(
+      _menuItemTextStyle(tester, const Key('note-menu-highlight'))?.height,
+      1.15,
+    );
+    expect(
+      tester.getSize(find.byKey(const Key('note-menu-highlight'))).height,
+      30,
+    );
+    expect(
+      _noteMenuItemTextColor(tester, const Key('note-menu-highlight')),
+      const Color(0x73F2F2F7),
+    );
+    await mouse.removePointer();
+  });
+
+  testWidgets('note context menu closes outside and uses accent hover color', (
+    tester,
+  ) async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Theme Study');
+    await vault.updateMarkdown(noteId: note.id, markdown: 'Alpha beta\n');
+
+    await _pumpWorkspace(
+      tester,
+      vault: vault,
+      settingsStore: _FakeSettingsStore(
+        initialSettings: const SynapseSettings(
+          preferences: WorkspacePreferences(
+            defaultNoteMode: WorkspaceDefaultNoteMode.source,
+            semanticSearchEnabled: true,
+            pastedImageWidth: 480,
+            autoSaveDelayMillis: 1000,
+            accentColor: WorkspaceAccentColor.green,
+          ),
+        ),
+      ),
+    );
+    await _activateLiveMarkdownBlock(tester, blockIndex: 0);
+    await _openNoteContextMenu(tester);
+
+    final mouse = await _hoverNoteMenuItem(
+      tester,
+      const Key('note-menu-text-format'),
+    );
+    expect(
+      _menuItemHighlightColor(tester, const Key('note-menu-text-format')),
+      CupertinoColors.systemGreen,
+    );
+    expect(find.byKey(const Key('note-submenu-text-format')), findsOneWidget);
+
+    await tester.tapAt(const Offset(1, 1));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('note-context-menu')), findsNothing);
+    expect(find.byKey(const Key('note-submenu-text-format')), findsNothing);
+    await mouse.removePointer();
+  });
+
+  testWidgets('note editor context menu formats selected markdown text', (
+    tester,
+  ) async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Format Study');
+    await vault.updateMarkdown(noteId: note.id, markdown: 'Alpha beta\n');
+
+    await _pumpWorkspace(tester, vault: vault);
+    await _switchToSourceMode(tester);
+    await _activateLiveMarkdownBlock(tester, blockIndex: 0);
+    final noteEditor = _activeLiveMarkdownTextField(tester);
+    noteEditor.controller!.selection = const TextSelection(
+      baseOffset: 6,
+      extentOffset: 10,
+    );
+    await tester.pump();
+
+    await _openNoteContextMenu(tester);
+    final mouse = await _hoverNoteMenuItem(
+      tester,
+      const Key('note-menu-text-format'),
+    );
+    await tester.tap(find.byKey(const Key('note-menu-bold')));
+    await tester.pumpAndSettle();
+    await mouse.removePointer();
+
+    expect(noteEditor.controller!.text, 'Alpha **beta**\n');
+  });
+
+  testWidgets('note editor context menu applies paragraph commands', (
+    tester,
+  ) async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Block Study');
+    await vault.updateMarkdown(noteId: note.id, markdown: 'Alpha\nBeta\n');
+
+    await _pumpWorkspace(tester, vault: vault);
+    await _switchToSourceMode(tester);
+    await _activateLiveMarkdownBlock(tester, blockIndex: 0);
+    final noteEditor = _activeLiveMarkdownTextField(tester);
+    noteEditor.controller!.selection = const TextSelection.collapsed(offset: 0);
+    await tester.pump();
+
+    await _openNoteContextMenu(tester);
+    final mouse = await _hoverNoteMenuItem(
+      tester,
+      const Key('note-menu-paragraph'),
+    );
+    await tester.tap(find.byKey(const Key('note-menu-heading-1')));
+    await tester.pumpAndSettle();
+    await mouse.removePointer();
+    expect(noteEditor.controller!.text, '# Alpha\n');
+  });
+
+  testWidgets('note editor context menu applies list commands', (tester) async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'List Study');
+    await vault.updateMarkdown(noteId: note.id, markdown: 'Alpha\nBeta\n');
+
+    await _pumpWorkspace(tester, vault: vault);
+    await _switchToSourceMode(tester);
+    await _activateLiveMarkdownBlock(tester, blockIndex: 0);
+    final noteEditor = _activeLiveMarkdownTextField(tester);
+    noteEditor.controller!.selection = const TextSelection(
+      baseOffset: 0,
+      extentOffset: 5,
+    );
+    await tester.pump();
+    await _openNoteContextMenu(tester);
+    final mouse = await _hoverNoteMenuItem(tester, const Key('note-menu-list'));
+    await tester.tap(find.byKey(const Key('note-menu-task-list')));
+    await tester.pumpAndSettle();
+    await mouse.removePointer();
+
+    expect(noteEditor.controller!.text, '- [ ] Alpha\n');
+  });
+
+  testWidgets('plain text paste skips pasted images from context menu', (
+    tester,
+  ) async {
+    final vault = _CountingUpdateVaultBackend();
+    final imageInput = _FakeImageInputService(
+      pastedImage: const ImportedImage(
+        filename: 'clipboard-1783082971508.png',
+        mimeType: 'image/png',
+        bytes: _tinyPng,
+      ),
+    );
+    _mockClipboardText('普通文本');
+
+    await _pumpWorkspace(tester, vault: vault, imageInput: imageInput);
+    await _switchToSourceMode(tester);
+    await _enterTextInLiveMarkdownBlock(tester, '正文');
+
+    await _openNoteContextMenu(tester);
+    expect(find.byKey(const Key('note-context-menu')), findsOneWidget);
+    await tester.tap(find.byKey(const Key('note-menu-paste-plain')));
+    await tester.pumpAndSettle();
+
+    final noteEditor = _activeLiveMarkdownTextField(tester);
+    expect(imageInput.pasteCalls, 0);
+    expect(noteEditor.controller!.text, contains('普通文本'));
   });
 
   testWidgets('live editor keeps table style when a table is clicked', (
@@ -2843,7 +3187,7 @@ void main() {
     expect(
       find.ancestor(
         of: find.text(proposalMarkdown),
-        matching: find.byType(SelectableRegion),
+        matching: find.byType(SelectableText),
       ),
       findsOneWidget,
     );
@@ -3295,6 +3639,53 @@ CupertinoTextField _activeLiveMarkdownTextField(
   );
 }
 
+Future<void> _openNoteContextMenu(WidgetTester tester) async {
+  await tester.tap(
+    find.byKey(const Key('note-editor')),
+    buttons: kSecondaryMouseButton,
+  );
+  await tester.pumpAndSettle();
+}
+
+Future<TestGesture> _hoverNoteMenuItem(WidgetTester tester, Key key) async {
+  final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+  await mouse.addPointer();
+  await mouse.moveTo(tester.getCenter(find.byKey(key)));
+  await tester.pumpAndSettle();
+  return mouse;
+}
+
+Color? _noteMenuItemTextColor(WidgetTester tester, Key key) {
+  return _menuItemTextStyle(tester, key)?.color;
+}
+
+TextStyle? _menuItemTextStyle(WidgetTester tester, Key key) {
+  final text = tester.widget<Text>(
+    find.descendant(of: find.byKey(key), matching: find.byType(Text)).first,
+  );
+  return text.style;
+}
+
+Color? _menuItemHighlightColor(WidgetTester tester, Key key) {
+  final surface = tester.widget<AnimatedContainer>(
+    find.descendant(
+      of: find.byKey(key),
+      matching: find.byType(AnimatedContainer),
+    ),
+  );
+  return (surface.decoration! as BoxDecoration).color;
+}
+
+double _menuSeparatorHeight(WidgetTester tester, Key key) {
+  return tester
+      .getSize(
+        find
+            .descendant(of: find.byKey(key), matching: find.byType(Padding))
+            .first,
+      )
+      .height;
+}
+
 enum _PreviewImageDropSide { left, right }
 
 Future<void> _dragPreviewImageToSide(
@@ -3393,6 +3784,9 @@ void _mockClipboardText(String? text) {
       .setMockMethodCallHandler(SystemChannels.platform, (methodCall) async {
         if (methodCall.method == 'Clipboard.getData') {
           return text == null ? null : <String, Object?>{'text': text};
+        }
+        if (methodCall.method == 'Clipboard.hasStrings') {
+          return <String, Object?>{'value': text != null && text.isNotEmpty};
         }
         return null;
       });
@@ -3521,6 +3915,11 @@ class _FakeImageInputService implements ImageInputService {
   Future<ImportedImage?> pickImage() async {
     pickCalls += 1;
     return pickedImage;
+  }
+
+  @override
+  Future<bool> canPasteImage() async {
+    return pastedImage != null;
   }
 
   @override

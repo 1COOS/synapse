@@ -18,6 +18,8 @@ class ImportedImage {
 abstract class ImageInputService {
   Future<ImportedImage?> pickImage();
 
+  Future<bool> canPasteImage();
+
   Future<ImportedImage?> pasteImage();
 }
 
@@ -39,6 +41,12 @@ class PlatformImageInputService implements ImageInputService {
       mimeType: file.mimeType ?? _mimeTypeForName(file.name),
       bytes: await file.readAsBytes(),
     );
+  }
+
+  @override
+  Future<bool> canPasteImage() async {
+    final bytes = await Pasteboard.image;
+    return bytes != null && bytes.isNotEmpty;
   }
 
   @override

@@ -4,7 +4,13 @@ import 'dart:math' as math;
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart'
-    show MenuAnchor, MenuController, MenuStyle, Tooltip, WidgetStatePropertyAll;
+    show
+        MenuAnchor,
+        MenuController,
+        MenuStyle,
+        SelectableText,
+        Tooltip,
+        WidgetStatePropertyAll;
 import 'package:flutter/services.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:path/path.dart' as p;
@@ -25,6 +31,8 @@ import '../../infrastructure/config/vault_location_store.dart';
 import '../../infrastructure/input/image_input_service.dart';
 import '../../infrastructure/vault/default_vault_backend.dart';
 import '../../infrastructure/vault/vault_backend.dart';
+import 'browser_context_menu_guard.dart';
+import 'markdown_context_commands.dart';
 import 'markdown_live_blocks.dart';
 
 typedef ProviderConfigTester = Future<String> Function(ProviderConfig config);
@@ -53,9 +61,19 @@ const _resourceCountStyle = TextStyle(
 );
 const _resourceMenuBackground = Color(0xE65F5F5F);
 const _resourceMenuText = Color(0xFFF2F2F7);
-const _resourceMenuHover = Color(0x26FFFFFF);
+const _noteMenuDisabledText = Color(0x73F2F2F7);
 const _resourceMenuLine = Color(0xFF777777);
 const _resourceMenuRadius = BorderRadius.all(Radius.circular(18));
+const _contextMenuItemHeight = 30.0;
+const _contextMenuItemRadius = BorderRadius.all(Radius.circular(8));
+const _contextMenuItemTextStyle = TextStyle(
+  fontSize: 13,
+  fontWeight: FontWeight.w400,
+  height: 1.15,
+);
+const _contextMenuPanelShadow = [
+  BoxShadow(color: Color(0x33000000), blurRadius: 24, offset: Offset(0, 12)),
+];
 const _resourceMenuAnchorStyle = MenuStyle(
   backgroundColor: WidgetStatePropertyAll(Color(0x00000000)),
   elevation: WidgetStatePropertyAll(0),
@@ -76,8 +94,16 @@ const _minTableColumnWidth = 64.0;
 const _maxTableWidth = 1200.0;
 const _tableCellHorizontalPadding = 20.0;
 const _tableCellEditingSlack = 8.0;
+final _openNoteSubmenuClosers = <VoidCallback>{};
 final _htmlImageTagPattern = RegExp(r'<img\s+[^>]*>', caseSensitive: false);
 final _markdownImageTagPattern = RegExp(r'!\[[^\]]*\]\([^)]+\)');
+
+void _dismissAllMacContextMenus() {
+  for (final closeSubmenu in List<VoidCallback>.of(_openNoteSubmenuClosers)) {
+    closeSubmenu();
+  }
+  ContextMenuController.removeAny();
+}
 
 enum _WorkspaceSection {
   resources('资源', CupertinoIcons.folder),
@@ -239,6 +265,23 @@ class _NoteSession {
   }
 }
 
+class _NoteEditorPasteAvailability {
+  const _NoteEditorPasteAvailability({
+    required this.hasText,
+    required this.hasImage,
+  });
+
+  static const empty = _NoteEditorPasteAvailability(
+    hasText: false,
+    hasImage: false,
+  );
+
+  final bool hasText;
+  final bool hasImage;
+
+  bool get canPaste => hasText || hasImage;
+}
+
 class SynapseWorkspace extends StatefulWidget {
   const SynapseWorkspace({
     super.key,
@@ -315,6 +358,23 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   @override
   void initState() {
     super.initState();
+    unawaited(
+      disableBrowserContextMenuForFlutterWeb().catchError((
+        Object error,
+        StackTrace stackTrace,
+      ) {
+        FlutterError.reportError(
+          FlutterErrorDetails(
+            exception: error,
+            stack: stackTrace,
+            library: 'synapse workspace',
+            context: ErrorDescription(
+              'while disabling the browser context menu',
+            ),
+          ),
+        );
+      }),
+    );
     _resetSplitWorkspace(disposeSessions: false);
     _imageInput = widget.imageInput ?? const PlatformImageInputService();
     _usesInjectedAiProvider = widget.aiProvider != null;
@@ -1423,6 +1483,20 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
         setState(() => _busy = false);
       }
     }
+  }
+
+  Future<_NoteEditorPasteAvailability> _noteEditorPasteAvailability() async {
+    if (_busy || _autoSaving || _activeNote == null) {
+      return _NoteEditorPasteAvailability.empty;
+    }
+    final results = await Future.wait<bool>([
+      Clipboard.hasStrings(),
+      _imageInput.canPasteImage(),
+    ]);
+    return _NoteEditorPasteAvailability(
+      hasText: results[0],
+      hasImage: results[1],
+    );
   }
 
   Future<void> _insertPastedImage({
@@ -3255,12 +3329,15 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
                 : _LiveMarkdownEditor(
                     controller: resolvedSession.controller,
                     enabled: true,
+                    busy: _busy || _autoSaving,
                     focused: focused,
                     onFocusPane: () {
                       if (resolvedPane != null) {
                         setState(() => _focusPane(resolvedPane.paneId));
                       }
                     },
+                    pasteAvailability: _noteEditorPasteAvailability,
+                    onPaste: _pasteIntoNoteEditor,
                     previewBuilder: _buildLivePreviewMarkdownBlock,
                   ),
           ),
@@ -3917,15 +3994,21 @@ class _LiveMarkdownEditor extends StatefulWidget {
   const _LiveMarkdownEditor({
     required this.controller,
     required this.enabled,
+    required this.busy,
     required this.focused,
     required this.onFocusPane,
+    required this.pasteAvailability,
+    required this.onPaste,
     required this.previewBuilder,
   });
 
   final TextEditingController controller;
   final bool enabled;
+  final bool busy;
   final bool focused;
   final VoidCallback onFocusPane;
+  final Future<_NoteEditorPasteAvailability> Function() pasteAvailability;
+  final Future<void> Function() onPaste;
   final Widget Function(String markdown, {VoidCallback? onImageTap})
   previewBuilder;
 
@@ -4055,6 +4138,403 @@ class _LiveMarkdownEditorState extends State<_LiveMarkdownEditor> {
     }
   }
 
+  Widget _buildContextMenu(
+    BuildContext context,
+    EditableTextState editableTextState,
+  ) {
+    return _buildContextMenuForAnchors(
+      context,
+      editableTextState.contextMenuAnchors,
+    );
+  }
+
+  Widget _buildContextMenuForAnchors(
+    BuildContext context,
+    TextSelectionToolbarAnchors anchors,
+  ) {
+    final appearance = _WorkspaceAppearanceScope.of(this.context);
+    return _WorkspaceAppearanceScope(
+      appearance: appearance,
+      child: FutureBuilder<_NoteEditorPasteAvailability>(
+        future: widget.pasteAvailability(),
+        initialData: _NoteEditorPasteAvailability.empty,
+        builder: (context, snapshot) {
+          final availability =
+              snapshot.data ?? _NoteEditorPasteAvailability.empty;
+          final hasSelection = !_normalizedBlockSelection().isCollapsed;
+          final canEdit = widget.enabled && !widget.busy;
+          return _NoteContextMenuToolbar(
+            anchors: anchors,
+            child: _NoteContextMenu(
+              children: [
+                _NoteMenuAction(
+                  itemKey: const Key('note-menu-copy'),
+                  label: '复制',
+                  enabled: hasSelection,
+                  onPressed: _copySelectionFromContextMenu,
+                ),
+                _NoteMenuAction(
+                  itemKey: const Key('note-menu-cut'),
+                  label: '剪切',
+                  enabled: canEdit && hasSelection,
+                  onPressed: _cutSelectionFromContextMenu,
+                ),
+                _NoteMenuAction(
+                  itemKey: const Key('note-menu-paste'),
+                  label: '粘贴',
+                  enabled: canEdit && availability.canPaste,
+                  onPressed: _pasteFromContextMenu,
+                ),
+                _NoteMenuAction(
+                  itemKey: const Key('note-menu-paste-plain'),
+                  label: '以纯文本粘贴',
+                  enabled: canEdit && availability.hasText,
+                  onPressed: _pastePlainTextFromContextMenu,
+                ),
+                const _NoteMenuSeparator(key: Key('note-menu-separator-0')),
+                _NoteMenuSubmenu(
+                  itemKey: const Key('note-menu-insert'),
+                  submenuKey: const Key('note-submenu-insert'),
+                  label: '插入',
+                  children: [
+                    _NoteMenuAction(
+                      itemKey: const Key('note-menu-insert-table'),
+                      label: '表格',
+                      enabled: canEdit,
+                      onPressed: () => _applyInsertion(MarkdownInsertion.table),
+                    ),
+                    _NoteMenuAction(
+                      itemKey: const Key('note-menu-insert-annotation'),
+                      label: '标注',
+                      enabled: canEdit,
+                      onPressed: () =>
+                          _applyInsertion(MarkdownInsertion.annotation),
+                    ),
+                    _NoteMenuAction(
+                      itemKey: const Key('note-menu-insert-divider'),
+                      label: '分割线',
+                      enabled: canEdit,
+                      onPressed: () =>
+                          _applyInsertion(MarkdownInsertion.divider),
+                    ),
+                  ],
+                ),
+                _NoteMenuSubmenu(
+                  itemKey: const Key('note-menu-text-format'),
+                  submenuKey: const Key('note-submenu-text-format'),
+                  label: '文本格式',
+                  children: [
+                    const _NoteMenuAction(
+                      itemKey: Key('note-menu-highlight'),
+                      label: '高亮',
+                      enabled: false,
+                      onPressed: null,
+                    ),
+                    _NoteMenuAction(
+                      itemKey: const Key('note-menu-bold'),
+                      label: '加粗',
+                      enabled: canEdit && hasSelection,
+                      onPressed: () =>
+                          _applyInlineFormat(MarkdownInlineFormat.bold),
+                    ),
+                    _NoteMenuAction(
+                      itemKey: const Key('note-menu-italic'),
+                      label: '斜体',
+                      enabled: canEdit && hasSelection,
+                      onPressed: () =>
+                          _applyInlineFormat(MarkdownInlineFormat.italic),
+                    ),
+                    _NoteMenuAction(
+                      itemKey: const Key('note-menu-strikethrough'),
+                      label: '删除线',
+                      enabled: canEdit && hasSelection,
+                      onPressed: () => _applyInlineFormat(
+                        MarkdownInlineFormat.strikethrough,
+                      ),
+                    ),
+                  ],
+                ),
+                _NoteMenuSubmenu(
+                  itemKey: const Key('note-menu-paragraph'),
+                  submenuKey: const Key('note-submenu-paragraph'),
+                  label: '段落设置',
+                  children: [
+                    _NoteMenuAction(
+                      itemKey: const Key('note-menu-heading-1'),
+                      label: '标题 1',
+                      enabled: canEdit,
+                      onPressed: () =>
+                          _applyParagraphStyle(MarkdownParagraphStyle.heading1),
+                    ),
+                    _NoteMenuAction(
+                      itemKey: const Key('note-menu-heading-2'),
+                      label: '标题 2',
+                      enabled: canEdit,
+                      onPressed: () =>
+                          _applyParagraphStyle(MarkdownParagraphStyle.heading2),
+                    ),
+                    _NoteMenuAction(
+                      itemKey: const Key('note-menu-heading-3'),
+                      label: '标题 3',
+                      enabled: canEdit,
+                      onPressed: () =>
+                          _applyParagraphStyle(MarkdownParagraphStyle.heading3),
+                    ),
+                    _NoteMenuAction(
+                      itemKey: const Key('note-menu-heading-4'),
+                      label: '标题 4',
+                      enabled: canEdit,
+                      onPressed: () =>
+                          _applyParagraphStyle(MarkdownParagraphStyle.heading4),
+                    ),
+                    _NoteMenuAction(
+                      itemKey: const Key('note-menu-body'),
+                      label: '正文',
+                      enabled: canEdit,
+                      onPressed: () =>
+                          _applyParagraphStyle(MarkdownParagraphStyle.body),
+                    ),
+                  ],
+                ),
+                _NoteMenuSubmenu(
+                  itemKey: const Key('note-menu-list'),
+                  submenuKey: const Key('note-submenu-list'),
+                  label: '列表设置',
+                  children: [
+                    _NoteMenuAction(
+                      itemKey: const Key('note-menu-unordered-list'),
+                      label: '无序列表',
+                      enabled: canEdit,
+                      onPressed: () =>
+                          _applyListStyle(MarkdownListStyle.unordered),
+                    ),
+                    _NoteMenuAction(
+                      itemKey: const Key('note-menu-ordered-list'),
+                      label: '有序列表',
+                      enabled: canEdit,
+                      onPressed: () =>
+                          _applyListStyle(MarkdownListStyle.ordered),
+                    ),
+                    _NoteMenuAction(
+                      itemKey: const Key('note-menu-task-list'),
+                      label: '任务列表',
+                      enabled: canEdit,
+                      onPressed: () => _applyListStyle(MarkdownListStyle.task),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  void _activateBlockAndOpenContextMenu(
+    MarkdownLiveBlock block,
+    Offset globalPosition, {
+    int? selectionOffset,
+  }) {
+    if (_tableForBlock(block) != null || _blockHasPreviewImage(block)) {
+      return;
+    }
+    widget.onFocusPane();
+    final offset = _clampOffset(selectionOffset ?? 0, block.text.length);
+    setState(() {
+      _activeOffset = _clampOffset(
+        block.start + offset,
+        widget.controller.text.length,
+      );
+      _updatingFullDocument = true;
+      widget.controller.selection = TextSelection.collapsed(
+        offset: _activeOffset!,
+      );
+      _updatingFullDocument = false;
+      _syncBlockController();
+      _blockController.selection = TextSelection.collapsed(offset: offset);
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) {
+        return;
+      }
+      _showContextMenuAt(globalPosition);
+    });
+  }
+
+  void _openContextMenuAtDocumentEnd(
+    List<MarkdownLiveBlock> blocks,
+    Offset globalPosition,
+  ) {
+    if (blocks.isEmpty) {
+      return;
+    }
+    var block = blocks.last;
+    for (final candidate in blocks.reversed) {
+      if (_tableForBlock(candidate) == null &&
+          !_blockHasPreviewImage(candidate)) {
+        block = candidate;
+        break;
+      }
+    }
+    _activateBlockAndOpenContextMenu(
+      block,
+      globalPosition,
+      selectionOffset: block.text.length,
+    );
+  }
+
+  void _showContextMenuAt(Offset globalPosition) {
+    ContextMenuController().show(
+      context: context,
+      contextMenuBuilder: (context) => _buildContextMenuForAnchors(
+        context,
+        TextSelectionToolbarAnchors(primaryAnchor: globalPosition),
+      ),
+      debugRequiredFor: widget,
+    );
+  }
+
+  Future<void> _copySelectionFromContextMenu() async {
+    final selection = _normalizedBlockSelection();
+    if (selection.isCollapsed) {
+      return;
+    }
+    _dismissAllMacContextMenus();
+    final text = _blockController.text.substring(
+      selection.start,
+      selection.end,
+    );
+    await Clipboard.setData(ClipboardData(text: text));
+  }
+
+  Future<void> _cutSelectionFromContextMenu() async {
+    final selection = _normalizedBlockSelection();
+    if (selection.isCollapsed || widget.busy) {
+      return;
+    }
+    _dismissAllMacContextMenus();
+    final text = _blockController.text.substring(
+      selection.start,
+      selection.end,
+    );
+    await Clipboard.setData(ClipboardData(text: text));
+    _replaceBlockSelection('');
+  }
+
+  Future<void> _pasteFromContextMenu() async {
+    if (widget.busy) {
+      return;
+    }
+    _dismissAllMacContextMenus();
+    _syncFullControllerSelectionFromBlock();
+    await widget.onPaste();
+    if (mounted) {
+      _syncBlockController();
+    }
+  }
+
+  Future<void> _pastePlainTextFromContextMenu() async {
+    if (widget.busy) {
+      return;
+    }
+    _dismissAllMacContextMenus();
+    final text = (await Clipboard.getData(Clipboard.kTextPlain))?.text;
+    if (text == null || text.isEmpty) {
+      return;
+    }
+    _replaceBlockSelection(text);
+  }
+
+  void _applyInlineFormat(MarkdownInlineFormat format) {
+    if (widget.busy || _normalizedBlockSelection().isCollapsed) {
+      return;
+    }
+    _dismissAllMacContextMenus();
+    _applyBlockValue(applyMarkdownInlineFormat(_blockController.value, format));
+  }
+
+  void _applyParagraphStyle(MarkdownParagraphStyle style) {
+    if (widget.busy) {
+      return;
+    }
+    _dismissAllMacContextMenus();
+    _applyBlockValue(
+      applyMarkdownParagraphStyle(_blockController.value, style),
+    );
+  }
+
+  void _applyListStyle(MarkdownListStyle style) {
+    if (widget.busy) {
+      return;
+    }
+    _dismissAllMacContextMenus();
+    _applyBlockValue(applyMarkdownListStyle(_blockController.value, style));
+  }
+
+  void _applyInsertion(MarkdownInsertion insertion) {
+    if (widget.busy) {
+      return;
+    }
+    _dismissAllMacContextMenus();
+    _applyBlockValue(insertMarkdownBlock(_blockController.value, insertion));
+  }
+
+  void _replaceBlockSelection(String replacement) {
+    final value = _blockController.value;
+    final selection = _normalizedBlockSelection();
+    final updated = value.text.replaceRange(
+      selection.start,
+      selection.end,
+      replacement,
+    );
+    _applyBlockValue(
+      value.copyWith(
+        text: updated,
+        selection: TextSelection.collapsed(
+          offset: selection.start + replacement.length,
+        ),
+        composing: TextRange.empty,
+      ),
+    );
+  }
+
+  void _applyBlockValue(TextEditingValue value) {
+    _blockController.value = value;
+    _replaceActiveBlock(value.text);
+  }
+
+  void _syncFullControllerSelectionFromBlock() {
+    final activeOffset = _activeOffset;
+    if (activeOffset == null) {
+      return;
+    }
+    final selection = _normalizedBlockSelection();
+    _updatingFullDocument = true;
+    widget.controller.selection = TextSelection(
+      baseOffset: _clampOffset(
+        activeOffset + selection.start,
+        widget.controller.text.length,
+      ),
+      extentOffset: _clampOffset(
+        activeOffset + selection.end,
+        widget.controller.text.length,
+      ),
+    );
+    _updatingFullDocument = false;
+  }
+
+  TextSelection _normalizedBlockSelection() {
+    final value = _blockController.value;
+    final selection = value.selection;
+    if (!selection.isValid) {
+      return TextSelection.collapsed(offset: value.text.length);
+    }
+    final start = _clampOffset(selection.start, value.text.length);
+    final end = _clampOffset(selection.end, value.text.length);
+    return TextSelection(baseOffset: start, extentOffset: end);
+  }
+
   void _replaceTableBlock(MarkdownLiveBlock block, MarkdownLiveTable table) {
     final markdown = widget.controller.text;
     final blocks = splitMarkdownLiveBlocks(markdown);
@@ -4108,6 +4588,9 @@ class _LiveMarkdownEditorState extends State<_LiveMarkdownEditor> {
     return GestureDetector(
       behavior: HitTestBehavior.translucent,
       onTap: _clearActiveBlock,
+      onSecondaryTapDown: (details) {
+        _openContextMenuAtDocumentEnd(blocks, details.globalPosition);
+      },
       child: CupertinoScrollbar(
         child: SingleChildScrollView(
           padding: const EdgeInsets.fromLTRB(16, 54, 16, 16),
@@ -4119,6 +4602,9 @@ class _LiveMarkdownEditorState extends State<_LiveMarkdownEditor> {
               GestureDetector(
                 behavior: HitTestBehavior.opaque,
                 onTap: _clearActiveBlock,
+                onSecondaryTapDown: (details) {
+                  _openContextMenuAtDocumentEnd(blocks, details.globalPosition);
+                },
                 child: const SizedBox(height: 96),
               ),
             ],
@@ -4144,6 +4630,11 @@ class _LiveMarkdownEditorState extends State<_LiveMarkdownEditor> {
       onTap: hasPreviewImage
           ? _handleImagePreviewTap
           : () => _activateBlock(block),
+      onSecondaryTapDown: hasPreviewImage
+          ? null
+          : (details) {
+              _activateBlockAndOpenContextMenu(block, details.globalPosition);
+            },
       child: Padding(
         padding: block.isBlank
             ? EdgeInsets.zero
@@ -4202,6 +4693,7 @@ class _LiveMarkdownEditorState extends State<_LiveMarkdownEditor> {
           color: _text,
         ),
         decoration: const BoxDecoration(color: _surface),
+        contextMenuBuilder: _buildContextMenu,
         onChanged: _replaceActiveBlock,
         onTap: () => _updateActiveOffsetFromBlockSelection(block),
       ),
@@ -4230,6 +4722,407 @@ class _LiveMarkdownEditorState extends State<_LiveMarkdownEditor> {
       return null;
     }
     return parseMarkdownLiveTable(block.text);
+  }
+}
+
+class _NoteContextMenuToolbar extends StatelessWidget {
+  const _NoteContextMenuToolbar({required this.anchors, required this.child});
+
+  final TextSelectionToolbarAnchors anchors;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    const screenPadding = 8.0;
+    final topPadding = MediaQuery.paddingOf(context).top + screenPadding;
+    final localAdjustment = Offset(screenPadding, topPadding);
+    return GestureDetector(
+      behavior: HitTestBehavior.translucent,
+      onTap: _dismissAllMacContextMenus,
+      onSecondaryTapDown: (_) => _dismissAllMacContextMenus(),
+      child: Padding(
+        padding: EdgeInsets.fromLTRB(
+          screenPadding,
+          topPadding,
+          screenPadding,
+          screenPadding,
+        ),
+        child: CustomSingleChildLayout(
+          delegate: _NoteContextMenuLayoutDelegate(
+            anchor: anchors.primaryAnchor - localAdjustment,
+          ),
+          child: child,
+        ),
+      ),
+    );
+  }
+}
+
+class _NoteContextMenuLayoutDelegate extends SingleChildLayoutDelegate {
+  _NoteContextMenuLayoutDelegate({required this.anchor});
+
+  final Offset anchor;
+
+  @override
+  BoxConstraints getConstraintsForChild(BoxConstraints constraints) {
+    return constraints.loosen();
+  }
+
+  @override
+  Offset getPositionForChild(Size size, Size childSize) {
+    final overhang = Offset(
+      anchor.dx + childSize.width - size.width,
+      anchor.dy + childSize.height - size.height,
+    );
+    return Offset(
+      overhang.dx > 0 ? anchor.dx - overhang.dx : anchor.dx,
+      overhang.dy > 0 ? anchor.dy - overhang.dy : anchor.dy,
+    );
+  }
+
+  @override
+  bool shouldRelayout(_NoteContextMenuLayoutDelegate oldDelegate) {
+    return anchor != oldDelegate.anchor;
+  }
+}
+
+class _NoteContextMenu extends StatelessWidget {
+  const _NoteContextMenu({required this.children});
+
+  final List<Widget> children;
+
+  @override
+  Widget build(BuildContext context) {
+    return _MacContextMenuPanel(
+      panelKey: const Key('note-context-menu'),
+      width: 204,
+      children: children,
+    );
+  }
+}
+
+class _MacContextMenuPanel extends StatelessWidget {
+  const _MacContextMenuPanel({
+    this.panelKey,
+    required this.width,
+    required this.children,
+  });
+
+  final Key? panelKey;
+  final double width;
+  final List<Widget> children;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      key: panelKey,
+      width: width,
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      decoration: BoxDecoration(
+        color: _resourceMenuBackground,
+        borderRadius: _resourceMenuRadius,
+        border: Border.all(color: const Color(0xFF8A8A8A), width: 1),
+        boxShadow: _contextMenuPanelShadow,
+      ),
+      child: Column(mainAxisSize: MainAxisSize.min, children: children),
+    );
+  }
+}
+
+class _MacContextMenuItem extends StatefulWidget {
+  const _MacContextMenuItem({
+    required this.itemKey,
+    required this.label,
+    required this.enabled,
+    required this.onPressed,
+    this.trailing,
+    this.highlighted = false,
+    this.onHoverChanged,
+  });
+
+  final Key itemKey;
+  final String label;
+  final bool enabled;
+  final FutureOr<void> Function()? onPressed;
+  final Widget? trailing;
+  final bool highlighted;
+  final ValueChanged<bool>? onHoverChanged;
+
+  @override
+  State<_MacContextMenuItem> createState() => _MacContextMenuItemState();
+}
+
+class _MacContextMenuItemState extends State<_MacContextMenuItem> {
+  bool _hovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final enabled = widget.enabled && widget.onPressed != null;
+    final highlighted = enabled && (widget.highlighted || _hovered);
+    final textColor = enabled ? _resourceMenuText : _noteMenuDisabledText;
+    final highlightColor = _WorkspaceAppearanceScope.of(context).accentColor;
+    return GestureDetector(
+      key: widget.itemKey,
+      behavior: HitTestBehavior.opaque,
+      onTap: enabled
+          ? () async {
+              await widget.onPressed?.call();
+            }
+          : null,
+      child: MouseRegion(
+        cursor: enabled ? SystemMouseCursors.click : SystemMouseCursors.basic,
+        onEnter: (_) {
+          setState(() => _hovered = true);
+          widget.onHoverChanged?.call(true);
+        },
+        onExit: (_) {
+          setState(() => _hovered = false);
+          widget.onHoverChanged?.call(false);
+        },
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 80),
+          curve: Curves.easeOut,
+          height: _contextMenuItemHeight,
+          padding: const EdgeInsets.symmetric(horizontal: 10),
+          decoration: BoxDecoration(
+            color: highlighted ? highlightColor : const Color(0x00000000),
+            borderRadius: _contextMenuItemRadius,
+          ),
+          child: Row(
+            children: [
+              Expanded(
+                child: Text(
+                  widget.label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: _contextMenuItemTextStyle.copyWith(color: textColor),
+                ),
+              ),
+              if (widget.trailing != null) widget.trailing!,
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _MacContextMenuSeparator extends StatelessWidget {
+  const _MacContextMenuSeparator();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Padding(
+      padding: EdgeInsets.symmetric(vertical: 4),
+      child: SizedBox(
+        height: 1,
+        width: double.infinity,
+        child: ColoredBox(color: _resourceMenuLine),
+      ),
+    );
+  }
+}
+
+class _NoteMenuAction extends StatefulWidget {
+  const _NoteMenuAction({
+    required this.itemKey,
+    required this.label,
+    required this.enabled,
+    required this.onPressed,
+    this.trailing,
+    this.highlighted = false,
+    this.onHoverChanged,
+  });
+
+  final Key itemKey;
+  final String label;
+  final bool enabled;
+  final FutureOr<void> Function()? onPressed;
+  final Widget? trailing;
+  final bool highlighted;
+  final ValueChanged<bool>? onHoverChanged;
+
+  @override
+  State<_NoteMenuAction> createState() => _NoteMenuActionState();
+}
+
+class _NoteMenuActionState extends State<_NoteMenuAction> {
+  @override
+  Widget build(BuildContext context) {
+    return _MacContextMenuItem(
+      itemKey: widget.itemKey,
+      label: widget.label,
+      enabled: widget.enabled,
+      onPressed: widget.onPressed,
+      trailing: widget.trailing,
+      highlighted: widget.highlighted,
+      onHoverChanged: widget.onHoverChanged,
+    );
+  }
+}
+
+class _NoteMenuSubmenu extends StatefulWidget {
+  const _NoteMenuSubmenu({
+    required this.itemKey,
+    required this.submenuKey,
+    required this.label,
+    required this.children,
+  });
+
+  final Key itemKey;
+  final Key submenuKey;
+  final String label;
+  final List<Widget> children;
+
+  @override
+  State<_NoteMenuSubmenu> createState() => _NoteMenuSubmenuState();
+}
+
+class _NoteMenuSubmenuState extends State<_NoteMenuSubmenu> {
+  final _link = LayerLink();
+  OverlayEntry? _overlayEntry;
+  Timer? _closeTimer;
+  late final VoidCallback _closeFromOutside = _hideOverlay;
+  bool _parentHovered = false;
+  bool _submenuHovered = false;
+
+  bool get _open => _overlayEntry != null;
+
+  @override
+  void initState() {
+    super.initState();
+    _openNoteSubmenuClosers.add(_closeFromOutside);
+  }
+
+  @override
+  void dispose() {
+    _openNoteSubmenuClosers.remove(_closeFromOutside);
+    _closeTimer?.cancel();
+    _removeOverlay();
+    super.dispose();
+  }
+
+  void _showOverlay() {
+    if (_overlayEntry != null) {
+      return;
+    }
+    _closeTimer?.cancel();
+    final appearance = _WorkspaceAppearanceScope.of(context);
+    _overlayEntry = OverlayEntry(
+      builder: (context) {
+        return Positioned.fill(
+          child: GestureDetector(
+            behavior: HitTestBehavior.translucent,
+            onTap: _dismissAllMacContextMenus,
+            onSecondaryTapDown: (_) => _dismissAllMacContextMenus(),
+            child: CompositedTransformFollower(
+              link: _link,
+              showWhenUnlinked: false,
+              targetAnchor: Alignment.topRight,
+              followerAnchor: Alignment.topLeft,
+              offset: const Offset(6, -8),
+              child: MouseRegion(
+                onEnter: (_) {
+                  _submenuHovered = true;
+                  _closeTimer?.cancel();
+                },
+                onExit: (_) {
+                  _submenuHovered = false;
+                  _scheduleClose();
+                },
+                child: Align(
+                  alignment: Alignment.topLeft,
+                  widthFactor: 1,
+                  heightFactor: 1,
+                  child: _WorkspaceAppearanceScope(
+                    appearance: appearance,
+                    child: _MacContextMenuPanel(
+                      panelKey: widget.submenuKey,
+                      width: 136,
+                      children: widget.children,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+    Overlay.of(context, rootOverlay: true).insert(_overlayEntry!);
+    setState(() {});
+  }
+
+  void _removeOverlay() {
+    _overlayEntry?.remove();
+    _overlayEntry?.dispose();
+    _overlayEntry = null;
+  }
+
+  void _hideOverlay() {
+    if (_overlayEntry == null) {
+      return;
+    }
+    _removeOverlay();
+    if (mounted) {
+      setState(() {});
+    }
+  }
+
+  void _scheduleClose() {
+    _closeTimer?.cancel();
+    _closeTimer = Timer(const Duration(milliseconds: 120), () {
+      if (!_parentHovered && !_submenuHovered) {
+        _hideOverlay();
+      }
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return CompositedTransformTarget(
+      link: _link,
+      child: _NoteMenuAction(
+        itemKey: widget.itemKey,
+        label: widget.label,
+        enabled: true,
+        highlighted: _open,
+        onHoverChanged: (hovered) {
+          _parentHovered = hovered;
+          if (hovered) {
+            _showOverlay();
+          } else {
+            _scheduleClose();
+          }
+        },
+        onPressed: () {
+          _parentHovered = true;
+          if (_open) {
+            _hideOverlay();
+          } else {
+            _showOverlay();
+          }
+        },
+        trailing: const Text(
+          '›',
+          style: TextStyle(
+            color: _resourceMenuText,
+            fontSize: 22,
+            fontWeight: FontWeight.w400,
+            height: 1,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _NoteMenuSeparator extends StatelessWidget {
+  const _NoteMenuSeparator({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return const _MacContextMenuSeparator();
   }
 }
 
@@ -5416,23 +6309,10 @@ class _ResourceContextMenu extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      key: Key('resource-context-menu-$resourceId'),
+    return _MacContextMenuPanel(
+      panelKey: Key('resource-context-menu-$resourceId'),
       width: 188,
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-      decoration: BoxDecoration(
-        color: _resourceMenuBackground,
-        borderRadius: _resourceMenuRadius,
-        border: Border.all(color: const Color(0xFF8A8A8A), width: 1),
-        boxShadow: const [
-          BoxShadow(
-            color: Color(0x33000000),
-            blurRadius: 24,
-            offset: Offset(0, 12),
-          ),
-        ],
-      ),
-      child: Column(mainAxisSize: MainAxisSize.min, children: children),
+      children: children,
     );
   }
 }
@@ -5453,43 +6333,13 @@ class _ResourceMenuAction extends StatefulWidget {
 }
 
 class _ResourceMenuActionState extends State<_ResourceMenuAction> {
-  bool _hovered = false;
-
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
-      key: widget.itemKey,
-      behavior: HitTestBehavior.opaque,
-      onTap: widget.onPressed,
-      child: MouseRegion(
-        cursor: SystemMouseCursors.click,
-        onEnter: (_) => setState(() => _hovered = true),
-        onExit: (_) => setState(() => _hovered = false),
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 80),
-          curve: Curves.easeOut,
-          height: 34,
-          padding: const EdgeInsets.symmetric(horizontal: 8),
-          decoration: BoxDecoration(
-            color: _hovered ? _resourceMenuHover : const Color(0x00000000),
-            borderRadius: BorderRadius.circular(7),
-          ),
-          child: Align(
-            alignment: Alignment.centerLeft,
-            child: Text(
-              widget.label,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(
-                color: _resourceMenuText,
-                fontSize: 14,
-                fontWeight: FontWeight.w600,
-                height: 1.2,
-              ),
-            ),
-          ),
-        ),
-      ),
+    return _MacContextMenuItem(
+      itemKey: widget.itemKey,
+      label: widget.label,
+      enabled: true,
+      onPressed: widget.onPressed,
     );
   }
 }
@@ -5499,14 +6349,7 @@ class _ResourceMenuSeparator extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return const Padding(
-      padding: EdgeInsets.symmetric(vertical: 7),
-      child: SizedBox(
-        height: 1,
-        width: double.infinity,
-        child: ColoredBox(color: _resourceMenuLine),
-      ),
-    );
+    return const _MacContextMenuSeparator();
   }
 }
 
@@ -6264,36 +7107,19 @@ class _ProposalCard extends StatelessWidget {
   }
 }
 
-class _SelectableTextBlock extends StatefulWidget {
+class _SelectableTextBlock extends StatelessWidget {
   const _SelectableTextBlock(this.text);
 
   final String text;
 
   @override
-  State<_SelectableTextBlock> createState() => _SelectableTextBlockState();
-}
-
-class _SelectableTextBlockState extends State<_SelectableTextBlock> {
-  final _focusNode = FocusNode();
-
-  @override
-  void dispose() {
-    _focusNode.dispose();
-    super.dispose();
-  }
-
-  @override
   Widget build(BuildContext context) {
-    return SelectableRegion(
-      focusNode: _focusNode,
-      selectionControls: cupertinoTextSelectionControls,
-      child: Text(
-        widget.text,
-        style: const TextStyle(
-          fontFamily: 'monospace',
-          fontSize: 12,
-          height: 1.45,
-        ),
+    return SelectableText(
+      text,
+      style: const TextStyle(
+        fontFamily: 'monospace',
+        fontSize: 12,
+        height: 1.45,
       ),
     );
   }
