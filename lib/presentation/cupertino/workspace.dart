@@ -4018,9 +4018,12 @@ class _LiveMarkdownEditor extends StatefulWidget {
 
 class _LiveMarkdownEditorState extends State<_LiveMarkdownEditor> {
   final _blockController = _MarkdownStyledTextEditingController();
+  final _blockFocusNode = FocusNode();
   int? _activeOffset;
   var _syncingBlock = false;
   var _updatingFullDocument = false;
+  var _activeTrailingInsertion = false;
+  var _autoActivatedInitialBlock = false;
 
   @override
   void initState() {
@@ -4035,7 +4038,10 @@ class _LiveMarkdownEditorState extends State<_LiveMarkdownEditor> {
       oldWidget.controller.removeListener(_handleFullDocumentChanged);
       widget.controller.addListener(_handleFullDocumentChanged);
       _activeOffset = null;
+      _activeTrailingInsertion = false;
+      _autoActivatedInitialBlock = false;
     }
+    _queueInitialBlockActivation();
     _syncBlockController();
   }
 
@@ -4043,7 +4049,80 @@ class _LiveMarkdownEditorState extends State<_LiveMarkdownEditor> {
   void dispose() {
     widget.controller.removeListener(_handleFullDocumentChanged);
     _blockController.dispose();
+    _blockFocusNode.dispose();
     super.dispose();
+  }
+
+  void _focusBlockEditor() {
+    final scheduledOffset = _activeOffset;
+    final scheduledTrailingInsertion = _activeTrailingInsertion;
+    final scheduledPrimaryFocus = FocusManager.instance.primaryFocus;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted ||
+          _activeOffset == null ||
+          _activeOffset != scheduledOffset ||
+          _activeTrailingInsertion != scheduledTrailingInsertion) {
+        return;
+      }
+      final currentPrimaryFocus = FocusManager.instance.primaryFocus;
+      if (currentPrimaryFocus != null &&
+          currentPrimaryFocus != _blockFocusNode &&
+          currentPrimaryFocus != scheduledPrimaryFocus) {
+        return;
+      }
+      _blockFocusNode.requestFocus();
+    });
+  }
+
+  void _queueInitialBlockActivation() {
+    if (_autoActivatedInitialBlock || _activeOffset != null) {
+      return;
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) {
+        return;
+      }
+      _activateInitialEditableBlock();
+    });
+  }
+
+  void _activateInitialEditableBlock() {
+    if (_autoActivatedInitialBlock || _activeOffset != null) {
+      return;
+    }
+    final blocks = splitMarkdownLiveBlocks(widget.controller.text);
+    MarkdownLiveBlock? target;
+    for (final block in blocks) {
+      if (block.isBlank || _blockHasPreviewImage(block)) {
+        continue;
+      }
+      target = block;
+      break;
+    }
+    _autoActivatedInitialBlock = true;
+    final block = target;
+    if (block == null) {
+      return;
+    }
+    widget.onFocusPane();
+    setState(() {
+      _activeTrailingInsertion = false;
+      _activeOffset = block.start;
+      final selectionOffset = block.text.length;
+      _updatingFullDocument = true;
+      widget.controller.selection = TextSelection.collapsed(
+        offset: _clampOffset(
+          block.start + selectionOffset,
+          widget.controller.text.length,
+        ),
+      );
+      _updatingFullDocument = false;
+      _syncBlockController();
+      _blockController.selection = TextSelection.collapsed(
+        offset: selectionOffset,
+      );
+    });
+    _focusBlockEditor();
   }
 
   void _handleFullDocumentChanged() {
@@ -4070,6 +4149,7 @@ class _LiveMarkdownEditorState extends State<_LiveMarkdownEditor> {
     }
     widget.onFocusPane();
     setState(() {
+      _activeTrailingInsertion = false;
       _activeOffset = block.start;
       _updatingFullDocument = true;
       widget.controller.selection = TextSelection.collapsed(
@@ -4078,6 +4158,7 @@ class _LiveMarkdownEditorState extends State<_LiveMarkdownEditor> {
       _updatingFullDocument = false;
       _syncBlockController();
     });
+    _focusBlockEditor();
   }
 
   void _syncBlockController() {
@@ -4085,8 +4166,23 @@ class _LiveMarkdownEditorState extends State<_LiveMarkdownEditor> {
     if (activeOffset == null) {
       return;
     }
+    if (_activeTrailingInsertion) {
+      if (_blockController.text.isEmpty) {
+        return;
+      }
+      _syncingBlock = true;
+      _blockController.value = const TextEditingValue(
+        text: '',
+        selection: TextSelection.collapsed(offset: 0),
+      );
+      _syncingBlock = false;
+      return;
+    }
     final blocks = splitMarkdownLiveBlocks(widget.controller.text);
-    final index = markdownBlockIndexForOffset(blocks, activeOffset);
+    final index = _nonBlankBlockIndexForOffset(blocks, activeOffset);
+    if (index == null) {
+      return;
+    }
     final block = blocks[index];
     if (_blockController.text == block.text) {
       return;
@@ -4108,16 +4204,22 @@ class _LiveMarkdownEditorState extends State<_LiveMarkdownEditor> {
     if (_syncingBlock || activeOffset == null) {
       return;
     }
+    if (_activeTrailingInsertion) {
+      _replaceVirtualTrailingBlock(text);
+      return;
+    }
     final markdown = widget.controller.text;
     final blocks = splitMarkdownLiveBlocks(markdown);
-    final index = markdownBlockIndexForOffset(blocks, activeOffset);
+    final index = _nonBlankBlockIndexForOffset(blocks, activeOffset);
+    if (index == null) {
+      return;
+    }
     final block = blocks[index];
     final blockSelection = _blockController.selection;
-    final nextOffset =
-        block.start +
-        (blockSelection.isValid
-            ? _clampOffset(blockSelection.extentOffset, text.length)
-            : text.length);
+    final textSelectionOffset = blockSelection.isValid
+        ? _clampOffset(blockSelection.extentOffset, text.length)
+        : text.length;
+    final nextOffset = block.start + textSelectionOffset;
     final updated = replaceMarkdownLiveBlock(
       markdown: markdown,
       block: block,
@@ -4133,9 +4235,49 @@ class _LiveMarkdownEditorState extends State<_LiveMarkdownEditor> {
     );
     _updatingFullDocument = false;
     _activeOffset = _clampOffset(nextOffset, updated.length);
+    _activeTrailingInsertion = false;
     if (mounted) {
       setState(() {});
     }
+  }
+
+  void _replaceVirtualTrailingBlock(String text) {
+    if (text.isEmpty) {
+      return;
+    }
+    final markdown = widget.controller.text;
+    final prefix = _trailingInsertionPrefix(markdown);
+    final insertionStart = markdown.length + prefix.length;
+    final blockSelection = _blockController.selection;
+    final textSelectionOffset = blockSelection.isValid
+        ? _clampOffset(blockSelection.extentOffset, text.length)
+        : text.length;
+    final updated = '$markdown$prefix$text';
+    final nextOffset = insertionStart + textSelectionOffset;
+
+    _updatingFullDocument = true;
+    widget.controller.value = TextEditingValue(
+      text: updated,
+      selection: TextSelection.collapsed(
+        offset: _clampOffset(nextOffset, updated.length),
+      ),
+    );
+    _updatingFullDocument = false;
+    _activeOffset = _clampOffset(nextOffset, updated.length);
+    _activeTrailingInsertion = false;
+    if (mounted) {
+      setState(() {});
+    }
+  }
+
+  String _trailingInsertionPrefix(String markdown) {
+    if (markdown.isEmpty || markdown.endsWith('\n\n')) {
+      return '';
+    }
+    if (markdown.endsWith('\n')) {
+      return '\n';
+    }
+    return '\n\n';
   }
 
   Widget _buildContextMenu(
@@ -4342,6 +4484,7 @@ class _LiveMarkdownEditorState extends State<_LiveMarkdownEditor> {
     widget.onFocusPane();
     final offset = _clampOffset(selectionOffset ?? 0, block.text.length);
     setState(() {
+      _activeTrailingInsertion = false;
       _activeOffset = _clampOffset(
         block.start + offset,
         widget.controller.text.length,
@@ -4354,6 +4497,7 @@ class _LiveMarkdownEditorState extends State<_LiveMarkdownEditor> {
       _syncBlockController();
       _blockController.selection = TextSelection.collapsed(offset: offset);
     });
+    _focusBlockEditor();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) {
         return;
@@ -4509,15 +4653,27 @@ class _LiveMarkdownEditorState extends State<_LiveMarkdownEditor> {
     if (activeOffset == null) {
       return;
     }
+    if (_activeTrailingInsertion) {
+      widget.controller.selection = TextSelection.collapsed(
+        offset: widget.controller.text.length,
+      );
+      return;
+    }
+    final blocks = splitMarkdownLiveBlocks(widget.controller.text);
+    final index = _nonBlankBlockIndexForOffset(blocks, activeOffset);
+    if (index == null) {
+      return;
+    }
+    final block = blocks[index];
     final selection = _normalizedBlockSelection();
     _updatingFullDocument = true;
     widget.controller.selection = TextSelection(
       baseOffset: _clampOffset(
-        activeOffset + selection.start,
+        block.start + selection.start,
         widget.controller.text.length,
       ),
       extentOffset: _clampOffset(
-        activeOffset + selection.end,
+        block.start + selection.end,
         widget.controller.text.length,
       ),
     );
@@ -4554,9 +4710,20 @@ class _LiveMarkdownEditorState extends State<_LiveMarkdownEditor> {
     );
     _updatingFullDocument = false;
     _activeOffset = _clampOffset(currentBlock.start, updated.length);
+    _activeTrailingInsertion = false;
     if (mounted) {
       setState(() {});
     }
+  }
+
+  void _activateTrailingTextBlock() {
+    widget.onFocusPane();
+    setState(() {
+      _activeTrailingInsertion = true;
+      _activeOffset = widget.controller.text.length;
+      _syncBlockController();
+    });
+    _focusBlockEditor();
   }
 
   void _clearActiveBlock() {
@@ -4564,15 +4731,21 @@ class _LiveMarkdownEditorState extends State<_LiveMarkdownEditor> {
       return;
     }
     widget.onFocusPane();
-    FocusScope.of(context).unfocus();
-    setState(() => _activeOffset = null);
+    _blockFocusNode.unfocus();
+    setState(() {
+      _activeTrailingInsertion = false;
+      _activeOffset = null;
+    });
   }
 
   void _handleImagePreviewTap() {
     widget.onFocusPane();
-    FocusScope.of(context).unfocus();
+    _blockFocusNode.unfocus();
     if (_activeOffset != null) {
-      setState(() => _activeOffset = null);
+      setState(() {
+        _activeTrailingInsertion = false;
+        _activeOffset = null;
+      });
     }
   }
 
@@ -4580,9 +4753,10 @@ class _LiveMarkdownEditorState extends State<_LiveMarkdownEditor> {
   Widget build(BuildContext context) {
     final blocks = splitMarkdownLiveBlocks(widget.controller.text);
     final activeOffset = _activeOffset;
-    final activeIndex = activeOffset == null
+    final activeIndex = activeOffset == null || _activeTrailingInsertion
         ? null
-        : markdownBlockIndexForOffset(blocks, activeOffset);
+        : _nonBlankBlockIndexForOffset(blocks, activeOffset);
+    _queueInitialBlockActivation();
     _syncBlockController();
 
     return GestureDetector(
@@ -4599,18 +4773,28 @@ class _LiveMarkdownEditorState extends State<_LiveMarkdownEditor> {
             children: [
               for (var index = 0; index < blocks.length; index += 1)
                 _buildBlock(blocks[index], index, activeIndex),
+              if (_activeTrailingInsertion)
+                _buildVirtualTrailingTextBlockEditor(blocks.length),
               GestureDetector(
+                key: const Key('live-markdown-end-edit-target'),
                 behavior: HitTestBehavior.opaque,
-                onTap: _clearActiveBlock,
+                onTap: _activateTrailingTextBlock,
                 onSecondaryTapDown: (details) {
                   _openContextMenuAtDocumentEnd(blocks, details.globalPosition);
                 },
-                child: const SizedBox(height: 96),
+                child: SizedBox(height: _activeTrailingInsertion ? 24 : 96),
               ),
             ],
           ),
         ),
       ),
+    );
+  }
+
+  Widget _buildVirtualTrailingTextBlockEditor(int index) {
+    return KeyedSubtree(
+      key: Key('live-markdown-block-editor-$index'),
+      child: _buildTextFieldEditor(placeholder: null),
     );
   }
 
@@ -4671,32 +4855,42 @@ class _LiveMarkdownEditorState extends State<_LiveMarkdownEditor> {
   }
 
   Widget _buildTextBlockEditor(MarkdownLiveBlock block, int index) {
-    final appearance = _WorkspaceAppearanceScope.of(context);
     return KeyedSubtree(
       key: Key('live-markdown-block-editor-$index'),
-      child: CupertinoTextField(
-        key: widget.focused ? const Key('note-editor') : null,
-        controller: _blockController,
-        enabled: widget.enabled,
-        readOnly: false,
-        autofocus: true,
-        textAlignVertical: TextAlignVertical.top,
-        minLines: 1,
-        maxLines: null,
-        padding: const EdgeInsets.symmetric(vertical: 3),
-        placeholder: '选择或创建笔记后开始整理 Markdown',
-        placeholderStyle: const TextStyle(color: _muted),
-        cursorColor: appearance.accentColor,
-        style: TextStyle(
-          fontSize: appearance.noteFontSize,
-          height: 1.55,
-          color: _text,
-        ),
-        decoration: const BoxDecoration(color: _surface),
-        contextMenuBuilder: _buildContextMenu,
-        onChanged: _replaceActiveBlock,
+      child: _buildTextFieldEditor(
         onTap: () => _updateActiveOffsetFromBlockSelection(block),
       ),
+    );
+  }
+
+  Widget _buildTextFieldEditor({
+    String? placeholder = '选择或创建笔记后开始整理 Markdown',
+    VoidCallback? onTap,
+  }) {
+    final appearance = _WorkspaceAppearanceScope.of(context);
+    return CupertinoTextField(
+      key: widget.focused ? const Key('note-editor') : null,
+      controller: _blockController,
+      focusNode: _blockFocusNode,
+      enabled: widget.enabled,
+      readOnly: false,
+      autofocus: false,
+      textAlignVertical: TextAlignVertical.top,
+      minLines: 1,
+      maxLines: null,
+      padding: const EdgeInsets.symmetric(vertical: 3),
+      placeholder: placeholder,
+      placeholderStyle: const TextStyle(color: _muted),
+      cursorColor: appearance.accentColor,
+      style: TextStyle(
+        fontSize: appearance.noteFontSize,
+        height: 1.55,
+        color: _text,
+      ),
+      decoration: const BoxDecoration(color: _surface),
+      contextMenuBuilder: _buildContextMenu,
+      onChanged: _replaceActiveBlock,
+      onTap: onTap,
     );
   }
 
@@ -4708,7 +4902,36 @@ class _LiveMarkdownEditorState extends State<_LiveMarkdownEditor> {
         block.start + selection.extentOffset,
         widget.controller.text.length,
       );
+      _updatingFullDocument = true;
+      widget.controller.selection = TextSelection.collapsed(
+        offset: _activeOffset!,
+      );
+      _updatingFullDocument = false;
     }
+  }
+
+  int? _nonBlankBlockIndexForOffset(
+    List<MarkdownLiveBlock> blocks,
+    int offset,
+  ) {
+    if (blocks.isEmpty) {
+      return null;
+    }
+    final index = markdownBlockIndexForOffset(blocks, offset);
+    if (!blocks[index].isBlank) {
+      return index;
+    }
+    for (var previous = index - 1; previous >= 0; previous -= 1) {
+      if (!blocks[previous].isBlank) {
+        return previous;
+      }
+    }
+    for (var next = index + 1; next < blocks.length; next += 1) {
+      if (!blocks[next].isBlank) {
+        return next;
+      }
+    }
+    return null;
   }
 
   bool _blockHasPreviewImage(MarkdownLiveBlock block) {
@@ -5702,6 +5925,21 @@ class _MarkdownSourceTextSpanBuilder {
     final markerStyle = baseStyle.copyWith(color: _muted);
     var index = 0;
     while (index < source.length) {
+      if (source.startsWith('~~', index)) {
+        final end = source.indexOf('~~', index + 2);
+        if (end != -1) {
+          spans.add(TextSpan(text: '~~', style: markerStyle));
+          spans.add(
+            TextSpan(
+              text: source.substring(index + 2, end),
+              style: baseStyle.copyWith(decoration: TextDecoration.lineThrough),
+            ),
+          );
+          spans.add(TextSpan(text: '~~', style: markerStyle));
+          index = end + 2;
+          continue;
+        }
+      }
       if (source.startsWith('**', index)) {
         final end = source.indexOf('**', index + 2);
         if (end != -1) {
@@ -5761,6 +5999,7 @@ class _MarkdownSourceTextSpanBuilder {
 
   static int _nextInlineMarker(String source, int start) {
     final candidates = <int>[
+      source.indexOf('~~', start),
       source.indexOf('**', start),
       source.indexOf('`', start),
       source.indexOf('*', start),

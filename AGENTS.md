@@ -10,3 +10,11 @@
 - OCR/tree proposal display, copy, and Markdown preview must preserve line breaks.
 - Proposal text must be fully viewable and selectable.
 - Image thumbnails must avoid cropping important content and provide a full-image preview.
+
+## Markdown Editor Rules
+
+- Markdown markers are the storage format and must remain visible while a block is actively being edited.
+- When a block loses focus and returns to preview rendering, Markdown markers should be hidden by the rendered Markdown view.
+- Live editor formatting commands must update the Markdown source and the styled editor display together.
+- Active editor `TextSpan.toPlainText()` must match the backing controller text exactly, so caret offsets cannot drift.
+- Focusing, clicking, selecting, or opening context menus must not mutate note content or insert blank lines.
