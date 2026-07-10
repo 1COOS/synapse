@@ -378,6 +378,74 @@ void main() {
       expect(result.session, same(session));
       expect(session.savePhase, NoteSavePhase.disposed);
     });
+
+    test(
+      'disposed sessions complete queued saves after the flight returns',
+      () async {
+        final vault = _TrackingVault();
+        final harness = _Harness(vault, scheduleEdits: false);
+        addTearDown(harness.dispose);
+        final session = await harness.createSession('Alpha');
+        vault.resetTracking();
+        session.controller.text = '# Alpha\nfirst snapshot';
+        final gate = vault.blockNextUpdate();
+        final currentSave = harness.coordinator.save(session);
+        await vault.nextUpdateStarted;
+        session.controller.text = '# Alpha\nnewer edit';
+        final queuedSave = harness.coordinator.save(session);
+        NoteSaveResult? queuedResult;
+        unawaited(queuedSave.then((result) => queuedResult = result));
+
+        harness.registry.remove([session.noteId]);
+        gate.complete();
+        final currentResult = await currentSave;
+        await _drainEventQueue();
+
+        expect(currentResult.session, same(session));
+        expect(queuedResult, isNotNull);
+        expect(queuedResult!.succeeded, isFalse);
+        expect(queuedResult!.error, isA<StateError>());
+        expect(session.savePhase, NoteSavePhase.disposed);
+        expect(harness.coordinator.isSaving, isFalse);
+      },
+    );
+
+    test(
+      'dispose completes a blocked current save without backend return',
+      () async {
+        final vault = _TrackingVault();
+        final harness = _Harness(vault, scheduleEdits: false);
+        final session = await harness.createSession('Alpha');
+        vault.resetTracking();
+        session.controller.text = '# Alpha\nblocked snapshot';
+        final gate = vault.blockNextUpdate();
+        addTearDown(() async {
+          if (!gate.isCompleted) {
+            gate.complete();
+          }
+          await vault.updateCompletedAt(1);
+          harness.registry.dispose();
+        });
+        final currentSave = harness.coordinator.save(session);
+        await vault.nextUpdateStarted;
+        NoteSaveResult? currentResult;
+        unawaited(currentSave.then((result) => currentResult = result));
+
+        harness.coordinator.dispose();
+        await _drainEventQueue();
+
+        expect(currentResult, isNotNull);
+        expect(currentResult!.succeeded, isFalse);
+        expect(currentResult!.error, isA<StateError>());
+        expect(session.savePhase, NoteSavePhase.dirty);
+        expect(harness.coordinator.isSaving, isFalse);
+
+        gate.complete();
+        await vault.updateCompletedAt(1);
+        await _drainEventQueue();
+        expect(currentResult!.succeeded, isFalse);
+      },
+    );
   });
 }
 

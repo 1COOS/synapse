@@ -368,8 +368,33 @@ final class NoteSaveCoordinator {
       return;
     }
     if (_isDisposed || session.savePhase == NoteSavePhase.disposed) {
+      _cancelTimerOnly(session);
       _flights.remove(session);
-      _complete(flight.completer, backendResult);
+      final queued = _queued.remove(session);
+      if (queued != null) {
+        final queuedFailure = session.savePhase == NoteSavePhase.disposed
+            ? _inactiveSessionFailure(
+                session,
+                StateError('Cannot save a disposed note session.'),
+              )
+            : _activeSessionFailure(
+                session,
+                StateError('Note save coordinator disposed.'),
+              );
+        _complete(queued.completer, queuedFailure);
+      }
+      final currentResult = _isDisposed
+          ? session.savePhase == NoteSavePhase.disposed
+                ? _inactiveSessionFailure(
+                    session,
+                    StateError('Note save coordinator disposed.'),
+                  )
+                : _activeSessionFailure(
+                    session,
+                    StateError('Note save coordinator disposed.'),
+                  )
+          : backendResult;
+      _complete(flight.completer, currentResult);
       return;
     }
 
@@ -502,15 +527,17 @@ final class NoteSaveCoordinator {
       return;
     }
     _isDisposed = true;
+    final flightEntries = _flights.entries.toList(growable: false);
+    final queuedEntries = _queued.entries.toList(growable: false);
     final affectedSessions = Set<NoteDocumentSession>.identity()
       ..addAll(_timers.keys)
-      ..addAll(_flights.keys)
-      ..addAll(_queued.keys);
+      ..addAll(flightEntries.map((entry) => entry.key))
+      ..addAll(queuedEntries.map((entry) => entry.key));
     for (final timer in _timers.values) {
       timer.cancel();
     }
     _timers.clear();
-    final queuedEntries = _queued.entries.toList(growable: false);
+    _flights.clear();
     _queued.clear();
     for (final session in affectedSessions) {
       if (session.savePhase == NoteSavePhase.disposed) {
@@ -524,6 +551,18 @@ final class NoteSaveCoordinator {
       }
     }
     for (final entry in queuedEntries) {
+      final result = entry.key.savePhase == NoteSavePhase.disposed
+          ? _inactiveSessionFailure(
+              entry.key,
+              StateError('Note save coordinator disposed.'),
+            )
+          : _activeSessionFailure(
+              entry.key,
+              StateError('Note save coordinator disposed.'),
+            );
+      _complete(entry.value.completer, result);
+    }
+    for (final entry in flightEntries) {
       final result = entry.key.savePhase == NoteSavePhase.disposed
           ? _inactiveSessionFailure(
               entry.key,
