@@ -32,6 +32,7 @@ import '../../infrastructure/input/image_input_service.dart';
 import '../../infrastructure/vault/default_vault_backend.dart';
 import '../../infrastructure/vault/vault_backend.dart';
 import '../workspace/state/note_document_session.dart';
+import '../workspace/state/note_save_coordinator.dart';
 import '../workspace/state/note_session_registry.dart';
 import 'browser_context_menu_guard.dart';
 import 'markdown_context_commands.dart';
@@ -295,6 +296,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
 
   final _emptyMarkdownController = TextEditingController();
   late final NoteSessionRegistry _noteSessionRegistry;
+  late final NoteSaveCoordinator _noteSaveCoordinator;
   late _SplitNode _splitRoot;
   String _focusedPaneId = '';
   int _nextPaneNumber = 1;
@@ -315,7 +317,6 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   bool _leftPaneCollapsed = false;
   bool _rightPaneCollapsed = false;
   bool _busy = false;
-  bool _autoSaving = false;
   String _message = '';
   final _selectedPreviewImageSrcNotifier = ValueNotifier<String?>(null);
   String _vaultLabel = supportsDirectoryVault ? '选择仓库' : 'H5 预览库';
@@ -336,6 +337,15 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     _noteSessionRegistry = NoteSessionRegistry(
       visibleBody: _visibleMarkdownBody,
       onEdited: _handleSessionMarkdownEdited,
+    );
+    _noteSaveCoordinator = NoteSaveCoordinator(
+      sessions: _noteSessionRegistry,
+      vault: _requireVault,
+      debounceDuration: () =>
+          Duration(milliseconds: _workspacePreferences.autoSaveDelayMillis),
+      serializeVisibleBody: _markdownForVisibleBody,
+      onResult: _applyNoteSaveResult,
+      onStateChanged: _handleNoteSaveCoordinatorStateChanged,
     );
     unawaited(
       disableBrowserContextMenuForFlutterWeb().catchError((
@@ -371,6 +381,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
 
   @override
   void dispose() {
+    _noteSaveCoordinator.dispose();
     _noteSessionRegistry.dispose();
     _emptyMarkdownController.dispose();
     _searchController.dispose();
@@ -639,6 +650,8 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
 
   bool get _hasVault => _vault != null;
 
+  bool get _autoSaving => _noteSaveCoordinator.isAutoSaving;
+
   bool get _usesNativeMacTitlebar {
     return !kIsWeb && defaultTargetPlatform == TargetPlatform.macOS;
   }
@@ -713,12 +726,12 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     }
     if (!_hasDirtySession(session)) {
       _cancelPendingAutoSave(session);
-      if (mounted) {
-        setState(() {});
-      }
       return;
     }
     _scheduleAutoSave(session);
+  }
+
+  void _handleNoteSaveCoordinatorStateChanged() {
     if (mounted) {
       setState(() {});
     }
@@ -738,26 +751,11 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   }
 
   void _cancelPendingAutoSave(NoteDocumentSession session) {
-    session.autoSaveTimer?.cancel();
-    session.autoSaveTimer = null;
+    _noteSaveCoordinator.cancel(session);
   }
 
   void _scheduleAutoSave(NoteDocumentSession session) {
-    _cancelPendingAutoSave(session);
-    session.autoSaveTimer = Timer(
-      Duration(milliseconds: _workspacePreferences.autoSaveDelayMillis),
-      () {
-        session.autoSaveTimer = null;
-        unawaited(
-          _saveSessionMarkdown(
-            session,
-            successMessage: '笔记已自动保存',
-            automatic: true,
-            rescheduleIfDirty: true,
-          ),
-        );
-      },
-    );
+    _noteSaveCoordinator.schedule(session);
   }
 
   VaultBackend _requireVault() {
@@ -1239,16 +1237,10 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   }
 
   Future<bool> _flushAllPendingMarkdown({String? successMessage}) async {
-    final sessions = _noteSessionRegistry.sessions.toList(growable: false);
-    for (final session in sessions) {
-      if (!await _flushSessionMarkdown(
-        session,
-        successMessage: successMessage,
-      )) {
-        return false;
-      }
-    }
-    return true;
+    final report = await _noteSaveCoordinator.flushAll(
+      successMessage: successMessage,
+    );
+    return report.succeeded;
   }
 
   Future<bool> _flushPendingMarkdown({String? successMessage}) async {
@@ -1263,30 +1255,10 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     NoteDocumentSession session, {
     String? successMessage,
   }) async {
-    _cancelPendingAutoSave(session);
-    while (true) {
-      final inFlight = session.markdownSaveInFlight;
-      if (inFlight != null) {
-        final saved = await inFlight;
-        if (!saved) {
-          return false;
-        }
-        _cancelPendingAutoSave(session);
-        continue;
-      }
-      if (!_hasDirtySession(session)) {
-        return true;
-      }
-      final saved = await _saveSessionMarkdown(
-        session,
-        successMessage: successMessage,
-        automatic: false,
-        rescheduleIfDirty: false,
-      );
-      if (!saved) {
-        return false;
-      }
-    }
+    final report = await _noteSaveCoordinator.flush([
+      session,
+    ], successMessage: successMessage);
+    return report.succeeded;
   }
 
   Future<bool> _saveCurrentMarkdown({
@@ -1311,126 +1283,68 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     required bool automatic,
     required bool rescheduleIfDirty,
     String? successMessage,
-  }) {
-    final inFlight = session.markdownSaveInFlight;
-    if (inFlight != null) {
-      return inFlight;
-    }
-    if (!_hasDirtySession(session)) {
-      return Future.value(true);
-    }
-    final noteId = session.note.id;
-    final body = session.controller.text;
-    final markdown = _markdownForVisibleBody(session.note, body);
-    late final Future<bool> saveFuture;
-    saveFuture =
-        _performMarkdownSave(
-          session: session,
-          noteId: noteId,
-          body: body,
-          markdown: markdown,
-          successMessage: successMessage,
-          automatic: automatic,
-          rescheduleIfDirty: rescheduleIfDirty,
-        ).whenComplete(() {
-          if (identical(session.markdownSaveInFlight, saveFuture)) {
-            session.markdownSaveInFlight = null;
-          }
-        });
-    session.markdownSaveInFlight = saveFuture;
-    return saveFuture;
+  }) async {
+    final result = await _noteSaveCoordinator.save(
+      session,
+      reason: automatic ? NoteSaveReason.debounce : NoteSaveReason.explicit,
+      rescheduleIfStillDirty: rescheduleIfDirty,
+      successMessage: successMessage,
+    );
+    return result.succeeded;
   }
 
-  Future<bool> _performMarkdownSave({
-    required NoteDocumentSession session,
-    required String noteId,
-    required String body,
-    required String markdown,
-    required bool automatic,
-    required bool rescheduleIfDirty,
-    String? successMessage,
-  }) async {
-    if (automatic && mounted) {
-      setState(() => _autoSaving = true);
+  void _applyNoteSaveResult(NoteSaveResult result, SaveRequest request) {
+    if (!mounted) {
+      return;
     }
-    try {
-      final vault = _requireVault();
-      var updated = await vault.updateMarkdown(
-        noteId: noteId,
-        markdown: markdown,
-      );
-      List<VaultResourceNode>? resources;
-      var noteIdChanged = false;
-      if (updated.title != session.note.title) {
-        final renamed = await vault.renameNote(
-          noteId: noteId,
-          title: updated.title,
-        );
-        updated = await vault.readNote(renamed.id);
-        resources = await vault.listResources();
-        noteIdChanged = updated.id != noteId;
-        _resetAiServices();
-      }
-      if (!mounted) {
-        return true;
-      }
-      final stillOpen =
-          _noteSessionRegistry.sessionFor(noteId) == session ||
-          _noteSessionRegistry.sessionFor(updated.id) == session;
-      final stillDirty = stillOpen && session.controller.text != body;
-      void commitWorkspaceState({required bool replaceNoteId}) {
-        setState(() {
-          if (resources != null) {
-            _resources = resources;
-          }
-          if (stillOpen) {
-            if (replaceNoteId) {
-              _replaceOpenNoteId(noteId, updated.id);
-            }
-            if (resources != null) {
-              _selectedResource = _findResource(_resources, updated.id);
-            }
-          }
-          if (successMessage != null && !stillDirty) {
-            _message = successMessage;
-          }
-        });
-      }
+    if (!result.succeeded) {
+      setState(() => _message = '笔记保存失败：${result.error}');
+      return;
+    }
+    final savedNote = result.savedNote;
+    if (savedNote == null) {
+      return;
+    }
+    final session = result.session;
+    final stillOpen =
+        identical(_noteSessionRegistry.sessionFor(result.oldNoteId), session) ||
+        identical(_noteSessionRegistry.sessionFor(savedNote.id), session);
 
-      if (stillOpen && noteIdChanged) {
-        _noteSessionRegistry.remapNoteIds(
-          {noteId: updated.id},
-          refreshedNotesByNewId: {updated.id: updated},
-          preserveDirtyBody: stillDirty,
-          afterCommitBeforeNotify: () {
-            commitWorkspaceState(replaceNoteId: true);
-          },
-        );
-      } else {
-        PreparedNoteDocumentUpdate? preparedUpdate;
-        if (stillOpen) {
-          preparedUpdate = session.prepareApplySavedNote(
-            updated,
-            preserveCurrentBody: stillDirty,
-          )..applySilently();
+    void commitWorkspaceState() {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        final resources = result.resources;
+        if (resources != null) {
+          _resources = resources;
+          _resetAiServices();
         }
-        commitWorkspaceState(replaceNoteId: false);
-        preparedUpdate?.publish();
-      }
-      if (stillDirty && rescheduleIfDirty) {
-        _scheduleAutoSave(session);
-      }
-      return true;
-    } catch (error) {
-      if (mounted) {
-        setState(() => _message = '笔记保存失败：$error');
-      }
-      return false;
-    } finally {
-      if (automatic && mounted) {
-        setState(() => _autoSaving = false);
-      }
+        if (stillOpen) {
+          if (result.idChanged) {
+            _replaceOpenNoteId(result.oldNoteId, savedNote.id);
+          }
+          if (resources != null) {
+            _selectedResource = _findResource(_resources, savedNote.id);
+          }
+        }
+        if (request.successMessage != null && !result.stillDirty) {
+          _message = request.successMessage!;
+        }
+      });
     }
+
+    if (!stillOpen) {
+      commitWorkspaceState();
+      return;
+    }
+    _noteSessionRegistry.remapSavedNote(
+      session: session,
+      oldNoteId: result.oldNoteId,
+      savedNote: savedNote,
+      preserveCurrentBody: result.stillDirty,
+      afterCommitBeforeNotify: commitWorkspaceState,
+    );
   }
 
   Future<void> _pasteIntoNoteEditor() async {

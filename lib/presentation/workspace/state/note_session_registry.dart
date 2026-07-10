@@ -183,6 +183,66 @@ final class NoteSessionRegistry extends ChangeNotifier {
     }
   }
 
+  void remapSavedNote({
+    required NoteDocumentSession session,
+    required String oldNoteId,
+    required VaultNoteContent savedNote,
+    required bool preserveCurrentBody,
+    VoidCallback? afterCommitBeforeNotify,
+  }) {
+    _ensureCanMutate();
+    if (savedNote.id.isEmpty) {
+      throw ArgumentError.value(savedNote.id, 'savedNote', 'Note id is empty.');
+    }
+    final ownedIds = <String>[
+      for (final entry in _sessions.entries)
+        if (identical(entry.value, session)) entry.key,
+    ];
+    if (!ownedIds.contains(oldNoteId) && !ownedIds.contains(savedNote.id)) {
+      throw StateError(
+        'Note session is not registered as "$oldNoteId" or '
+        '"${savedNote.id}".',
+      );
+    }
+    final destinationOwner = _sessions[savedNote.id];
+    if (destinationOwner != null && !identical(destinationOwner, session)) {
+      throw StateError(
+        'Note session target "${savedNote.id}" is already owned by '
+        'another session.',
+      );
+    }
+
+    final preparedUpdate = session.prepareApplySavedNote(
+      savedNote,
+      preserveCurrentBody: preserveCurrentBody,
+    );
+    final remapped = Map<String, NoteDocumentSession>.of(_sessions)
+      ..removeWhere((_, value) => identical(value, session))
+      ..[savedNote.id] = session;
+    Object? commitHookError;
+    StackTrace? commitHookStackTrace;
+    _isRemapTransactionActive = true;
+    try {
+      preparedUpdate.applySilently();
+      _sessions
+        ..clear()
+        ..addAll(remapped);
+      try {
+        afterCommitBeforeNotify?.call();
+      } catch (error, stackTrace) {
+        commitHookError = error;
+        commitHookStackTrace = stackTrace;
+      }
+      preparedUpdate.publish();
+      notifyListeners();
+    } finally {
+      _isRemapTransactionActive = false;
+    }
+    if (commitHookError case final error?) {
+      Error.throwWithStackTrace(error, commitHookStackTrace!);
+    }
+  }
+
   List<NoteDocumentSession> remove(
     Iterable<String> ids, {
     bool dispose = true,

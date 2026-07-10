@@ -1,5 +1,3 @@
-import 'dart:async';
-
 import 'package:flutter/widgets.dart';
 
 import '../../../domain/vault/vault_resource.dart';
@@ -27,8 +25,6 @@ final class NoteDocumentSession extends ChangeNotifier {
 
   final Set<String> selectedSourceIds = <String>{};
   List<AiProposal> proposals = const [];
-  Timer? autoSaveTimer;
-  Future<bool>? markdownSaveInFlight;
 
   bool _isProgrammaticChange = false;
   bool _isDisposed = false;
@@ -226,8 +222,6 @@ final class NoteDocumentSession extends ChangeNotifier {
       return;
     }
     _isDisposed = true;
-    autoSaveTimer?.cancel();
-    autoSaveTimer = null;
     _controller.removeListener(_handleControllerEdited);
     _controller.dispose();
     _savePhase = NoteSavePhase.disposed;
