@@ -1245,6 +1245,9 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       setState(() => _message = 'H5 预览使用浏览器沙盒库');
       return;
     }
+    if (!await _autoSaveDirtyMarkdownBeforeSwitch()) {
+      return;
+    }
     VaultLocation? pickedLocation;
     try {
       pickedLocation = await _pickVaultLocation();
@@ -1255,9 +1258,6 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       return;
     }
     if (pickedLocation == null) {
-      return;
-    }
-    if (!await _autoSaveDirtyMarkdownBeforeSwitch()) {
       return;
     }
     await _runBusy(() async {
@@ -1275,12 +1275,25 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       _message = '';
     });
     try {
-      return await _flushPendingMarkdown();
+      return await _flushAllPendingMarkdown();
     } finally {
       if (mounted) {
         setState(() => _busy = false);
       }
     }
+  }
+
+  Future<bool> _flushAllPendingMarkdown({String? successMessage}) async {
+    final sessions = _noteSessions.values.toList(growable: false);
+    for (final session in sessions) {
+      if (!await _flushSessionMarkdown(
+        session,
+        successMessage: successMessage,
+      )) {
+        return false;
+      }
+    }
+    return true;
   }
 
   Future<bool> _flushPendingMarkdown({String? successMessage}) async {

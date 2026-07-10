@@ -362,6 +362,191 @@ void main() {
     expect(find.text('Second'), findsWidgets);
   });
 
+  testWidgets('flushes every dirty pane before opening the vault picker', (
+    tester,
+  ) async {
+    const firstPath = '/vault/first';
+    const secondPath = '/vault/second';
+    final events = <String>[];
+    final firstVault = _RecordingUpdateVaultBackend(
+      events: events,
+      seedExampleData: false,
+    );
+    await firstVault.createNote(parentPath: '', title: 'Alpha');
+    await firstVault.createNote(parentPath: '', title: 'Beta');
+    final secondVault = MemoryVaultBackend(seedExampleData: false);
+    await secondVault.createNote(parentPath: '', title: 'Second');
+    final locationStore = _FakeVaultLocationStore(
+      loadedLocation: const VaultLocation(rootPath: firstPath),
+      existingPaths: const {firstPath, secondPath},
+    );
+
+    await _pumpWorkspace(
+      tester,
+      vault: null,
+      vaultLocationStore: locationStore,
+      directoryPicker: () async {
+        events.add('picker');
+        return secondPath;
+      },
+      vaultBackendFactory: (rootPath) {
+        return rootPath == firstPath ? firstVault : secondVault;
+      },
+    );
+    await tester.tap(find.byKey(const Key('split-pane-right-button')));
+    await tester.pump(const Duration(milliseconds: 250));
+    await tester.tap(find.byKey(const Key('resource-row-Beta.md')));
+    await tester.pump(const Duration(milliseconds: 250));
+    await tester.tap(find.byKey(const Key('note-mode-source-pane-1')));
+    await tester.pump(const Duration(milliseconds: 250));
+    await _enterTextInLiveMarkdownBlock(
+      tester,
+      '# Alpha\nalpha dirty',
+      paneId: 1,
+    );
+    await tester.tap(find.byKey(const Key('note-mode-source-pane-2')));
+    await tester.pump(const Duration(milliseconds: 250));
+    await _enterTextInLiveMarkdownBlock(
+      tester,
+      '# Beta\nbeta dirty',
+      paneId: 2,
+    );
+
+    await tester.tap(find.byKey(const Key('vault-location-button')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 250));
+
+    expect(
+      events.where((event) => event.startsWith('save:')),
+      unorderedEquals(['save:Alpha.md', 'save:Beta.md']),
+    );
+    expect(events.last, 'picker');
+    expect(
+      (await firstVault.readNote('Alpha.md')).markdown,
+      contains('alpha dirty'),
+    );
+    expect(
+      (await firstVault.readNote('Beta.md')).markdown,
+      contains('beta dirty'),
+    );
+    expect(locationStore.savedLocations.last.rootPath, secondPath);
+    expect(find.text('Second'), findsWidgets);
+  });
+
+  testWidgets(
+    'keeps every pane and skips the vault picker when an unfocused save fails',
+    (tester) async {
+      const firstPath = '/vault/first';
+      const secondPath = '/vault/second';
+      final events = <String>[];
+      var pickerCalls = 0;
+      final firstVault = _RecordingUpdateVaultBackend(
+        events: events,
+        failingNoteId: 'Alpha.md',
+        seedExampleData: false,
+      );
+      await firstVault.createNote(parentPath: '', title: 'Alpha');
+      await firstVault.createNote(parentPath: '', title: 'Beta');
+      final secondVault = MemoryVaultBackend(seedExampleData: false);
+      await secondVault.createNote(parentPath: '', title: 'Second');
+      final locationStore = _FakeVaultLocationStore(
+        loadedLocation: const VaultLocation(rootPath: firstPath),
+        existingPaths: const {firstPath, secondPath},
+      );
+
+      await _pumpWorkspace(
+        tester,
+        vault: null,
+        vaultLocationStore: locationStore,
+        directoryPicker: () async {
+          pickerCalls += 1;
+          events.add('picker');
+          return secondPath;
+        },
+        vaultBackendFactory: (rootPath) {
+          return rootPath == firstPath ? firstVault : secondVault;
+        },
+      );
+      locationStore.savedLocations.clear();
+      await tester.tap(find.byKey(const Key('split-pane-right-button')));
+      await tester.pump(const Duration(milliseconds: 250));
+      await tester.tap(find.byKey(const Key('resource-row-Beta.md')));
+      await tester.pump(const Duration(milliseconds: 250));
+      await tester.tap(find.byKey(const Key('note-mode-source-pane-1')));
+      await tester.pump(const Duration(milliseconds: 250));
+      await _enterTextInLiveMarkdownBlock(
+        tester,
+        '# Alpha\nalpha dirty',
+        paneId: 1,
+      );
+      final alphaController = _liveMarkdownDocumentController(
+        tester,
+        paneId: 1,
+      );
+      final alphaControllerText = alphaController.text;
+      await tester.tap(find.byKey(const Key('note-mode-source-pane-2')));
+      await tester.pump(const Duration(milliseconds: 250));
+      await _enterTextInLiveMarkdownBlock(
+        tester,
+        '# Beta\nbeta dirty',
+        paneId: 2,
+      );
+      final betaController = _liveMarkdownDocumentController(tester, paneId: 2);
+      final betaControllerText = betaController.text;
+
+      await tester.tap(find.byKey(const Key('vault-location-button')));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 250));
+
+      final failedSaveIndex = events.indexOf('save:Alpha.md');
+      expect(failedSaveIndex, greaterThanOrEqualTo(0));
+      expect(
+        events
+            .skip(failedSaveIndex + 1)
+            .where((event) => event.startsWith('save:')),
+        isEmpty,
+      );
+      expect(pickerCalls, 0);
+      expect(locationStore.savedLocations, isEmpty);
+      expect(find.byKey(const Key('split-pane-pane-1')), findsOneWidget);
+      expect(find.byKey(const Key('split-pane-pane-2')), findsOneWidget);
+      expect(
+        find.descendant(
+          of: find.byKey(const Key('split-pane-title-pane-1')),
+          matching: find.text('Alpha'),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(
+          of: find.byKey(const Key('split-pane-title-pane-2')),
+          matching: find.text('Beta'),
+        ),
+        findsOneWidget,
+      );
+      final retainedAlphaController = _liveMarkdownDocumentController(
+        tester,
+        paneId: 1,
+      );
+      final retainedBetaController = _liveMarkdownDocumentController(
+        tester,
+        paneId: 2,
+      );
+      expect(retainedAlphaController, same(alphaController));
+      expect(retainedBetaController, same(betaController));
+      expect(retainedAlphaController.text, alphaControllerText);
+      expect(retainedBetaController.text, betaControllerText);
+      expect(retainedAlphaController.text, contains('alpha dirty'));
+      expect(retainedBetaController.text, contains('beta dirty'));
+      expect(
+        (await firstVault.readNote('Alpha.md')).markdown,
+        isNot(contains('alpha dirty')),
+      );
+      expect(find.text('Second'), findsNothing);
+      expect(find.textContaining('save failed'), findsOneWidget);
+    },
+  );
+
   testWidgets('does not switch vaults when auto-save fails', (tester) async {
     final firstVault = _FailingUpdateVaultBackend(seedExampleData: false);
     await firstVault.createNote(parentPath: '', title: 'First');
@@ -4574,6 +4759,21 @@ dynamic _activeLiveMarkdownTextField(WidgetTester tester, {int? paneId}) {
       as dynamic;
 }
 
+TextEditingController _liveMarkdownDocumentController(
+  WidgetTester tester, {
+  required int paneId,
+}) {
+  final editor = tester.widget<Widget>(
+    _inNotePane(
+      find.byWidgetPredicate(
+        (widget) => widget.runtimeType.toString() == '_LiveMarkdownEditor',
+      ),
+      paneId,
+    ).first,
+  );
+  return (editor as dynamic).controller as TextEditingController;
+}
+
 TextSpan _activeLiveMarkdownTextSpan(WidgetTester tester) {
   final editableText = tester.widget<EditableText>(
     find.descendant(
@@ -4867,6 +5067,29 @@ class _FailingUpdateVaultBackend extends _CountingUpdateVaultBackend {
   }) {
     if (failUpdates) {
       throw StateError('save failed');
+    }
+    return super.updateMarkdown(noteId: noteId, markdown: markdown);
+  }
+}
+
+class _RecordingUpdateVaultBackend extends MemoryVaultBackend {
+  _RecordingUpdateVaultBackend({
+    required this.events,
+    this.failingNoteId,
+    super.seedExampleData,
+  });
+
+  final List<String> events;
+  final String? failingNoteId;
+
+  @override
+  Future<VaultNoteContent> updateMarkdown({
+    required String noteId,
+    required String markdown,
+  }) {
+    events.add('save:$noteId');
+    if (noteId == failingNoteId) {
+      throw StateError('save failed for $noteId');
     }
     return super.updateMarkdown(noteId: noteId, markdown: markdown);
   }
