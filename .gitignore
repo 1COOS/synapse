@@ -57,6 +57,8 @@ macos/Flutter/ephemeral/
 windows/flutter/ephemeral/
 
 # Local env and tooling
+/.superpowers/
+/.worktrees/
 .env
 .env.*
 *.tmp
