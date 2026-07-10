@@ -60,6 +60,7 @@ final class SplitWorkspaceController extends ChangeNotifier {
     );
     _root = initialPane;
     _focusedPaneId = initialPane.paneId;
+    _paneGenerations[initialPane.paneId] = _createPaneGeneration();
   }
 
   late SplitNode _root;
@@ -67,6 +68,8 @@ final class SplitWorkspaceController extends ChangeNotifier {
   NoteMode _defaultMode;
   int _nextPaneNumber = 1;
   int _nextSplitNumber = 1;
+  int _nextPaneGeneration = 1;
+  final Map<String, int> _paneGenerations = <String, int>{};
 
   SplitNode get root => _root;
 
@@ -82,6 +85,8 @@ final class SplitWorkspaceController extends ChangeNotifier {
   );
 
   SplitLeaf? pane(String paneId) => _findSplitLeaf(_root, paneId);
+
+  int? paneGeneration(String paneId) => _paneGenerations[paneId];
 
   int paneCountForNote(String noteId) {
     return _splitLeaves(_root).where((pane) => pane.noteId == noteId).length;
@@ -100,6 +105,9 @@ final class SplitWorkspaceController extends ChangeNotifier {
     );
     _root = initialPane;
     _focusedPaneId = initialPane.paneId;
+    _paneGenerations
+      ..clear()
+      ..[initialPane.paneId] = _createPaneGeneration();
     notifyListeners();
   }
 
@@ -139,6 +147,7 @@ final class SplitWorkspaceController extends ChangeNotifier {
     );
     _root = _replaceNode(_root, focused.paneId, branch);
     _focusedPaneId = newPane.paneId;
+    _paneGenerations[newPane.paneId] = _createPaneGeneration();
     notifyListeners();
     return newPane.paneId;
   }
@@ -153,6 +162,7 @@ final class SplitWorkspaceController extends ChangeNotifier {
       paneId,
       SplitLeaf(paneId: paneId, noteId: noteId, mode: target.mode),
     );
+    _paneGenerations[paneId] = _createPaneGeneration();
     notifyListeners();
   }
 
@@ -239,6 +249,7 @@ final class SplitWorkspaceController extends ChangeNotifier {
       return false;
     }
     _root = nextRoot;
+    _paneGenerations.remove(paneId);
     if (_focusedPaneId == paneId) {
       _focusedPaneId = _splitLeaves(_root).first.paneId;
     }
@@ -298,6 +309,8 @@ final class SplitWorkspaceController extends ChangeNotifier {
   }
 
   String _createPaneId() => 'pane-${_nextPaneNumber++}';
+
+  int _createPaneGeneration() => _nextPaneGeneration++;
 
   String _createSplitId() => 'split-${_nextSplitNumber++}';
 }

@@ -163,6 +163,23 @@ void main() {
       expect(controller.closeImpact('missing').noteId, isNull);
     });
 
+    test('pane generation changes on replacement and reset but not remap', () {
+      final controller = SplitWorkspaceController(initialNoteId: 'A.md');
+      addTearDown(controller.dispose);
+      final initialGeneration = controller.paneGeneration('pane-1');
+
+      controller.remapNoteIds(const {'A.md': 'folder/A.md'});
+      expect(controller.paneGeneration('pane-1'), initialGeneration);
+
+      controller.setPaneNote('pane-1', 'B.md');
+      final replacementGeneration = controller.paneGeneration('pane-1');
+      expect(replacementGeneration, isNot(initialGeneration));
+
+      controller.reset(initialNoteId: 'C.md');
+      expect(controller.focusedPaneId, 'pane-1');
+      expect(controller.paneGeneration('pane-1'), isNot(replacementGeneration));
+    });
+
     test(
       'close keeps one pane, compresses the tree, and focuses predictably',
       () {

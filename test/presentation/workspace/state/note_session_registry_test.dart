@@ -257,6 +257,34 @@ void main() {
       expect(registry.sessions, isEmpty);
     });
 
+    test('remove commit hook blocks registry mutation and disposal', () {
+      final registry = _createRegistry();
+      addTearDown(registry.dispose);
+      registry.upsert(_note('A.md', 'A'));
+      Object? mutationError;
+      Object? disposeError;
+
+      registry.remove(
+        const ['A.md'],
+        afterCommitBeforeNotify: () {
+          try {
+            registry.upsert(_note('B.md', 'B'));
+          } catch (error) {
+            mutationError = error;
+          }
+          try {
+            registry.dispose();
+          } catch (error) {
+            disposeError = error;
+          }
+        },
+      );
+
+      expect(mutationError, isA<StateError>());
+      expect(disposeError, isA<StateError>());
+      expect(registry.noteIds, isEmpty);
+    });
+
     test('dispose cannot notify or leak through a reentrant listener', () {
       final registry = _createRegistry();
       final sessionA = registry.upsert(_note('A.md', 'A'));

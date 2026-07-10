@@ -956,6 +956,253 @@ void main() {
     expect(find.textContaining('save failed'), findsOneWidget);
   });
 
+  testWidgets(
+    'close waiting on save does not close a pane rebound to another session',
+    (tester) async {
+      final vault = _DelayedUpdateVaultBackend(seedExampleData: false);
+      final beta = await vault.createNote(parentPath: '', title: 'Beta');
+      final gamma = await vault.createNote(parentPath: '', title: 'Gamma');
+      await vault.makeReadSynchronous(gamma.id);
+
+      await _pumpWorkspace(
+        tester,
+        vault: vault,
+        settingsStore: _FakeSettingsStore(
+          initialSettings: const SynapseSettings(
+            preferences: WorkspacePreferences(
+              defaultNoteMode: WorkspaceDefaultNoteMode.source,
+              semanticSearchEnabled: true,
+              pastedImageWidth: 480,
+              autoSaveDelayMillis: 10000,
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.byKey(Key('resource-row-${gamma.id}')));
+      await tester.pump(const Duration(milliseconds: 250));
+      await tester.tap(find.byKey(const Key('note-mode-source-pane-1')));
+      await tester.pump(const Duration(milliseconds: 250));
+      await tester.tap(find.byKey(const Key('split-pane-right-button')));
+      await tester.pump(const Duration(milliseconds: 250));
+      await tester.tap(find.byKey(Key('resource-row-${beta.id}')));
+      await tester.pump(const Duration(milliseconds: 250));
+      await tester.tap(find.byKey(const Key('note-mode-source-pane-2')));
+      await tester.pump(const Duration(milliseconds: 250));
+
+      await tester.tap(find.byKey(const Key('split-pane-pane-1')));
+      await tester.pump();
+      await _enterTextInLiveMarkdownBlock(
+        tester,
+        '# Gamma\ndirty Gamma session',
+        paneId: 1,
+      );
+      await tester.tap(find.byKey(const Key('split-pane-pane-2')));
+      await tester.pump();
+      await _enterTextInLiveMarkdownBlock(
+        tester,
+        '# Beta\nclose is waiting',
+        paneId: 2,
+      );
+      await tester.pump();
+
+      final gammaTap = tester
+          .widget<GestureDetector>(
+            find
+                .descendant(
+                  of: find.byKey(Key('resource-row-${gamma.id}')),
+                  matching: find.byType(GestureDetector),
+                )
+                .first,
+          )
+          .onTap!;
+      final closePane = tester
+          .widget<CupertinoButton>(
+            find
+                .descendant(
+                  of: find.byKey(const Key('close-split-pane-button')),
+                  matching: find.byType(CupertinoButton),
+                )
+                .first,
+          )
+          .onPressed!;
+
+      gammaTap();
+      await tester.pump();
+      await vault.updateStarted.future;
+      closePane();
+      await tester.pump();
+      vault.completeUpdate();
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const Key('split-pane-pane-2')), findsOneWidget);
+      expect(
+        find.descendant(
+          of: find.byKey(const Key('split-pane-title-pane-2')),
+          matching: find.text('Gamma'),
+        ),
+        findsOneWidget,
+      );
+      await tester.tap(find.byKey(const Key('note-mode-source-pane-2')));
+      await tester.pump(const Duration(milliseconds: 250));
+      final gammaController = _liveMarkdownDocumentController(
+        tester,
+        paneId: 1,
+      );
+      expect(
+        _liveMarkdownDocumentController(tester, paneId: 2),
+        same(gammaController),
+      );
+      expect(gammaController.text, contains('dirty Gamma session'));
+    },
+  );
+
+  testWidgets('folder rename remaps every open note session', (tester) async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final folder = await vault.createFolder(parentPath: '', title: '读书');
+    final alpha = await vault.createNote(
+      parentPath: folder.path,
+      title: 'Alpha',
+    );
+    final beta = await vault.createNote(parentPath: folder.path, title: 'Beta');
+
+    await _pumpWorkspace(tester, vault: vault);
+    await tester.tap(find.byKey(const Key('note-mode-source-pane-1')));
+    await tester.pump(const Duration(milliseconds: 250));
+    await tester.tap(find.byKey(const Key('split-pane-right-button')));
+    await tester.pump(const Duration(milliseconds: 250));
+    await tester.tap(find.byKey(Key('resource-row-${beta.id}')));
+    await tester.pump(const Duration(milliseconds: 250));
+    await tester.tap(find.byKey(const Key('note-mode-source-pane-2')));
+    await tester.pump(const Duration(milliseconds: 250));
+
+    final alphaController = _liveMarkdownDocumentController(tester, paneId: 1);
+    final betaController = _liveMarkdownDocumentController(tester, paneId: 2);
+
+    await tester.tap(
+      find.byKey(Key('resource-row-${folder.id}')),
+      buttons: kSecondaryMouseButton,
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(Key('folder-menu-rename-${folder.id}')));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byKey(const Key('resource-name-input')), '课程');
+    await tester.tap(find.text('重命名'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('note-mode-source-pane-2')));
+    await tester.pump(const Duration(milliseconds: 250));
+
+    expect(
+      _liveMarkdownDocumentController(tester, paneId: 1),
+      same(alphaController),
+    );
+    expect(
+      _liveMarkdownDocumentController(tester, paneId: 2),
+      same(betaController),
+    );
+    expect(find.byKey(Key('resource-row-${alpha.id}')), findsNothing);
+    expect(find.byKey(Key('resource-row-${beta.id}')), findsNothing);
+    expect(find.byKey(const Key('resource-row-课程/Alpha.md')), findsOneWidget);
+    expect(find.byKey(const Key('resource-row-课程/Beta.md')), findsOneWidget);
+  });
+
+  testWidgets('moving a duplicate-pane note updates every pane', (
+    tester,
+  ) async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final source = await vault.createFolder(parentPath: '', title: '读书');
+    final target = await vault.createFolder(parentPath: '', title: '课程');
+    final note = await vault.createNote(parentPath: source.path, title: '心经');
+
+    await _pumpWorkspace(tester, vault: vault);
+    await tester.tap(find.byKey(const Key('note-mode-source-pane-1')));
+    await tester.pump(const Duration(milliseconds: 250));
+    await tester.tap(find.byKey(const Key('split-pane-right-button')));
+    await tester.pump(const Duration(milliseconds: 250));
+    final sharedController = _liveMarkdownDocumentController(tester, paneId: 1);
+    expect(
+      _liveMarkdownDocumentController(tester, paneId: 2),
+      same(sharedController),
+    );
+
+    await tester.tap(
+      find.byKey(Key('resource-row-${note.id}')),
+      buttons: kSecondaryMouseButton,
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(Key('note-menu-move-${note.id}')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(Key('move-target-folder-${target.id}')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('移动'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('note-mode-source-pane-2')));
+    await tester.pump(const Duration(milliseconds: 250));
+
+    expect(
+      _liveMarkdownDocumentController(tester, paneId: 1),
+      same(sharedController),
+    );
+    expect(
+      _liveMarkdownDocumentController(tester, paneId: 2),
+      same(sharedController),
+    );
+    expect(find.byKey(Key('resource-row-${note.id}')), findsNothing);
+    expect(find.byKey(const Key('resource-row-课程/心经.md')), findsOneWidget);
+  });
+
+  testWidgets(
+    'deleting an open note cancels pending saves and clears every pane',
+    (tester) async {
+      final vault = _CountingUpdateVaultBackend(seedExampleData: false);
+      final alpha = await vault.createNote(parentPath: '', title: 'Alpha');
+      await vault.createNote(parentPath: '', title: 'Beta');
+
+      await _pumpWorkspace(tester, vault: vault);
+      await tester.tap(find.byKey(const Key('note-mode-source-pane-1')));
+      await tester.pump(const Duration(milliseconds: 250));
+      await tester.tap(find.byKey(const Key('split-pane-right-button')));
+      await tester.pump(const Duration(milliseconds: 250));
+      await _enterTextInLiveMarkdownBlock(
+        tester,
+        '# Alpha\npending delete',
+        paneId: 2,
+      );
+      await tester.pump();
+
+      await tester.tap(
+        find.byKey(Key('resource-row-${alpha.id}')),
+        buttons: kSecondaryMouseButton,
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(Key('note-menu-delete-${alpha.id}')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('删除'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 250));
+
+      expect(find.byKey(Key('resource-row-${alpha.id}')), findsNothing);
+      expect(
+        find.descendant(
+          of: find.byKey(const Key('split-pane-title-pane-1')),
+          matching: find.text('Alpha'),
+        ),
+        findsNothing,
+      );
+      expect(
+        find.descendant(
+          of: find.byKey(const Key('split-pane-title-pane-2')),
+          matching: find.text('Alpha'),
+        ),
+        findsNothing,
+      );
+
+      final updatesAfterDelete = vault.updateCalls;
+      await tester.pump(const Duration(milliseconds: 1001));
+      await tester.pump();
+      expect(vault.updateCalls, updatesAfterDelete);
+    },
+  );
+
   testWidgets('dragging a split divider resizes adjacent panes', (
     tester,
   ) async {
@@ -5147,9 +5394,23 @@ class _DelayedUpdateVaultBackend extends MemoryVaultBackend {
 
   final updateStarted = Completer<void>();
   final _updateRelease = Completer<void>();
+  final Map<String, VaultNoteContent> _synchronousReads = {};
+
+  Future<void> makeReadSynchronous(String noteId) async {
+    _synchronousReads[noteId] = await super.readNote(noteId);
+  }
 
   void completeUpdate() {
     _updateRelease.complete();
+  }
+
+  @override
+  Future<VaultNoteContent> readNote(String noteId) {
+    final synchronous = _synchronousReads[noteId];
+    if (synchronous != null) {
+      return SynchronousFuture<VaultNoteContent>(synchronous);
+    }
+    return super.readNote(noteId);
   }
 
   @override

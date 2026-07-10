@@ -15,7 +15,7 @@ final class NoteSessionRegistry extends ChangeNotifier {
   final Map<String, NoteDocumentSession> _sessions =
       <String, NoteDocumentSession>{};
   bool _isDisposed = false;
-  bool _isRemapTransactionActive = false;
+  bool _isMutationTransactionActive = false;
 
   NoteDocumentSession upsert(
     VaultNoteContent note, {
@@ -120,6 +120,12 @@ final class NoteSessionRegistry extends ChangeNotifier {
       );
     }
     if (moves.isEmpty) {
+      _isMutationTransactionActive = true;
+      try {
+        afterCommitBeforeNotify?.call();
+      } finally {
+        _isMutationTransactionActive = false;
+      }
       return;
     }
 
@@ -157,7 +163,7 @@ final class NoteSessionRegistry extends ChangeNotifier {
     ];
     Object? commitHookError;
     StackTrace? commitHookStackTrace;
-    _isRemapTransactionActive = true;
+    _isMutationTransactionActive = true;
     try {
       for (final update in preparedUpdates) {
         update.applySilently();
@@ -176,7 +182,7 @@ final class NoteSessionRegistry extends ChangeNotifier {
       }
       notifyListeners();
     } finally {
-      _isRemapTransactionActive = false;
+      _isMutationTransactionActive = false;
     }
     if (commitHookError case final error?) {
       Error.throwWithStackTrace(error, commitHookStackTrace!);
@@ -221,7 +227,7 @@ final class NoteSessionRegistry extends ChangeNotifier {
       ..[savedNote.id] = session;
     Object? commitHookError;
     StackTrace? commitHookStackTrace;
-    _isRemapTransactionActive = true;
+    _isMutationTransactionActive = true;
     try {
       preparedUpdate.applySilently();
       _sessions
@@ -236,7 +242,7 @@ final class NoteSessionRegistry extends ChangeNotifier {
       preparedUpdate.publish();
       notifyListeners();
     } finally {
-      _isRemapTransactionActive = false;
+      _isMutationTransactionActive = false;
     }
     if (commitHookError case final error?) {
       Error.throwWithStackTrace(error, commitHookStackTrace!);
@@ -246,6 +252,7 @@ final class NoteSessionRegistry extends ChangeNotifier {
   List<NoteDocumentSession> remove(
     Iterable<String> ids, {
     bool dispose = true,
+    VoidCallback? afterCommitBeforeNotify,
   }) {
     _ensureCanMutate();
     final removed = <NoteDocumentSession>[];
@@ -260,13 +267,32 @@ final class NoteSessionRegistry extends ChangeNotifier {
       }
       removed.add(session);
     }
-    if (dispose) {
-      for (final session in removed) {
-        session.dispose();
-      }
+    if (seen.isEmpty) {
+      return removed;
     }
-    if (removed.isNotEmpty) {
-      notifyListeners();
+    Object? commitHookError;
+    StackTrace? commitHookStackTrace;
+    _isMutationTransactionActive = true;
+    try {
+      try {
+        afterCommitBeforeNotify?.call();
+      } catch (error, stackTrace) {
+        commitHookError = error;
+        commitHookStackTrace = stackTrace;
+      }
+      if (dispose) {
+        for (final session in removed) {
+          session.dispose();
+        }
+      }
+      if (removed.isNotEmpty) {
+        notifyListeners();
+      }
+    } finally {
+      _isMutationTransactionActive = false;
+    }
+    if (commitHookError case final error?) {
+      Error.throwWithStackTrace(error, commitHookStackTrace!);
     }
     return removed;
   }
@@ -286,9 +312,9 @@ final class NoteSessionRegistry extends ChangeNotifier {
     if (_isDisposed) {
       return;
     }
-    if (_isRemapTransactionActive) {
+    if (_isMutationTransactionActive) {
       throw StateError(
-        'Cannot dispose the note session registry during a remap transaction.',
+        'Cannot dispose the note session registry during a mutation transaction.',
       );
     }
     _isDisposed = true;
@@ -308,9 +334,9 @@ final class NoteSessionRegistry extends ChangeNotifier {
 
   void _ensureCanMutate() {
     _ensureActive();
-    if (_isRemapTransactionActive) {
+    if (_isMutationTransactionActive) {
       throw StateError(
-        'Cannot mutate the note session registry during a remap transaction.',
+        'Cannot mutate the note session registry during a mutation transaction.',
       );
     }
   }

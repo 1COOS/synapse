@@ -11,6 +11,8 @@ typedef TimerFactory =
     Timer Function(Duration duration, void Function() action);
 typedef VisibleBodySerializer =
     String Function(VaultNoteContent note, String visibleBody);
+typedef NoteSaveResultCallback =
+    FutureOr<void> Function(NoteSaveResult result, SaveRequest request);
 
 enum NoteSaveReason { debounce, explicit, mutationBarrier }
 
@@ -82,7 +84,7 @@ final class NoteSaveCoordinator {
     required VaultBackend Function() vault,
     required Duration Function() debounceDuration,
     required VisibleBodySerializer serializeVisibleBody,
-    required void Function(NoteSaveResult result, SaveRequest request) onResult,
+    required NoteSaveResultCallback onResult,
     required VoidCallback onStateChanged,
     TimerFactory? timerFactory,
   }) : _sessions = sessions,
@@ -97,7 +99,7 @@ final class NoteSaveCoordinator {
   final VaultBackend Function() _vault;
   final Duration Function() _debounceDuration;
   final VisibleBodySerializer _serializeVisibleBody;
-  final void Function(NoteSaveResult result, SaveRequest request) _onResult;
+  final NoteSaveResultCallback _onResult;
   final VoidCallback _onStateChanged;
   final TimerFactory _timerFactory;
   final Map<NoteDocumentSession, Timer> _timers =
@@ -313,7 +315,7 @@ final class NoteSaveCoordinator {
 
   Future<void> _runFlight(_SaveFlight flight) async {
     final backendResult = await _performBackendSave(flight);
-    _finishFlight(flight, backendResult);
+    await _finishFlight(flight, backendResult);
   }
 
   Future<NoteSaveResult> _performBackendSave(_SaveFlight flight) async {
@@ -361,7 +363,10 @@ final class NoteSaveCoordinator {
     }
   }
 
-  void _finishFlight(_SaveFlight flight, NoteSaveResult backendResult) {
+  Future<void> _finishFlight(
+    _SaveFlight flight,
+    NoteSaveResult backendResult,
+  ) async {
     final session = flight.session;
     if (!identical(_flights[session], flight)) {
       _complete(flight.completer, backendResult);
@@ -406,7 +411,7 @@ final class NoteSaveCoordinator {
       session.setSavePhase(NoteSavePhase.failed, error: result.error);
     }
     try {
-      _onResult(result, flight.request);
+      await _onResult(result, flight.request);
     } catch (error, stackTrace) {
       result = _copyResult(result, error: error, stackTrace: stackTrace);
       if (session.savePhase != NoteSavePhase.disposed) {
