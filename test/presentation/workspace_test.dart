@@ -701,6 +701,71 @@ void main() {
   });
 
   testWidgets(
+    'title autosave cannot overwrite a newer structural resource tree',
+    (tester) async {
+      final vault = _TitleSaveStructuralRaceVaultBackend(
+        seedExampleData: false,
+      );
+      addTearDown(vault.releaseFolderRename);
+      final folder = await vault.createFolder(
+        parentPath: '',
+        title: 'Old Folder',
+      );
+      await vault.createNote(parentPath: '', title: 'Alpha');
+
+      await _pumpWorkspace(
+        tester,
+        vault: vault,
+        settingsStore: _FakeSettingsStore(
+          initialSettings: const SynapseSettings(
+            preferences: WorkspacePreferences(
+              defaultNoteMode: WorkspaceDefaultNoteMode.source,
+              semanticSearchEnabled: true,
+              pastedImageWidth: 480,
+              autoSaveDelayMillis: 10000,
+            ),
+          ),
+        ),
+      );
+      await _switchToSourceMode(tester);
+      await _enterTextInLiveMarkdownBlock(tester, '# Renamed Alpha\nbody');
+      await tester.tap(
+        find.byKey(Key('resource-row-${folder.id}')),
+        buttons: kSecondaryMouseButton,
+      );
+      await tester.pump(const Duration(milliseconds: 300));
+      await tester.tap(find.byKey(Key('folder-menu-rename-${folder.id}')));
+      await tester.pump(const Duration(milliseconds: 300));
+      await tester.enterText(
+        find.byKey(const Key('resource-name-input')),
+        'New Folder',
+      );
+      await tester.tap(find.text('重命名'));
+      await tester.pump();
+      await vault.folderRenameStarted.future;
+
+      await tester.pump(const Duration(milliseconds: 10000));
+      await tester.pump();
+      await vault.titleRenameCompleted.future;
+      await tester.pump(const Duration(milliseconds: 300));
+
+      vault.releaseFolderRename();
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const Key('resource-row-New Folder')), findsOneWidget);
+      expect(find.byKey(Key('resource-row-${folder.id}')), findsNothing);
+      expect(
+        find.byKey(const Key('resource-row-Renamed Alpha.md')),
+        findsOneWidget,
+      );
+      expect(
+        _resourceRowBackgroundColor(tester, 'New Folder'),
+        isNot(const Color(0x00000000)),
+      );
+    },
+  );
+
+  testWidgets(
     'title rename invalidates search and remaps open note materials',
     (tester) async {
       final vault = MemoryVaultBackend(seedExampleData: false);
@@ -2247,30 +2312,112 @@ void main() {
     },
   );
 
+  testWidgets('delayed delete ignores resource selection while busy', (
+    tester,
+  ) async {
+    final vault = _DelayedDeleteNoteVaultBackend(seedExampleData: false);
+    addTearDown(vault.completeDelete);
+    final folder = await vault.createFolder(parentPath: '', title: 'Keep');
+    final alpha = await vault.createNote(parentPath: '', title: 'Alpha');
+    final beta = await vault.createNote(parentPath: '', title: 'Beta');
+
+    await _pumpWorkspace(tester, vault: vault);
+    await tester.tap(find.byKey(const Key('split-pane-right-button')));
+    await tester.pump(const Duration(milliseconds: 250));
+    final selectBeta = tester
+        .widget<GestureDetector>(
+          find.descendant(
+            of: find.byKey(Key('resource-row-${beta.id}')),
+            matching: find.byType(GestureDetector),
+          ),
+        )
+        .onTap!;
+    final selectFolder = tester
+        .widget<GestureDetector>(
+          find.descendant(
+            of: find.byKey(Key('resource-row-${folder.id}')),
+            matching: find.byType(GestureDetector),
+          ),
+        )
+        .onTap!;
+
+    await tester.tap(
+      find.byKey(Key('resource-row-${alpha.id}')),
+      buttons: kSecondaryMouseButton,
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(Key('note-menu-delete-${alpha.id}')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('删除'));
+    await tester.pump();
+    await vault.deleteStarted.future;
+    await tester.pump(const Duration(milliseconds: 300));
+
+    selectBeta();
+    await tester.pump(const Duration(milliseconds: 300));
+    selectFolder();
+    await tester.pump();
+    expect(
+      find.descendant(
+        of: find.byKey(const Key('split-pane-title-pane-2')),
+        matching: find.text('Alpha'),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      _resourceRowBackgroundColor(tester, folder.id),
+      const Color(0x00000000),
+    );
+
+    vault.completeDelete();
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(Key('resource-row-${alpha.id}')), findsNothing);
+    expect(
+      find.descendant(
+        of: find.byKey(const Key('split-pane-title-pane-2')),
+        matching: find.text('Beta'),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      _resourceRowBackgroundColor(tester, folder.id),
+      const Color(0x00000000),
+    );
+  });
+
   testWidgets(
-    'delayed delete preserves an unaffected resource selected during backend await',
+    'resource switching cannot save a quiescing note during delayed delete',
     (tester) async {
       final vault = _DelayedDeleteNoteVaultBackend(seedExampleData: false);
       addTearDown(vault.completeDelete);
-      final folder = await vault.createFolder(parentPath: '', title: 'Keep');
       final alpha = await vault.createNote(parentPath: '', title: 'Alpha');
       final beta = await vault.createNote(parentPath: '', title: 'Beta');
 
-      await _pumpWorkspace(tester, vault: vault);
-      await tester.tap(find.byKey(const Key('split-pane-right-button')));
-      await tester.pump(const Duration(milliseconds: 250));
+      await _pumpWorkspace(
+        tester,
+        vault: vault,
+        settingsStore: _FakeSettingsStore(
+          initialSettings: const SynapseSettings(
+            preferences: WorkspacePreferences(
+              defaultNoteMode: WorkspaceDefaultNoteMode.source,
+              semanticSearchEnabled: true,
+              pastedImageWidth: 480,
+              autoSaveDelayMillis: 10000,
+            ),
+          ),
+        ),
+      );
+      await _enterTextInLiveMarkdownBlock(
+        tester,
+        '# Alpha\ndiscard this edit',
+        paneId: 1,
+      );
+      await tester.pump();
       final selectBeta = tester
           .widget<GestureDetector>(
             find.descendant(
               of: find.byKey(Key('resource-row-${beta.id}')),
-              matching: find.byType(GestureDetector),
-            ),
-          )
-          .onTap!;
-      final selectFolder = tester
-          .widget<GestureDetector>(
-            find.descendant(
-              of: find.byKey(Key('resource-row-${folder.id}')),
               matching: find.byType(GestureDetector),
             ),
           )
@@ -2286,22 +2433,17 @@ void main() {
       await tester.tap(find.text('删除'));
       await tester.pump();
       await vault.deleteStarted.future;
-      await tester.pump(const Duration(milliseconds: 300));
 
       selectBeta();
-      await tester.pumpAndSettle();
-      selectFolder();
-      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+
+      expect(vault.updatedNoteIds, isEmpty);
       expect(
         find.descendant(
-          of: find.byKey(const Key('split-pane-title-pane-2')),
-          matching: find.text('Beta'),
+          of: find.byKey(const Key('split-pane-title-pane-1')),
+          matching: find.text('Alpha'),
         ),
         findsOneWidget,
-      );
-      expect(
-        _resourceRowBackgroundColor(tester, folder.id),
-        isNot(const Color(0x00000000)),
       );
 
       vault.completeDelete();
@@ -2310,15 +2452,12 @@ void main() {
       expect(find.byKey(Key('resource-row-${alpha.id}')), findsNothing);
       expect(
         find.descendant(
-          of: find.byKey(const Key('split-pane-title-pane-2')),
+          of: find.byKey(const Key('split-pane-title-pane-1')),
           matching: find.text('Beta'),
         ),
         findsOneWidget,
       );
-      expect(
-        _resourceRowBackgroundColor(tester, folder.id),
-        isNot(const Color(0x00000000)),
-      );
+      expect(vault.updatedNoteIds, isEmpty);
     },
   );
 
@@ -5999,11 +6138,50 @@ class _GatedCloseVaultBackend extends MemoryVaultBackend {
   }
 }
 
+class _TitleSaveStructuralRaceVaultBackend extends MemoryVaultBackend {
+  _TitleSaveStructuralRaceVaultBackend({super.seedExampleData});
+
+  final folderRenameStarted = Completer<void>();
+  final titleRenameCompleted = Completer<void>();
+  final _folderRenameRelease = Completer<void>();
+
+  void releaseFolderRename() {
+    if (!_folderRenameRelease.isCompleted) {
+      _folderRenameRelease.complete();
+    }
+  }
+
+  @override
+  Future<VaultNote> renameNote({
+    required String noteId,
+    required String title,
+  }) async {
+    final renamed = await super.renameNote(noteId: noteId, title: title);
+    if (noteId == 'Alpha.md' && !titleRenameCompleted.isCompleted) {
+      titleRenameCompleted.complete();
+    }
+    return renamed;
+  }
+
+  @override
+  Future<VaultResourceNode> renameFolder({
+    required String folderPath,
+    required String title,
+  }) async {
+    if (!folderRenameStarted.isCompleted) {
+      folderRenameStarted.complete();
+    }
+    await _folderRenameRelease.future;
+    return super.renameFolder(folderPath: folderPath, title: title);
+  }
+}
+
 class _DelayedDeleteNoteVaultBackend extends MemoryVaultBackend {
   _DelayedDeleteNoteVaultBackend({super.seedExampleData});
 
   final deleteStarted = Completer<void>();
   final _deleteRelease = Completer<void>();
+  final List<String> updatedNoteIds = <String>[];
 
   void completeDelete() {
     if (!_deleteRelease.isCompleted) {
@@ -6018,6 +6196,15 @@ class _DelayedDeleteNoteVaultBackend extends MemoryVaultBackend {
     }
     await _deleteRelease.future;
     return super.deleteNote(noteId);
+  }
+
+  @override
+  Future<VaultNoteContent> updateMarkdown({
+    required String noteId,
+    required String markdown,
+  }) async {
+    updatedNoteIds.add(noteId);
+    return super.updateMarkdown(noteId: noteId, markdown: markdown);
   }
 }
 

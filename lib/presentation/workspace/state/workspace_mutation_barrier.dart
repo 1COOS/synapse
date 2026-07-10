@@ -129,10 +129,20 @@ final class WorkspaceMutationBarrier {
     VaultMutationDelta<T> delta, {
     NoteDocumentSession? originatingSession,
     FutureOr<void> Function(VaultMutationDelta<T> delta)? onCommitted,
+  }) => commitPrepared<T>(
+    () => delta,
+    originatingSession: originatingSession,
+    onCommitted: onCommitted,
+  );
+
+  Future<WorkspaceMutationResult<T>> commitPrepared<T>(
+    FutureOr<VaultMutationDelta<T>> Function() prepare, {
+    NoteDocumentSession? originatingSession,
+    FutureOr<void> Function(VaultMutationDelta<T> delta)? onCommitted,
   }) {
     if (originatingSession != null &&
         _activeSessions.contains(originatingSession)) {
-      return _commitAndNotify(delta, onCommitted: onCommitted);
+      return _prepareCommitAndNotify(prepare, onCommitted: onCommitted);
     }
     if (originatingSession != null &&
         _reservedSessions.containsKey(originatingSession)) {
@@ -143,7 +153,10 @@ final class WorkspaceMutationBarrier {
           apply: () async {
             try {
               completer.complete(
-                await _commitAndNotify(delta, onCommitted: onCommitted),
+                await _prepareCommitAndNotify(
+                  prepare,
+                  onCommitted: onCommitted,
+                ),
               );
             } catch (error, stackTrace) {
               completer.completeError(error, stackTrace);
@@ -154,7 +167,7 @@ final class WorkspaceMutationBarrier {
       return completer.future;
     }
     return _synchronized(
-      () => _commitAndNotify(delta, onCommitted: onCommitted),
+      () => _prepareCommitAndNotify(prepare, onCommitted: onCommitted),
     );
   }
 
@@ -245,6 +258,19 @@ final class WorkspaceMutationBarrier {
       return MutationFailed<T>(error: error, stackTrace: stackTrace);
     }
     return MutationCommitted<T>(delta);
+  }
+
+  Future<WorkspaceMutationResult<T>> _prepareCommitAndNotify<T>(
+    FutureOr<VaultMutationDelta<T>> Function() prepare, {
+    FutureOr<void> Function(VaultMutationDelta<T> delta)? onCommitted,
+  }) async {
+    late final VaultMutationDelta<T> delta;
+    try {
+      delta = await prepare();
+    } catch (error, stackTrace) {
+      return MutationFailed<T>(error: error, stackTrace: stackTrace);
+    }
+    return _commitAndNotify(delta, onCommitted: onCommitted);
   }
 
   void _commitDelta<T>(VaultMutationDelta<T> delta) {

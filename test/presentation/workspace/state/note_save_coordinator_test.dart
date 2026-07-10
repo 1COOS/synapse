@@ -278,7 +278,6 @@ void main() {
 
       expect(result.succeeded, isTrue);
       expect(result.idChanged, isTrue);
-      expect(result.resources, isNotNull);
       expect(harness.registry.sessionFor(oldNoteId), isNull);
       expect(harness.registry.sessionFor(result.savedNote!.id), same(session));
       expect(session.controller, same(controller));
@@ -307,6 +306,51 @@ void main() {
       expect(vault.updateCalls, 0);
       expect(session.controller.text, '# Alpha\ndiscard me');
       expect(session.savePhase, NoteSavePhase.dirty);
+    });
+
+    test(
+      'ordinary flush is blocked by an active quiescence lease without writing',
+      () async {
+        final vault = _TrackingVault();
+        final harness = _Harness(vault, scheduleEdits: false);
+        addTearDown(harness.dispose);
+        final session = await harness.createSession('Alpha');
+        vault.resetTracking();
+        session.controller.text = '# Alpha\ndirty during mutation';
+        final lease = await harness.coordinator.acquireQuiescence([
+          session,
+        ], disposition: DirtyDisposition.discard);
+        addTearDown(() => lease.release(resumeDirty: false));
+
+        final report = await harness.coordinator
+            .flush([session])
+            .timeout(const Duration(seconds: 1));
+
+        expect(report.succeeded, isFalse);
+        expect(report.blockedByQuiescence, isTrue);
+        expect(report.blockedSessions, [same(session)]);
+        expect(report.results, isEmpty);
+        expect(vault.updateCalls, 0);
+        expect(session.isDirty, isTrue);
+      },
+    );
+
+    test('quiescence flush saves through its private lease permit', () async {
+      final vault = _TrackingVault();
+      final harness = _Harness(vault, scheduleEdits: false);
+      addTearDown(harness.dispose);
+      final session = await harness.createSession('Alpha');
+      vault.resetTracking();
+      session.controller.text = '# Alpha\nflush inside mutation';
+
+      final lease = await harness.coordinator.acquireQuiescence([
+        session,
+      ], disposition: DirtyDisposition.flush);
+      addTearDown(lease.release);
+
+      expect(lease.report.succeeded, isTrue);
+      expect(vault.savedNoteIds, ['Alpha.md']);
+      expect(session.isDirty, isFalse);
     });
 
     test(

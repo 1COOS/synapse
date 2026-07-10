@@ -78,6 +78,45 @@ void main() {
       ]);
     });
 
+    test(
+      'prepared commit reads state only after the preceding mutation commits',
+      () async {
+        final harness = _BarrierHarness();
+        addTearDown(harness.dispose);
+        final executeStarted = Completer<void>();
+        final releaseExecute = Completer<void>();
+        var resourceTreeVersion = 'old-tree';
+
+        final mutation = harness.barrier.run<void>(
+          WorkspaceMutationPlan<void>(
+            affectedNoteIds: const {},
+            dirtyDisposition: DirtyDisposition.flush,
+            execute: () async {
+              executeStarted.complete();
+              await releaseExecute.future;
+              return const VaultMutationDelta<void>(value: null);
+            },
+          ),
+          onCommitted: (_) => resourceTreeVersion = 'moved-tree',
+        );
+        await executeStarted.future;
+        var prepared = false;
+        final saveCommit = harness.barrier.commitPrepared<String>(() async {
+          prepared = true;
+          return VaultMutationDelta<String>(value: resourceTreeVersion);
+        });
+        await _drainEventQueue();
+
+        expect(prepared, isFalse);
+        releaseExecute.complete();
+
+        expect(await mutation, isA<MutationCommitted<void>>());
+        final committed = await saveCommit;
+        expect(committed, isA<MutationCommitted<String>>());
+        expect((committed as MutationCommitted<String>).value, 'moved-tree');
+      },
+    );
+
     test('commits remaps to the registry and every split pane', () async {
       final harness = _BarrierHarness(initialNoteId: 'A.md');
       addTearDown(harness.dispose);
@@ -188,8 +227,8 @@ void main() {
             if (saved == null) {
               return;
             }
-            await barrier.commit<void>(
-              VaultMutationDelta<void>(
+            await barrier.commitPrepared<void>(
+              () => VaultMutationDelta<void>(
                 value: null,
                 remappedNoteIds: {result.oldNoteId: saved.id},
                 refreshedNotesByNewId: {saved.id: saved},
@@ -254,8 +293,8 @@ void main() {
             if (saved == null) {
               return;
             }
-            final commitResult = await barrier.commit<void>(
-              VaultMutationDelta<void>(
+            final commitResult = await barrier.commitPrepared<void>(
+              () => VaultMutationDelta<void>(
                 value: null,
                 remappedNoteIds: {result.oldNoteId: saved.id},
                 refreshedNotesByNewId: {saved.id: saved},

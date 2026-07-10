@@ -50,7 +50,6 @@ final class NoteSaveResult {
     required this.oldNoteId,
     required this.bodySnapshot,
     required this.savedNote,
-    required this.resources,
     required this.error,
     required this.stackTrace,
     required this.stillDirty,
@@ -60,7 +59,6 @@ final class NoteSaveResult {
   final String oldNoteId;
   final String bodySnapshot;
   final VaultNoteContent? savedNote;
-  final List<VaultResourceNode>? resources;
   final Object? error;
   final StackTrace? stackTrace;
   final bool stillDirty;
@@ -71,23 +69,33 @@ final class NoteSaveResult {
 }
 
 final class FlushReport {
-  const FlushReport(this.results);
+  const FlushReport(
+    this.results, {
+    this.blockedSessions = const <NoteDocumentSession>[],
+  });
 
   final List<NoteSaveResult> results;
+  final List<NoteDocumentSession> blockedSessions;
 
-  bool get succeeded => results.every((result) => result.succeeded);
+  bool get blockedByQuiescence => blockedSessions.isNotEmpty;
+
+  bool get succeeded =>
+      !blockedByQuiescence && results.every((result) => result.succeeded);
 }
 
 final class NoteSaveQuiescenceLease {
   NoteSaveQuiescenceLease._({
     required NoteSaveCoordinator coordinator,
     required List<NoteDocumentSession> sessions,
+    required _QuiescencePermit permit,
     required this.report,
   }) : _coordinator = coordinator,
-       _sessions = sessions;
+       _sessions = sessions,
+       _permit = permit;
 
   final NoteSaveCoordinator _coordinator;
   final List<NoteDocumentSession> _sessions;
+  final _QuiescencePermit _permit;
   final FlushReport report;
   bool _isReleased = false;
 
@@ -98,8 +106,22 @@ final class NoteSaveQuiescenceLease {
       return;
     }
     _isReleased = true;
+    _permit.invalidate();
     _coordinator._releaseQuiescence(_sessions, resumeDirty: resumeDirty);
   }
+}
+
+final class _QuiescencePermit {
+  _QuiescencePermit(Iterable<NoteDocumentSession> sessions)
+    : _sessions = Set<NoteDocumentSession>.identity()..addAll(sessions);
+
+  final Set<NoteDocumentSession> _sessions;
+  bool _isActive = true;
+
+  bool allows(NoteDocumentSession session) =>
+      _isActive && _sessions.contains(session);
+
+  void invalidate() => _isActive = false;
 }
 
 final class NoteSaveCoordinator {
@@ -197,6 +219,19 @@ final class NoteSaveCoordinator {
     NoteSaveReason reason = NoteSaveReason.explicit,
     bool rescheduleIfStillDirty = false,
     String? successMessage,
+  }) => _save(
+    session,
+    reason: reason,
+    rescheduleIfStillDirty: rescheduleIfStillDirty,
+    successMessage: successMessage,
+  );
+
+  Future<NoteSaveResult> _save(
+    NoteDocumentSession session, {
+    required NoteSaveReason reason,
+    required bool rescheduleIfStillDirty,
+    String? successMessage,
+    _QuiescencePermit? permit,
   }) {
     if (session.savePhase == NoteSavePhase.disposed) {
       return Future<NoteSaveResult>.value(
@@ -214,7 +249,7 @@ final class NoteSaveCoordinator {
         ),
       );
     }
-    if (_isQuiescing(session) && reason != NoteSaveReason.mutationBarrier) {
+    if (_isQuiescing(session) && !(permit?.allows(session) ?? false)) {
       cancel(session);
       return Future<NoteSaveResult>.value(_suppressedResult(session));
     }
@@ -248,8 +283,15 @@ final class NoteSaveCoordinator {
 
   Future<FlushReport> flush(
     Iterable<NoteDocumentSession> targetSessions, {
-    NoteSaveReason reason = NoteSaveReason.mutationBarrier,
+    NoteSaveReason reason = NoteSaveReason.explicit,
     String? successMessage,
+  }) => _flush(targetSessions, reason: reason, successMessage: successMessage);
+
+  Future<FlushReport> _flush(
+    Iterable<NoteDocumentSession> targetSessions, {
+    required NoteSaveReason reason,
+    String? successMessage,
+    _QuiescencePermit? permit,
   }) async {
     final results = <NoteSaveResult>[];
     for (final session in targetSessions) {
@@ -268,10 +310,18 @@ final class NoteSaveCoordinator {
         if (!session.isDirty) {
           break;
         }
-        final result = await save(
+        if (_isQuiescing(session) && !(permit?.allows(session) ?? false)) {
+          return FlushReport(
+            List<NoteSaveResult>.unmodifiable(results),
+            blockedSessions: <NoteDocumentSession>[session],
+          );
+        }
+        final result = await _save(
           session,
           reason: reason,
+          rescheduleIfStillDirty: false,
           successMessage: successMessage,
+          permit: permit,
         );
         results.add(result);
         if (!result.succeeded) {
@@ -283,7 +333,7 @@ final class NoteSaveCoordinator {
   }
 
   Future<FlushReport> flushAll({
-    NoteSaveReason reason = NoteSaveReason.mutationBarrier,
+    NoteSaveReason reason = NoteSaveReason.explicit,
     String? successMessage,
   }) {
     return flush(
@@ -323,14 +373,16 @@ final class NoteSaveCoordinator {
       for (final session in targetSessions)
         if (seen.add(session)) session,
     ];
+    final permit = _QuiescencePermit(sessions);
     _holdQuiescence(sessions);
     try {
       late final FlushReport report;
       if (disposition == DirtyDisposition.flush) {
-        report = await flush(
+        report = await _flush(
           sessions,
           reason: reason,
           successMessage: successMessage,
+          permit: permit,
         );
       } else {
         final results = <NoteSaveResult>[];
@@ -350,9 +402,11 @@ final class NoteSaveCoordinator {
       return NoteSaveQuiescenceLease._(
         coordinator: this,
         sessions: List<NoteDocumentSession>.unmodifiable(sessions),
+        permit: permit,
         report: report,
       );
     } catch (_) {
+      permit.invalidate();
       _releaseQuiescence(sessions, resumeDirty: true);
       rethrow;
     }
@@ -394,21 +448,18 @@ final class NoteSaveCoordinator {
         noteId: oldNoteId,
         markdown: markdown,
       );
-      List<VaultResourceNode>? resources;
       if (savedNote.title != noteSnapshot.title) {
         final renamed = await vault.renameNote(
           noteId: oldNoteId,
           title: savedNote.title,
         );
         savedNote = await vault.readNote(renamed.id);
-        resources = await vault.listResources();
       }
       return NoteSaveResult(
         session: session,
         oldNoteId: oldNoteId,
         bodySnapshot: bodySnapshot,
         savedNote: savedNote,
-        resources: resources,
         error: null,
         stackTrace: null,
         stillDirty: false,
@@ -419,7 +470,6 @@ final class NoteSaveCoordinator {
         oldNoteId: oldNoteId,
         bodySnapshot: bodySnapshot,
         savedNote: null,
-        resources: null,
         error: error,
         stackTrace: stackTrace,
         stillDirty: false,
@@ -536,7 +586,6 @@ final class NoteSaveCoordinator {
       oldNoteId: session.noteId,
       bodySnapshot: session.controller.text,
       savedNote: null,
-      resources: null,
       error: null,
       stackTrace: null,
       stillDirty: false,
@@ -549,7 +598,6 @@ final class NoteSaveCoordinator {
       oldNoteId: session.noteId,
       bodySnapshot: session.controller.text,
       savedNote: null,
-      resources: null,
       error: null,
       stackTrace: null,
       stillDirty: session.isDirty,
@@ -566,7 +614,6 @@ final class NoteSaveCoordinator {
       oldNoteId: session.noteId,
       bodySnapshot: session.controller.text,
       savedNote: null,
-      resources: null,
       error: error,
       stackTrace: stackTrace ?? StackTrace.current,
       stillDirty: session.isDirty,
@@ -582,7 +629,6 @@ final class NoteSaveCoordinator {
       oldNoteId: session.noteId,
       bodySnapshot: '',
       savedNote: null,
-      resources: null,
       error: error,
       stackTrace: StackTrace.current,
       stillDirty: false,
@@ -746,7 +792,6 @@ NoteSaveResult _copyResult(
     oldNoteId: result.oldNoteId,
     bodySnapshot: result.bodySnapshot,
     savedNote: result.savedNote,
-    resources: result.resources,
     error: error ?? result.error,
     stackTrace: stackTrace ?? result.stackTrace,
     stillDirty: stillDirty ?? result.stillDirty,

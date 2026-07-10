@@ -1082,6 +1082,9 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   }
 
   Future<void> _selectResource(VaultResourceNode resource) async {
+    if (_busy) {
+      return;
+    }
     if (resource.isFolder) {
       setState(() {
         _selectedResource = resource;
@@ -1106,6 +1109,9 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   }
 
   Future<void> _createFolder({String parentPath = ''}) async {
+    if (_busy) {
+      return;
+    }
     final title = await _promptResourceName(
       title: '新建文件夹',
       placeholder: '文件夹名称',
@@ -1130,6 +1136,9 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   }
 
   Future<void> _createNote({String parentPath = ''}) async {
+    if (_busy) {
+      return;
+    }
     await _runBusy(() async {
       if (!await _flushPendingMarkdown()) {
         return;
@@ -1340,12 +1349,14 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     if (!stillOpen) {
       return;
     }
-    final mutationResult = await _workspaceMutationBarrier.commit<void>(
-      VaultMutationDelta<void>(
+    final mutationResult = await _workspaceMutationBarrier.commitPrepared<void>(
+      () async => VaultMutationDelta<void>(
         value: null,
         remappedNoteIds: {result.oldNoteId: savedNote.id},
         refreshedNotesByNewId: {savedNote.id: savedNote},
-        resources: result.resources,
+        resources: result.idChanged
+            ? await _requireVault().listResources()
+            : null,
       ),
       originatingSession: session,
       onCommitted: (delta) {
@@ -1670,6 +1681,9 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   }
 
   Future<void> _deleteResource(VaultResourceNode resource) async {
+    if (_busy) {
+      return;
+    }
     final paneTarget = _captureFocusedPaneMutationTarget();
     final affectedSessions =
         (resource.isFolder
@@ -1812,7 +1826,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   }
 
   Future<void> _renameFolder(VaultResourceNode folder) async {
-    if (!folder.isFolder) {
+    if (_busy || !folder.isFolder) {
       return;
     }
     final affectedSessions = _noteSessionRegistry
@@ -1894,14 +1908,14 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   }
 
   Future<void> _createSiblingNote(VaultResourceNode note) async {
-    if (!note.isNote) {
+    if (_busy || !note.isNote) {
       return;
     }
     await _createNote(parentPath: _parentFolderPath(note.path));
   }
 
   Future<void> _copyNote(VaultResourceNode note) async {
-    if (!note.isNote) {
+    if (_busy || !note.isNote) {
       return;
     }
     final sourceSession = _noteSessionRegistry.sessionFor(note.id);
@@ -1965,7 +1979,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   }
 
   Future<void> _moveNote(VaultResourceNode note) async {
-    if (!note.isNote) {
+    if (_busy || !note.isNote) {
       return;
     }
     final sourceSession = _noteSessionRegistry.sessionFor(note.id);
