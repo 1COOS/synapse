@@ -15,12 +15,13 @@ final class NoteSessionRegistry extends ChangeNotifier {
   final Map<String, NoteDocumentSession> _sessions =
       <String, NoteDocumentSession>{};
   bool _isDisposed = false;
+  bool _isRemapTransactionActive = false;
 
   NoteDocumentSession upsert(
     VaultNoteContent note, {
     bool preserveDirtyBody = true,
   }) {
-    _ensureActive();
+    _ensureCanMutate();
     final existing = _sessions[note.id];
     if (existing != null) {
       existing.replaceFromVault(note, preserveDirtyBody: preserveDirtyBody);
@@ -73,8 +74,10 @@ final class NoteSessionRegistry extends ChangeNotifier {
   void remapNoteIds(
     Map<String, String> idMap, {
     required Map<String, VaultNoteContent> refreshedNotesByNewId,
+    bool preserveDirtyBody = true,
+    VoidCallback? afterCommitBeforeNotify,
   }) {
-    _ensureActive();
+    _ensureCanMutate();
     if (idMap.isEmpty) {
       return;
     }
@@ -145,23 +148,46 @@ final class NoteSessionRegistry extends ChangeNotifier {
       remapped[id] = entry.value;
     }
 
-    for (final move in moves.values) {
-      _visibleBody(move.refreshedNote.markdown);
+    final preparedUpdates = <PreparedNoteDocumentUpdate>[
+      for (final move in moves.values)
+        move.session.prepareReplaceFromVault(
+          move.refreshedNote,
+          preserveDirtyBody: preserveDirtyBody,
+        ),
+    ];
+    Object? commitHookError;
+    StackTrace? commitHookStackTrace;
+    _isRemapTransactionActive = true;
+    try {
+      for (final update in preparedUpdates) {
+        update.applySilently();
+      }
+      _sessions
+        ..clear()
+        ..addAll(remapped);
+      try {
+        afterCommitBeforeNotify?.call();
+      } catch (error, stackTrace) {
+        commitHookError = error;
+        commitHookStackTrace = stackTrace;
+      }
+      for (final update in preparedUpdates) {
+        update.publish();
+      }
+      notifyListeners();
+    } finally {
+      _isRemapTransactionActive = false;
     }
-    for (final move in moves.values) {
-      move.session.replaceFromVault(move.refreshedNote);
+    if (commitHookError case final error?) {
+      Error.throwWithStackTrace(error, commitHookStackTrace!);
     }
-    _sessions
-      ..clear()
-      ..addAll(remapped);
-    notifyListeners();
   }
 
   List<NoteDocumentSession> remove(
     Iterable<String> ids, {
     bool dispose = true,
   }) {
-    _ensureActive();
+    _ensureCanMutate();
     final removed = <NoteDocumentSession>[];
     final seen = <String>{};
     for (final id in ids) {
@@ -186,12 +212,12 @@ final class NoteSessionRegistry extends ChangeNotifier {
   }
 
   void retainOnly(Set<String> ids) {
-    _ensureActive();
+    _ensureCanMutate();
     remove(_sessions.keys.where((id) => !ids.contains(id)).toList());
   }
 
   void clear({bool dispose = true}) {
-    _ensureActive();
+    _ensureCanMutate();
     remove(_sessions.keys.toList(), dispose: dispose);
   }
 
@@ -200,14 +226,32 @@ final class NoteSessionRegistry extends ChangeNotifier {
     if (_isDisposed) {
       return;
     }
-    clear();
+    if (_isRemapTransactionActive) {
+      throw StateError(
+        'Cannot dispose the note session registry during a remap transaction.',
+      );
+    }
     _isDisposed = true;
+    final sessions = _sessions.values.toList(growable: false);
+    _sessions.clear();
+    for (final session in sessions) {
+      session.dispose();
+    }
     super.dispose();
   }
 
   void _ensureActive() {
     if (_isDisposed) {
       throw StateError('Note session registry has been disposed.');
+    }
+  }
+
+  void _ensureCanMutate() {
+    _ensureActive();
+    if (_isRemapTransactionActive) {
+      throw StateError(
+        'Cannot mutate the note session registry during a remap transaction.',
+      );
     }
   }
 }

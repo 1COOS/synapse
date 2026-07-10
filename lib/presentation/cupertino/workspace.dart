@@ -1378,27 +1378,45 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
           _noteSessionRegistry.sessionFor(noteId) == session ||
           _noteSessionRegistry.sessionFor(updated.id) == session;
       final stillDirty = stillOpen && session.controller.text != body;
-      setState(() {
-        if (resources != null) {
-          _resources = resources;
-        }
-        if (stillOpen) {
-          if (noteIdChanged) {
-            _noteSessionRegistry.remapNoteIds(
-              {noteId: updated.id},
-              refreshedNotesByNewId: {updated.id: updated},
-            );
-            _replaceOpenNoteId(noteId, updated.id);
-          }
-          session.applySavedNote(updated, preserveCurrentBody: stillDirty);
+      void commitWorkspaceState({required bool replaceNoteId}) {
+        setState(() {
           if (resources != null) {
-            _selectedResource = _findResource(_resources, updated.id);
+            _resources = resources;
           }
+          if (stillOpen) {
+            if (replaceNoteId) {
+              _replaceOpenNoteId(noteId, updated.id);
+            }
+            if (resources != null) {
+              _selectedResource = _findResource(_resources, updated.id);
+            }
+          }
+          if (successMessage != null && !stillDirty) {
+            _message = successMessage;
+          }
+        });
+      }
+
+      if (stillOpen && noteIdChanged) {
+        _noteSessionRegistry.remapNoteIds(
+          {noteId: updated.id},
+          refreshedNotesByNewId: {updated.id: updated},
+          preserveDirtyBody: stillDirty,
+          afterCommitBeforeNotify: () {
+            commitWorkspaceState(replaceNoteId: true);
+          },
+        );
+      } else {
+        PreparedNoteDocumentUpdate? preparedUpdate;
+        if (stillOpen) {
+          preparedUpdate = session.prepareApplySavedNote(
+            updated,
+            preserveCurrentBody: stillDirty,
+          )..applySilently();
         }
-        if (successMessage != null && !stillDirty) {
-          _message = successMessage;
-        }
-      });
+        commitWorkspaceState(replaceNoteId: false);
+        preparedUpdate?.publish();
+      }
       if (stillDirty && rescheduleIfDirty) {
         _scheduleAutoSave(session);
       }
