@@ -1127,6 +1127,51 @@ void main() {
     },
   );
 
+  testWidgets(
+    'queued duplicate closes flush the note before its last reference closes',
+    (tester) async {
+      final vault = _GatedCloseVaultBackend(
+        blockedNoteId: 'Blocker.md',
+        seedExampleData: false,
+      );
+      addTearDown(vault.releaseBlockedUpdate);
+
+      await _runQueuedLastReferenceCloseRace(tester, vault);
+
+      expect(vault.updatedNoteIds, contains('Alpha.md'));
+      expect(
+        (await vault.readNote('Alpha.md')).markdown,
+        contains('dirty Alpha session'),
+      );
+      expect(find.byKey(const Key('split-pane-pane-1')), findsNothing);
+      expect(find.byKey(const Key('split-pane-pane-2')), findsNothing);
+      expect(find.byKey(const Key('split-pane-pane-4')), findsOneWidget);
+    },
+  );
+
+  testWidgets(
+    'queued duplicate closes keep both panes when the last-reference save fails',
+    (tester) async {
+      final vault = _GatedCloseVaultBackend(
+        blockedNoteId: 'Blocker.md',
+        failingNoteId: 'Alpha.md',
+        seedExampleData: false,
+      );
+      addTearDown(vault.releaseBlockedUpdate);
+
+      final alphaController = await _runQueuedLastReferenceCloseRace(
+        tester,
+        vault,
+      );
+
+      expect(vault.updatedNoteIds, contains('Alpha.md'));
+      expect(find.byKey(const Key('split-pane-pane-1')), findsOneWidget);
+      expect(find.byKey(const Key('split-pane-pane-2')), findsOneWidget);
+      expect(alphaController.text, contains('dirty Alpha session'));
+      expect(find.textContaining('save failed for Alpha.md'), findsOneWidget);
+    },
+  );
+
   testWidgets('folder rename remaps every open note session', (tester) async {
     final vault = MemoryVaultBackend(seedExampleData: false);
     final folder = await vault.createFolder(parentPath: '', title: '读书');
@@ -2153,6 +2198,127 @@ void main() {
       final noteEditor = _activeLiveMarkdownTextField(tester);
       expect(noteEditor.controller?.text, contains('# Beta'));
       expect(find.text('Alpha'), findsNothing);
+    },
+  );
+
+  testWidgets(
+    'delayed delete fills the affected pane focused during backend await',
+    (tester) async {
+      final vault = _DelayedDeleteNoteVaultBackend(seedExampleData: false);
+      addTearDown(vault.completeDelete);
+      final alpha = await vault.createNote(parentPath: '', title: 'Alpha');
+      await vault.createNote(parentPath: '', title: 'Beta');
+
+      await _pumpWorkspace(tester, vault: vault);
+      await tester.tap(find.byKey(const Key('split-pane-right-button')));
+      await tester.pump(const Duration(milliseconds: 250));
+      final focusPaneOne = tester
+          .widget<GestureDetector>(find.byKey(const Key('split-pane-pane-1')))
+          .onTap!;
+
+      await tester.tap(
+        find.byKey(Key('resource-row-${alpha.id}')),
+        buttons: kSecondaryMouseButton,
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(Key('note-menu-delete-${alpha.id}')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('删除'));
+      await tester.pump();
+      await vault.deleteStarted.future;
+      await tester.pump(const Duration(milliseconds: 300));
+
+      focusPaneOne();
+      vault.completeDelete();
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(Key('resource-row-${alpha.id}')), findsNothing);
+      expect(
+        find.descendant(
+          of: find.byKey(const Key('split-pane-title-pane-1')),
+          matching: find.text('Beta'),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        _resourceRowBackgroundColor(tester, 'Beta.md'),
+        isNot(const Color(0x00000000)),
+      );
+    },
+  );
+
+  testWidgets(
+    'delayed delete preserves an unaffected resource selected during backend await',
+    (tester) async {
+      final vault = _DelayedDeleteNoteVaultBackend(seedExampleData: false);
+      addTearDown(vault.completeDelete);
+      final folder = await vault.createFolder(parentPath: '', title: 'Keep');
+      final alpha = await vault.createNote(parentPath: '', title: 'Alpha');
+      final beta = await vault.createNote(parentPath: '', title: 'Beta');
+
+      await _pumpWorkspace(tester, vault: vault);
+      await tester.tap(find.byKey(const Key('split-pane-right-button')));
+      await tester.pump(const Duration(milliseconds: 250));
+      final selectBeta = tester
+          .widget<GestureDetector>(
+            find.descendant(
+              of: find.byKey(Key('resource-row-${beta.id}')),
+              matching: find.byType(GestureDetector),
+            ),
+          )
+          .onTap!;
+      final selectFolder = tester
+          .widget<GestureDetector>(
+            find.descendant(
+              of: find.byKey(Key('resource-row-${folder.id}')),
+              matching: find.byType(GestureDetector),
+            ),
+          )
+          .onTap!;
+
+      await tester.tap(
+        find.byKey(Key('resource-row-${alpha.id}')),
+        buttons: kSecondaryMouseButton,
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(Key('note-menu-delete-${alpha.id}')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('删除'));
+      await tester.pump();
+      await vault.deleteStarted.future;
+      await tester.pump(const Duration(milliseconds: 300));
+
+      selectBeta();
+      await tester.pumpAndSettle();
+      selectFolder();
+      await tester.pump();
+      expect(
+        find.descendant(
+          of: find.byKey(const Key('split-pane-title-pane-2')),
+          matching: find.text('Beta'),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        _resourceRowBackgroundColor(tester, folder.id),
+        isNot(const Color(0x00000000)),
+      );
+
+      vault.completeDelete();
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(Key('resource-row-${alpha.id}')), findsNothing);
+      expect(
+        find.descendant(
+          of: find.byKey(const Key('split-pane-title-pane-2')),
+          matching: find.text('Beta'),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        _resourceRowBackgroundColor(tester, folder.id),
+        isNot(const Color(0x00000000)),
+      );
     },
   );
 
@@ -5157,6 +5323,89 @@ void main() {
   });
 }
 
+Future<TextEditingController> _runQueuedLastReferenceCloseRace(
+  WidgetTester tester,
+  _GatedCloseVaultBackend vault,
+) async {
+  await vault.createNote(parentPath: '', title: 'Alpha');
+  await vault.createNote(parentPath: '', title: 'Blocker');
+  await vault.createNote(parentPath: '', title: 'Keeper');
+
+  await _pumpWorkspace(
+    tester,
+    vault: vault,
+    size: const Size(2400, 1000),
+    settingsStore: _FakeSettingsStore(
+      initialSettings: const SynapseSettings(
+        preferences: WorkspacePreferences(
+          defaultNoteMode: WorkspaceDefaultNoteMode.source,
+          semanticSearchEnabled: true,
+          pastedImageWidth: 480,
+          autoSaveDelayMillis: 10000,
+        ),
+      ),
+    ),
+  );
+  await tester.tap(find.byKey(const Key('split-pane-right-button')));
+  await tester.pump(const Duration(milliseconds: 250));
+  await tester.tap(find.byKey(const Key('split-pane-right-button')));
+  await tester.pump(const Duration(milliseconds: 250));
+  await tester.tap(find.byKey(const Key('resource-row-Blocker.md')));
+  await tester.pump(const Duration(milliseconds: 250));
+  await tester.tap(find.byKey(const Key('split-pane-right-button')));
+  await tester.pump(const Duration(milliseconds: 250));
+  await tester.tap(find.byKey(const Key('resource-row-Keeper.md')));
+  await tester.pump(const Duration(milliseconds: 250));
+
+  await tester.tap(find.byKey(const Key('note-mode-source-pane-1')));
+  await tester.pump(const Duration(milliseconds: 250));
+  await _enterTextInLiveMarkdownBlock(
+    tester,
+    '# Alpha\ndirty Alpha session',
+    paneId: 1,
+  );
+  await tester.tap(find.byKey(const Key('note-mode-source-pane-3')));
+  await tester.pump(const Duration(milliseconds: 250));
+  await _enterTextInLiveMarkdownBlock(
+    tester,
+    '# Blocker\ndirty blocker session',
+    paneId: 3,
+  );
+  await tester.pump();
+
+  final alphaController = _liveMarkdownDocumentController(tester, paneId: 1);
+  final focusPaneOne = tester
+      .widget<GestureDetector>(find.byKey(const Key('split-pane-pane-1')))
+      .onTap!;
+  final focusPaneTwo = tester
+      .widget<GestureDetector>(find.byKey(const Key('split-pane-pane-2')))
+      .onTap!;
+  final focusPaneThree = tester
+      .widget<GestureDetector>(find.byKey(const Key('split-pane-pane-3')))
+      .onTap!;
+  final closeFocusedPane = tester
+      .widget<CupertinoButton>(
+        find.descendant(
+          of: find.byKey(const Key('close-split-pane-button')),
+          matching: find.byType(CupertinoButton),
+        ),
+      )
+      .onPressed!;
+
+  focusPaneThree();
+  closeFocusedPane();
+  await vault.blockedUpdateStarted.future;
+
+  focusPaneOne();
+  closeFocusedPane();
+  focusPaneTwo();
+  closeFocusedPane();
+
+  vault.releaseBlockedUpdate();
+  await tester.pumpAndSettle();
+  return alphaController;
+}
+
 Future<void> _pumpWorkspace(
   WidgetTester tester, {
   required MemoryVaultBackend? vault,
@@ -5709,6 +5958,66 @@ class _DelayedUpdateVaultBackend extends MemoryVaultBackend {
     updateStarted.complete();
     await _updateRelease.future;
     return super.updateMarkdown(noteId: noteId, markdown: markdown);
+  }
+}
+
+class _GatedCloseVaultBackend extends MemoryVaultBackend {
+  _GatedCloseVaultBackend({
+    required this.blockedNoteId,
+    this.failingNoteId,
+    super.seedExampleData,
+  });
+
+  final String blockedNoteId;
+  final String? failingNoteId;
+  final blockedUpdateStarted = Completer<void>();
+  final _blockedUpdateRelease = Completer<void>();
+  final List<String> updatedNoteIds = <String>[];
+
+  void releaseBlockedUpdate() {
+    if (!_blockedUpdateRelease.isCompleted) {
+      _blockedUpdateRelease.complete();
+    }
+  }
+
+  @override
+  Future<VaultNoteContent> updateMarkdown({
+    required String noteId,
+    required String markdown,
+  }) async {
+    updatedNoteIds.add(noteId);
+    if (noteId == blockedNoteId && !_blockedUpdateRelease.isCompleted) {
+      if (!blockedUpdateStarted.isCompleted) {
+        blockedUpdateStarted.complete();
+      }
+      await _blockedUpdateRelease.future;
+    }
+    if (noteId == failingNoteId) {
+      throw StateError('save failed for $noteId');
+    }
+    return super.updateMarkdown(noteId: noteId, markdown: markdown);
+  }
+}
+
+class _DelayedDeleteNoteVaultBackend extends MemoryVaultBackend {
+  _DelayedDeleteNoteVaultBackend({super.seedExampleData});
+
+  final deleteStarted = Completer<void>();
+  final _deleteRelease = Completer<void>();
+
+  void completeDelete() {
+    if (!_deleteRelease.isCompleted) {
+      _deleteRelease.complete();
+    }
+  }
+
+  @override
+  Future<void> deleteNote(String noteId) async {
+    if (!deleteStarted.isCompleted) {
+      deleteStarted.complete();
+    }
+    await _deleteRelease.future;
+    return super.deleteNote(noteId);
   }
 }
 

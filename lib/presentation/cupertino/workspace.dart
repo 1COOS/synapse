@@ -542,9 +542,10 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     if (!impact.canClose) {
       return;
     }
-    final affectedNoteIds = impact.noteId == null
+    final targetNoteId = target.noteId;
+    final affectedNoteIds = targetNoteId == null
         ? const <String>{}
-        : <String>{impact.noteId!};
+        : <String>{_ownedNoteId(target.session, fallback: targetNoteId)};
     final result = await _workspaceMutationBarrier.run<void>(
       WorkspaceMutationPlan<void>(
         affectedNoteIds: affectedNoteIds,
@@ -1675,16 +1676,32 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
                 ? _noteSessionRegistry.sessionsUnderPath(resource.path)
                 : _noteSessionRegistry.sessionsForIds([resource.id]))
             .toList(growable: false);
-    final selectedResourceId = _selectedResource?.id;
-    final selectedWasDeleted =
-        _selectedResource != null &&
-        _resourceContainsResource(resource, _selectedResource!);
-    final paneWasDeleted = paneTarget?.session != null
-        ? affectedSessions.any(
-            (session) => identical(session, paneTarget!.session),
-          )
-        : paneTarget?.noteId != null &&
-              _resourceContainsNote(resource, paneTarget!.noteId!);
+    final affectedSessionSet = Set<NoteDocumentSession>.identity()
+      ..addAll(affectedSessions);
+    final affectedPaneTargets = <_PaneMutationTarget>[];
+    for (final pane in _splitWorkspaceController.panes) {
+      final noteId = pane.noteId;
+      if (noteId == null) {
+        continue;
+      }
+      final session = _noteSessionRegistry.sessionFor(noteId);
+      if (!(session != null && affectedSessionSet.contains(session)) &&
+          !_resourceContainsNote(resource, noteId)) {
+        continue;
+      }
+      final generation = _splitWorkspaceController.paneGeneration(pane.paneId);
+      if (generation == null) {
+        continue;
+      }
+      affectedPaneTargets.add(
+        _PaneMutationTarget(
+          paneId: pane.paneId,
+          generation: generation,
+          noteId: noteId,
+          session: session,
+        ),
+      );
+    }
     final confirmed = await _confirmDelete(
       title: resource.isFolder ? '删除文件夹' : '删除笔记',
       message: resource.isFolder
@@ -1746,35 +1763,44 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
                 return;
               }
               final fallbackNote = delta.value.fallbackNote;
-              final targetGenerationIsCurrent =
-                  paneTarget != null &&
-                  _paneMutationTargetHasCurrentGeneration(paneTarget);
               setState(() {
                 _resources = delta.resources ?? const [];
                 _searchResults = const [];
-                if (paneWasDeleted && targetGenerationIsCurrent) {
-                  if (fallbackNote != null) {
-                    final fallbackSession = _upsertNoteSession(fallbackNote);
-                    fallbackSession.proposals = delta.value.fallbackProposals;
-                    _splitWorkspaceController.setPaneNote(
-                      paneTarget.paneId,
-                      fallbackNote.id,
-                    );
+                bool canReceiveFallback(_PaneMutationTarget target) {
+                  return _paneMutationTargetHasCurrentGeneration(target) &&
+                      _splitWorkspaceController.pane(target.paneId)?.noteId ==
+                          null;
+                }
+
+                _PaneMutationTarget? fallbackPaneTarget;
+                final focusedPaneId = _splitWorkspaceController.focusedPaneId;
+                for (final target in affectedPaneTargets) {
+                  if (target.paneId == focusedPaneId &&
+                      canReceiveFallback(target)) {
+                    fallbackPaneTarget = target;
+                    break;
                   }
-                  if (_splitWorkspaceController.focusedPaneId ==
-                      paneTarget.paneId) {
-                    _selectedResource = fallbackNote == null
-                        ? null
-                        : _findResource(_resources, fallbackNote.id);
-                    _narrowSection = fallbackNote == null
-                        ? _WorkspaceSection.resources
-                        : _WorkspaceSection.notes;
-                  }
-                } else if (_selectedResource?.id == selectedResourceId) {
-                  _selectedResource =
-                      selectedWasDeleted || selectedResourceId == null
-                      ? null
-                      : _findResource(_resources, selectedResourceId);
+                }
+                if (fallbackPaneTarget == null &&
+                    paneTarget != null &&
+                    canReceiveFallback(paneTarget)) {
+                  fallbackPaneTarget = paneTarget;
+                }
+                if (fallbackNote != null && fallbackPaneTarget != null) {
+                  final fallbackSession = _upsertNoteSession(fallbackNote);
+                  fallbackSession.proposals = delta.value.fallbackProposals;
+                  _splitWorkspaceController.setPaneNote(
+                    fallbackPaneTarget.paneId,
+                    fallbackNote.id,
+                  );
+                }
+                _reconcileSelectedResourceAfterMutation(
+                  remappedNoteIds: const {},
+                );
+                if (fallbackPaneTarget?.paneId == focusedPaneId) {
+                  _narrowSection = fallbackNote == null
+                      ? _WorkspaceSection.resources
+                      : _WorkspaceSection.notes;
                 }
                 _message = resource.isFolder ? '文件夹已删除' : '笔记已删除';
                 _resetAiServices();
@@ -3587,16 +3613,6 @@ bool _resourceContainsNote(VaultResourceNode resource, String noteId) {
     return resource.id == noteId;
   }
   return _pathIsInside(noteId, resource.path);
-}
-
-bool _resourceContainsResource(
-  VaultResourceNode parent,
-  VaultResourceNode child,
-) {
-  if (parent.isNote) {
-    return parent.id == child.id;
-  }
-  return _pathIsInside(child.path, parent.path);
 }
 
 bool _pathIsInside(String path, String folder) {
