@@ -50,12 +50,13 @@
 - `docs/development.md`
 - `docs/product.md`
 
-## 任务 1：添加跨 pane characterization tests
+## 任务 1：锁定并修复切 Vault 的全 session 保存契约
 
 **文件：**
 
 - 修改：`test/presentation/workspace_test.dart`
 - 修改：`test/support/workspace_fakes.dart`（若该文件尚未存在则创建）
+- 修改：`lib/presentation/cupertino/workspace.dart`
 
 - [ ] **步骤 1：补充可观测调用顺序的 fake Vault**
 
@@ -89,7 +90,7 @@ final class RecordingVaultBackend extends MemoryVaultBackend {
 }
 ```
 
-- [ ] **步骤 2：编写“切 Vault 保存所有 dirty pane”的失败测试**
+- [ ] **步骤 2：编写切 Vault 的两个失败测试**
 
 测试流程：打开 A、向右分屏、在第二 pane 打开 B、编辑 A 和 B、聚焦 B、点击切换 Vault。断言旧 Vault 同时收到 A/B 保存，且保存事件发生在 picker 事件之前。
 
@@ -99,6 +100,8 @@ expect(log.events.indexOf('save:old:A.md'), lessThan(log.events.indexOf('picker'
 expect(log.events.indexOf('save:old:B.md'), lessThan(log.events.indexOf('picker')));
 ```
 
+第二个测试让非焦点 A 保存失败，断言 picker 没有被调用、旧 Vault 和所有 editor 内容保持不变。
+
 - [ ] **步骤 3：运行测试确认正确失败**
 
 运行：
@@ -107,18 +110,35 @@ expect(log.events.indexOf('save:old:B.md'), lessThan(log.events.indexOf('picker'
 flutter test --no-pub test/presentation/workspace_test.dart --plain-name "saves every dirty pane before switching vaults"
 ```
 
-预期：FAIL；当前实现只保存 `_activeSession`。
+预期：FAIL；当前实现只保存 `_activeSession`，并且 picker 发生在 flush 之前。
 
-- [ ] **步骤 4：补充四个 characterization red tests**
+- [ ] **步骤 4：编写最小实现让两个测试通过**
 
-新增并分别运行：
+在旧 workspace 上先建立兼容 wrapper，后续任务再把它迁入 coordinator：
 
-1. 任一非焦点 session 保存失败时不调用 picker、不切 Vault；
-2. folder rename remap 目录内两个已打开 note；
-3. duplicate pane 的 note move/delete 更新或清除所有 pane；
-4. 两个 pane 各有附件时，切换焦点不改变图片解析。
+```dart
+Future<bool> _flushAllPendingMarkdown() async {
+  for (final session in List<_NoteSession>.of(_noteSessions.values)) {
+    if (!await _flushSessionMarkdown(session)) {
+      return false;
+    }
+  }
+  return true;
+}
+```
 
-- [ ] **步骤 5：确认既有编辑器契约仍通过**
+`_chooseVault()` 必须先 `_flushAllPendingMarkdown()`，成功后才调用 picker。失败时不清空 session、不调用 picker。
+
+- [ ] **步骤 5：运行两个切 Vault 测试通过**
+
+```bash
+flutter test --no-pub test/presentation/workspace_test.dart --plain-name "saves every dirty pane before switching vaults"
+flutter test --no-pub test/presentation/workspace_test.dart --plain-name "does not pick or switch vault when any pane save fails"
+```
+
+预期：PASS。
+
+- [ ] **步骤 6：确认既有编辑器契约仍通过**
 
 运行：
 
@@ -130,11 +150,11 @@ flutter test --no-pub test/presentation/workspace_test.dart --plain-name "clicki
 
 预期：PASS。
 
-- [ ] **步骤 6：Commit**
+- [ ] **步骤 7：Commit**
 
 ```bash
-git add test/presentation/workspace_test.dart test/support/workspace_fakes.dart
-git commit -m "test: characterize multi-pane workspace state"
+git add test/presentation/workspace_test.dart test/support/workspace_fakes.dart lib/presentation/cupertino/workspace.dart
+git commit -m "fix: flush all note panes before vault switch"
 ```
 
 ## 任务 2：实现 NoteDocumentSession 与 NoteSessionRegistry
