@@ -34,6 +34,7 @@ import '../../infrastructure/vault/vault_backend.dart';
 import '../workspace/state/note_document_session.dart';
 import '../workspace/state/note_save_coordinator.dart';
 import '../workspace/state/note_session_registry.dart';
+import '../workspace/state/split_workspace_controller.dart';
 import 'browser_context_menu_guard.dart';
 import 'markdown_context_commands.dart';
 import 'markdown_live_blocks.dart';
@@ -203,44 +204,9 @@ extension _WorkspaceAccentColorLabel on WorkspaceAccentColor {
 
 enum _LeftPaneMode { resources, search }
 
-enum _NoteMode { reading, source }
-
 enum _ImageDropSide { before, after }
 
 enum _ImagePreviewMode { reading, editing }
-
-enum _SplitAxis { horizontal, vertical }
-
-enum _SplitDirection { left, right, up, down }
-
-abstract class _SplitNode {
-  const _SplitNode({required this.id});
-
-  final String id;
-}
-
-class _SplitLeaf extends _SplitNode {
-  _SplitLeaf({required this.paneId, this.noteId, this.mode = _NoteMode.reading})
-    : super(id: paneId);
-
-  final String paneId;
-  String? noteId;
-  _NoteMode mode;
-}
-
-class _SplitBranch extends _SplitNode {
-  _SplitBranch({
-    required super.id,
-    required this.axis,
-    required this.first,
-    required this.second,
-  });
-
-  final _SplitAxis axis;
-  _SplitNode first;
-  _SplitNode second;
-  double ratio = 0.5;
-}
 
 class _NoteEditorPasteAvailability {
   const _NoteEditorPasteAvailability({
@@ -297,10 +263,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   final _emptyMarkdownController = TextEditingController();
   late final NoteSessionRegistry _noteSessionRegistry;
   late final NoteSaveCoordinator _noteSaveCoordinator;
-  late _SplitNode _splitRoot;
-  String _focusedPaneId = '';
-  int _nextPaneNumber = 1;
-  int _nextSplitNumber = 1;
+  late final SplitWorkspaceController _splitWorkspaceController;
   final _searchController = TextEditingController();
   final _editorPasteFocusNode = FocusNode();
   final _sourcePaneFocusNode = FocusNode();
@@ -334,6 +297,9 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   @override
   void initState() {
     super.initState();
+    _splitWorkspaceController = SplitWorkspaceController(
+      defaultMode: _preferredNoteMode,
+    );
     _noteSessionRegistry = NoteSessionRegistry(
       visibleBody: _visibleMarkdownBody,
       onEdited: _handleSessionMarkdownEdited,
@@ -383,6 +349,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   void dispose() {
     _noteSaveCoordinator.dispose();
     _noteSessionRegistry.dispose();
+    _splitWorkspaceController.dispose();
     _emptyMarkdownController.dispose();
     _searchController.dispose();
     _editorPasteFocusNode.dispose();
@@ -426,75 +393,22 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     }
     _inactiveSelectedSourceIds.clear();
     _inactiveProposals = const [];
-    _nextPaneNumber = 1;
-    _nextSplitNumber = 1;
-    final pane = _SplitLeaf(paneId: _createPaneId(), mode: _preferredNoteMode);
-    _splitRoot = pane;
-    _focusedPaneId = pane.paneId;
-  }
-
-  String _createPaneId() {
-    return 'pane-${_nextPaneNumber++}';
-  }
-
-  String _createSplitId() {
-    return 'split-${_nextSplitNumber++}';
+    _splitWorkspaceController.reset(defaultMode: _preferredNoteMode);
   }
 
   NoteDocumentSession _upsertNoteSession(VaultNoteContent note) {
     return _noteSessionRegistry.upsert(note);
   }
 
-  void _replaceOpenNoteId(String before, String after) {
-    for (final pane in _splitLeaves(_splitRoot)) {
-      if (pane.noteId == before) {
-        pane.noteId = after;
-      }
-    }
-  }
-
   void _discardUnusedSessions() {
-    final openNoteIds = _splitLeaves(
-      _splitRoot,
-    ).map((pane) => pane.noteId).whereType<String>().toSet();
-    _noteSessionRegistry.retainOnly(openNoteIds);
-  }
-
-  _SplitLeaf? _findSplitLeaf(_SplitNode node, String paneId) {
-    if (node is _SplitLeaf) {
-      return node.paneId == paneId ? node : null;
-    }
-    final branch = node as _SplitBranch;
-    return _findSplitLeaf(branch.first, paneId) ??
-        _findSplitLeaf(branch.second, paneId);
-  }
-
-  Iterable<_SplitLeaf> _splitLeaves(_SplitNode node) sync* {
-    if (node is _SplitLeaf) {
-      yield node;
-      return;
-    }
-    final branch = node as _SplitBranch;
-    yield* _splitLeaves(branch.first);
-    yield* _splitLeaves(branch.second);
-  }
-
-  int _splitLeafCount() {
-    return _splitLeaves(_splitRoot).length;
-  }
-
-  int _splitLeafCountForNote(String noteId) {
-    return _splitLeaves(
-      _splitRoot,
-    ).where((pane) => pane.noteId == noteId).length;
+    _noteSessionRegistry.retainOnly(_splitWorkspaceController.openNoteIds);
   }
 
   void _focusPane(String paneId) {
-    final pane = _findSplitLeaf(_splitRoot, paneId);
-    if (pane == null) {
+    if (!_splitWorkspaceController.focus(paneId)) {
       return;
     }
-    _focusedPaneId = pane.paneId;
+    final pane = _splitWorkspaceController.pane(paneId)!;
     _selectedResource = pane.noteId == null
         ? null
         : _findResource(_resources, pane.noteId!);
@@ -508,77 +422,21 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
         : _findResource(_resources, noteId);
   }
 
-  void _splitFocusedPane(_SplitDirection direction) {
-    final focused = _focusedPane;
-    if (focused == null) {
-      return;
-    }
-    final newPane = _SplitLeaf(
-      paneId: _createPaneId(),
-      noteId: focused.noteId,
-      mode: focused.mode,
-    );
-    final axis =
-        direction == _SplitDirection.left || direction == _SplitDirection.right
-        ? _SplitAxis.horizontal
-        : _SplitAxis.vertical;
-    final newBranch = _SplitBranch(
-      id: _createSplitId(),
-      axis: axis,
-      first:
-          direction == _SplitDirection.left || direction == _SplitDirection.up
-          ? newPane
-          : focused,
-      second:
-          direction == _SplitDirection.left || direction == _SplitDirection.up
-          ? focused
-          : newPane,
-    );
+  void _splitFocusedPane(SplitDirection direction) {
     setState(() {
-      _replaceSplitNode(focused.paneId, newBranch);
-      _focusedPaneId = newPane.paneId;
+      _splitWorkspaceController.splitFocused(direction);
       _syncFocusedPaneSelection();
     });
   }
 
-  void _replaceSplitNode(String nodeId, _SplitNode replacement) {
-    if (_splitRoot.id == nodeId) {
-      _splitRoot = replacement;
-      return;
-    }
-    _replaceSplitNodeInBranch(_splitRoot, nodeId, replacement);
-  }
-
-  bool _replaceSplitNodeInBranch(
-    _SplitNode node,
-    String nodeId,
-    _SplitNode replacement,
-  ) {
-    if (node is! _SplitBranch) {
-      return false;
-    }
-    if (node.first.id == nodeId) {
-      node.first = replacement;
-      return true;
-    }
-    if (node.second.id == nodeId) {
-      node.second = replacement;
-      return true;
-    }
-    return _replaceSplitNodeInBranch(node.first, nodeId, replacement) ||
-        _replaceSplitNodeInBranch(node.second, nodeId, replacement);
-  }
-
   Future<void> _closeFocusedPane() async {
-    if (_splitLeafCount() <= 1) {
+    final paneId = _splitWorkspaceController.focusedPaneId;
+    final impact = _splitWorkspaceController.closeImpact(paneId);
+    if (!impact.canClose) {
       return;
     }
-    final focused = _focusedPane;
-    if (focused == null) {
-      return;
-    }
-    final noteId = focused.noteId;
-    if (noteId != null && _splitLeafCountForNote(noteId) == 1) {
+    final noteId = impact.noteId;
+    if (noteId != null) {
       final session = _noteSessionRegistry.sessionFor(noteId);
       if (session != null &&
           !await _flushSessionMarkdown(session, successMessage: '笔记已保存')) {
@@ -586,40 +444,15 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       }
     }
     setState(() {
-      final nextRoot = _removeSplitLeaf(_splitRoot, focused.paneId);
-      if (nextRoot != null) {
-        _splitRoot = nextRoot;
-      }
-      _focusedPaneId = _splitLeaves(_splitRoot).first.paneId;
+      _splitWorkspaceController.closePane(paneId);
       _discardUnusedSessions();
       _syncFocusedPaneSelection();
     });
   }
 
-  _SplitNode? _removeSplitLeaf(_SplitNode node, String paneId) {
-    if (node is _SplitLeaf) {
-      return node.paneId == paneId ? null : node;
-    }
-    final branch = node as _SplitBranch;
-    final first = _removeSplitLeaf(branch.first, paneId);
-    final second = _removeSplitLeaf(branch.second, paneId);
-    if (first == null) {
-      return second;
-    }
-    if (second == null) {
-      return first;
-    }
-    branch.first = first;
-    branch.second = second;
-    return branch;
-  }
-
-  void _resizeSplitBranch(_SplitBranch branch, double delta, double extent) {
-    if (extent <= 0) {
-      return;
-    }
+  void _resizeSplitBranch(String branchId, double delta, double extent) {
     setState(() {
-      branch.ratio = (branch.ratio + delta / extent).clamp(0.15, 0.85);
+      _splitWorkspaceController.resizeBranch(branchId, delta, extent);
     });
   }
 
@@ -656,7 +489,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     return !kIsWeb && defaultTargetPlatform == TargetPlatform.macOS;
   }
 
-  _SplitLeaf? get _focusedPane => _findSplitLeaf(_splitRoot, _focusedPaneId);
+  SplitLeaf? get _focusedPane => _splitWorkspaceController.focusedPane;
 
   NoteDocumentSession? get _activeSession {
     final noteId = _focusedPane?.noteId;
@@ -674,11 +507,11 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       return;
     }
     if (note == null) {
-      pane.noteId = null;
+      _splitWorkspaceController.setPaneNote(pane.paneId, null);
       return;
     }
     _upsertNoteSession(note);
-    pane.noteId = note.id;
+    _splitWorkspaceController.setPaneNote(pane.paneId, note.id);
   }
 
   TextEditingController get _markdownController {
@@ -702,18 +535,18 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     session.proposals = value;
   }
 
-  set _noteMode(_NoteMode value) {
+  set _noteMode(NoteMode value) {
     final pane = _focusedPane;
     if (pane != null) {
-      pane.mode = value;
+      _splitWorkspaceController.setPaneMode(pane.paneId, value);
     }
   }
 
-  _NoteMode get _preferredNoteMode {
+  NoteMode get _preferredNoteMode {
     return _workspacePreferences.defaultNoteMode ==
             WorkspaceDefaultNoteMode.source
-        ? _NoteMode.source
-        : _NoteMode.reading;
+        ? NoteMode.source
+        : NoteMode.reading;
   }
 
   bool _hasDirtySession(NoteDocumentSession session) {
@@ -847,11 +680,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
         _settings = settings;
         _workspacePreferences = settings.preferences;
         _providerConfig = settings.providerConfig;
-        for (final pane in _splitLeaves(_splitRoot)) {
-          if (pane.noteId == null) {
-            pane.mode = _preferredNoteMode;
-          }
-        }
+        _splitWorkspaceController.updateDefaultMode(_preferredNoteMode);
         if (!_usesInjectedAiProvider) {
           _useAiProvider(
             settings.providerConfig.isComplete
@@ -1322,7 +1151,9 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
         }
         if (stillOpen) {
           if (result.idChanged) {
-            _replaceOpenNoteId(result.oldNoteId, savedNote.id);
+            _splitWorkspaceController.remapNoteIds({
+              result.oldNoteId: savedNote.id,
+            });
           }
           if (resources != null) {
             _selectedResource = _findResource(_resources, savedNote.id);
@@ -2215,37 +2046,37 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
           _SplitIconAction(
             key: const Key('split-pane-left-button'),
             label: '向左分屏',
-            direction: _SplitDirection.left,
+            direction: SplitDirection.left,
             onPressed: controlsDisabled
                 ? null
-                : () => _splitFocusedPane(_SplitDirection.left),
+                : () => _splitFocusedPane(SplitDirection.left),
           ),
           const SizedBox(width: 6),
           _SplitIconAction(
             key: const Key('split-pane-right-button'),
             label: '向右分屏',
-            direction: _SplitDirection.right,
+            direction: SplitDirection.right,
             onPressed: controlsDisabled
                 ? null
-                : () => _splitFocusedPane(_SplitDirection.right),
+                : () => _splitFocusedPane(SplitDirection.right),
           ),
           const SizedBox(width: 6),
           _SplitIconAction(
             key: const Key('split-pane-up-button'),
             label: '向上分屏',
-            direction: _SplitDirection.up,
+            direction: SplitDirection.up,
             onPressed: controlsDisabled
                 ? null
-                : () => _splitFocusedPane(_SplitDirection.up),
+                : () => _splitFocusedPane(SplitDirection.up),
           ),
           const SizedBox(width: 6),
           _SplitIconAction(
             key: const Key('split-pane-down-button'),
             label: '向下分屏',
-            direction: _SplitDirection.down,
+            direction: SplitDirection.down,
             onPressed: controlsDisabled
                 ? null
-                : () => _splitFocusedPane(_SplitDirection.down),
+                : () => _splitFocusedPane(SplitDirection.down),
           ),
           const SizedBox(width: 10),
           _ModeIconAction(
@@ -2253,7 +2084,8 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
             label: '关闭分屏',
             icon: CupertinoIcons.xmark,
             selected: false,
-            onPressed: controlsDisabled || _splitLeafCount() <= 1
+            onPressed:
+                controlsDisabled || _splitWorkspaceController.panes.length <= 1
                 ? null
                 : () => unawaited(_closeFocusedPane()),
           ),
@@ -2580,19 +2412,19 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       child: Padding(
         key: const Key('split-workspace'),
         padding: const EdgeInsets.all(_noteWorkspaceGutter),
-        child: _buildSplitNode(_splitRoot),
+        child: _buildSplitNode(_splitWorkspaceController.root),
       ),
     );
   }
 
-  Widget _buildSplitNode(_SplitNode node) {
-    if (node is _SplitLeaf) {
+  Widget _buildSplitNode(SplitNode node) {
+    if (node is SplitLeaf) {
       return _buildSplitLeaf(node);
     }
-    final branch = node as _SplitBranch;
+    final branch = node as SplitBranch;
     return LayoutBuilder(
       builder: (context, constraints) {
-        final horizontal = branch.axis == _SplitAxis.horizontal;
+        final horizontal = branch.axis == SplitAxis.horizontal;
         final extent = horizontal
             ? constraints.maxWidth
             : constraints.maxHeight;
@@ -2614,7 +2446,8 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
           _SplitDivider(
             key: Key('split-divider-${branch.id}'),
             axis: branch.axis,
-            onDragDelta: (delta) => _resizeSplitBranch(branch, delta, extent),
+            onDragDelta: (delta) =>
+                _resizeSplitBranch(branch.id, delta, extent),
           ),
           SizedBox(
             width: horizontal ? secondExtent : null,
@@ -2629,8 +2462,8 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     );
   }
 
-  Widget _buildSplitLeaf(_SplitLeaf pane) {
-    final focused = pane.paneId == _focusedPaneId;
+  Widget _buildSplitLeaf(SplitLeaf pane) {
+    final focused = pane.paneId == _splitWorkspaceController.focusedPaneId;
     final session = pane.noteId == null
         ? null
         : _noteSessionRegistry.sessionFor(pane.noteId!);
@@ -2650,7 +2483,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
           child: Stack(
             children: [
               Positioned.fill(
-                child: pane.mode == _NoteMode.reading
+                child: pane.mode == NoteMode.reading
                     ? session == null
                           ? const _EmptyState(text: '选择或创建笔记后开始整理 Markdown')
                           : _buildMarkdownPreview(session: session)
@@ -2674,7 +2507,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   }
 
   Widget _buildPaneHeader(
-    _SplitLeaf pane, {
+    SplitLeaf pane, {
     required NoteDocumentSession? session,
     required bool focused,
   }) {
@@ -2710,7 +2543,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     );
   }
 
-  Widget _buildPaneModeControls(_SplitLeaf pane, {required bool focused}) {
+  Widget _buildPaneModeControls(SplitLeaf pane, {required bool focused}) {
     return DecoratedBox(
       decoration: BoxDecoration(
         color: _surface.withValues(alpha: 0.92),
@@ -2723,14 +2556,14 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
           _paneModeButton(
             pane: pane,
             focused: focused,
-            mode: _NoteMode.source,
+            mode: NoteMode.source,
             label: '编辑',
             icon: CupertinoIcons.pencil,
           ),
           _paneModeButton(
             pane: pane,
             focused: focused,
-            mode: _NoteMode.reading,
+            mode: NoteMode.reading,
             label: '阅读',
             icon: CupertinoIcons.book,
           ),
@@ -2740,13 +2573,13 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   }
 
   Widget _paneModeButton({
-    required _SplitLeaf pane,
+    required SplitLeaf pane,
     required bool focused,
-    required _NoteMode mode,
+    required NoteMode mode,
     required String label,
     required IconData icon,
   }) {
-    final suffix = mode == _NoteMode.reading ? 'reading' : 'source';
+    final suffix = mode == NoteMode.reading ? 'reading' : 'source';
     final button = _PaneModeIconAction(
       key: Key('note-mode-$suffix-${pane.paneId}'),
       label: label,
@@ -2755,7 +2588,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       onPressed: () {
         setState(() {
           _focusPane(pane.paneId);
-          pane.mode = mode;
+          _splitWorkspaceController.setPaneMode(pane.paneId, mode);
         });
       },
     );
@@ -3173,10 +3006,11 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     return _clampImageWidth(parsed ?? _defaultPastedImageWidth);
   }
 
-  Widget _buildNoteEditor({NoteDocumentSession? session, _SplitLeaf? pane}) {
+  Widget _buildNoteEditor({NoteDocumentSession? session, SplitLeaf? pane}) {
     final resolvedSession = session ?? _activeSession;
     final resolvedPane = pane ?? _focusedPane;
-    final focused = resolvedPane?.paneId == _focusedPaneId;
+    final focused =
+        resolvedPane?.paneId == _splitWorkspaceController.focusedPaneId;
     final appearance = _workspaceAppearance;
     return Focus(
       focusNode: _editorPasteFocusNode,
@@ -3672,12 +3506,12 @@ class _SplitDivider extends StatelessWidget {
     required this.onDragDelta,
   });
 
-  final _SplitAxis axis;
+  final SplitAxis axis;
   final ValueChanged<double> onDragDelta;
 
   @override
   Widget build(BuildContext context) {
-    final horizontal = axis == _SplitAxis.horizontal;
+    final horizontal = axis == SplitAxis.horizontal;
     return MouseRegion(
       cursor: horizontal
           ? SystemMouseCursors.resizeColumn
@@ -3782,7 +3616,7 @@ class _SplitIconAction extends StatelessWidget {
   });
 
   final String label;
-  final _SplitDirection direction;
+  final SplitDirection direction;
   final VoidCallback? onPressed;
 
   @override
@@ -3811,20 +3645,20 @@ class _SplitIconAction extends StatelessWidget {
 class _SplitDirectionGlyph extends StatelessWidget {
   const _SplitDirectionGlyph({required this.direction});
 
-  final _SplitDirection direction;
+  final SplitDirection direction;
 
   @override
   Widget build(BuildContext context) {
     final horizontal =
-        direction == _SplitDirection.left || direction == _SplitDirection.right;
+        direction == SplitDirection.left || direction == SplitDirection.right;
     final baseIcon = horizontal
         ? CupertinoIcons.square_split_1x2
         : CupertinoIcons.square_split_2x1;
     final chevronIcon = switch (direction) {
-      _SplitDirection.left => CupertinoIcons.chevron_left,
-      _SplitDirection.right => CupertinoIcons.chevron_right,
-      _SplitDirection.up => CupertinoIcons.chevron_up,
-      _SplitDirection.down => CupertinoIcons.chevron_down,
+      SplitDirection.left => CupertinoIcons.chevron_left,
+      SplitDirection.right => CupertinoIcons.chevron_right,
+      SplitDirection.up => CupertinoIcons.chevron_up,
+      SplitDirection.down => CupertinoIcons.chevron_down,
     };
     return SizedBox(
       width: 22,
@@ -3836,10 +3670,10 @@ class _SplitDirectionGlyph extends StatelessWidget {
           const SizedBox(width: 22, height: 22),
           Icon(baseIcon, size: 18, color: _muted),
           Positioned(
-            left: direction == _SplitDirection.left ? -1 : null,
-            right: direction == _SplitDirection.right ? -1 : null,
-            top: direction == _SplitDirection.up ? -1 : null,
-            bottom: direction == _SplitDirection.down ? -1 : null,
+            left: direction == SplitDirection.left ? -1 : null,
+            right: direction == SplitDirection.right ? -1 : null,
+            top: direction == SplitDirection.up ? -1 : null,
+            bottom: direction == SplitDirection.down ? -1 : null,
             child: Icon(chevronIcon, size: 9, color: _text),
           ),
         ],
