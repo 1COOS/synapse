@@ -308,6 +308,42 @@ final class SplitWorkspaceController extends ChangeNotifier {
     return Set<String>.unmodifiable(clearedIds);
   }
 
+  void applyMutation({
+    required Map<String, String> remappedNoteIds,
+    required Set<String> removedNoteIds,
+    String? fallbackNoteId,
+  }) {
+    if (remappedNoteIds.isEmpty && removedNoteIds.isEmpty) {
+      return;
+    }
+    final replacement = removedNoteIds.contains(fallbackNoteId)
+        ? null
+        : fallbackNoteId;
+    final updatedRoot = _mapLeaves(_root, (pane) {
+      final noteId = pane.noteId;
+      if (noteId == null) {
+        return pane;
+      }
+      final remappedId = remappedNoteIds[noteId] ?? noteId;
+      final committedId = removedNoteIds.contains(remappedId)
+          ? replacement
+          : remappedId;
+      if (committedId == noteId) {
+        return pane;
+      }
+      return SplitLeaf(
+        paneId: pane.paneId,
+        noteId: committedId,
+        mode: pane.mode,
+      );
+    });
+    if (identical(updatedRoot, _root)) {
+      return;
+    }
+    _root = updatedRoot;
+    notifyListeners();
+  }
+
   String _createPaneId() => 'pane-${_nextPaneNumber++}';
 
   int _createPaneGeneration() => _nextPaneGeneration++;

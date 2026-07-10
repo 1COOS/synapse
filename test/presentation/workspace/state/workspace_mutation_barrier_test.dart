@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:synapse/domain/vault/vault_resource.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
+import 'package:synapse/presentation/workspace/state/note_document_session.dart';
 import 'package:synapse/presentation/workspace/state/note_save_coordinator.dart';
 import 'package:synapse/presentation/workspace/state/note_session_registry.dart';
 import 'package:synapse/presentation/workspace/state/split_workspace_controller.dart';
@@ -408,6 +409,146 @@ void main() {
         expect(splitObservedCommittedRegistry, isTrue);
       },
     );
+
+    test(
+      'discard lease suppresses edits and timers until delete commit',
+      () async {
+        final timers = _ManualTimerFactory();
+        final harness = _LeaseHarness(
+          initialNoteId: 'A.md',
+          timerFactory: timers.call,
+        );
+        addTearDown(harness.dispose);
+        final session = harness.registry.upsert(_note('A.md', 'old'));
+        session.controller.text = 'dirty before delete';
+        expect(timers.activeCount, 1);
+        final executeStarted = Completer<void>();
+        final releaseExecute = Completer<void>();
+
+        final mutation = harness.barrier.run<void>(
+          WorkspaceMutationPlan<void>(
+            affectedNoteIds: const {'A.md'},
+            dirtyDisposition: DirtyDisposition.discard,
+            execute: () async {
+              executeStarted.complete();
+              await releaseExecute.future;
+              return const VaultMutationDelta<void>(
+                value: null,
+                removedNoteIds: {'A.md'},
+              );
+            },
+          ),
+        );
+        await executeStarted.future;
+        session.controller.text = 'edited while delete backend waits';
+        final activeDuringExecute = timers.activeCount;
+        timers.fireActive();
+        await _drainEventQueue();
+        final writesDuringExecute = List<String>.of(harness.vault.savedNoteIds);
+
+        releaseExecute.complete();
+        expect(await mutation, isA<MutationCommitted<void>>());
+        timers.fireAll();
+        await _drainEventQueue();
+
+        expect(activeDuringExecute, 0);
+        expect(writesDuringExecute, isEmpty);
+        expect(harness.vault.savedNoteIds, isEmpty);
+        expect(timers.activeCount, 0);
+        expect(harness.registry.sessionFor('A.md'), isNull);
+        expect(session.savePhase, NoteSavePhase.disposed);
+      },
+    );
+
+    test(
+      'flush lease resumes a backend-time edit on the remapped id',
+      () async {
+        final timers = _ManualTimerFactory();
+        final harness = _LeaseHarness(
+          initialNoteId: 'A.md',
+          timerFactory: timers.call,
+        );
+        addTearDown(harness.dispose);
+        final session = harness.registry.upsert(_note('A.md', 'old'));
+        final executeStarted = Completer<void>();
+        final releaseExecute = Completer<void>();
+
+        final mutation = harness.barrier.run<void>(
+          WorkspaceMutationPlan<void>(
+            affectedNoteIds: const {'A.md'},
+            dirtyDisposition: DirtyDisposition.flush,
+            execute: () async {
+              executeStarted.complete();
+              await releaseExecute.future;
+              return VaultMutationDelta<void>(
+                value: null,
+                remappedNoteIds: const {'A.md': 'folder/A.md'},
+                refreshedNotesByNewId: {
+                  'folder/A.md': _note('folder/A.md', 'old'),
+                },
+              );
+            },
+          ),
+        );
+        await executeStarted.future;
+        session.controller.text = 'edited while move backend waits';
+        final activeDuringExecute = timers.activeCount;
+
+        releaseExecute.complete();
+        expect(await mutation, isA<MutationCommitted<void>>());
+        final activeAfterCommit = timers.activeCount;
+        timers.fireActive();
+        await _drainEventQueue();
+
+        expect(activeDuringExecute, 0);
+        expect(activeAfterCommit, 1);
+        expect(harness.vault.savedNoteIds, ['folder/A.md']);
+        expect(harness.registry.sessionFor('folder/A.md'), same(session));
+        expect(session.isDirty, isFalse);
+      },
+    );
+
+    test('combined remap and remove publish one complete delta', () async {
+      final harness = _BarrierHarness(initialNoteId: 'A.md');
+      addTearDown(harness.dispose);
+      final remapped = harness.registry.upsert(_note('A.md', 'A'));
+      harness.registry.upsert(_note('C.md', 'C'));
+      final secondPane = harness.splits.splitFocused(SplitDirection.right);
+      harness.splits.setPaneNote(secondPane, 'C.md');
+      final observations = <bool>[];
+      bool isCommitted() {
+        final paneNotes = harness.splits.panes
+            .map((pane) => pane.noteId)
+            .toList();
+        return harness.registry.sessionFor('A.md') == null &&
+            identical(harness.registry.sessionFor('B.md'), remapped) &&
+            harness.registry.sessionFor('C.md') == null &&
+            paneNotes.length == 2 &&
+            paneNotes[0] == 'B.md' &&
+            paneNotes[1] == null;
+      }
+
+      harness.registry.addListener(() => observations.add(isCommitted()));
+      harness.splits.addListener(() => observations.add(isCommitted()));
+      remapped.addListener(() => observations.add(isCommitted()));
+
+      final result = await harness.barrier.run<void>(
+        WorkspaceMutationPlan<void>(
+          affectedNoteIds: const {'A.md', 'C.md'},
+          dirtyDisposition: DirtyDisposition.flush,
+          execute: () async => VaultMutationDelta<void>(
+            value: null,
+            remappedNoteIds: const {'A.md': 'B.md'},
+            removedNoteIds: const {'C.md'},
+            refreshedNotesByNewId: {'B.md': _note('B.md', 'A')},
+          ),
+        ),
+      );
+
+      expect(result, isA<MutationCommitted<void>>());
+      expect(observations, isNotEmpty);
+      expect(observations, everyElement(isTrue));
+    });
   });
 }
 
@@ -468,6 +609,59 @@ final class _BarrierHarness {
   }
 }
 
+final class _LeaseHarness {
+  _LeaseHarness({required String initialNoteId, TimerFactory? timerFactory}) {
+    splits = SplitWorkspaceController(initialNoteId: initialNoteId);
+    late NoteSaveCoordinator createdCoordinator;
+    registry = NoteSessionRegistry(
+      visibleBody: (markdown) => markdown,
+      onEdited: (session) => createdCoordinator.schedule(session),
+    );
+    createdCoordinator = NoteSaveCoordinator(
+      sessions: registry,
+      vault: () => vault,
+      debounceDuration: () => const Duration(seconds: 1),
+      serializeVisibleBody: (_, body) => body,
+      onResult: (result, _) {
+        final saved = result.savedNote;
+        if (saved == null || !result.succeeded) {
+          return;
+        }
+        final owner = registry.sessionFor(result.oldNoteId);
+        if (!identical(owner, result.session)) {
+          return;
+        }
+        registry.remapSavedNote(
+          session: result.session,
+          oldNoteId: result.oldNoteId,
+          savedNote: saved,
+          preserveCurrentBody: result.stillDirty,
+        );
+      },
+      onStateChanged: () {},
+      timerFactory: timerFactory,
+    );
+    coordinator = createdCoordinator;
+    barrier = WorkspaceMutationBarrier(
+      sessions: registry,
+      saveCoordinator: coordinator,
+      splits: splits,
+    );
+  }
+
+  final _RecordingUpdateVault vault = _RecordingUpdateVault();
+  late final NoteSessionRegistry registry;
+  late final NoteSaveCoordinator coordinator;
+  late final SplitWorkspaceController splits;
+  late final WorkspaceMutationBarrier barrier;
+
+  void dispose() {
+    coordinator.dispose();
+    registry.dispose();
+    splits.dispose();
+  }
+}
+
 final class _FailingUpdateVault extends MemoryVaultBackend {
   _FailingUpdateVault() : super(seedExampleData: false);
 
@@ -499,19 +693,49 @@ final class _DelayedUpdateVault extends MemoryVaultBackend {
   }
 }
 
+final class _RecordingUpdateVault extends MemoryVaultBackend {
+  _RecordingUpdateVault() : super(seedExampleData: false);
+
+  final List<String> savedNoteIds = <String>[];
+
+  @override
+  Future<VaultNoteContent> updateMarkdown({
+    required String noteId,
+    required String markdown,
+  }) async {
+    savedNoteIds.add(noteId);
+    return _note(noteId, markdown);
+  }
+}
+
 final class _ManualTimerFactory {
   final List<_ManualTimer> timers = <_ManualTimer>[];
 
   Timer call(Duration duration, void Function() callback) {
-    final timer = _ManualTimer();
+    final timer = _ManualTimer(callback);
     timers.add(timer);
     return timer;
   }
 
   int get activeCount => timers.where((timer) => timer.isActive).length;
+
+  void fireActive() {
+    for (final timer in List<_ManualTimer>.of(timers)) {
+      timer.fire();
+    }
+  }
+
+  void fireAll() {
+    for (final timer in List<_ManualTimer>.of(timers)) {
+      timer.fire();
+    }
+  }
 }
 
 final class _ManualTimer implements Timer {
+  _ManualTimer(this._callback);
+
+  final void Function() _callback;
   bool _isActive = true;
 
   @override
@@ -523,6 +747,14 @@ final class _ManualTimer implements Timer {
   @override
   void cancel() {
     _isActive = false;
+  }
+
+  void fire() {
+    if (!_isActive) {
+      return;
+    }
+    _isActive = false;
+    _callback();
   }
 }
 

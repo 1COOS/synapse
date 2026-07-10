@@ -456,6 +456,76 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
         : _findResource(_resources, noteId);
   }
 
+  void _reconcileSelectedResourceAfterMutation({
+    required Map<String, String> remappedNoteIds,
+    String? oldFolderPath,
+    String? newFolderPath,
+  }) {
+    final selectedResourceId = _selectedResource?.id;
+    if (selectedResourceId == null) {
+      return;
+    }
+    var committedResourceId = remappedNoteIds[selectedResourceId];
+    if (committedResourceId == null &&
+        oldFolderPath != null &&
+        newFolderPath != null &&
+        _pathIsInside(selectedResourceId, oldFolderPath)) {
+      committedResourceId = _replacePathPrefix(
+        selectedResourceId,
+        oldFolderPath,
+        newFolderPath,
+      );
+    }
+    final selectedResource = _findResource(
+      _resources,
+      committedResourceId ?? selectedResourceId,
+    );
+    if (selectedResource != null) {
+      _selectedResource = selectedResource;
+      return;
+    }
+    _syncFocusedPaneSelection();
+  }
+
+  Map<String, String> _actualNoteIdRemaps(Map<String, String> remaps) {
+    return <String, String>{
+      for (final entry in remaps.entries)
+        if (entry.key != entry.value) entry.key: entry.value,
+    };
+  }
+
+  void _syncRemappedSessionMaterials(
+    Map<String, String> remaps, {
+    bool clearFocusedPreview = false,
+  }) {
+    if (remaps.isEmpty) {
+      return;
+    }
+    final focusedSession = _activeSession;
+    var shouldClearFocusedPreviewSelection = false;
+    for (final newNoteId in remaps.values) {
+      final session = _noteSessionRegistry.sessionFor(newNoteId);
+      if (session == null) {
+        continue;
+      }
+      final sourceIds = session.note.sources.map((source) => source.id).toSet();
+      session.selectedSourceIds.retainWhere(sourceIds.contains);
+      session.proposals = <AiProposal>[
+        for (final proposal in session.proposals)
+          proposal.noteId == newNoteId
+              ? proposal
+              : proposal.copyWith(noteId: newNoteId),
+      ];
+      if (clearFocusedPreview && identical(session, focusedSession)) {
+        shouldClearFocusedPreviewSelection = true;
+      }
+    }
+    _searchResults = const [];
+    if (shouldClearFocusedPreviewSelection) {
+      _setSelectedPreviewImageSrc(null);
+    }
+  }
+
   void _splitFocusedPane(SplitDirection direction) {
     setState(() {
       _splitWorkspaceController.splitFocused(direction);
@@ -1269,7 +1339,6 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     if (!stillOpen) {
       return;
     }
-    final selectedResourceId = _selectedResource?.id;
     final mutationResult = await _workspaceMutationBarrier.commit<void>(
       VaultMutationDelta<void>(
         value: null,
@@ -1287,18 +1356,17 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
           return;
         }
         setState(() {
+          _syncRemappedSessionMaterials(
+            _actualNoteIdRemaps(delta.remappedNoteIds),
+            clearFocusedPreview: true,
+          );
           final resources = delta.resources;
           if (resources != null) {
             _resources = resources;
             _resetAiServices();
-            if (_selectedResource?.id == selectedResourceId) {
-              final remappedSelectedId = selectedResourceId == result.oldNoteId
-                  ? savedNote.id
-                  : selectedResourceId;
-              _selectedResource = remappedSelectedId == null
-                  ? null
-                  : _findResource(_resources, remappedSelectedId);
-            }
+            _reconcileSelectedResourceAfterMutation(
+              remappedNoteIds: delta.remappedNoteIds,
+            );
           }
           if (request.successMessage != null && !result.stillDirty) {
             _message = request.successMessage!;
@@ -1733,7 +1801,6 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     if (title == null) {
       return;
     }
-    final selectedResourceId = _selectedResource?.id;
     await _runBusy(() async {
       final vault = _requireVault();
       final affectedNoteIds = <String>{
@@ -1778,20 +1845,17 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
           }
           setState(() {
             _resources = delta.resources ?? const [];
-            if (_selectedResource?.id == selectedResourceId) {
-              final remappedSelectedId =
-                  selectedResourceId != null &&
-                      _pathIsInside(selectedResourceId, folder.path)
-                  ? _replacePathPrefix(
-                      selectedResourceId,
-                      folder.path,
-                      delta.value.path,
-                    )
-                  : selectedResourceId;
-              _selectedResource = remappedSelectedId == null
-                  ? null
-                  : _findResource(_resources, remappedSelectedId);
+            _syncRemappedSessionMaterials(
+              _actualNoteIdRemaps(delta.remappedNoteIds),
+            );
+            if (folder.path != delta.value.path) {
+              _searchResults = const [];
             }
+            _reconcileSelectedResourceAfterMutation(
+              remappedNoteIds: delta.remappedNoteIds,
+              oldFolderPath: folder.path,
+              newFolderPath: delta.value.path,
+            );
             _collapsedFolderIds.remove(folder.id);
             _collapsedFolderIds.remove(delta.value.id);
             _message = '文件夹已重命名';
@@ -1917,7 +1981,9 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
               _paneMutationTargetStillOwnsSession(paneTarget);
           setState(() {
             _resources = delta.resources ?? const [];
-            _searchResults = const [];
+            _syncRemappedSessionMaterials(
+              _actualNoteIdRemaps(delta.remappedNoteIds),
+            );
             final movedSession =
                 _noteSessionRegistry.sessionFor(delta.value.note.id) ??
                 _upsertNoteSession(delta.value.note);
@@ -1929,13 +1995,12 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
               );
               if (_splitWorkspaceController.focusedPaneId ==
                   paneTarget.paneId) {
-                _selectedResource = _findResource(
-                  _resources,
-                  delta.value.note.id,
-                );
                 _narrowSection = _WorkspaceSection.notes;
               }
             }
+            _reconcileSelectedResourceAfterMutation(
+              remappedNoteIds: delta.remappedNoteIds,
+            );
             _collapsedFolderIds.remove(parentPath);
             _message = '笔记已移动';
             _resetAiServices();
@@ -3437,6 +3502,10 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
               const SizedBox(height: 8),
               for (var index = 0; index < _proposals.length; index++)
                 _ProposalCard(
+                  key: Key(
+                    'proposal-${_proposals[index].noteId}-'
+                    '${_proposals[index].id}',
+                  ),
                   proposal: _proposals[index],
                   copyKey: Key(
                     index == 0
@@ -4022,6 +4091,7 @@ class _LiveMarkdownEditorState extends State<_LiveMarkdownEditor> {
   void initState() {
     super.initState();
     widget.controller.addListener(_handleFullDocumentChanged);
+    _queueInitialBlockActivation();
   }
 
   @override
@@ -4069,11 +4139,13 @@ class _LiveMarkdownEditorState extends State<_LiveMarkdownEditor> {
   }
 
   void _queueInitialBlockActivation() {
-    if (_autoActivatedInitialBlock || _activeOffset != null) {
+    if (!widget.focused ||
+        _autoActivatedInitialBlock ||
+        _activeOffset != null) {
       return;
     }
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) {
+      if (!mounted || !widget.focused) {
         return;
       }
       _activateInitialEditableBlock();
@@ -4081,7 +4153,9 @@ class _LiveMarkdownEditorState extends State<_LiveMarkdownEditor> {
   }
 
   void _activateInitialEditableBlock() {
-    if (_autoActivatedInitialBlock || _activeOffset != null) {
+    if (!widget.focused ||
+        _autoActivatedInitialBlock ||
+        _activeOffset != null) {
       return;
     }
     final blocks = splitMarkdownLiveBlocks(widget.controller.text);
@@ -7683,6 +7757,7 @@ class _ImageSourceTileState extends State<_ImageSourceTile> {
 
 class _ProposalCard extends StatelessWidget {
   const _ProposalCard({
+    super.key,
     required this.proposal,
     required this.copyKey,
     required this.deleteKey,

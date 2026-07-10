@@ -95,23 +95,27 @@ final class WorkspaceMutationBarrier {
         _activeSessions.addAll(affectedSessions);
         try {
           await _drainPendingSaveCommits(affectedSessions);
-          final flushReport = await _saveCoordinator.quiesce(
+          final lease = await _saveCoordinator.acquireQuiescence(
             affectedSessions,
             disposition: plan.dirtyDisposition,
           );
-          if (plan.dirtyDisposition == DirtyDisposition.flush &&
-              !flushReport.succeeded) {
-            return MutationAborted<T>(flushReport);
-          }
-
-          late final VaultMutationDelta<T> delta;
           try {
-            delta = await plan.execute();
-          } catch (error, stackTrace) {
-            return MutationFailed<T>(error: error, stackTrace: stackTrace);
-          }
+            if (plan.dirtyDisposition == DirtyDisposition.flush &&
+                !lease.report.succeeded) {
+              return MutationAborted<T>(lease.report);
+            }
 
-          return _commitAndNotify(delta, onCommitted: onCommitted);
+            late final VaultMutationDelta<T> delta;
+            try {
+              delta = await plan.execute();
+            } catch (error, stackTrace) {
+              return MutationFailed<T>(error: error, stackTrace: stackTrace);
+            }
+
+            return await _commitAndNotify(delta, onCommitted: onCommitted);
+          } finally {
+            lease.release();
+          }
         } finally {
           _activeSessions.removeAll(affectedSessions);
         }
@@ -244,23 +248,20 @@ final class WorkspaceMutationBarrier {
   }
 
   void _commitDelta<T>(VaultMutationDelta<T> delta) {
-    if (delta.remappedNoteIds.isNotEmpty) {
-      _sessions.remapNoteIds(
-        delta.remappedNoteIds,
-        refreshedNotesByNewId: delta.refreshedNotesByNewId,
-        afterCommitBeforeNotify: () {
-          _splits.remapNoteIds(delta.remappedNoteIds);
-        },
-      );
+    if (delta.remappedNoteIds.isEmpty && delta.removedNoteIds.isEmpty) {
+      return;
     }
-    if (delta.removedNoteIds.isNotEmpty) {
-      _sessions.remove(
-        delta.removedNoteIds,
-        afterCommitBeforeNotify: () {
-          _splits.clearNoteIds(delta.removedNoteIds);
-        },
-      );
-    }
+    _sessions.applyMutation(
+      remappedNoteIds: delta.remappedNoteIds,
+      removedNoteIds: delta.removedNoteIds,
+      refreshedNotesByNewId: delta.refreshedNotesByNewId,
+      afterCommitBeforeNotify: () {
+        _splits.applyMutation(
+          remappedNoteIds: delta.remappedNoteIds,
+          removedNoteIds: delta.removedNoteIds,
+        );
+      },
+    );
   }
 }
 

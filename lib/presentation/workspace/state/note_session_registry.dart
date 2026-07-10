@@ -249,6 +249,136 @@ final class NoteSessionRegistry extends ChangeNotifier {
     }
   }
 
+  void applyMutation({
+    required Map<String, String> remappedNoteIds,
+    required Set<String> removedNoteIds,
+    required Map<String, VaultNoteContent> refreshedNotesByNewId,
+    bool preserveDirtyBody = true,
+    VoidCallback? afterCommitBeforeNotify,
+  }) {
+    _ensureCanMutate();
+    if (remappedNoteIds.isEmpty && removedNoteIds.isEmpty) {
+      return;
+    }
+
+    final moves = <String, _SessionMove>{};
+    final destinationOwners = <String, String>{};
+    for (final entry in remappedNoteIds.entries) {
+      final session = _sessions[entry.key];
+      if (session == null) {
+        continue;
+      }
+      final newId = entry.value;
+      if (newId.isEmpty) {
+        throw ArgumentError.value(
+          newId,
+          'remappedNoteIds',
+          'New note id is empty.',
+        );
+      }
+      final refreshed = refreshedNotesByNewId[newId];
+      if (refreshed == null) {
+        throw ArgumentError(
+          'Missing refreshed note snapshot for remapped id "$newId".',
+        );
+      }
+      if (refreshed.id != newId) {
+        throw ArgumentError(
+          'Refreshed note id "${refreshed.id}" does not match remapped id '
+          '"$newId".',
+        );
+      }
+      final previousOwner = destinationOwners[newId];
+      if (previousOwner != null && previousOwner != entry.key) {
+        throw StateError(
+          'Note session target "$newId" is already claimed by '
+          '"$previousOwner".',
+        );
+      }
+      destinationOwners[newId] = entry.key;
+      moves[entry.key] = _SessionMove(
+        session: session,
+        newId: newId,
+        refreshedNote: refreshed,
+      );
+    }
+
+    for (final move in moves.entries) {
+      final targetSession = _sessions[move.value.newId];
+      if (targetSession != null &&
+          !identical(targetSession, move.value.session) &&
+          !moves.containsKey(move.value.newId)) {
+        throw StateError(
+          'Note session target "${move.value.newId}" is already owned by '
+          'another session.',
+        );
+      }
+    }
+
+    final committedSessions = <String, NoteDocumentSession>{};
+    for (final entry in _sessions.entries) {
+      final move = moves[entry.key];
+      final id = move?.newId ?? entry.key;
+      final previous = committedSessions[id];
+      if (previous != null && !identical(previous, entry.value)) {
+        throw StateError(
+          'Note session target "$id" is already owned by another session.',
+        );
+      }
+      committedSessions[id] = entry.value;
+    }
+    for (final removedId in removedNoteIds) {
+      committedSessions.remove(removedId);
+    }
+
+    final retainedSessions = Set<NoteDocumentSession>.identity()
+      ..addAll(committedSessions.values);
+    final preparedUpdates = <PreparedNoteDocumentUpdate>[
+      for (final move in moves.values)
+        if (retainedSessions.contains(move.session))
+          move.session.prepareReplaceFromVault(
+            move.refreshedNote,
+            preserveDirtyBody: preserveDirtyBody,
+          ),
+    ];
+    final removedSessions = <NoteDocumentSession>[
+      for (final session in _sessions.values)
+        if (!retainedSessions.contains(session)) session,
+    ];
+    final shouldNotify = moves.isNotEmpty || removedSessions.isNotEmpty;
+    Object? commitHookError;
+    StackTrace? commitHookStackTrace;
+    _isMutationTransactionActive = true;
+    try {
+      for (final update in preparedUpdates) {
+        update.applySilently();
+      }
+      _sessions
+        ..clear()
+        ..addAll(committedSessions);
+      try {
+        afterCommitBeforeNotify?.call();
+      } catch (error, stackTrace) {
+        commitHookError = error;
+        commitHookStackTrace = stackTrace;
+      }
+      for (final session in removedSessions) {
+        session.dispose();
+      }
+      for (final update in preparedUpdates) {
+        update.publish();
+      }
+      if (shouldNotify) {
+        notifyListeners();
+      }
+    } finally {
+      _isMutationTransactionActive = false;
+    }
+    if (commitHookError case final error?) {
+      Error.throwWithStackTrace(error, commitHookStackTrace!);
+    }
+  }
+
   List<NoteDocumentSession> remove(
     Iterable<String> ids, {
     bool dispose = true,

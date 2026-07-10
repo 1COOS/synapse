@@ -78,6 +78,30 @@ final class FlushReport {
   bool get succeeded => results.every((result) => result.succeeded);
 }
 
+final class NoteSaveQuiescenceLease {
+  NoteSaveQuiescenceLease._({
+    required NoteSaveCoordinator coordinator,
+    required List<NoteDocumentSession> sessions,
+    required this.report,
+  }) : _coordinator = coordinator,
+       _sessions = sessions;
+
+  final NoteSaveCoordinator _coordinator;
+  final List<NoteDocumentSession> _sessions;
+  final FlushReport report;
+  bool _isReleased = false;
+
+  bool get isReleased => _isReleased;
+
+  void release({bool resumeDirty = true}) {
+    if (_isReleased) {
+      return;
+    }
+    _isReleased = true;
+    _coordinator._releaseQuiescence(_sessions, resumeDirty: resumeDirty);
+  }
+}
+
 final class NoteSaveCoordinator {
   NoteSaveCoordinator({
     required NoteSessionRegistry sessions,
@@ -108,8 +132,8 @@ final class NoteSaveCoordinator {
       Map<NoteDocumentSession, _SaveFlight>.identity();
   final Map<NoteDocumentSession, _QueuedSave> _queued =
       Map<NoteDocumentSession, _QueuedSave>.identity();
-  final Set<NoteDocumentSession> _quiescing =
-      Set<NoteDocumentSession>.identity();
+  final Map<NoteDocumentSession, int> _quiescenceCounts =
+      Map<NoteDocumentSession, int>.identity();
   bool _isDisposed = false;
 
   bool get isSaving => !_isDisposed && _flights.isNotEmpty;
@@ -121,7 +145,9 @@ final class NoteSaveCoordinator {
       );
 
   void schedule(NoteDocumentSession session) {
-    if (_isDisposed || session.savePhase == NoteSavePhase.disposed) {
+    if (_isDisposed ||
+        session.savePhase == NoteSavePhase.disposed ||
+        _isQuiescing(session)) {
       return;
     }
     cancel(session);
@@ -187,6 +213,10 @@ final class NoteSaveCoordinator {
           StateError('Note save coordinator disposed.'),
         ),
       );
+    }
+    if (_isQuiescing(session) && reason != NoteSaveReason.mutationBarrier) {
+      cancel(session);
+      return Future<NoteSaveResult>.value(_suppressedResult(session));
     }
     cancel(session);
     final request = SaveRequest(
@@ -269,29 +299,63 @@ final class NoteSaveCoordinator {
     NoteSaveReason reason = NoteSaveReason.mutationBarrier,
     String? successMessage,
   }) async {
-    final sessions = targetSessions.toList(growable: false);
-    if (disposition == DirtyDisposition.flush) {
-      return flush(sessions, reason: reason, successMessage: successMessage);
-    }
-
-    final results = <NoteSaveResult>[];
-    _quiescing.addAll(sessions);
+    final lease = await acquireQuiescence(
+      targetSessions,
+      disposition: disposition,
+      reason: reason,
+      successMessage: successMessage,
+    );
     try {
-      for (final session in sessions) {
-        cancel(session);
-        _cancelQueued(session, StateError('Queued note save discarded.'));
-      }
-      for (final session in sessions) {
-        final pending = _flights[session]?.future;
-        if (pending != null) {
-          results.add(await pending);
-        }
-        cancel(session);
-      }
+      return lease.report;
     } finally {
-      _quiescing.removeAll(sessions);
+      lease.release(resumeDirty: disposition == DirtyDisposition.flush);
     }
-    return FlushReport(List<NoteSaveResult>.unmodifiable(results));
+  }
+
+  Future<NoteSaveQuiescenceLease> acquireQuiescence(
+    Iterable<NoteDocumentSession> targetSessions, {
+    required DirtyDisposition disposition,
+    NoteSaveReason reason = NoteSaveReason.mutationBarrier,
+    String? successMessage,
+  }) async {
+    final seen = Set<NoteDocumentSession>.identity();
+    final sessions = <NoteDocumentSession>[
+      for (final session in targetSessions)
+        if (seen.add(session)) session,
+    ];
+    _holdQuiescence(sessions);
+    try {
+      late final FlushReport report;
+      if (disposition == DirtyDisposition.flush) {
+        report = await flush(
+          sessions,
+          reason: reason,
+          successMessage: successMessage,
+        );
+      } else {
+        final results = <NoteSaveResult>[];
+        for (final session in sessions) {
+          cancel(session);
+          _cancelQueued(session, StateError('Queued note save discarded.'));
+        }
+        for (final session in sessions) {
+          final pending = _flights[session]?.future;
+          if (pending != null) {
+            results.add(await pending);
+          }
+          cancel(session);
+        }
+        report = FlushReport(List<NoteSaveResult>.unmodifiable(results));
+      }
+      return NoteSaveQuiescenceLease._(
+        coordinator: this,
+        sessions: List<NoteDocumentSession>.unmodifiable(sessions),
+        report: report,
+      );
+    } catch (_) {
+      _releaseQuiescence(sessions, resumeDirty: true);
+      rethrow;
+    }
   }
 
   Future<NoteSaveResult> _startFlight(
@@ -457,7 +521,7 @@ final class NoteSaveCoordinator {
     } else if (result.succeeded &&
         result.stillDirty &&
         flight.request.rescheduleIfStillDirty &&
-        !_quiescing.contains(session)) {
+        !_isQuiescing(session)) {
       schedule(session);
     }
     if (!_isDisposed) {
@@ -476,6 +540,19 @@ final class NoteSaveCoordinator {
       error: null,
       stackTrace: null,
       stillDirty: false,
+    );
+  }
+
+  NoteSaveResult _suppressedResult(NoteDocumentSession session) {
+    return NoteSaveResult(
+      session: session,
+      oldNoteId: session.noteId,
+      bodySnapshot: session.controller.text,
+      savedNote: null,
+      resources: null,
+      error: null,
+      stackTrace: null,
+      stillDirty: session.isDirty,
     );
   }
 
@@ -525,6 +602,48 @@ final class NoteSaveCoordinator {
 
   void _cancelTimerOnly(NoteDocumentSession session) {
     _timers.remove(session)?.cancel();
+  }
+
+  bool _isQuiescing(NoteDocumentSession session) {
+    return _quiescenceCounts.containsKey(session);
+  }
+
+  void _holdQuiescence(Iterable<NoteDocumentSession> sessions) {
+    for (final session in sessions) {
+      _quiescenceCounts.update(
+        session,
+        (count) => count + 1,
+        ifAbsent: () => 1,
+      );
+      cancel(session);
+    }
+  }
+
+  void _releaseQuiescence(
+    Iterable<NoteDocumentSession> sessions, {
+    required bool resumeDirty,
+  }) {
+    final released = <NoteDocumentSession>[];
+    for (final session in sessions) {
+      final count = _quiescenceCounts[session];
+      if (count == null) {
+        continue;
+      }
+      if (count <= 1) {
+        _quiescenceCounts.remove(session);
+        released.add(session);
+      } else {
+        _quiescenceCounts[session] = count - 1;
+      }
+    }
+    if (!resumeDirty || _isDisposed) {
+      return;
+    }
+    for (final session in released) {
+      if (session.savePhase != NoteSavePhase.disposed && session.isDirty) {
+        schedule(session);
+      }
+    }
   }
 
   void dispose() {
@@ -579,7 +698,7 @@ final class NoteSaveCoordinator {
             );
       _complete(entry.value.completer, result);
     }
-    _quiescing.clear();
+    _quiescenceCounts.clear();
   }
 }
 

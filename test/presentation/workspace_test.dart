@@ -700,6 +700,77 @@ void main() {
     );
   });
 
+  testWidgets(
+    'title rename invalidates search and remaps open note materials',
+    (tester) async {
+      final vault = MemoryVaultBackend(seedExampleData: false);
+      final note = await vault.createNote(parentPath: '', title: '心经');
+      await vault.updateMarkdown(noteId: note.id, markdown: '# 心经\n独特问题线索');
+      final source = await vault.addImageSource(
+        noteId: note.id,
+        filename: 'rename-source.png',
+        mimeType: 'image/png',
+        bytes: _tinyPng,
+      );
+      final now = DateTime.now().toUtc();
+      await vault.saveProposal(
+        AiProposal(
+          id: 'title-rename-proposal',
+          noteId: note.id,
+          sourceIds: [source.id],
+          title: '标题重命名建议',
+          proposedMarkdown: '保留建议正文',
+          status: ProposalStatus.pending,
+          createdAt: now,
+          updatedAt: now,
+        ),
+      );
+
+      await _pumpWorkspace(tester, vault: vault);
+      await tester.tap(find.byKey(const Key('left-pane-mode-search')));
+      await tester.pump(const Duration(milliseconds: 250));
+      await tester.enterText(
+        find.byKey(const Key('workspace-search-field')),
+        '独特问题',
+      );
+      await tester.tap(find.byKey(const Key('workspace-search-submit-button')));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('search-result-心经.md')), findsOneWidget);
+
+      await tester.tap(find.byType(Image).first);
+      await tester.pump();
+      final generateButtonBeforeRename = tester.widget<CupertinoButton>(
+        find.descendant(
+          of: find.byKey(const Key('generate-proposal-button')),
+          matching: find.byType(CupertinoButton),
+        ),
+      );
+      expect(generateButtonBeforeRename.onPressed, isNotNull);
+
+      await _switchToSourceMode(tester);
+      await _enterTextInLiveMarkdownBlock(tester, '# 金刚经\n独特问题线索');
+      await tester.pump(const Duration(milliseconds: 1000));
+      await tester.pump();
+
+      expect(find.byKey(const Key('search-result-心经.md')), findsNothing);
+      expect(
+        find.byKey(const Key('proposal-心经.md-title-rename-proposal')),
+        findsNothing,
+      );
+      expect(
+        find.byKey(const Key('proposal-金刚经.md-title-rename-proposal')),
+        findsOneWidget,
+      );
+      final generateButtonAfterRename = tester.widget<CupertinoButton>(
+        find.descendant(
+          of: find.byKey(const Key('generate-proposal-button')),
+          matching: find.byType(CupertinoButton),
+        ),
+      );
+      expect(generateButtonAfterRename.onPressed, isNotNull);
+    },
+  );
+
   testWidgets('keeps duplicate split panes open after title rename', (
     tester,
   ) async {
@@ -989,15 +1060,15 @@ void main() {
       await tester.tap(find.byKey(const Key('note-mode-source-pane-2')));
       await tester.pump(const Duration(milliseconds: 250));
 
-      await tester.tap(find.byKey(const Key('split-pane-pane-1')));
-      await tester.pump();
+      await tester.tap(find.byKey(const Key('note-mode-source-pane-1')));
+      await tester.pump(const Duration(milliseconds: 250));
       await _enterTextInLiveMarkdownBlock(
         tester,
         '# Gamma\ndirty Gamma session',
         paneId: 1,
       );
-      await tester.tap(find.byKey(const Key('split-pane-pane-2')));
-      await tester.pump();
+      await tester.tap(find.byKey(const Key('note-mode-source-pane-2')));
+      await tester.pump(const Duration(milliseconds: 250));
       await _enterTextInLiveMarkdownBlock(
         tester,
         '# Beta\nclose is waiting',
@@ -1064,6 +1135,31 @@ void main() {
       title: 'Alpha',
     );
     final beta = await vault.createNote(parentPath: folder.path, title: 'Beta');
+    final now = DateTime.now().toUtc();
+    await vault.saveProposal(
+      AiProposal(
+        id: 'alpha-folder-rename-proposal',
+        noteId: alpha.id,
+        sourceIds: const [],
+        title: 'Alpha 建议',
+        proposedMarkdown: 'Alpha proposal',
+        status: ProposalStatus.pending,
+        createdAt: now,
+        updatedAt: now,
+      ),
+    );
+    await vault.saveProposal(
+      AiProposal(
+        id: 'beta-folder-rename-proposal',
+        noteId: beta.id,
+        sourceIds: const [],
+        title: 'Beta 建议',
+        proposedMarkdown: 'Beta proposal',
+        status: ProposalStatus.pending,
+        createdAt: now,
+        updatedAt: now,
+      ),
+    );
 
     await _pumpWorkspace(tester, vault: vault);
     await tester.tap(find.byKey(const Key('note-mode-source-pane-1')));
@@ -1103,7 +1199,146 @@ void main() {
     expect(find.byKey(Key('resource-row-${beta.id}')), findsNothing);
     expect(find.byKey(const Key('resource-row-课程/Alpha.md')), findsOneWidget);
     expect(find.byKey(const Key('resource-row-课程/Beta.md')), findsOneWidget);
+    expect(
+      find.byKey(const Key('proposal-读书/Beta.md-beta-folder-rename-proposal')),
+      findsNothing,
+    );
+    expect(
+      find.byKey(const Key('proposal-课程/Beta.md-beta-folder-rename-proposal')),
+      findsOneWidget,
+    );
+
+    await tester.tap(find.byKey(const Key('note-mode-source-pane-1')));
+    await tester.pump(const Duration(milliseconds: 250));
+
+    expect(
+      find.byKey(
+        const Key('proposal-读书/Alpha.md-alpha-folder-rename-proposal'),
+      ),
+      findsNothing,
+    );
+    expect(
+      find.byKey(
+        const Key('proposal-课程/Alpha.md-alpha-folder-rename-proposal'),
+      ),
+      findsOneWidget,
+    );
   });
+
+  testWidgets('folder rename invalidates search for unopened notes', (
+    tester,
+  ) async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final activeFolder = await vault.createFolder(
+      parentPath: '',
+      title: 'A-active',
+    );
+    await vault.createNote(parentPath: activeFolder.path, title: 'Active');
+    final targetFolder = await vault.createFolder(
+      parentPath: '',
+      title: 'Z-target',
+    );
+    final hidden = await vault.createNote(
+      parentPath: targetFolder.path,
+      title: 'Hidden',
+    );
+    await vault.updateMarkdown(
+      noteId: hidden.id,
+      markdown: '# Hidden\n未打开笔记的独特线索',
+    );
+
+    await _pumpWorkspace(tester, vault: vault);
+    await tester.tap(find.byKey(const Key('left-pane-mode-search')));
+    await tester.pump(const Duration(milliseconds: 250));
+    await tester.enterText(
+      find.byKey(const Key('workspace-search-field')),
+      '独特线索',
+    );
+    await tester.tap(find.byKey(const Key('workspace-search-submit-button')));
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const Key('search-result-Z-target/Hidden.md')),
+      findsOneWidget,
+    );
+
+    await tester.tap(find.byKey(const Key('left-pane-mode-resources')));
+    await tester.pump(const Duration(milliseconds: 250));
+    await tester.tap(
+      find.byKey(Key('resource-row-${targetFolder.id}')),
+      buttons: kSecondaryMouseButton,
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(Key('folder-menu-rename-${targetFolder.id}')));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.byKey(const Key('resource-name-input')),
+      'Renamed',
+    );
+    await tester.tap(find.text('重命名'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('left-pane-mode-search')));
+    await tester.pump();
+
+    expect(
+      find.byKey(const Key('search-result-Z-target/Hidden.md')),
+      findsNothing,
+    );
+  });
+
+  testWidgets(
+    'folder rename keeps the pane focused during backend await selected',
+    (tester) async {
+      final vault = _DelayedRenameFolderVaultBackend(seedExampleData: false);
+      addTearDown(vault.completeRename);
+      final folder = await vault.createFolder(parentPath: '', title: '读书');
+      final alpha = await vault.createNote(
+        parentPath: folder.path,
+        title: 'Alpha',
+      );
+      final beta = await vault.createNote(
+        parentPath: folder.path,
+        title: 'Beta',
+      );
+
+      await _pumpWorkspace(tester, vault: vault);
+      await tester.tap(find.byKey(const Key('split-pane-right-button')));
+      await tester.pump(const Duration(milliseconds: 250));
+      await tester.tap(find.byKey(Key('resource-row-${beta.id}')));
+      await tester.pump(const Duration(milliseconds: 250));
+      final focusPaneOne = tester
+          .widget<GestureDetector>(find.byKey(const Key('split-pane-pane-1')))
+          .onTap!;
+
+      await tester.tap(
+        find.byKey(Key('resource-row-${folder.id}')),
+        buttons: kSecondaryMouseButton,
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(Key('folder-menu-rename-${folder.id}')));
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byKey(const Key('resource-name-input')),
+        '课程',
+      );
+      await tester.tap(find.text('重命名'));
+      await tester.pump();
+      await vault.renameStarted.future;
+      await tester.pump(const Duration(milliseconds: 300));
+
+      focusPaneOne();
+      vault.completeRename();
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(Key('resource-row-${alpha.id}')), findsNothing);
+      expect(find.byKey(Key('resource-row-${beta.id}')), findsNothing);
+      expect(find.byKey(const Key('resource-row-课程/Alpha.md')), findsOneWidget);
+      expect(find.byKey(const Key('resource-row-课程/Beta.md')), findsOneWidget);
+      expect(
+        _resourceRowBackgroundColor(tester, '课程/Alpha.md'),
+        isNot(const Color(0x00000000)),
+      );
+    },
+  );
 
   testWidgets('moving a duplicate-pane note updates every pane', (
     tester,
@@ -1149,6 +1384,49 @@ void main() {
     expect(find.byKey(Key('resource-row-${note.id}')), findsNothing);
     expect(find.byKey(const Key('resource-row-课程/心经.md')), findsOneWidget);
   });
+
+  testWidgets(
+    'moving a duplicate-pane note keeps the pane focused during backend await selected',
+    (tester) async {
+      final vault = _DelayedMoveNoteVaultBackend(seedExampleData: false);
+      addTearDown(vault.completeMove);
+      final source = await vault.createFolder(parentPath: '', title: '读书');
+      final target = await vault.createFolder(parentPath: '', title: '课程');
+      final note = await vault.createNote(parentPath: source.path, title: '心经');
+
+      await _pumpWorkspace(tester, vault: vault);
+      await tester.tap(find.byKey(const Key('split-pane-right-button')));
+      await tester.pump(const Duration(milliseconds: 250));
+      final focusPaneOne = tester
+          .widget<GestureDetector>(find.byKey(const Key('split-pane-pane-1')))
+          .onTap!;
+
+      await tester.tap(
+        find.byKey(Key('resource-row-${note.id}')),
+        buttons: kSecondaryMouseButton,
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(Key('note-menu-move-${note.id}')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(Key('move-target-folder-${target.id}')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('移动'));
+      await tester.pump();
+      await vault.moveStarted.future;
+      await tester.pump(const Duration(milliseconds: 300));
+
+      focusPaneOne();
+      vault.completeMove();
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(Key('resource-row-${note.id}')), findsNothing);
+      expect(find.byKey(const Key('resource-row-课程/心经.md')), findsOneWidget);
+      expect(
+        _resourceRowBackgroundColor(tester, '课程/心经.md'),
+        isNot(const Color(0x00000000)),
+      );
+    },
+  );
 
   testWidgets(
     'deleting an open note cancels pending saves and clears every pane',
@@ -5145,6 +5423,16 @@ Color? _menuItemHighlightColor(WidgetTester tester, Key key) {
   return (surface.decoration! as BoxDecoration).color;
 }
 
+Color? _resourceRowBackgroundColor(WidgetTester tester, String resourceId) {
+  final surface = tester.widget<AnimatedContainer>(
+    find.descendant(
+      of: find.byKey(Key('resource-row-$resourceId')),
+      matching: find.byType(AnimatedContainer),
+    ),
+  );
+  return (surface.decoration! as BoxDecoration).color;
+}
+
 double _menuSeparatorHeight(WidgetTester tester, Key key) {
   return tester
       .getSize(
@@ -5421,6 +5709,56 @@ class _DelayedUpdateVaultBackend extends MemoryVaultBackend {
     updateStarted.complete();
     await _updateRelease.future;
     return super.updateMarkdown(noteId: noteId, markdown: markdown);
+  }
+}
+
+class _DelayedRenameFolderVaultBackend extends MemoryVaultBackend {
+  _DelayedRenameFolderVaultBackend({super.seedExampleData});
+
+  final renameStarted = Completer<void>();
+  final _renameRelease = Completer<void>();
+
+  void completeRename() {
+    if (!_renameRelease.isCompleted) {
+      _renameRelease.complete();
+    }
+  }
+
+  @override
+  Future<VaultResourceNode> renameFolder({
+    required String folderPath,
+    required String title,
+  }) async {
+    if (!renameStarted.isCompleted) {
+      renameStarted.complete();
+    }
+    await _renameRelease.future;
+    return super.renameFolder(folderPath: folderPath, title: title);
+  }
+}
+
+class _DelayedMoveNoteVaultBackend extends MemoryVaultBackend {
+  _DelayedMoveNoteVaultBackend({super.seedExampleData});
+
+  final moveStarted = Completer<void>();
+  final _moveRelease = Completer<void>();
+
+  void completeMove() {
+    if (!_moveRelease.isCompleted) {
+      _moveRelease.complete();
+    }
+  }
+
+  @override
+  Future<VaultNote> moveNote({
+    required String noteId,
+    required String parentPath,
+  }) async {
+    if (!moveStarted.isCompleted) {
+      moveStarted.complete();
+    }
+    await _moveRelease.future;
+    return super.moveNote(noteId: noteId, parentPath: parentPath);
   }
 }
 
