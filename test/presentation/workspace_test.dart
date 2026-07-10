@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/cupertino.dart';
@@ -401,7 +402,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 250));
     await _enterTextInLiveMarkdownBlock(
       tester,
-      '# Alpha\nalpha dirty',
+      '# Gamma\nalpha dirty',
       paneId: 1,
     );
     await tester.tap(find.byKey(const Key('note-mode-source-pane-2')));
@@ -412,6 +413,7 @@ void main() {
       paneId: 2,
     );
 
+    expect(events, isEmpty);
     await tester.tap(find.byKey(const Key('vault-location-button')));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 250));
@@ -422,7 +424,7 @@ void main() {
     );
     expect(events.last, 'picker');
     expect(
-      (await firstVault.readNote('Alpha.md')).markdown,
+      (await firstVault.readNote('Gamma.md')).markdown,
       contains('alpha dirty'),
     );
     expect(
@@ -431,6 +433,51 @@ void main() {
     );
     expect(locationStore.savedLocations.last.rootPath, secondPath);
     expect(find.text('Second'), findsWidgets);
+  });
+
+  testWidgets('does not open the vault picker after workspace unmounts', (
+    tester,
+  ) async {
+    const firstPath = '/vault/first';
+    const secondPath = '/vault/second';
+    var pickerCalls = 0;
+    final firstVault = _DelayedUpdateVaultBackend(seedExampleData: false);
+    await firstVault.createNote(parentPath: '', title: 'Alpha');
+    final secondVault = MemoryVaultBackend(seedExampleData: false);
+    await secondVault.createNote(parentPath: '', title: 'Second');
+    final locationStore = _FakeVaultLocationStore(
+      loadedLocation: const VaultLocation(rootPath: firstPath),
+      existingPaths: const {firstPath, secondPath},
+    );
+
+    await _pumpWorkspace(
+      tester,
+      vault: null,
+      vaultLocationStore: locationStore,
+      directoryPicker: () async {
+        pickerCalls += 1;
+        return secondPath;
+      },
+      vaultBackendFactory: (rootPath) {
+        return rootPath == firstPath ? firstVault : secondVault;
+      },
+    );
+    await _switchToSourceMode(tester);
+    await _enterTextInLiveMarkdownBlock(tester, '# Alpha\ndirty');
+    final controller = _liveMarkdownDocumentController(tester, paneId: 1);
+
+    await tester.tap(find.byKey(const Key('vault-location-button')));
+    await tester.pump();
+    expect(firstVault.updateStarted.isCompleted, isTrue);
+    controller.text = '# Alpha\n';
+    await tester.pump();
+    await tester.pumpWidget(const SizedBox.shrink());
+
+    firstVault.completeUpdate();
+    await tester.pump();
+    await tester.pump();
+
+    expect(pickerCalls, 0);
   });
 
   testWidgets(
@@ -5091,6 +5138,27 @@ class _RecordingUpdateVaultBackend extends MemoryVaultBackend {
     if (noteId == failingNoteId) {
       throw StateError('save failed for $noteId');
     }
+    return super.updateMarkdown(noteId: noteId, markdown: markdown);
+  }
+}
+
+class _DelayedUpdateVaultBackend extends MemoryVaultBackend {
+  _DelayedUpdateVaultBackend({super.seedExampleData});
+
+  final updateStarted = Completer<void>();
+  final _updateRelease = Completer<void>();
+
+  void completeUpdate() {
+    _updateRelease.complete();
+  }
+
+  @override
+  Future<VaultNoteContent> updateMarkdown({
+    required String noteId,
+    required String markdown,
+  }) async {
+    updateStarted.complete();
+    await _updateRelease.future;
     return super.updateMarkdown(noteId: noteId, markdown: markdown);
   }
 }

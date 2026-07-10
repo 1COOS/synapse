@@ -1245,7 +1245,8 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       setState(() => _message = 'H5 预览使用浏览器沙盒库');
       return;
     }
-    if (!await _autoSaveDirtyMarkdownBeforeSwitch()) {
+    final saved = await _autoSaveDirtyMarkdownBeforeSwitch();
+    if (!saved || !mounted) {
       return;
     }
     VaultLocation? pickedLocation;
@@ -1258,6 +1259,9 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       return;
     }
     if (pickedLocation == null) {
+      return;
+    }
+    if (!mounted) {
       return;
     }
     await _runBusy(() async {
