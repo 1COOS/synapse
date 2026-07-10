@@ -4020,6 +4020,7 @@ class _LiveMarkdownEditorState extends State<_LiveMarkdownEditor> {
   final _blockController = _MarkdownStyledTextEditingController();
   final _blockFocusNode = FocusNode();
   int? _activeOffset;
+  _MarkdownCommandTarget? _activeSelectionTarget;
   var _syncingBlock = false;
   var _updatingFullDocument = false;
   var _activeTrailingInsertion = false;
@@ -4038,6 +4039,7 @@ class _LiveMarkdownEditorState extends State<_LiveMarkdownEditor> {
       oldWidget.controller.removeListener(_handleFullDocumentChanged);
       widget.controller.addListener(_handleFullDocumentChanged);
       _activeOffset = null;
+      _activeSelectionTarget = null;
       _activeTrailingInsertion = false;
       _autoActivatedInitialBlock = false;
     }
@@ -4108,6 +4110,7 @@ class _LiveMarkdownEditorState extends State<_LiveMarkdownEditor> {
     setState(() {
       _activeTrailingInsertion = false;
       _activeOffset = block.start;
+      _activeSelectionTarget = null;
       final selectionOffset = block.text.length;
       _updatingFullDocument = true;
       widget.controller.selection = TextSelection.collapsed(
@@ -4138,8 +4141,39 @@ class _LiveMarkdownEditorState extends State<_LiveMarkdownEditor> {
       _activeOffset = selection.isValid
           ? _clampOffset(selection.extentOffset, widget.controller.text.length)
           : _clampOffset(activeOffset, widget.controller.text.length);
+      _clearStaleActiveSelectionTarget();
       _syncBlockController();
     });
+  }
+
+  void _handleBlockSelectionChanged(
+    TextSelection selection,
+    SelectionChangedCause? cause,
+  ) {
+    if (_syncingBlock) {
+      return;
+    }
+    final block = _currentActiveTextBlock();
+    if (block == null || _blockController.text != block.text) {
+      _activeSelectionTarget = null;
+      return;
+    }
+    widget.onFocusPane();
+    final normalized = _normalizedSelectionForValue(
+      _blockController.value.copyWith(selection: selection),
+    );
+    _updateActiveOffsetFromBlockSelection(block, selection: normalized);
+    if (!normalized.isCollapsed) {
+      _activeSelectionTarget = _MarkdownCommandTarget(
+        value: _blockController.value.copyWith(
+          selection: normalized,
+          composing: TextRange.empty,
+        ),
+        blockStart: block.start,
+      );
+      return;
+    }
+    _clearStaleActiveSelectionTarget();
   }
 
   void _activateBlock(MarkdownLiveBlock block) {
@@ -4151,6 +4185,7 @@ class _LiveMarkdownEditorState extends State<_LiveMarkdownEditor> {
     setState(() {
       _activeTrailingInsertion = false;
       _activeOffset = block.start;
+      _activeSelectionTarget = null;
       _updatingFullDocument = true;
       widget.controller.selection = TextSelection.collapsed(
         offset: block.start,
@@ -4185,8 +4220,10 @@ class _LiveMarkdownEditorState extends State<_LiveMarkdownEditor> {
     }
     final block = blocks[index];
     if (_blockController.text == block.text) {
+      _clearStaleActiveSelectionTarget();
       return;
     }
+    _activeSelectionTarget = null;
     _syncingBlock = true;
     final oldSelection = _blockController.selection;
     final selectionOffset = oldSelection.isValid
@@ -4235,6 +4272,7 @@ class _LiveMarkdownEditorState extends State<_LiveMarkdownEditor> {
     );
     _updatingFullDocument = false;
     _activeOffset = _clampOffset(nextOffset, updated.length);
+    _activeSelectionTarget = null;
     _activeTrailingInsertion = false;
     if (mounted) {
       setState(() {});
@@ -4264,6 +4302,7 @@ class _LiveMarkdownEditorState extends State<_LiveMarkdownEditor> {
     );
     _updatingFullDocument = false;
     _activeOffset = _clampOffset(nextOffset, updated.length);
+    _activeSelectionTarget = null;
     _activeTrailingInsertion = false;
     if (mounted) {
       setState(() {});
@@ -4284,16 +4323,21 @@ class _LiveMarkdownEditorState extends State<_LiveMarkdownEditor> {
     BuildContext context,
     EditableTextState editableTextState,
   ) {
+    final menuTarget = _captureMarkdownCommandTargetForMenu(
+      editableTextState.textEditingValue,
+    );
     return _buildContextMenuForAnchors(
       context,
       editableTextState.contextMenuAnchors,
+      menuTarget: menuTarget,
     );
   }
 
   Widget _buildContextMenuForAnchors(
     BuildContext context,
-    TextSelectionToolbarAnchors anchors,
-  ) {
+    TextSelectionToolbarAnchors anchors, {
+    _MarkdownCommandTarget? menuTarget,
+  }) {
     final appearance = _WorkspaceAppearanceScope.of(this.context);
     return _WorkspaceAppearanceScope(
       appearance: appearance,
@@ -4303,7 +4347,12 @@ class _LiveMarkdownEditorState extends State<_LiveMarkdownEditor> {
         builder: (context, snapshot) {
           final availability =
               snapshot.data ?? _NoteEditorPasteAvailability.empty;
-          final hasSelection = !_normalizedBlockSelection().isCollapsed;
+          final hasSelection =
+              _resolveMarkdownCommandTarget(
+                menuTarget: menuTarget,
+                requireSelection: true,
+              ) !=
+              null;
           final canEdit = widget.enabled && !widget.busy;
           return _NoteContextMenuToolbar(
             anchors: anchors,
@@ -4313,25 +4362,29 @@ class _LiveMarkdownEditorState extends State<_LiveMarkdownEditor> {
                   itemKey: const Key('note-menu-copy'),
                   label: '复制',
                   enabled: hasSelection,
-                  onPressed: _copySelectionFromContextMenu,
+                  onPressed: () =>
+                      _copySelectionFromContextMenu(menuTarget: menuTarget),
                 ),
                 _NoteMenuAction(
                   itemKey: const Key('note-menu-cut'),
                   label: '剪切',
                   enabled: canEdit && hasSelection,
-                  onPressed: _cutSelectionFromContextMenu,
+                  onPressed: () =>
+                      _cutSelectionFromContextMenu(menuTarget: menuTarget),
                 ),
                 _NoteMenuAction(
                   itemKey: const Key('note-menu-paste'),
                   label: '粘贴',
                   enabled: canEdit && availability.canPaste,
-                  onPressed: _pasteFromContextMenu,
+                  onPressed: () =>
+                      _pasteFromContextMenu(menuTarget: menuTarget),
                 ),
                 _NoteMenuAction(
                   itemKey: const Key('note-menu-paste-plain'),
                   label: '以纯文本粘贴',
                   enabled: canEdit && availability.hasText,
-                  onPressed: _pastePlainTextFromContextMenu,
+                  onPressed: () =>
+                      _pastePlainTextFromContextMenu(menuTarget: menuTarget),
                 ),
                 const _NoteMenuSeparator(key: Key('note-menu-separator-0')),
                 _NoteMenuSubmenu(
@@ -4343,21 +4396,28 @@ class _LiveMarkdownEditorState extends State<_LiveMarkdownEditor> {
                       itemKey: const Key('note-menu-insert-table'),
                       label: '表格',
                       enabled: canEdit,
-                      onPressed: () => _applyInsertion(MarkdownInsertion.table),
+                      onPressed: () => _applyInsertion(
+                        MarkdownInsertion.table,
+                        menuTarget: menuTarget,
+                      ),
                     ),
                     _NoteMenuAction(
                       itemKey: const Key('note-menu-insert-annotation'),
                       label: '标注',
                       enabled: canEdit,
-                      onPressed: () =>
-                          _applyInsertion(MarkdownInsertion.annotation),
+                      onPressed: () => _applyInsertion(
+                        MarkdownInsertion.annotation,
+                        menuTarget: menuTarget,
+                      ),
                     ),
                     _NoteMenuAction(
                       itemKey: const Key('note-menu-insert-divider'),
                       label: '分割线',
                       enabled: canEdit,
-                      onPressed: () =>
-                          _applyInsertion(MarkdownInsertion.divider),
+                      onPressed: () => _applyInsertion(
+                        MarkdownInsertion.divider,
+                        menuTarget: menuTarget,
+                      ),
                     ),
                   ],
                 ),
@@ -4376,15 +4436,19 @@ class _LiveMarkdownEditorState extends State<_LiveMarkdownEditor> {
                       itemKey: const Key('note-menu-bold'),
                       label: '加粗',
                       enabled: canEdit && hasSelection,
-                      onPressed: () =>
-                          _applyInlineFormat(MarkdownInlineFormat.bold),
+                      onPressed: () => _applyInlineFormat(
+                        MarkdownInlineFormat.bold,
+                        menuTarget: menuTarget,
+                      ),
                     ),
                     _NoteMenuAction(
                       itemKey: const Key('note-menu-italic'),
                       label: '斜体',
                       enabled: canEdit && hasSelection,
-                      onPressed: () =>
-                          _applyInlineFormat(MarkdownInlineFormat.italic),
+                      onPressed: () => _applyInlineFormat(
+                        MarkdownInlineFormat.italic,
+                        menuTarget: menuTarget,
+                      ),
                     ),
                     _NoteMenuAction(
                       itemKey: const Key('note-menu-strikethrough'),
@@ -4392,6 +4456,7 @@ class _LiveMarkdownEditorState extends State<_LiveMarkdownEditor> {
                       enabled: canEdit && hasSelection,
                       onPressed: () => _applyInlineFormat(
                         MarkdownInlineFormat.strikethrough,
+                        menuTarget: menuTarget,
                       ),
                     ),
                   ],
@@ -4405,36 +4470,46 @@ class _LiveMarkdownEditorState extends State<_LiveMarkdownEditor> {
                       itemKey: const Key('note-menu-heading-1'),
                       label: '标题 1',
                       enabled: canEdit,
-                      onPressed: () =>
-                          _applyParagraphStyle(MarkdownParagraphStyle.heading1),
+                      onPressed: () => _applyParagraphStyle(
+                        MarkdownParagraphStyle.heading1,
+                        menuTarget: menuTarget,
+                      ),
                     ),
                     _NoteMenuAction(
                       itemKey: const Key('note-menu-heading-2'),
                       label: '标题 2',
                       enabled: canEdit,
-                      onPressed: () =>
-                          _applyParagraphStyle(MarkdownParagraphStyle.heading2),
+                      onPressed: () => _applyParagraphStyle(
+                        MarkdownParagraphStyle.heading2,
+                        menuTarget: menuTarget,
+                      ),
                     ),
                     _NoteMenuAction(
                       itemKey: const Key('note-menu-heading-3'),
                       label: '标题 3',
                       enabled: canEdit,
-                      onPressed: () =>
-                          _applyParagraphStyle(MarkdownParagraphStyle.heading3),
+                      onPressed: () => _applyParagraphStyle(
+                        MarkdownParagraphStyle.heading3,
+                        menuTarget: menuTarget,
+                      ),
                     ),
                     _NoteMenuAction(
                       itemKey: const Key('note-menu-heading-4'),
                       label: '标题 4',
                       enabled: canEdit,
-                      onPressed: () =>
-                          _applyParagraphStyle(MarkdownParagraphStyle.heading4),
+                      onPressed: () => _applyParagraphStyle(
+                        MarkdownParagraphStyle.heading4,
+                        menuTarget: menuTarget,
+                      ),
                     ),
                     _NoteMenuAction(
                       itemKey: const Key('note-menu-body'),
                       label: '正文',
                       enabled: canEdit,
-                      onPressed: () =>
-                          _applyParagraphStyle(MarkdownParagraphStyle.body),
+                      onPressed: () => _applyParagraphStyle(
+                        MarkdownParagraphStyle.body,
+                        menuTarget: menuTarget,
+                      ),
                     ),
                   ],
                 ),
@@ -4447,21 +4522,28 @@ class _LiveMarkdownEditorState extends State<_LiveMarkdownEditor> {
                       itemKey: const Key('note-menu-unordered-list'),
                       label: '无序列表',
                       enabled: canEdit,
-                      onPressed: () =>
-                          _applyListStyle(MarkdownListStyle.unordered),
+                      onPressed: () => _applyListStyle(
+                        MarkdownListStyle.unordered,
+                        menuTarget: menuTarget,
+                      ),
                     ),
                     _NoteMenuAction(
                       itemKey: const Key('note-menu-ordered-list'),
                       label: '有序列表',
                       enabled: canEdit,
-                      onPressed: () =>
-                          _applyListStyle(MarkdownListStyle.ordered),
+                      onPressed: () => _applyListStyle(
+                        MarkdownListStyle.ordered,
+                        menuTarget: menuTarget,
+                      ),
                     ),
                     _NoteMenuAction(
                       itemKey: const Key('note-menu-task-list'),
                       label: '任务列表',
                       enabled: canEdit,
-                      onPressed: () => _applyListStyle(MarkdownListStyle.task),
+                      onPressed: () => _applyListStyle(
+                        MarkdownListStyle.task,
+                        menuTarget: menuTarget,
+                      ),
                     ),
                   ],
                 ),
@@ -4539,46 +4621,70 @@ class _LiveMarkdownEditorState extends State<_LiveMarkdownEditor> {
     );
   }
 
-  Future<void> _copySelectionFromContextMenu() async {
-    final selection = _normalizedBlockSelection();
-    if (selection.isCollapsed) {
+  bool _globalPositionHitsBlockEditor(Offset globalPosition) {
+    final editorContext = _blockFocusNode.context;
+    final renderObject = editorContext?.findRenderObject();
+    if (renderObject is! RenderBox || !renderObject.attached) {
+      return false;
+    }
+    final localPosition = renderObject.globalToLocal(globalPosition);
+    return renderObject.paintBounds.inflate(2).contains(localPosition);
+  }
+
+  Future<void> _copySelectionFromContextMenu({
+    _MarkdownCommandTarget? menuTarget,
+  }) async {
+    final target = _resolveMarkdownCommandTarget(
+      menuTarget: menuTarget,
+      requireSelection: true,
+    );
+    if (target == null) {
       return;
     }
     _dismissAllMacContextMenus();
-    final text = _blockController.text.substring(
-      selection.start,
-      selection.end,
+    final text = target.value.text.substring(
+      target.selection.start,
+      target.selection.end,
     );
     await Clipboard.setData(ClipboardData(text: text));
   }
 
-  Future<void> _cutSelectionFromContextMenu() async {
-    final selection = _normalizedBlockSelection();
-    if (selection.isCollapsed || widget.busy) {
+  Future<void> _cutSelectionFromContextMenu({
+    _MarkdownCommandTarget? menuTarget,
+  }) async {
+    final target = _resolveMarkdownCommandTarget(
+      menuTarget: menuTarget,
+      requireSelection: true,
+    );
+    if (target == null || widget.busy) {
       return;
     }
     _dismissAllMacContextMenus();
-    final text = _blockController.text.substring(
-      selection.start,
-      selection.end,
+    final text = target.value.text.substring(
+      target.selection.start,
+      target.selection.end,
     );
     await Clipboard.setData(ClipboardData(text: text));
-    _replaceBlockSelection('');
+    _replaceBlockSelection('', target: target);
   }
 
-  Future<void> _pasteFromContextMenu() async {
+  Future<void> _pasteFromContextMenu({
+    _MarkdownCommandTarget? menuTarget,
+  }) async {
     if (widget.busy) {
       return;
     }
     _dismissAllMacContextMenus();
-    _syncFullControllerSelectionFromBlock();
+    _syncFullControllerSelectionFromBlock(menuTarget: menuTarget);
     await widget.onPaste();
     if (mounted) {
       _syncBlockController();
     }
   }
 
-  Future<void> _pastePlainTextFromContextMenu() async {
+  Future<void> _pastePlainTextFromContextMenu({
+    _MarkdownCommandTarget? menuTarget,
+  }) async {
     if (widget.busy) {
       return;
     }
@@ -4587,46 +4693,79 @@ class _LiveMarkdownEditorState extends State<_LiveMarkdownEditor> {
     if (text == null || text.isEmpty) {
       return;
     }
-    _replaceBlockSelection(text);
+    _replaceBlockSelection(text, target: menuTarget);
   }
 
-  void _applyInlineFormat(MarkdownInlineFormat format) {
-    if (widget.busy || _normalizedBlockSelection().isCollapsed) {
+  void _applyInlineFormat(
+    MarkdownInlineFormat format, {
+    _MarkdownCommandTarget? menuTarget,
+  }) {
+    final target = _resolveMarkdownCommandTarget(
+      menuTarget: menuTarget,
+      requireSelection: true,
+    );
+    if (widget.busy || target == null) {
       return;
     }
     _dismissAllMacContextMenus();
-    _applyBlockValue(applyMarkdownInlineFormat(_blockController.value, format));
+    _applyBlockValue(applyMarkdownInlineFormat(target.value, format));
   }
 
-  void _applyParagraphStyle(MarkdownParagraphStyle style) {
+  void _applyParagraphStyle(
+    MarkdownParagraphStyle style, {
+    _MarkdownCommandTarget? menuTarget,
+  }) {
     if (widget.busy) {
       return;
     }
     _dismissAllMacContextMenus();
     _applyBlockValue(
-      applyMarkdownParagraphStyle(_blockController.value, style),
+      applyMarkdownParagraphStyle(
+        _markdownCommandTarget(menuTarget: menuTarget).value,
+        style,
+      ),
     );
   }
 
-  void _applyListStyle(MarkdownListStyle style) {
+  void _applyListStyle(
+    MarkdownListStyle style, {
+    _MarkdownCommandTarget? menuTarget,
+  }) {
     if (widget.busy) {
       return;
     }
     _dismissAllMacContextMenus();
-    _applyBlockValue(applyMarkdownListStyle(_blockController.value, style));
+    _applyBlockValue(
+      applyMarkdownListStyle(
+        _markdownCommandTarget(menuTarget: menuTarget).value,
+        style,
+      ),
+    );
   }
 
-  void _applyInsertion(MarkdownInsertion insertion) {
+  void _applyInsertion(
+    MarkdownInsertion insertion, {
+    _MarkdownCommandTarget? menuTarget,
+  }) {
     if (widget.busy) {
       return;
     }
     _dismissAllMacContextMenus();
-    _applyBlockValue(insertMarkdownBlock(_blockController.value, insertion));
+    _applyBlockValue(
+      insertMarkdownBlock(
+        _markdownCommandTarget(menuTarget: menuTarget).value,
+        insertion,
+      ),
+    );
   }
 
-  void _replaceBlockSelection(String replacement) {
-    final value = _blockController.value;
-    final selection = _normalizedBlockSelection();
+  void _replaceBlockSelection(
+    String replacement, {
+    _MarkdownCommandTarget? target,
+  }) {
+    final resolvedTarget = target ?? _markdownCommandTarget();
+    final value = resolvedTarget.value;
+    final selection = resolvedTarget.selection;
     final updated = value.text.replaceRange(
       selection.start,
       selection.end,
@@ -4644,11 +4783,14 @@ class _LiveMarkdownEditorState extends State<_LiveMarkdownEditor> {
   }
 
   void _applyBlockValue(TextEditingValue value) {
+    _activeSelectionTarget = null;
     _blockController.value = value;
     _replaceActiveBlock(value.text);
   }
 
-  void _syncFullControllerSelectionFromBlock() {
+  void _syncFullControllerSelectionFromBlock({
+    _MarkdownCommandTarget? menuTarget,
+  }) {
     final activeOffset = _activeOffset;
     if (activeOffset == null) {
       return;
@@ -4665,7 +4807,7 @@ class _LiveMarkdownEditorState extends State<_LiveMarkdownEditor> {
       return;
     }
     final block = blocks[index];
-    final selection = _normalizedBlockSelection();
+    final selection = _markdownCommandTarget(menuTarget: menuTarget).selection;
     _updatingFullDocument = true;
     widget.controller.selection = TextSelection(
       baseOffset: _clampOffset(
@@ -4680,8 +4822,122 @@ class _LiveMarkdownEditorState extends State<_LiveMarkdownEditor> {
     _updatingFullDocument = false;
   }
 
+  _MarkdownCommandTarget? _captureMarkdownCommandTargetForMenu([
+    TextEditingValue? editingValue,
+  ]) {
+    if (editingValue != null) {
+      final block = _currentActiveTextBlock();
+      if (block == null || editingValue.text != _blockController.text) {
+        return null;
+      }
+      final selection = _normalizedSelectionForValue(editingValue);
+      if (selection.isCollapsed) {
+        return null;
+      }
+      return _MarkdownCommandTarget(
+        value: editingValue.copyWith(selection: selection),
+        blockStart: block.start,
+      );
+    }
+    return _resolveMarkdownCommandTarget(requireSelection: true);
+  }
+
+  _MarkdownCommandTarget _markdownCommandTarget({
+    _MarkdownCommandTarget? menuTarget,
+  }) {
+    return _resolveMarkdownCommandTarget(menuTarget: menuTarget)!;
+  }
+
+  _MarkdownCommandTarget? _resolveMarkdownCommandTarget({
+    _MarkdownCommandTarget? menuTarget,
+    bool requireSelection = false,
+  }) {
+    final selection = _normalizedBlockSelection();
+    if (!selection.isCollapsed) {
+      return _MarkdownCommandTarget(
+        value: _blockController.value.copyWith(selection: selection),
+        blockStart: _currentActiveTextBlock()?.start,
+      );
+    }
+    if (_validMenuCommandTarget(menuTarget)) {
+      return menuTarget!;
+    }
+    final activeTarget = _validActiveSelectionTarget();
+    if (activeTarget != null) {
+      return activeTarget;
+    }
+    if (requireSelection) {
+      return null;
+    }
+    return _MarkdownCommandTarget(
+      value: _blockController.value.copyWith(selection: selection),
+      blockStart: _currentActiveTextBlock()?.start,
+    );
+  }
+
+  bool _validMenuCommandTarget(_MarkdownCommandTarget? target) {
+    final block = _currentActiveTextBlock();
+    return target != null &&
+        target.hasSelection &&
+        block != null &&
+        target.blockStart == block.start &&
+        target.value.text == _blockController.text;
+  }
+
+  _MarkdownCommandTarget? _validActiveSelectionTarget() {
+    final target = _activeSelectionTarget;
+    final block = _currentActiveTextBlock();
+    if (target == null ||
+        block == null ||
+        target.blockStart != block.start ||
+        target.value.text != block.text ||
+        target.value.text != _blockController.text) {
+      return null;
+    }
+    final selection = target.selection;
+    if (!selection.isValid || selection.isCollapsed) {
+      return null;
+    }
+    final start = _clampOffset(selection.start, target.value.text.length);
+    final end = _clampOffset(selection.end, target.value.text.length);
+    if (start == end) {
+      return null;
+    }
+    return _MarkdownCommandTarget(
+      value: target.value.copyWith(
+        selection: TextSelection(baseOffset: start, extentOffset: end),
+        composing: TextRange.empty,
+      ),
+      blockStart: target.blockStart,
+    );
+  }
+
+  void _clearStaleActiveSelectionTarget() {
+    if (_activeSelectionTarget == null ||
+        _validActiveSelectionTarget() != null) {
+      return;
+    }
+    _activeSelectionTarget = null;
+  }
+
+  MarkdownLiveBlock? _currentActiveTextBlock() {
+    final activeOffset = _activeOffset;
+    if (activeOffset == null || _activeTrailingInsertion) {
+      return null;
+    }
+    final blocks = splitMarkdownLiveBlocks(widget.controller.text);
+    final index = _nonBlankBlockIndexForOffset(blocks, activeOffset);
+    if (index == null) {
+      return null;
+    }
+    return blocks[index];
+  }
+
   TextSelection _normalizedBlockSelection() {
-    final value = _blockController.value;
+    return _normalizedSelectionForValue(_blockController.value);
+  }
+
+  TextSelection _normalizedSelectionForValue(TextEditingValue value) {
     final selection = value.selection;
     if (!selection.isValid) {
       return TextSelection.collapsed(offset: value.text.length);
@@ -4710,6 +4966,7 @@ class _LiveMarkdownEditorState extends State<_LiveMarkdownEditor> {
     );
     _updatingFullDocument = false;
     _activeOffset = _clampOffset(currentBlock.start, updated.length);
+    _activeSelectionTarget = null;
     _activeTrailingInsertion = false;
     if (mounted) {
       setState(() {});
@@ -4721,6 +4978,7 @@ class _LiveMarkdownEditorState extends State<_LiveMarkdownEditor> {
     setState(() {
       _activeTrailingInsertion = true;
       _activeOffset = widget.controller.text.length;
+      _activeSelectionTarget = null;
       _syncBlockController();
     });
     _focusBlockEditor();
@@ -4735,6 +4993,7 @@ class _LiveMarkdownEditorState extends State<_LiveMarkdownEditor> {
     setState(() {
       _activeTrailingInsertion = false;
       _activeOffset = null;
+      _activeSelectionTarget = null;
     });
   }
 
@@ -4745,6 +5004,7 @@ class _LiveMarkdownEditorState extends State<_LiveMarkdownEditor> {
       setState(() {
         _activeTrailingInsertion = false;
         _activeOffset = null;
+        _activeSelectionTarget = null;
       });
     }
   }
@@ -4763,6 +5023,9 @@ class _LiveMarkdownEditorState extends State<_LiveMarkdownEditor> {
       behavior: HitTestBehavior.translucent,
       onTap: _clearActiveBlock,
       onSecondaryTapDown: (details) {
+        if (_globalPositionHitsBlockEditor(details.globalPosition)) {
+          return;
+        }
         _openContextMenuAtDocumentEnd(blocks, details.globalPosition);
       },
       child: CupertinoScrollbar(
@@ -4868,16 +5131,11 @@ class _LiveMarkdownEditorState extends State<_LiveMarkdownEditor> {
     VoidCallback? onTap,
   }) {
     final appearance = _WorkspaceAppearanceScope.of(context);
-    return CupertinoTextField(
+    return _LiveMarkdownEditableText(
       key: widget.focused ? const Key('note-editor') : null,
       controller: _blockController,
       focusNode: _blockFocusNode,
       enabled: widget.enabled,
-      readOnly: false,
-      autofocus: false,
-      textAlignVertical: TextAlignVertical.top,
-      minLines: 1,
-      maxLines: null,
       padding: const EdgeInsets.symmetric(vertical: 3),
       placeholder: placeholder,
       placeholderStyle: const TextStyle(color: _muted),
@@ -4891,15 +5149,19 @@ class _LiveMarkdownEditorState extends State<_LiveMarkdownEditor> {
       contextMenuBuilder: _buildContextMenu,
       onChanged: _replaceActiveBlock,
       onTap: onTap,
+      onSelectionChanged: _handleBlockSelectionChanged,
     );
   }
 
-  void _updateActiveOffsetFromBlockSelection(MarkdownLiveBlock block) {
+  void _updateActiveOffsetFromBlockSelection(
+    MarkdownLiveBlock block, {
+    TextSelection? selection,
+  }) {
     widget.onFocusPane();
-    final selection = _blockController.selection;
-    if (selection.isValid) {
+    final blockSelection = selection ?? _blockController.selection;
+    if (blockSelection.isValid) {
       _activeOffset = _clampOffset(
-        block.start + selection.extentOffset,
+        block.start + blockSelection.extentOffset,
         widget.controller.text.length,
       );
       _updatingFullDocument = true;
@@ -4945,6 +5207,148 @@ class _LiveMarkdownEditorState extends State<_LiveMarkdownEditor> {
       return null;
     }
     return parseMarkdownLiveTable(block.text);
+  }
+}
+
+class _MarkdownCommandTarget {
+  const _MarkdownCommandTarget({required this.value, required this.blockStart});
+
+  final TextEditingValue value;
+  final int? blockStart;
+
+  TextSelection get selection => value.selection;
+
+  bool get hasSelection => !selection.isCollapsed;
+}
+
+class _LiveMarkdownEditableText extends StatefulWidget {
+  const _LiveMarkdownEditableText({
+    super.key,
+    required this.controller,
+    required this.focusNode,
+    required this.enabled,
+    required this.padding,
+    required this.placeholder,
+    required this.placeholderStyle,
+    required this.cursorColor,
+    required this.style,
+    required this.decoration,
+    required this.contextMenuBuilder,
+    required this.onChanged,
+    required this.onTap,
+    required this.onSelectionChanged,
+  });
+
+  final _MarkdownStyledTextEditingController controller;
+  final FocusNode focusNode;
+  final bool enabled;
+  final EdgeInsetsGeometry padding;
+  final String? placeholder;
+  final TextStyle? placeholderStyle;
+  final Color cursorColor;
+  final TextStyle style;
+  final Decoration? decoration;
+  final EditableTextContextMenuBuilder contextMenuBuilder;
+  final ValueChanged<String> onChanged;
+  final VoidCallback? onTap;
+  final SelectionChangedCallback onSelectionChanged;
+
+  bool get readOnly => !enabled;
+  TextAlignVertical get textAlignVertical => TextAlignVertical.top;
+
+  @override
+  State<_LiveMarkdownEditableText> createState() =>
+      _LiveMarkdownEditableTextState();
+}
+
+class _LiveMarkdownEditableTextState extends State<_LiveMarkdownEditableText>
+    implements TextSelectionGestureDetectorBuilderDelegate {
+  @override
+  final editableTextKey = GlobalKey<EditableTextState>();
+
+  late final TextSelectionGestureDetectorBuilder _gestureDetectorBuilder;
+
+  @override
+  bool get forcePressEnabled => true;
+
+  @override
+  bool get selectionEnabled => widget.enabled;
+
+  @override
+  void initState() {
+    super.initState();
+    _gestureDetectorBuilder = TextSelectionGestureDetectorBuilder(
+      delegate: this,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final selectionColor =
+        DefaultSelectionStyle.of(context).selectionColor ??
+        CupertinoTheme.of(context).primaryColor.withValues(alpha: 0.2);
+    final backgroundCursorColor = CupertinoDynamicColor.resolve(
+      CupertinoColors.inactiveGray,
+      context,
+    );
+
+    return DecoratedBox(
+      decoration: widget.decoration ?? const BoxDecoration(),
+      child: Padding(
+        padding: widget.padding,
+        child: _gestureDetectorBuilder.buildGestureDetector(
+          behavior: HitTestBehavior.translucent,
+          child: Listener(
+            behavior: HitTestBehavior.translucent,
+            onPointerDown: (_) => widget.onTap?.call(),
+            child: Stack(
+              alignment: AlignmentDirectional.topStart,
+              children: [
+                ValueListenableBuilder<TextEditingValue>(
+                  valueListenable: widget.controller,
+                  builder: (context, value, child) {
+                    if (widget.placeholder == null || value.text.isNotEmpty) {
+                      return const SizedBox.shrink();
+                    }
+                    return IgnorePointer(
+                      child: Text(
+                        widget.placeholder!,
+                        style: widget.placeholderStyle,
+                        textAlign: TextAlign.start,
+                      ),
+                    );
+                  },
+                ),
+                EditableText(
+                  key: editableTextKey,
+                  controller: widget.controller,
+                  focusNode: widget.focusNode,
+                  readOnly: !widget.enabled,
+                  keyboardType: TextInputType.multiline,
+                  style: widget.style,
+                  cursorColor: widget.cursorColor,
+                  backgroundCursorColor: backgroundCursorColor,
+                  maxLines: null,
+                  minLines: 1,
+                  autofocus: false,
+                  enableInteractiveSelection: widget.enabled,
+                  selectionColor: selectionColor,
+                  selectionControls: widget.enabled
+                      ? cupertinoTextSelectionHandleControls
+                      : null,
+                  rendererIgnoresPointer: true,
+                  cursorOpacityAnimates: true,
+                  paintCursorAboveText: true,
+                  onChanged: widget.onChanged,
+                  onSelectionChanged: widget.onSelectionChanged,
+                  contextMenuBuilder: widget.contextMenuBuilder,
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
   }
 }
 

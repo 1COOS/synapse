@@ -1665,12 +1665,6 @@ void main() {
         matching: find.byType(EditableText),
       ),
     );
-    final paragraphEditor = tester.widget<CupertinoTextField>(
-      find.descendant(
-        of: find.byKey(const Key('live-markdown-block-editor-2')),
-        matching: find.byType(CupertinoTextField),
-      ),
-    );
     expect(paragraphEditableText.style.color, isNot(const Color(0x00000000)));
     final paragraphSpan = paragraphEditableText.controller.buildTextSpan(
       context: tester.element(find.byType(EditableText).first),
@@ -1678,9 +1672,9 @@ void main() {
       withComposing: false,
     );
     expect(paragraphSpan.toPlainText(), contains('**bold**'));
-    expect(paragraphSpan.toPlainText(), paragraphEditor.controller?.text);
+    expect(paragraphSpan.toPlainText(), paragraphEditableText.controller.text);
     expect(_spanHasBoldText(paragraphSpan, 'bold'), isTrue);
-    expect(paragraphEditor.controller?.text, contains('**bold**'));
+    expect(paragraphEditableText.controller.text, contains('**bold**'));
     expect(
       find.byKey(const Key('live-markdown-block-preview-0')),
       findsOneWidget,
@@ -1967,11 +1961,10 @@ void main() {
     await _switchToSourceMode(tester);
     await _activateLiveMarkdownBlock(tester, blockIndex: 0);
     final noteEditor = _activeLiveMarkdownTextField(tester);
-    noteEditor.controller!.selection = const TextSelection(
-      baseOffset: 6,
-      extentOffset: 10,
+    await _setActiveLiveMarkdownSelection(
+      tester,
+      const TextSelection(baseOffset: 6, extentOffset: 10),
     );
-    await tester.pump();
 
     await _openNoteContextMenu(tester);
     final mouse = await _hoverNoteMenuItem(
@@ -1992,6 +1985,503 @@ void main() {
     expect(find.byKey(const Key('note-editor')), findsOneWidget);
   });
 
+  testWidgets(
+    'preserves selected text when secondary click collapses selection',
+    (tester) async {
+      final vault = MemoryVaultBackend(seedExampleData: false);
+      final note = await vault.createNote(
+        parentPath: '',
+        title: 'Format Study',
+      );
+      await vault.updateMarkdown(noteId: note.id, markdown: 'Alpha beta\n');
+
+      await _pumpWorkspace(tester, vault: vault);
+      await _switchToSourceMode(tester);
+      await _activateLiveMarkdownBlock(tester, blockIndex: 0);
+      final noteEditor = _activeLiveMarkdownTextField(tester);
+      await _setActiveLiveMarkdownSelection(
+        tester,
+        const TextSelection(baseOffset: 6, extentOffset: 10),
+      );
+      await _setActiveLiveMarkdownSelection(
+        tester,
+        const TextSelection.collapsed(offset: 10),
+      );
+
+      await _openNoteContextMenu(tester);
+      final mouse = await _hoverNoteMenuItem(
+        tester,
+        const Key('note-menu-text-format'),
+      );
+      await tester.tap(find.byKey(const Key('note-menu-bold')));
+      await tester.pumpAndSettle();
+      await mouse.removePointer();
+
+      expect(noteEditor.controller!.text, 'Alpha **beta**\n');
+      final span = _activeLiveMarkdownTextSpan(tester);
+      expect(span.toPlainText(), noteEditor.controller!.text);
+      expect(
+        _spanHasTextStyle(span, 'beta', fontWeight: FontWeight.bold),
+        isTrue,
+      );
+    },
+  );
+
+  testWidgets(
+    'preserves selected text when secondary click collapses selection for italic',
+    (tester) async {
+      final vault = MemoryVaultBackend(seedExampleData: false);
+      final note = await vault.createNote(
+        parentPath: '',
+        title: 'Format Study',
+      );
+      await vault.updateMarkdown(noteId: note.id, markdown: 'Alpha beta\n');
+
+      await _pumpWorkspace(tester, vault: vault);
+      await _switchToSourceMode(tester);
+      await _activateLiveMarkdownBlock(tester, blockIndex: 0);
+      final noteEditor = _activeLiveMarkdownTextField(tester);
+      await _setActiveLiveMarkdownSelection(
+        tester,
+        const TextSelection(baseOffset: 6, extentOffset: 10),
+      );
+      await _setActiveLiveMarkdownSelection(
+        tester,
+        const TextSelection.collapsed(offset: 10),
+      );
+
+      await _openNoteContextMenu(tester);
+      final mouse = await _hoverNoteMenuItem(
+        tester,
+        const Key('note-menu-text-format'),
+      );
+      await tester.tap(find.byKey(const Key('note-menu-italic')));
+      await tester.pumpAndSettle();
+      await mouse.removePointer();
+
+      expect(noteEditor.controller!.text, 'Alpha *beta*\n');
+      final span = _activeLiveMarkdownTextSpan(tester);
+      expect(span.toPlainText(), noteEditor.controller!.text);
+      expect(
+        _spanHasTextStyle(span, 'beta', fontStyle: FontStyle.italic),
+        isTrue,
+      );
+    },
+  );
+
+  testWidgets(
+    'context menu preserves command target when editor tap collapses selection',
+    (tester) async {
+      final vault = MemoryVaultBackend(seedExampleData: false);
+      final note = await vault.createNote(
+        parentPath: '',
+        title: 'Format Study',
+      );
+      await vault.updateMarkdown(noteId: note.id, markdown: 'Alpha beta\n');
+
+      await _pumpWorkspace(tester, vault: vault);
+      await _switchToSourceMode(tester);
+      await _activateLiveMarkdownBlock(tester, blockIndex: 0);
+      await _setActiveLiveMarkdownSelection(
+        tester,
+        const TextSelection(baseOffset: 6, extentOffset: 10),
+      );
+
+      await _openNoteContextMenu(tester);
+      await _setActiveLiveMarkdownSelection(
+        tester,
+        const TextSelection.collapsed(offset: 10),
+      );
+      _activeLiveMarkdownTextField(tester).onTap?.call();
+      await tester.pump();
+      final mouse = await _hoverNoteMenuItem(
+        tester,
+        const Key('note-menu-text-format'),
+      );
+      await tester.tap(find.byKey(const Key('note-menu-bold')));
+      await tester.pumpAndSettle();
+      await mouse.removePointer();
+
+      final noteEditor = _activeLiveMarkdownTextField(tester);
+      expect(noteEditor.controller!.text, 'Alpha **beta**\n');
+      final span = _activeLiveMarkdownTextSpan(tester);
+      expect(span.toPlainText(), noteEditor.controller!.text);
+      expect(
+        _spanHasTextStyle(span, 'beta', fontWeight: FontWeight.bold),
+        isTrue,
+      );
+    },
+  );
+
+  testWidgets(
+    'context menu uses editable text selection callback before secondary click collapse',
+    (tester) async {
+      final vault = MemoryVaultBackend(seedExampleData: false);
+      final note = await vault.createNote(
+        parentPath: '',
+        title: 'Format Study',
+      );
+      await vault.updateMarkdown(noteId: note.id, markdown: 'Alpha beta\n');
+
+      await _pumpWorkspace(tester, vault: vault);
+      await _switchToSourceMode(tester);
+      await _activateLiveMarkdownBlock(tester, blockIndex: 0);
+      final noteEditor = _activeLiveMarkdownTextField(tester);
+      final editableText = tester.widget<EditableText>(
+        find.descendant(
+          of: find.byKey(const Key('note-editor')),
+          matching: find.byType(EditableText),
+        ),
+      );
+      editableText.onSelectionChanged?.call(
+        const TextSelection(baseOffset: 6, extentOffset: 10),
+        SelectionChangedCause.drag,
+      );
+      await tester.pump();
+      noteEditor.controller!.selection = const TextSelection.collapsed(
+        offset: 10,
+      );
+      await tester.pump();
+
+      await _openNoteContextMenu(tester);
+      final mouse = await _hoverNoteMenuItem(
+        tester,
+        const Key('note-menu-text-format'),
+      );
+      await tester.tap(find.byKey(const Key('note-menu-bold')));
+      await tester.pumpAndSettle();
+      await mouse.removePointer();
+
+      final updatedEditor = _activeLiveMarkdownTextField(tester);
+      expect(updatedEditor.controller!.text, 'Alpha **beta**\n');
+      final span = _activeLiveMarkdownTextSpan(tester);
+      expect(span.toPlainText(), updatedEditor.controller!.text);
+      expect(
+        _spanHasTextStyle(span, 'beta', fontWeight: FontWeight.bold),
+        isTrue,
+      );
+    },
+  );
+
+  testWidgets(
+    'context menu preserves command target when outer secondary tap opens menu',
+    (tester) async {
+      final vault = MemoryVaultBackend(seedExampleData: false);
+      final note = await vault.createNote(
+        parentPath: '',
+        title: 'Format Study',
+      );
+      await vault.updateMarkdown(noteId: note.id, markdown: 'Alpha beta\n');
+
+      await _pumpWorkspace(tester, vault: vault);
+      await _switchToSourceMode(tester);
+      await _activateLiveMarkdownBlock(tester, blockIndex: 0);
+      await _setActiveLiveMarkdownSelection(
+        tester,
+        const TextSelection(baseOffset: 6, extentOffset: 10),
+      );
+
+      await _openNoteContextMenuAtEditorCenter(tester);
+      await _setActiveLiveMarkdownSelection(
+        tester,
+        const TextSelection.collapsed(offset: 10),
+      );
+      final mouse = await _hoverNoteMenuItem(
+        tester,
+        const Key('note-menu-text-format'),
+      );
+      await tester.tap(find.byKey(const Key('note-menu-bold')));
+      await tester.pumpAndSettle();
+      await mouse.removePointer();
+
+      final noteEditor = _activeLiveMarkdownTextField(tester);
+      expect(noteEditor.controller!.text, 'Alpha **beta**\n');
+      final span = _activeLiveMarkdownTextSpan(tester);
+      expect(span.toPlainText(), noteEditor.controller!.text);
+      expect(
+        _spanHasTextStyle(span, 'beta', fontWeight: FontWeight.bold),
+        isTrue,
+      );
+    },
+  );
+
+  testWidgets('context menu formats text selected with a mouse drag', (
+    tester,
+  ) async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Format Study');
+    await vault.updateMarkdown(noteId: note.id, markdown: 'Alpha beta\n');
+
+    await _pumpWorkspace(tester, vault: vault);
+    await _switchToSourceMode(tester);
+    await _activateLiveMarkdownBlock(tester, blockIndex: 0);
+    await _dragSelectActiveLiveMarkdownRange(tester, start: 6, end: 10);
+
+    await _openNoteContextMenu(tester);
+    final mouse = await _hoverNoteMenuItem(
+      tester,
+      const Key('note-menu-text-format'),
+    );
+    await tester.tap(find.byKey(const Key('note-menu-bold')));
+    await tester.pumpAndSettle();
+    await mouse.removePointer();
+
+    final noteEditor = _activeLiveMarkdownTextField(tester);
+    expect(noteEditor.controller!.text, 'Alpha **beta**\n');
+    final span = _activeLiveMarkdownTextSpan(tester);
+    expect(span.toPlainText(), noteEditor.controller!.text);
+    expect(
+      _spanHasTextStyle(span, 'beta', fontWeight: FontWeight.bold),
+      isTrue,
+    );
+  });
+
+  testWidgets(
+    'context menu keeps same block selection when document end handles secondary tap',
+    (tester) async {
+      final vault = MemoryVaultBackend(seedExampleData: false);
+      final note = await vault.createNote(
+        parentPath: '',
+        title: 'Format Study',
+      );
+      await vault.updateMarkdown(noteId: note.id, markdown: 'Alpha beta\n');
+
+      await _pumpWorkspace(tester, vault: vault);
+      await _switchToSourceMode(tester);
+      await _activateLiveMarkdownBlock(tester, blockIndex: 0);
+      await _setActiveLiveMarkdownSelection(
+        tester,
+        const TextSelection(baseOffset: 6, extentOffset: 10),
+      );
+
+      await tester.tap(
+        find.byKey(const Key('live-markdown-end-edit-target')),
+        buttons: kSecondaryMouseButton,
+      );
+      await tester.pumpAndSettle();
+      final mouse = await _hoverNoteMenuItem(
+        tester,
+        const Key('note-menu-text-format'),
+      );
+      await tester.tap(find.byKey(const Key('note-menu-bold')));
+      await tester.pumpAndSettle();
+      await mouse.removePointer();
+
+      final noteEditor = _activeLiveMarkdownTextField(tester);
+      expect(noteEditor.controller!.text, 'Alpha **beta**\n');
+      final span = _activeLiveMarkdownTextSpan(tester);
+      expect(span.toPlainText(), noteEditor.controller!.text);
+      expect(
+        _spanHasTextStyle(span, 'beta', fontWeight: FontWeight.bold),
+        isTrue,
+      );
+    },
+  );
+
+  testWidgets(
+    'context menu does not reuse a stale editable text command target',
+    (tester) async {
+      final vault = MemoryVaultBackend(seedExampleData: false);
+      final note = await vault.createNote(
+        parentPath: '',
+        title: 'Format Study',
+      );
+      await vault.updateMarkdown(
+        noteId: note.id,
+        markdown: 'Alpha beta gamma\n',
+      );
+
+      await _pumpWorkspace(tester, vault: vault);
+      await _switchToSourceMode(tester);
+      await _activateLiveMarkdownBlock(tester, blockIndex: 0);
+      await _setActiveLiveMarkdownSelection(
+        tester,
+        const TextSelection(baseOffset: 6, extentOffset: 10),
+      );
+      _activeLiveMarkdownEditableTextState(tester).showToolbar();
+      await tester.pumpAndSettle();
+      await tester.tapAt(const Offset(1, 1));
+      await tester.pumpAndSettle();
+
+      await _setActiveLiveMarkdownSelection(
+        tester,
+        const TextSelection(baseOffset: 11, extentOffset: 16),
+      );
+      _activeLiveMarkdownEditableTextState(tester).showToolbar();
+      await tester.pumpAndSettle();
+      await _setActiveLiveMarkdownSelection(
+        tester,
+        const TextSelection.collapsed(offset: 16),
+      );
+      var mouse = await _hoverNoteMenuItem(
+        tester,
+        const Key('note-menu-text-format'),
+      );
+      await tester.tap(find.byKey(const Key('note-menu-italic')));
+      await tester.pumpAndSettle();
+      await mouse.removePointer();
+
+      final noteEditor = _activeLiveMarkdownTextField(tester);
+      expect(noteEditor.controller!.text, 'Alpha beta *gamma*\n');
+      final span = _activeLiveMarkdownTextSpan(tester);
+      expect(span.toPlainText(), noteEditor.controller!.text);
+      expect(
+        _spanHasTextStyle(span, 'gamma', fontStyle: FontStyle.italic),
+        isTrue,
+      );
+    },
+  );
+
+  testWidgets(
+    'context menu preserves command target across consecutive inline formats',
+    (tester) async {
+      final vault = MemoryVaultBackend(seedExampleData: false);
+      final note = await vault.createNote(
+        parentPath: '',
+        title: 'Format Study',
+      );
+      await vault.updateMarkdown(
+        noteId: note.id,
+        markdown: 'Alpha beta gamma\n',
+      );
+
+      await _pumpWorkspace(tester, vault: vault);
+      await _switchToSourceMode(tester);
+      await _activateLiveMarkdownBlock(tester, blockIndex: 0);
+
+      await _setActiveLiveMarkdownSelection(
+        tester,
+        const TextSelection(baseOffset: 6, extentOffset: 10),
+      );
+      await _openNoteContextMenu(tester);
+      await _setActiveLiveMarkdownSelection(
+        tester,
+        const TextSelection.collapsed(offset: 10),
+      );
+      _activeLiveMarkdownTextField(tester).onTap?.call();
+      await tester.pump();
+      var mouse = await _hoverNoteMenuItem(
+        tester,
+        const Key('note-menu-text-format'),
+      );
+      await tester.tap(find.byKey(const Key('note-menu-bold')));
+      await tester.pumpAndSettle();
+      await mouse.removePointer();
+
+      expect(
+        _activeLiveMarkdownTextField(tester).controller!.text,
+        'Alpha **beta** gamma\n',
+      );
+      _activeLiveMarkdownEditableTextState(tester).hideToolbar();
+      await tester.pumpAndSettle();
+
+      await _setActiveLiveMarkdownSelection(
+        tester,
+        const TextSelection(baseOffset: 15, extentOffset: 20),
+      );
+      await _openNoteContextMenu(tester);
+      await _setActiveLiveMarkdownSelection(
+        tester,
+        const TextSelection.collapsed(offset: 20),
+      );
+      _activeLiveMarkdownTextField(tester).onTap?.call();
+      await tester.pump();
+      mouse = await _hoverNoteMenuItem(
+        tester,
+        const Key('note-menu-text-format'),
+      );
+      await tester.tap(find.byKey(const Key('note-menu-italic')));
+      await tester.pumpAndSettle();
+      await mouse.removePointer();
+
+      final noteEditor = _activeLiveMarkdownTextField(tester);
+      expect(noteEditor.controller!.text, 'Alpha **beta** *gamma*\n');
+      final span = _activeLiveMarkdownTextSpan(tester);
+      expect(span.toPlainText(), noteEditor.controller!.text);
+      expect(
+        _spanHasTextStyle(span, 'beta', fontWeight: FontWeight.bold),
+        isTrue,
+      );
+      expect(
+        _spanHasTextStyle(span, 'gamma', fontStyle: FontStyle.italic),
+        isTrue,
+      );
+    },
+  );
+
+  testWidgets(
+    'context menu preserves command target across consecutive inline formats with editable state',
+    (tester) async {
+      final vault = MemoryVaultBackend(seedExampleData: false);
+      final note = await vault.createNote(
+        parentPath: '',
+        title: 'Format Study',
+      );
+      await vault.updateMarkdown(
+        noteId: note.id,
+        markdown: 'Alpha beta gamma\n',
+      );
+
+      await _pumpWorkspace(tester, vault: vault);
+      await _switchToSourceMode(tester);
+      await _activateLiveMarkdownBlock(tester, blockIndex: 0);
+
+      await _setActiveLiveMarkdownSelection(
+        tester,
+        const TextSelection(baseOffset: 6, extentOffset: 10),
+      );
+      _activeLiveMarkdownEditableTextState(tester).showToolbar();
+      await tester.pumpAndSettle();
+      await _setActiveLiveMarkdownSelection(
+        tester,
+        const TextSelection.collapsed(offset: 10),
+      );
+      var mouse = await _hoverNoteMenuItem(
+        tester,
+        const Key('note-menu-text-format'),
+      );
+      await tester.tap(find.byKey(const Key('note-menu-bold')));
+      await tester.pumpAndSettle();
+      await mouse.removePointer();
+
+      expect(
+        _activeLiveMarkdownTextField(tester).controller!.text,
+        'Alpha **beta** gamma\n',
+      );
+
+      await _setActiveLiveMarkdownSelection(
+        tester,
+        const TextSelection(baseOffset: 15, extentOffset: 20),
+      );
+      _activeLiveMarkdownEditableTextState(tester).showToolbar();
+      await tester.pumpAndSettle();
+      await _setActiveLiveMarkdownSelection(
+        tester,
+        const TextSelection.collapsed(offset: 20),
+      );
+      mouse = await _hoverNoteMenuItem(
+        tester,
+        const Key('note-menu-text-format'),
+      );
+      await tester.tap(find.byKey(const Key('note-menu-italic')));
+      await tester.pumpAndSettle();
+      await mouse.removePointer();
+
+      final noteEditor = _activeLiveMarkdownTextField(tester);
+      expect(noteEditor.controller!.text, 'Alpha **beta** *gamma*\n');
+      final span = _activeLiveMarkdownTextSpan(tester);
+      expect(span.toPlainText(), noteEditor.controller!.text);
+      expect(
+        _spanHasTextStyle(span, 'beta', fontWeight: FontWeight.bold),
+        isTrue,
+      );
+      expect(
+        _spanHasTextStyle(span, 'gamma', fontStyle: FontStyle.italic),
+        isTrue,
+      );
+    },
+  );
+
   testWidgets('note editor context menu italicizes selected markdown text', (
     tester,
   ) async {
@@ -2003,11 +2493,10 @@ void main() {
     await _switchToSourceMode(tester);
     await _activateLiveMarkdownBlock(tester, blockIndex: 0);
     final noteEditor = _activeLiveMarkdownTextField(tester);
-    noteEditor.controller!.selection = const TextSelection(
-      baseOffset: 6,
-      extentOffset: 10,
+    await _setActiveLiveMarkdownSelection(
+      tester,
+      const TextSelection(baseOffset: 6, extentOffset: 10),
     );
-    await tester.pump();
 
     await _openNoteContextMenu(tester);
     final mouse = await _hoverNoteMenuItem(
@@ -2042,11 +2531,10 @@ void main() {
       await _switchToSourceMode(tester);
       await _activateLiveMarkdownBlock(tester, blockIndex: 0);
       final noteEditor = _activeLiveMarkdownTextField(tester);
-      noteEditor.controller!.selection = const TextSelection(
-        baseOffset: 6,
-        extentOffset: 10,
+      await _setActiveLiveMarkdownSelection(
+        tester,
+        const TextSelection(baseOffset: 6, extentOffset: 10),
       );
-      await tester.pump();
 
       await _openNoteContextMenu(tester);
       final mouse = await _hoverNoteMenuItem(
@@ -2082,11 +2570,10 @@ void main() {
     await _switchToSourceMode(tester);
     await _activateLiveMarkdownBlock(tester, blockIndex: 2);
     final noteEditor = _activeLiveMarkdownTextField(tester);
-    noteEditor.controller!.selection = const TextSelection(
-      baseOffset: 7,
-      extentOffset: 11,
+    await _setActiveLiveMarkdownSelection(
+      tester,
+      const TextSelection(baseOffset: 7, extentOffset: 11),
     );
-    await tester.pump();
 
     await _openNoteContextMenu(tester);
     final mouse = await _hoverNoteMenuItem(
@@ -2111,8 +2598,10 @@ void main() {
     await _switchToSourceMode(tester);
     await _activateLiveMarkdownBlock(tester, blockIndex: 0);
     final noteEditor = _activeLiveMarkdownTextField(tester);
-    noteEditor.controller!.selection = const TextSelection.collapsed(offset: 0);
-    await tester.pump();
+    await _setActiveLiveMarkdownSelection(
+      tester,
+      const TextSelection.collapsed(offset: 0),
+    );
 
     await _openNoteContextMenu(tester);
     final mouse = await _hoverNoteMenuItem(
@@ -2134,11 +2623,10 @@ void main() {
     await _switchToSourceMode(tester);
     await _activateLiveMarkdownBlock(tester, blockIndex: 0);
     final noteEditor = _activeLiveMarkdownTextField(tester);
-    noteEditor.controller!.selection = const TextSelection(
-      baseOffset: 0,
-      extentOffset: 5,
+    await _setActiveLiveMarkdownSelection(
+      tester,
+      const TextSelection(baseOffset: 0, extentOffset: 5),
     );
-    await tester.pump();
     await _openNoteContextMenu(tester);
     final mouse = await _hoverNoteMenuItem(tester, const Key('note-menu-list'));
     await tester.tap(find.byKey(const Key('note-menu-task-list')));
@@ -2294,7 +2782,7 @@ void main() {
       find.byKey(const Key('live-markdown-block-editor-3')),
       findsOneWidget,
     );
-    await tester.enterText(find.byKey(const Key('note-editor')), 'after table');
+    await tester.enterText(_activeLiveMarkdownEditableText(), 'after table');
     await tester.pump(const Duration(milliseconds: 1000));
     await tester.pump();
 
@@ -2761,7 +3249,7 @@ void main() {
       find.byKey(const Key('live-markdown-block-editor-3')),
       findsOneWidget,
     );
-    await tester.enterText(find.byKey(const Key('note-editor')), 'after image');
+    await tester.enterText(_activeLiveMarkdownEditableText(), 'after image');
     await tester.pump(const Duration(milliseconds: 1000));
     await tester.pump();
 
@@ -4015,13 +4503,75 @@ Future<void> _enterTextInLiveMarkdownBlock(
   );
 }
 
-CupertinoTextField _activeLiveMarkdownTextField(
+Future<void> _setActiveLiveMarkdownSelection(
+  WidgetTester tester,
+  TextSelection selection, {
+  int? paneId,
+}) async {
+  final editableTextState = _activeLiveMarkdownEditableTextState(
+    tester,
+    paneId: paneId,
+  );
+  editableTextState.updateEditingValue(
+    editableTextState.textEditingValue.copyWith(
+      selection: selection,
+      composing: TextRange.empty,
+    ),
+  );
+  await tester.pump();
+}
+
+Future<void> _dragSelectActiveLiveMarkdownRange(
+  WidgetTester tester, {
+  required int start,
+  required int end,
+  int? paneId,
+}) async {
+  final editableTextState = _activeLiveMarkdownEditableTextState(
+    tester,
+    paneId: paneId,
+  );
+  Offset caretGlobalOffset(int offset) {
+    final rect = editableTextState.renderEditable.getLocalRectForCaret(
+      TextPosition(offset: offset),
+    );
+    return editableTextState.renderEditable.localToGlobal(rect.center);
+  }
+
+  final gesture = await tester.createGesture(kind: PointerDeviceKind.mouse);
+  await gesture.down(caretGlobalOffset(start));
+  await tester.pump();
+  await gesture.moveTo(caretGlobalOffset(end));
+  await tester.pump();
+  await gesture.up();
+  await gesture.removePointer();
+  await tester.pumpAndSettle();
+}
+
+EditableTextState _activeLiveMarkdownEditableTextState(
   WidgetTester tester, {
   int? paneId,
 }) {
-  return tester.widget<CupertinoTextField>(
-    _inNotePane(find.byKey(const Key('note-editor')), paneId).first,
+  return tester.state<EditableTextState>(
+    _activeLiveMarkdownEditableText(paneId: paneId),
   );
+}
+
+Finder _activeLiveMarkdownEditableText({int? paneId}) {
+  return _inNotePane(
+    find.descendant(
+      of: find.byKey(const Key('note-editor')),
+      matching: find.byType(EditableText),
+    ),
+    paneId,
+  ).first;
+}
+
+dynamic _activeLiveMarkdownTextField(WidgetTester tester, {int? paneId}) {
+  return tester.widget<Widget>(
+        _inNotePane(find.byKey(const Key('note-editor')), paneId).first,
+      )
+      as dynamic;
 }
 
 TextSpan _activeLiveMarkdownTextSpan(WidgetTester tester) {
@@ -4039,8 +4589,34 @@ TextSpan _activeLiveMarkdownTextSpan(WidgetTester tester) {
 }
 
 Future<void> _openNoteContextMenu(WidgetTester tester) async {
-  await tester.tap(
-    find.byKey(const Key('note-editor')),
+  final editableText = find.descendant(
+    of: find.byKey(const Key('note-editor')),
+    matching: find.byType(EditableText),
+  );
+  final editableTextState = _activeLiveMarkdownEditableTextState(tester);
+  var tapPosition = tester.getTopLeft(editableText.first) + const Offset(8, 8);
+  final selection = editableTextState.textEditingValue.selection;
+  if (selection.isValid && !selection.isCollapsed) {
+    final endpoints = editableTextState.renderEditable.getEndpointsForSelection(
+      selection,
+    );
+    if (endpoints.isNotEmpty) {
+      final start = endpoints.first.point;
+      final end = endpoints.length == 1
+          ? endpoints.first.point
+          : endpoints.last.point;
+      tapPosition = editableTextState.renderEditable.localToGlobal(
+        Offset((start.dx + end.dx) / 2, start.dy - 2),
+      );
+    }
+  }
+  await tester.tapAt(tapPosition, buttons: kSecondaryMouseButton);
+  await tester.pumpAndSettle();
+}
+
+Future<void> _openNoteContextMenuAtEditorCenter(WidgetTester tester) async {
+  await tester.tapAt(
+    tester.getCenter(find.byKey(const Key('note-editor'))),
     buttons: kSecondaryMouseButton,
   );
   await tester.pumpAndSettle();
