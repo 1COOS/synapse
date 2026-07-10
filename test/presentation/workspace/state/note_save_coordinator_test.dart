@@ -70,7 +70,7 @@ void main() {
       expect(second.savePhase, NoteSavePhase.dirty);
     });
 
-    test('shares one in-flight future for concurrent save requests', () async {
+    test('same-body save requests share one backend flight', () async {
       final vault = _TrackingVault();
       final harness = _Harness(vault, scheduleEdits: false);
       addTearDown(harness.dispose);
@@ -91,6 +91,139 @@ void main() {
       expect(results.every((result) => result.succeeded), isTrue);
       expect(vault.updateCalls, 1);
       expect(vault.maxConcurrentUpdates, 1);
+    });
+
+    test(
+      'starts a queued debounce save immediately after an explicit flight',
+      () async {
+        final vault = _TrackingVault();
+        final timers = _ManualTimerFactory();
+        final harness = _Harness(vault, timerFactory: timers.call);
+        addTearDown(harness.dispose);
+        final session = await harness.createSession('Alpha');
+        vault.resetTracking();
+        session.controller.text = '# Alpha\nfirst snapshot';
+        final firstGate = vault.blockNextUpdate();
+        final firstSave = harness.coordinator.save(session);
+        await vault.nextUpdateStarted;
+
+        session.controller.text = '# Alpha\nnewer edit';
+        final secondGate = vault.blockNextUpdate();
+        timers.fireActive();
+        firstGate.complete();
+        await firstSave;
+        await _drainEventQueue();
+
+        expect(vault.updateCalls, 2);
+        expect(vault.savedMarkdown, [
+          '# Alpha\nfirst snapshot',
+          '# Alpha\nnewer edit',
+        ]);
+        secondGate.complete();
+        await vault.updateCompletedAt(2);
+        await _drainEventQueue();
+
+        expect(session.controller.text, '# Alpha\nnewer edit');
+        expect(session.savePhase, NoteSavePhase.clean);
+      },
+    );
+
+    test(
+      'a changed-body explicit save completes after its queued write',
+      () async {
+        final vault = _TrackingVault();
+        final harness = _Harness(vault, scheduleEdits: false);
+        addTearDown(harness.dispose);
+        final session = await harness.createSession('Alpha');
+        vault.resetTracking();
+        session.controller.text = '# Alpha\nfirst snapshot';
+        final firstGate = vault.blockNextUpdate();
+        final firstSave = harness.coordinator.save(session);
+        await vault.nextUpdateStarted;
+
+        session.controller.text = '# Alpha\nnewer edit';
+        final secondGate = vault.blockNextUpdate();
+        final secondSave = harness.coordinator.save(session);
+        var secondCompleted = false;
+        unawaited(secondSave.then((_) => secondCompleted = true));
+        firstGate.complete();
+        await firstSave;
+        await _drainEventQueue();
+
+        expect(identical(secondSave, firstSave), isFalse);
+        expect(vault.updateCalls, 2);
+        expect(secondCompleted, isFalse);
+        secondGate.complete();
+        final secondResult = await secondSave;
+
+        expect(secondResult.succeeded, isTrue);
+        expect(secondResult.bodySnapshot, '# Alpha\nnewer edit');
+        expect(secondCompleted, isTrue);
+        expect(session.savePhase, NoteSavePhase.clean);
+      },
+    );
+
+    test(
+      'recomputes dirty state after the synchronous result commit',
+      () async {
+        final vault = _TrackingVault();
+        final timers = _ManualTimerFactory();
+        late NoteDocumentSession session;
+        var injectedEdit = false;
+        final harness = _Harness(
+          vault,
+          scheduleEdits: false,
+          timerFactory: timers.call,
+          afterCommit: (result, request) {
+            if (!injectedEdit && result.succeeded) {
+              injectedEdit = true;
+              session.controller.text = '# Alpha\nedit during commit';
+            }
+          },
+        );
+        addTearDown(harness.dispose);
+        session = await harness.createSession('Alpha');
+        vault.resetTracking();
+        session.controller.text = '# Alpha\nfirst snapshot';
+
+        final result = await harness.coordinator.save(
+          session,
+          reason: NoteSaveReason.debounce,
+          rescheduleIfStillDirty: true,
+        );
+
+        expect(result.succeeded, isTrue);
+        expect(result.stillDirty, isTrue);
+        expect(session.controller.text, '# Alpha\nedit during commit');
+        expect(timers.activeCount, 1);
+        expect(session.savePhase, NoteSavePhase.scheduled);
+      },
+    );
+
+    test('fails a queued request when the current flight fails', () async {
+      final vault = _TrackingVault();
+      final harness = _Harness(vault, scheduleEdits: false);
+      addTearDown(harness.dispose);
+      final session = await harness.createSession('Alpha');
+      vault.resetTracking();
+      session.controller.text = '# Alpha\nfirst snapshot';
+      vault.failingNoteIds.add(session.noteId);
+      final gate = vault.blockNextUpdate();
+      final firstSave = harness.coordinator.save(session);
+      await vault.nextUpdateStarted;
+      session.controller.text = '# Alpha\nnewer edit';
+      final queuedSave = harness.coordinator.save(session);
+
+      gate.complete();
+      final firstResult = await firstSave;
+      final queuedResult = await queuedSave;
+
+      expect(identical(queuedSave, firstSave), isFalse);
+      expect(firstResult.succeeded, isFalse);
+      expect(queuedResult.succeeded, isFalse);
+      expect(vault.updateCalls, 1);
+      expect(session.controller.text, '# Alpha\nnewer edit');
+      expect(session.savePhase, NoteSavePhase.failed);
     });
 
     test('preserves edits made in flight and flushes the newer body', () async {
@@ -194,9 +327,57 @@ void main() {
         expect(timers.activeCount, 0);
         expect(vault.updateCalls, 0);
         expect(harness.registry.sessionFor(session.noteId), same(session));
-        expect(session.savePhase, isNot(NoteSavePhase.disposed));
+        expect(session.savePhase, NoteSavePhase.dirty);
       },
     );
+
+    test(
+      'dispose restores saving phase and completes queued futures',
+      () async {
+        final vault = _TrackingVault();
+        final harness = _Harness(vault, scheduleEdits: false);
+        addTearDown(harness.registry.dispose);
+        final session = await harness.createSession('Alpha');
+        vault.resetTracking();
+        session.controller.text = '# Alpha\nfirst snapshot';
+        final gate = vault.blockNextUpdate();
+        addTearDown(() {
+          if (!gate.isCompleted) {
+            gate.complete();
+          }
+        });
+        final firstSave = harness.coordinator.save(session);
+        await vault.nextUpdateStarted;
+        session.controller.text = '# Alpha\nnewer edit';
+        final queuedSave = harness.coordinator.save(session);
+
+        harness.coordinator.dispose();
+        expect(identical(queuedSave, firstSave), isFalse);
+        final queuedResult = await queuedSave;
+
+        expect(queuedResult.succeeded, isFalse);
+        expect(queuedResult.error, isA<StateError>());
+        expect(session.savePhase, NoteSavePhase.dirty);
+        gate.complete();
+        await firstSave;
+        expect(session.savePhase, NoteSavePhase.dirty);
+      },
+    );
+
+    test('save returns a structured failure for a disposed session', () async {
+      final vault = _TrackingVault();
+      final harness = _Harness(vault, scheduleEdits: false);
+      addTearDown(harness.registry.dispose);
+      final session = await harness.createSession('Alpha');
+      session.dispose();
+
+      final result = await harness.coordinator.save(session);
+
+      expect(result.succeeded, isFalse);
+      expect(result.error, isA<StateError>());
+      expect(result.session, same(session));
+      expect(session.savePhase, NoteSavePhase.disposed);
+    });
   });
 }
 
@@ -205,6 +386,7 @@ final class _Harness {
     this.vault, {
     this.scheduleEdits = true,
     TimerFactory? timerFactory,
+    void Function(NoteSaveResult result, SaveRequest request)? afterCommit,
   }) {
     registry = NoteSessionRegistry(
       visibleBody: (markdown) => markdown,
@@ -219,7 +401,10 @@ final class _Harness {
       vault: () => vault,
       debounceDuration: () => const Duration(seconds: 1),
       serializeVisibleBody: (note, body) => body,
-      onResult: _commitResult,
+      onResult: (result, request) {
+        _commitResult(result, request);
+        afterCommit?.call(result, request);
+      },
       onStateChanged: () {},
       timerFactory: timerFactory,
     );
@@ -271,12 +456,28 @@ final class _TrackingVault extends MemoryVaultBackend {
   final List<String> savedNoteIds = <String>[];
   final List<String> savedMarkdown = <String>[];
   int updateCalls = 0;
+  int completedUpdates = 0;
   int concurrentUpdates = 0;
   int maxConcurrentUpdates = 0;
   Completer<void>? _nextGate;
-  Completer<void> _nextUpdateStarted = Completer<void>();
+  final Map<int, Completer<void>> _startedSignals = <int, Completer<void>>{};
+  final Map<int, Completer<void>> _completedSignals = <int, Completer<void>>{};
 
-  Future<void> get nextUpdateStarted => _nextUpdateStarted.future;
+  Future<void> get nextUpdateStarted => updateStartedAt(1);
+
+  Future<void> updateStartedAt(int call) {
+    if (updateCalls >= call) {
+      return Future<void>.value();
+    }
+    return (_startedSignals[call] ??= Completer<void>()).future;
+  }
+
+  Future<void> updateCompletedAt(int call) {
+    if (completedUpdates >= call) {
+      return Future<void>.value();
+    }
+    return (_completedSignals[call] ??= Completer<void>()).future;
+  }
 
   Completer<void> blockNextUpdate() {
     final gate = Completer<void>();
@@ -289,10 +490,12 @@ final class _TrackingVault extends MemoryVaultBackend {
     savedNoteIds.clear();
     savedMarkdown.clear();
     updateCalls = 0;
+    completedUpdates = 0;
     concurrentUpdates = 0;
     maxConcurrentUpdates = 0;
     _nextGate = null;
-    _nextUpdateStarted = Completer<void>();
+    _startedSignals.clear();
+    _completedSignals.clear();
   }
 
   @override
@@ -301,28 +504,35 @@ final class _TrackingVault extends MemoryVaultBackend {
     required String markdown,
   }) async {
     updateCalls += 1;
+    final call = updateCalls;
     savedNoteIds.add(noteId);
     savedMarkdown.add(markdown);
     concurrentUpdates += 1;
     if (concurrentUpdates > maxConcurrentUpdates) {
       maxConcurrentUpdates = concurrentUpdates;
     }
-    if (!_nextUpdateStarted.isCompleted) {
-      _nextUpdateStarted.complete();
-    }
+    _startedSignals.remove(call)?.complete();
     final gate = _nextGate;
     _nextGate = null;
     try {
-      if (failingNoteIds.contains(noteId)) {
-        throw StateError('save failed for $noteId');
-      }
       if (gate != null) {
         await gate.future;
+      }
+      if (failingNoteIds.contains(noteId)) {
+        throw StateError('save failed for $noteId');
       }
       return await super.updateMarkdown(noteId: noteId, markdown: markdown);
     } finally {
       concurrentUpdates -= 1;
+      completedUpdates += 1;
+      _completedSignals.remove(call)?.complete();
     }
+  }
+}
+
+Future<void> _drainEventQueue() async {
+  for (var i = 0; i < 10; i += 1) {
+    await Future<void>.delayed(Duration.zero);
   }
 }
 

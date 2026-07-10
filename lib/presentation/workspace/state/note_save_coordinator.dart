@@ -26,6 +26,20 @@ final class SaveRequest {
   final NoteSaveReason reason;
   final bool rescheduleIfStillDirty;
   final String? successMessage;
+
+  SaveRequest merge(SaveRequest newer) {
+    return SaveRequest(
+      reason: _saveReasonPriority(newer.reason) >= _saveReasonPriority(reason)
+          ? newer.reason
+          : reason,
+      rescheduleIfStillDirty:
+          rescheduleIfStillDirty || newer.rescheduleIfStillDirty,
+      successMessage: _latestNonEmptyMessage(
+        current: successMessage,
+        newer: newer.successMessage,
+      ),
+    );
+  }
 }
 
 final class NoteSaveResult {
@@ -68,8 +82,7 @@ final class NoteSaveCoordinator {
     required VaultBackend Function() vault,
     required Duration Function() debounceDuration,
     required VisibleBodySerializer serializeVisibleBody,
-    required FutureOr<void> Function(NoteSaveResult result, SaveRequest request)
-    onResult,
+    required void Function(NoteSaveResult result, SaveRequest request) onResult,
     required VoidCallback onStateChanged,
     TimerFactory? timerFactory,
   }) : _sessions = sessions,
@@ -84,25 +97,26 @@ final class NoteSaveCoordinator {
   final VaultBackend Function() _vault;
   final Duration Function() _debounceDuration;
   final VisibleBodySerializer _serializeVisibleBody;
-  final FutureOr<void> Function(NoteSaveResult result, SaveRequest request)
-  _onResult;
+  final void Function(NoteSaveResult result, SaveRequest request) _onResult;
   final VoidCallback _onStateChanged;
   final TimerFactory _timerFactory;
   final Map<NoteDocumentSession, Timer> _timers =
       Map<NoteDocumentSession, Timer>.identity();
-  final Map<NoteDocumentSession, Future<NoteSaveResult>> _inFlight =
-      Map<NoteDocumentSession, Future<NoteSaveResult>>.identity();
-  final Map<NoteDocumentSession, SaveRequest> _inFlightRequests =
-      Map<NoteDocumentSession, SaveRequest>.identity();
+  final Map<NoteDocumentSession, _SaveFlight> _flights =
+      Map<NoteDocumentSession, _SaveFlight>.identity();
+  final Map<NoteDocumentSession, _QueuedSave> _queued =
+      Map<NoteDocumentSession, _QueuedSave>.identity();
   final Set<NoteDocumentSession> _quiescing =
       Set<NoteDocumentSession>.identity();
   bool _isDisposed = false;
 
-  bool get isSaving => _inFlight.isNotEmpty;
+  bool get isSaving => !_isDisposed && _flights.isNotEmpty;
 
-  bool get isAutoSaving => _inFlightRequests.values.any(
-    (request) => request.reason == NoteSaveReason.debounce,
-  );
+  bool get isAutoSaving =>
+      !_isDisposed &&
+      _flights.values.any(
+        (flight) => flight.request.reason == NoteSaveReason.debounce,
+      );
 
   void schedule(NoteDocumentSession session) {
     if (_isDisposed || session.savePhase == NoteSavePhase.disposed) {
@@ -156,51 +170,48 @@ final class NoteSaveCoordinator {
     bool rescheduleIfStillDirty = false,
     String? successMessage,
   }) {
-    if (_isDisposed) {
+    if (session.savePhase == NoteSavePhase.disposed) {
       return Future<NoteSaveResult>.value(
-        _disposedResult(session, StateError('Note save coordinator disposed.')),
-      );
-    }
-    cancel(session);
-    final existing = _inFlight[session];
-    if (existing != null) {
-      return existing;
-    }
-    if (!session.isDirty) {
-      return Future<NoteSaveResult>.value(
-        NoteSaveResult(
-          session: session,
-          oldNoteId: session.noteId,
-          bodySnapshot: session.controller.text,
-          savedNote: null,
-          resources: null,
-          error: null,
-          stackTrace: null,
-          stillDirty: false,
+        _inactiveSessionFailure(
+          session,
+          StateError('Cannot save a disposed note session.'),
         ),
       );
     }
-
+    if (_isDisposed) {
+      return Future<NoteSaveResult>.value(
+        _activeSessionFailure(
+          session,
+          StateError('Note save coordinator disposed.'),
+        ),
+      );
+    }
+    cancel(session);
     final request = SaveRequest(
       reason: reason,
       rescheduleIfStillDirty: rescheduleIfStillDirty,
       successMessage: successMessage,
     );
-    session.setSavePhase(NoteSavePhase.saving);
-    late final Future<NoteSaveResult> future;
-    future = _performSave(session, request).whenComplete(() {
-      if (identical(_inFlight[session], future)) {
-        _inFlight.remove(session);
-        _inFlightRequests.remove(session);
-        if (!_isDisposed) {
-          _onStateChanged();
-        }
+    final flight = _flights[session];
+    if (flight != null) {
+      if (session.controller.text == flight.bodySnapshot) {
+        flight.request = flight.request.merge(request);
+        _onStateChanged();
+        return flight.future;
       }
-    });
-    _inFlight[session] = future;
-    _inFlightRequests[session] = request;
-    _onStateChanged();
-    return future;
+      final queued = _queued[session];
+      if (queued != null) {
+        queued.request = queued.request.merge(request);
+        return queued.future;
+      }
+      final created = _QueuedSave(request);
+      _queued[session] = created;
+      return created.future;
+    }
+    if (!session.isDirty) {
+      return Future<NoteSaveResult>.value(_cleanResult(session));
+    }
+    return _startFlight(session, request);
   }
 
   Future<FlushReport> flush(
@@ -212,7 +223,7 @@ final class NoteSaveCoordinator {
     for (final session in targetSessions) {
       cancel(session);
       while (true) {
-        final pending = _inFlight[session];
+        final pending = _queued[session]?.future ?? _flights[session]?.future;
         if (pending != null) {
           final result = await pending;
           results.add(result);
@@ -266,9 +277,10 @@ final class NoteSaveCoordinator {
     try {
       for (final session in sessions) {
         cancel(session);
+        _cancelQueued(session, StateError('Queued note save discarded.'));
       }
       for (final session in sessions) {
-        final pending = _inFlight[session];
+        final pending = _flights[session]?.future;
         if (pending != null) {
           results.add(await pending);
         }
@@ -280,14 +292,35 @@ final class NoteSaveCoordinator {
     return FlushReport(List<NoteSaveResult>.unmodifiable(results));
   }
 
-  Future<NoteSaveResult> _performSave(
+  Future<NoteSaveResult> _startFlight(
     NoteDocumentSession session,
-    SaveRequest request,
-  ) async {
-    final noteSnapshot = session.note;
+    SaveRequest request, {
+    Completer<NoteSaveResult>? completer,
+  }) {
+    final flight = _SaveFlight(
+      session: session,
+      noteSnapshot: session.note,
+      bodySnapshot: session.controller.text,
+      request: request,
+      completer: completer,
+    );
+    _flights[session] = flight;
+    session.setSavePhase(NoteSavePhase.saving);
+    _onStateChanged();
+    unawaited(_runFlight(flight));
+    return flight.future;
+  }
+
+  Future<void> _runFlight(_SaveFlight flight) async {
+    final backendResult = await _performBackendSave(flight);
+    _finishFlight(flight, backendResult);
+  }
+
+  Future<NoteSaveResult> _performBackendSave(_SaveFlight flight) async {
+    final session = flight.session;
+    final noteSnapshot = flight.noteSnapshot;
     final oldNoteId = noteSnapshot.id;
-    final bodySnapshot = session.controller.text;
-    NoteSaveResult result;
+    final bodySnapshot = flight.bodySnapshot;
     try {
       final markdown = _serializeVisibleBody(noteSnapshot, bodySnapshot);
       final vault = _vault();
@@ -304,7 +337,7 @@ final class NoteSaveCoordinator {
         savedNote = await vault.readNote(renamed.id);
         resources = await vault.listResources();
       }
-      result = NoteSaveResult(
+      return NoteSaveResult(
         session: session,
         oldNoteId: oldNoteId,
         bodySnapshot: bodySnapshot,
@@ -312,10 +345,10 @@ final class NoteSaveCoordinator {
         resources: resources,
         error: null,
         stackTrace: null,
-        stillDirty: session.controller.text != bodySnapshot,
+        stillDirty: false,
       );
     } catch (error, stackTrace) {
-      result = NoteSaveResult(
+      return NoteSaveResult(
         session: session,
         oldNoteId: oldNoteId,
         bodySnapshot: bodySnapshot,
@@ -323,47 +356,104 @@ final class NoteSaveCoordinator {
         resources: null,
         error: error,
         stackTrace: stackTrace,
-        stillDirty: session.controller.text != bodySnapshot,
+        stillDirty: false,
       );
     }
+  }
 
-    if (_isDisposed || session.savePhase == NoteSavePhase.disposed) {
-      return result;
+  void _finishFlight(_SaveFlight flight, NoteSaveResult backendResult) {
+    final session = flight.session;
+    if (!identical(_flights[session], flight)) {
+      _complete(flight.completer, backendResult);
+      return;
     }
+    if (_isDisposed || session.savePhase == NoteSavePhase.disposed) {
+      _flights.remove(session);
+      _complete(flight.completer, backendResult);
+      return;
+    }
+
+    var result = _copyResult(
+      backendResult,
+      stillDirty: session.controller.text != flight.bodySnapshot,
+    );
     if (!result.succeeded) {
       session.setSavePhase(NoteSavePhase.failed, error: result.error);
     }
     try {
-      await _onResult(result, request);
+      _onResult(result, flight.request);
     } catch (error, stackTrace) {
-      result = NoteSaveResult(
-        session: session,
-        oldNoteId: oldNoteId,
-        bodySnapshot: bodySnapshot,
-        savedNote: result.savedNote,
-        resources: result.resources,
-        error: error,
-        stackTrace: stackTrace,
-        stillDirty: session.controller.text != bodySnapshot,
-      );
-      if (!_isDisposed && session.savePhase != NoteSavePhase.disposed) {
+      result = _copyResult(result, error: error, stackTrace: stackTrace);
+      if (session.savePhase != NoteSavePhase.disposed) {
         session.setSavePhase(NoteSavePhase.failed, error: error);
       }
-      return result;
     }
-    if (_isDisposed || session.savePhase == NoteSavePhase.disposed) {
-      return result;
+    if (session.savePhase != NoteSavePhase.disposed) {
+      result = _copyResult(
+        result,
+        stillDirty: session.controller.text != flight.bodySnapshot,
+      );
     }
-    if (result.succeeded &&
+
+    _flights.remove(session);
+    final queued = _queued.remove(session);
+    if (!result.succeeded) {
+      _cancelTimerOnly(session);
+      if (queued != null) {
+        _complete(
+          queued.completer,
+          _activeSessionFailure(
+            session,
+            result.error!,
+            stackTrace: result.stackTrace,
+          ),
+        );
+      }
+    } else if (queued != null && !_isDisposed) {
+      _cancelTimerOnly(session);
+      if (session.savePhase == NoteSavePhase.disposed) {
+        _complete(
+          queued.completer,
+          _inactiveSessionFailure(
+            session,
+            StateError('Cannot save a disposed note session.'),
+          ),
+        );
+      } else if (session.isDirty) {
+        _startFlight(session, queued.request, completer: queued.completer);
+      } else {
+        _complete(queued.completer, _cleanResult(session));
+      }
+    } else if (result.succeeded &&
         result.stillDirty &&
-        request.rescheduleIfStillDirty &&
+        flight.request.rescheduleIfStillDirty &&
         !_quiescing.contains(session)) {
       schedule(session);
     }
-    return result;
+    if (!_isDisposed) {
+      _onStateChanged();
+    }
+    _complete(flight.completer, result);
   }
 
-  NoteSaveResult _disposedResult(NoteDocumentSession session, Object error) {
+  NoteSaveResult _cleanResult(NoteDocumentSession session) {
+    return NoteSaveResult(
+      session: session,
+      oldNoteId: session.noteId,
+      bodySnapshot: session.controller.text,
+      savedNote: null,
+      resources: null,
+      error: null,
+      stackTrace: null,
+      stillDirty: false,
+    );
+  }
+
+  NoteSaveResult _activeSessionFailure(
+    NoteDocumentSession session,
+    Object error, {
+    StackTrace? stackTrace,
+  }) {
     return NoteSaveResult(
       session: session,
       oldNoteId: session.noteId,
@@ -371,9 +461,40 @@ final class NoteSaveCoordinator {
       savedNote: null,
       resources: null,
       error: error,
-      stackTrace: StackTrace.current,
+      stackTrace: stackTrace ?? StackTrace.current,
       stillDirty: session.isDirty,
     );
+  }
+
+  NoteSaveResult _inactiveSessionFailure(
+    NoteDocumentSession session,
+    Object error,
+  ) {
+    return NoteSaveResult(
+      session: session,
+      oldNoteId: session.noteId,
+      bodySnapshot: '',
+      savedNote: null,
+      resources: null,
+      error: error,
+      stackTrace: StackTrace.current,
+      stillDirty: false,
+    );
+  }
+
+  void _cancelQueued(NoteDocumentSession session, Object error) {
+    final queued = _queued.remove(session);
+    if (queued == null) {
+      return;
+    }
+    final result = session.savePhase == NoteSavePhase.disposed
+        ? _inactiveSessionFailure(session, error)
+        : _activeSessionFailure(session, error);
+    _complete(queued.completer, result);
+  }
+
+  void _cancelTimerOnly(NoteDocumentSession session) {
+    _timers.remove(session)?.cancel();
   }
 
   void dispose() {
@@ -381,12 +502,110 @@ final class NoteSaveCoordinator {
       return;
     }
     _isDisposed = true;
+    final affectedSessions = Set<NoteDocumentSession>.identity()
+      ..addAll(_timers.keys)
+      ..addAll(_flights.keys)
+      ..addAll(_queued.keys);
     for (final timer in _timers.values) {
       timer.cancel();
     }
     _timers.clear();
+    final queuedEntries = _queued.entries.toList(growable: false);
+    _queued.clear();
+    for (final session in affectedSessions) {
+      if (session.savePhase == NoteSavePhase.disposed) {
+        continue;
+      }
+      if (session.savePhase == NoteSavePhase.scheduled ||
+          session.savePhase == NoteSavePhase.saving) {
+        session.setSavePhase(
+          session.isDirty ? NoteSavePhase.dirty : NoteSavePhase.clean,
+        );
+      }
+    }
+    for (final entry in queuedEntries) {
+      final result = entry.key.savePhase == NoteSavePhase.disposed
+          ? _inactiveSessionFailure(
+              entry.key,
+              StateError('Note save coordinator disposed.'),
+            )
+          : _activeSessionFailure(
+              entry.key,
+              StateError('Note save coordinator disposed.'),
+            );
+      _complete(entry.value.completer, result);
+    }
     _quiescing.clear();
   }
+}
+
+final class _SaveFlight {
+  _SaveFlight({
+    required this.session,
+    required this.noteSnapshot,
+    required this.bodySnapshot,
+    required this.request,
+    Completer<NoteSaveResult>? completer,
+  }) : completer = completer ?? Completer<NoteSaveResult>();
+
+  final NoteDocumentSession session;
+  final VaultNoteContent noteSnapshot;
+  final String bodySnapshot;
+  SaveRequest request;
+  final Completer<NoteSaveResult> completer;
+
+  Future<NoteSaveResult> get future => completer.future;
+}
+
+final class _QueuedSave {
+  _QueuedSave(this.request);
+
+  SaveRequest request;
+  final Completer<NoteSaveResult> completer = Completer<NoteSaveResult>();
+
+  Future<NoteSaveResult> get future => completer.future;
+}
+
+void _complete(Completer<NoteSaveResult> completer, NoteSaveResult result) {
+  if (!completer.isCompleted) {
+    completer.complete(result);
+  }
+}
+
+NoteSaveResult _copyResult(
+  NoteSaveResult result, {
+  Object? error,
+  StackTrace? stackTrace,
+  bool? stillDirty,
+}) {
+  return NoteSaveResult(
+    session: result.session,
+    oldNoteId: result.oldNoteId,
+    bodySnapshot: result.bodySnapshot,
+    savedNote: result.savedNote,
+    resources: result.resources,
+    error: error ?? result.error,
+    stackTrace: stackTrace ?? result.stackTrace,
+    stillDirty: stillDirty ?? result.stillDirty,
+  );
+}
+
+int _saveReasonPriority(NoteSaveReason reason) {
+  return switch (reason) {
+    NoteSaveReason.debounce => 0,
+    NoteSaveReason.explicit => 1,
+    NoteSaveReason.mutationBarrier => 2,
+  };
+}
+
+String? _latestNonEmptyMessage({
+  required String? current,
+  required String? newer,
+}) {
+  if (newer != null && newer.isNotEmpty) {
+    return newer;
+  }
+  return current;
 }
 
 Timer _defaultTimerFactory(Duration duration, void Function() action) {
