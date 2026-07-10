@@ -31,6 +31,8 @@ import '../../infrastructure/config/vault_location_store.dart';
 import '../../infrastructure/input/image_input_service.dart';
 import '../../infrastructure/vault/default_vault_backend.dart';
 import '../../infrastructure/vault/vault_backend.dart';
+import '../workspace/state/note_document_session.dart';
+import '../workspace/state/note_session_registry.dart';
 import 'browser_context_menu_guard.dart';
 import 'markdown_context_commands.dart';
 import 'markdown_live_blocks.dart';
@@ -239,32 +241,6 @@ class _SplitBranch extends _SplitNode {
   double ratio = 0.5;
 }
 
-class _NoteSession {
-  _NoteSession({required this.note, required VoidCallback onEdited})
-    : controller = TextEditingController(
-        text: _visibleMarkdownBody(note.markdown),
-      ) {
-    _onEdited = onEdited;
-    controller.addListener(_onEdited);
-  }
-
-  VaultNoteContent note;
-  final TextEditingController controller;
-  final Set<String> selectedSourceIds = <String>{};
-  List<AiProposal> proposals = const [];
-  Timer? autoSaveTimer;
-  Future<bool>? markdownSaveInFlight;
-  late final VoidCallback _onEdited;
-
-  bool get isDirty => controller.text != _visibleMarkdownBody(note.markdown);
-
-  void dispose() {
-    autoSaveTimer?.cancel();
-    controller.removeListener(_onEdited);
-    controller.dispose();
-  }
-}
-
 class _NoteEditorPasteAvailability {
   const _NoteEditorPasteAvailability({
     required this.hasText,
@@ -318,7 +294,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   late AiProvider _aiProvider;
 
   final _emptyMarkdownController = TextEditingController();
-  final Map<String, _NoteSession> _noteSessions = <String, _NoteSession>{};
+  late final NoteSessionRegistry _noteSessionRegistry;
   late _SplitNode _splitRoot;
   String _focusedPaneId = '';
   int _nextPaneNumber = 1;
@@ -339,7 +315,6 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   bool _leftPaneCollapsed = false;
   bool _rightPaneCollapsed = false;
   bool _busy = false;
-  bool _programmaticMarkdownChange = false;
   bool _autoSaving = false;
   String _message = '';
   final _selectedPreviewImageSrcNotifier = ValueNotifier<String?>(null);
@@ -358,6 +333,10 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   @override
   void initState() {
     super.initState();
+    _noteSessionRegistry = NoteSessionRegistry(
+      visibleBody: _visibleMarkdownBody,
+      onEdited: _handleSessionMarkdownEdited,
+    );
     unawaited(
       disableBrowserContextMenuForFlutterWeb().catchError((
         Object error,
@@ -392,9 +371,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
 
   @override
   void dispose() {
-    for (final session in _noteSessions.values) {
-      session.dispose();
-    }
+    _noteSessionRegistry.dispose();
     _emptyMarkdownController.dispose();
     _searchController.dispose();
     _editorPasteFocusNode.dispose();
@@ -434,10 +411,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
 
   void _resetSplitWorkspace({bool disposeSessions = true}) {
     if (disposeSessions) {
-      for (final session in _noteSessions.values) {
-        session.dispose();
-      }
-      _noteSessions.clear();
+      _noteSessionRegistry.clear();
     }
     _inactiveSelectedSourceIds.clear();
     _inactiveProposals = const [];
@@ -456,23 +430,8 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     return 'split-${_nextSplitNumber++}';
   }
 
-  _NoteSession _upsertNoteSession(VaultNoteContent note) {
-    final existing = _noteSessions[note.id];
-    if (existing != null) {
-      final wasClean = !existing.isDirty;
-      existing.note = note;
-      if (wasClean) {
-        _replaceSessionMarkdown(existing, note.markdown);
-      }
-      return existing;
-    }
-    late final _NoteSession session;
-    session = _NoteSession(
-      note: note,
-      onEdited: () => _handleSessionMarkdownEdited(session),
-    );
-    _noteSessions[note.id] = session;
-    return session;
+  NoteDocumentSession _upsertNoteSession(VaultNoteContent note) {
+    return _noteSessionRegistry.upsert(note);
   }
 
   void _replaceOpenNoteId(String before, String after) {
@@ -487,12 +446,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     final openNoteIds = _splitLeaves(
       _splitRoot,
     ).map((pane) => pane.noteId).whereType<String>().toSet();
-    final staleIds = _noteSessions.keys
-        .where((noteId) => !openNoteIds.contains(noteId))
-        .toList();
-    for (final noteId in staleIds) {
-      _noteSessions.remove(noteId)?.dispose();
-    }
+    _noteSessionRegistry.retainOnly(openNoteIds);
   }
 
   _SplitLeaf? _findSplitLeaf(_SplitNode node, String paneId) {
@@ -614,7 +568,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     }
     final noteId = focused.noteId;
     if (noteId != null && _splitLeafCountForNote(noteId) == 1) {
-      final session = _noteSessions[noteId];
+      final session = _noteSessionRegistry.sessionFor(noteId);
       if (session != null &&
           !await _flushSessionMarkdown(session, successMessage: '笔记已保存')) {
         return;
@@ -691,12 +645,12 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
 
   _SplitLeaf? get _focusedPane => _findSplitLeaf(_splitRoot, _focusedPaneId);
 
-  _NoteSession? get _activeSession {
+  NoteDocumentSession? get _activeSession {
     final noteId = _focusedPane?.noteId;
     if (noteId == null) {
       return null;
     }
-    return _noteSessions[noteId];
+    return _noteSessionRegistry.sessionFor(noteId);
   }
 
   VaultNoteContent? get _activeNote => _activeSession?.note;
@@ -749,13 +703,12 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
         : _NoteMode.reading;
   }
 
-  bool _hasDirtySession(_NoteSession session) {
-    return session.controller.text !=
-        _visibleMarkdownBody(session.note.markdown);
+  bool _hasDirtySession(NoteDocumentSession session) {
+    return session.isDirty;
   }
 
-  void _handleSessionMarkdownEdited(_NoteSession session) {
-    if (_programmaticMarkdownChange) {
+  void _handleSessionMarkdownEdited(NoteDocumentSession session) {
+    if (session.isProgrammaticChange) {
       return;
     }
     if (!_hasDirtySession(session)) {
@@ -779,19 +732,17 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     _replaceSessionMarkdown(session, markdown);
   }
 
-  void _replaceSessionMarkdown(_NoteSession session, String markdown) {
+  void _replaceSessionMarkdown(NoteDocumentSession session, String markdown) {
     _cancelPendingAutoSave(session);
-    _programmaticMarkdownChange = true;
-    session.controller.text = _visibleMarkdownBody(markdown);
-    _programmaticMarkdownChange = false;
+    session.replaceBodyProgrammatically(_visibleMarkdownBody(markdown));
   }
 
-  void _cancelPendingAutoSave(_NoteSession session) {
+  void _cancelPendingAutoSave(NoteDocumentSession session) {
     session.autoSaveTimer?.cancel();
     session.autoSaveTimer = null;
   }
 
-  void _scheduleAutoSave(_NoteSession session) {
+  void _scheduleAutoSave(NoteDocumentSession session) {
     _cancelPendingAutoSave(session);
     session.autoSaveTimer = Timer(
       Duration(milliseconds: _workspacePreferences.autoSaveDelayMillis),
@@ -1288,7 +1239,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   }
 
   Future<bool> _flushAllPendingMarkdown({String? successMessage}) async {
-    final sessions = _noteSessions.values.toList(growable: false);
+    final sessions = _noteSessionRegistry.sessions.toList(growable: false);
     for (final session in sessions) {
       if (!await _flushSessionMarkdown(
         session,
@@ -1309,7 +1260,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   }
 
   Future<bool> _flushSessionMarkdown(
-    _NoteSession session, {
+    NoteDocumentSession session, {
     String? successMessage,
   }) async {
     _cancelPendingAutoSave(session);
@@ -1356,7 +1307,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   }
 
   Future<bool> _saveSessionMarkdown(
-    _NoteSession session, {
+    NoteDocumentSession session, {
     required bool automatic,
     required bool rescheduleIfDirty,
     String? successMessage,
@@ -1391,7 +1342,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   }
 
   Future<bool> _performMarkdownSave({
-    required _NoteSession session,
+    required NoteDocumentSession session,
     required String noteId,
     required String body,
     required String markdown,
@@ -1424,8 +1375,8 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
         return true;
       }
       final stillOpen =
-          _noteSessions[noteId] == session ||
-          _noteSessions[updated.id] == session;
+          _noteSessionRegistry.sessionFor(noteId) == session ||
+          _noteSessionRegistry.sessionFor(updated.id) == session;
       final stillDirty = stillOpen && session.controller.text != body;
       setState(() {
         if (resources != null) {
@@ -1433,16 +1384,13 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
         }
         if (stillOpen) {
           if (noteIdChanged) {
-            _noteSessions.remove(noteId);
-            _noteSessions[updated.id] = session;
+            _noteSessionRegistry.remapNoteIds(
+              {noteId: updated.id},
+              refreshedNotesByNewId: {updated.id: updated},
+            );
             _replaceOpenNoteId(noteId, updated.id);
           }
-          session.note = updated;
-          if (!stillDirty &&
-              session.controller.text !=
-                  _visibleMarkdownBody(updated.markdown)) {
-            _replaceSessionMarkdown(session, updated.markdown);
-          }
+          session.applySavedNote(updated, preserveCurrentBody: stillDirty);
           if (resources != null) {
             _selectedResource = _findResource(_resources, updated.id);
           }
@@ -2751,7 +2699,9 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
 
   Widget _buildSplitLeaf(_SplitLeaf pane) {
     final focused = pane.paneId == _focusedPaneId;
-    final session = pane.noteId == null ? null : _noteSessions[pane.noteId!];
+    final session = pane.noteId == null
+        ? null
+        : _noteSessionRegistry.sessionFor(pane.noteId!);
     final accentColor = _workspaceAppearance.accentColor;
     return GestureDetector(
       key: Key('split-pane-${pane.paneId}'),
@@ -2793,7 +2743,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
 
   Widget _buildPaneHeader(
     _SplitLeaf pane, {
-    required _NoteSession? session,
+    required NoteDocumentSession? session,
     required bool focused,
   }) {
     return SizedBox(
@@ -2883,7 +2833,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     return KeyedSubtree(key: Key('note-mode-$suffix'), child: button);
   }
 
-  Widget _buildMarkdownPreview({_NoteSession? session}) {
+  Widget _buildMarkdownPreview({NoteDocumentSession? session}) {
     final markdown = MarkdownDocument.parse(
       (session ?? _activeSession)?.controller.text ?? '',
     ).body;
@@ -3291,7 +3241,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     return _clampImageWidth(parsed ?? _defaultPastedImageWidth);
   }
 
-  Widget _buildNoteEditor({_NoteSession? session, _SplitLeaf? pane}) {
+  Widget _buildNoteEditor({NoteDocumentSession? session, _SplitLeaf? pane}) {
     final resolvedSession = session ?? _activeSession;
     final resolvedPane = pane ?? _focusedPane;
     final focused = resolvedPane?.paneId == _focusedPaneId;
