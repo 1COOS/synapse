@@ -792,6 +792,175 @@ void main() {
   );
 
   testWidgets(
+    'copy readback failure requires reload and never retries backend copy',
+    (tester) async {
+      final vault = _PostMutationHydrationFailureVault(
+        _HydrationFailure.readNote,
+      );
+      final note = await vault.createNote(parentPath: '', title: '心经');
+      final reportedErrors = <FlutterErrorDetails>[];
+      final previousOnError = FlutterError.onError;
+      FlutterError.onError = reportedErrors.add;
+      addTearDown(() => FlutterError.onError = previousOnError);
+
+      await pumpWorkspace(tester, vault: vault);
+
+      Future<void> requestCopy() async {
+        await tester.tap(
+          find.byKey(Key('resource-row-${note.id}')),
+          buttons: kSecondaryMouseButton,
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(Key('note-menu-copy-${note.id}')));
+        await tester.pumpAndSettle();
+      }
+
+      await requestCopy();
+      FlutterError.onError = previousOnError;
+
+      expect(vault.copyCalls, 1);
+      expect(reportedErrors, hasLength(1));
+      expect(find.text(_reloadRequiredMessage), findsOneWidget);
+
+      await requestCopy();
+      expect(vault.copyCalls, 1);
+    },
+  );
+
+  testWidgets(
+    'move proposal hydration failure requires reload and never retries move',
+    (tester) async {
+      final vault = _PostMutationHydrationFailureVault(
+        _HydrationFailure.listProposals,
+      );
+      final source = await vault.createFolder(parentPath: '', title: '读书');
+      final target = await vault.createFolder(parentPath: '', title: '课程');
+      final note = await vault.createNote(parentPath: source.path, title: '心经');
+      final reportedErrors = <FlutterErrorDetails>[];
+      final previousOnError = FlutterError.onError;
+      FlutterError.onError = reportedErrors.add;
+      addTearDown(() => FlutterError.onError = previousOnError);
+
+      await pumpWorkspace(tester, vault: vault);
+
+      Future<void> requestMove() async {
+        await tester.tap(
+          find.byKey(Key('resource-row-${note.id}')),
+          buttons: kSecondaryMouseButton,
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(Key('note-menu-move-${note.id}')));
+        await tester.pumpAndSettle();
+        if (find.text('移动笔记').evaluate().isNotEmpty) {
+          await tester.tap(find.byKey(Key('move-target-folder-${target.id}')));
+          await tester.pumpAndSettle();
+          await tester.tap(find.text('移动'));
+          await tester.pumpAndSettle();
+        }
+      }
+
+      await requestMove();
+      FlutterError.onError = previousOnError;
+
+      expect(vault.moveCalls, 1);
+      expect(reportedErrors, hasLength(1));
+      expect(find.text(_reloadRequiredMessage), findsOneWidget);
+
+      await requestMove();
+      expect(vault.moveCalls, 1);
+    },
+  );
+
+  testWidgets(
+    'delete resource hydration failure requires reload and never retries delete',
+    (tester) async {
+      final vault = _PostMutationHydrationFailureVault(
+        _HydrationFailure.listResources,
+      );
+      final note = await vault.createNote(parentPath: '', title: '心经');
+      await vault.createNote(parentPath: '', title: '其他');
+      final reportedErrors = <FlutterErrorDetails>[];
+      final previousOnError = FlutterError.onError;
+      FlutterError.onError = reportedErrors.add;
+      addTearDown(() => FlutterError.onError = previousOnError);
+
+      await pumpWorkspace(tester, vault: vault);
+
+      Future<void> requestDelete() async {
+        await tester.tap(
+          find.byKey(Key('resource-row-${note.id}')),
+          buttons: kSecondaryMouseButton,
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(Key('note-menu-delete-${note.id}')));
+        await tester.pumpAndSettle();
+        if (find.text('删除笔记').evaluate().isNotEmpty) {
+          await tester.tap(find.text('删除'));
+          await tester.pumpAndSettle();
+        }
+      }
+
+      await requestDelete();
+      FlutterError.onError = previousOnError;
+
+      expect(vault.deleteCalls, 1);
+      expect(reportedErrors, hasLength(1));
+      expect(find.text(_reloadRequiredMessage), findsOneWidget);
+
+      await requestDelete();
+      expect(vault.deleteCalls, 1);
+    },
+  );
+
+  testWidgets(
+    'rename readback failure requires reload and never retries folder rename',
+    (tester) async {
+      final vault = _PostMutationHydrationFailureVault(
+        _HydrationFailure.readNote,
+      );
+      final folder = await vault.createFolder(parentPath: '', title: '读书');
+      await vault.createNote(parentPath: folder.path, title: '心经');
+      final reportedErrors = <FlutterErrorDetails>[];
+      final previousOnError = FlutterError.onError;
+      FlutterError.onError = reportedErrors.add;
+      addTearDown(() => FlutterError.onError = previousOnError);
+
+      await pumpWorkspace(tester, vault: vault);
+
+      Future<void> requestRename() async {
+        await tester.tap(
+          find.byKey(Key('resource-row-${folder.id}')),
+          buttons: kSecondaryMouseButton,
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(Key('folder-menu-rename-${folder.id}')));
+        await tester.pumpAndSettle();
+        if (find
+            .byKey(const Key('resource-name-input'))
+            .evaluate()
+            .isNotEmpty) {
+          await tester.enterText(
+            find.byKey(const Key('resource-name-input')),
+            '课程',
+          );
+          await tester.tap(find.text('重命名'));
+          await tester.pumpAndSettle();
+        }
+      }
+
+      await requestRename();
+      FlutterError.onError = previousOnError;
+
+      expect(vault.renameFolderCalls, 1);
+      expect(reportedErrors, hasLength(1));
+      expect(find.text(_reloadRequiredMessage), findsOneWidget);
+
+      await requestRename();
+      expect(vault.renameFolderCalls, 1);
+    },
+  );
+
+  testWidgets(
     'deletes a folder recursively and resets contained active notes',
     (tester) async {
       final vault = MemoryVaultBackend(seedExampleData: false);
@@ -838,6 +1007,86 @@ final class _CountingCopyVault extends MemoryVaultBackend {
   Future<VaultNote> copyNote({required String noteId}) {
     copyCalls += 1;
     return super.copyNote(noteId: noteId);
+  }
+}
+
+const _reloadRequiredMessage = '工作区状态提交异常。后端操作可能已完成，请重新加载工作区后再继续。';
+
+enum _HydrationFailure { listResources, readNote, listProposals }
+
+final class _PostMutationHydrationFailureVault extends MemoryVaultBackend {
+  _PostMutationHydrationFailureVault(this.failure)
+    : super(seedExampleData: false);
+
+  final _HydrationFailure failure;
+  bool _mutationCommitted = false;
+  int copyCalls = 0;
+  int moveCalls = 0;
+  int deleteCalls = 0;
+  int renameFolderCalls = 0;
+
+  @override
+  Future<VaultNote> copyNote({required String noteId}) async {
+    copyCalls += 1;
+    final copied = await super.copyNote(noteId: noteId);
+    _mutationCommitted = true;
+    return copied;
+  }
+
+  @override
+  Future<VaultNote> moveNote({
+    required String noteId,
+    required String parentPath,
+  }) async {
+    moveCalls += 1;
+    final moved = await super.moveNote(noteId: noteId, parentPath: parentPath);
+    _mutationCommitted = true;
+    return moved;
+  }
+
+  @override
+  Future<void> deleteNote(String noteId) async {
+    deleteCalls += 1;
+    await super.deleteNote(noteId);
+    _mutationCommitted = true;
+  }
+
+  @override
+  Future<VaultResourceNode> renameFolder({
+    required String folderPath,
+    required String title,
+  }) async {
+    renameFolderCalls += 1;
+    final renamed = await super.renameFolder(
+      folderPath: folderPath,
+      title: title,
+    );
+    _mutationCommitted = true;
+    return renamed;
+  }
+
+  @override
+  Future<List<VaultResourceNode>> listResources() {
+    if (_mutationCommitted && failure == _HydrationFailure.listResources) {
+      throw StateError('post-mutation listResources failed');
+    }
+    return super.listResources();
+  }
+
+  @override
+  Future<VaultNoteContent> readNote(String noteId) {
+    if (_mutationCommitted && failure == _HydrationFailure.readNote) {
+      throw StateError('post-mutation readNote failed');
+    }
+    return super.readNote(noteId);
+  }
+
+  @override
+  Future<List<AiProposal>> listProposals(String noteId) {
+    if (_mutationCommitted && failure == _HydrationFailure.listProposals) {
+      throw StateError('post-mutation listProposals failed');
+    }
+    return super.listProposals(noteId);
   }
 }
 

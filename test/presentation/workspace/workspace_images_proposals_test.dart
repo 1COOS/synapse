@@ -9,6 +9,7 @@ import 'package:synapse/infrastructure/config/synapse_settings.dart';
 import 'package:synapse/infrastructure/input/image_input_service.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
 import 'package:synapse/presentation/cupertino/workspace/workspace_resources.dart';
+import 'package:synapse/presentation/cupertino/workspace/workspace_controls.dart';
 import 'package:synapse/presentation/cupertino/workspace/workspace_sources.dart';
 import 'package:synapse/presentation/workspace/editor/live_markdown_editor.dart';
 import 'package:synapse/presentation/workspace/editor/preview_image_block.dart';
@@ -316,6 +317,41 @@ void main() {
     expect(await vault.listSources(note.id), isEmpty);
   });
 
+  testWidgets(
+    'source delete hydration failure requires reload and never retries',
+    (tester) async {
+      final vault = _PostDeleteHydrationFailureVault();
+      final reportedErrors = <FlutterErrorDetails>[];
+      final previousOnError = FlutterError.onError;
+      FlutterError.onError = reportedErrors.add;
+      addTearDown(() => FlutterError.onError = previousOnError);
+      final note = await vault.createNote(parentPath: '', title: 'Image Study');
+      await vault.addImageSource(
+        noteId: note.id,
+        filename: 'delete-fatal.png',
+        mimeType: 'image/png',
+        bytes: tinyPng,
+      );
+
+      await pumpWorkspace(tester, vault: vault);
+      await tester.tap(find.byKey(const Key('delete-image-button')));
+      await tester.pumpAndSettle();
+      vault.failSourceHydration = true;
+      await tester.tap(find.text('删除'));
+      await tester.pumpAndSettle();
+      FlutterError.onError = previousOnError;
+
+      expect(vault.deleteSourceCalls, 1);
+      expect(reportedErrors, hasLength(1));
+      expect(find.textContaining('后端操作可能已完成，请重新加载工作区'), findsOneWidget);
+
+      expect(find.byKey(const Key('delete-image-button')), findsNothing);
+      expect(vault.deleteSourceCalls, 1);
+      vault.failSourceHydration = false;
+      expect(await vault.listSources(note.id), isEmpty);
+    },
+  );
+
   testWidgets('source deletion follows a same-session title remap', (
     tester,
   ) async {
@@ -372,6 +408,39 @@ void main() {
     expect(find.text('图片 OCR 整理建议'), findsNothing);
     expect(await vault.listProposals('preview-note.md'), isEmpty);
   });
+
+  testWidgets(
+    'proposal delete hydration failure requires reload and never retries',
+    (tester) async {
+      final vault = _PostDeleteHydrationFailureVault(seedExampleData: true);
+      final reportedErrors = <FlutterErrorDetails>[];
+      final previousOnError = FlutterError.onError;
+      FlutterError.onError = reportedErrors.add;
+      addTearDown(() => FlutterError.onError = previousOnError);
+
+      await pumpWorkspace(tester, vault: vault);
+      await tester.tap(find.byKey(const Key('delete-proposal-button')));
+      await tester.pumpAndSettle();
+      vault.failProposalHydration = true;
+      await tester.tap(find.text('删除'));
+      await tester.pumpAndSettle();
+      FlutterError.onError = previousOnError;
+
+      expect(vault.deleteProposalCalls, 1);
+      expect(reportedErrors, hasLength(1));
+      expect(find.textContaining('后端操作可能已完成，请重新加载工作区'), findsOneWidget);
+
+      expect(
+        tester
+            .widget<IconAction>(find.byKey(const Key('delete-proposal-button')))
+            .onPressed,
+        isNull,
+      );
+      expect(vault.deleteProposalCalls, 1);
+      vault.failProposalHydration = false;
+      expect(await vault.listProposals('preview-note.md'), isEmpty);
+    },
+  );
 
   testWidgets('shows full selectable multiline proposal text', (tester) async {
     final vault = MemoryVaultBackend(seedExampleData: false);
@@ -972,4 +1041,41 @@ void main() {
     expect(await firstVault.listProposals(alpha.id), isEmpty);
     expect(await secondVault.listProposals(second.id), isEmpty);
   });
+}
+
+final class _PostDeleteHydrationFailureVault extends MemoryVaultBackend {
+  _PostDeleteHydrationFailureVault({super.seedExampleData = false});
+
+  bool failSourceHydration = false;
+  bool failProposalHydration = false;
+  int deleteSourceCalls = 0;
+  int deleteProposalCalls = 0;
+
+  @override
+  Future<void> deleteSource(SourceItem source) async {
+    deleteSourceCalls += 1;
+    await super.deleteSource(source);
+  }
+
+  @override
+  Future<void> deleteProposal(String proposalId) async {
+    deleteProposalCalls += 1;
+    await super.deleteProposal(proposalId);
+  }
+
+  @override
+  Future<VaultNoteContent> readNote(String noteId) {
+    if (failSourceHydration) {
+      throw StateError('source delete readback failed');
+    }
+    return super.readNote(noteId);
+  }
+
+  @override
+  Future<List<AiProposal>> listProposals(String noteId) {
+    if (failProposalHydration) {
+      throw StateError('proposal delete refresh failed');
+    }
+    return super.listProposals(noteId);
+  }
 }

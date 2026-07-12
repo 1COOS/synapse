@@ -121,21 +121,54 @@ final class _SilentValueNotifier<T> extends ChangeNotifier
   }
 }
 
+final class _WorkspaceSnapshotField<T> {
+  const _WorkspaceSnapshotField.unchanged() : isChanged = false, value = null;
+
+  const _WorkspaceSnapshotField.set(this.value) : isChanged = true;
+
+  final bool isChanged;
+  final T? value;
+}
+
+final class _WorkspaceCommitSnapshot {
+  const _WorkspaceCommitSnapshot({
+    this.resources = const _WorkspaceSnapshotField.unchanged(),
+    this.selectedResource = const _WorkspaceSnapshotField.unchanged(),
+    this.searchResults = const _WorkspaceSnapshotField.unchanged(),
+    this.narrowSection = const _WorkspaceSnapshotField.unchanged(),
+    this.message = const _WorkspaceSnapshotField.unchanged(),
+    this.previewImageSrc = const _WorkspaceSnapshotField.unchanged(),
+    this.aiServices = const _WorkspaceSnapshotField.unchanged(),
+    this.collapsedFolderIds = const _WorkspaceSnapshotField.unchanged(),
+    this.searchIndexFingerprints = const _WorkspaceSnapshotField.unchanged(),
+  });
+
+  final _WorkspaceSnapshotField<List<VaultResourceNode>> resources;
+  final _WorkspaceSnapshotField<VaultResourceNode?> selectedResource;
+  final _WorkspaceSnapshotField<List<SearchResult>> searchResults;
+  final _WorkspaceSnapshotField<_WorkspaceSection> narrowSection;
+  final _WorkspaceSnapshotField<String> message;
+  final _WorkspaceSnapshotField<String?> previewImageSrc;
+  final _WorkspaceSnapshotField<_PreparedAiServices> aiServices;
+  final _WorkspaceSnapshotField<Set<String>> collapsedFolderIds;
+  final _WorkspaceSnapshotField<Map<String, String>> searchIndexFingerprints;
+}
+
 final class _PreparedWorkspaceSnapshotMutation
     implements PreparedWorkspaceSnapshotMutation {
   _PreparedWorkspaceSnapshotMutation({
     required _SynapseWorkspaceState state,
     required Object preparedToken,
-    required VoidCallback install,
+    required _WorkspaceCommitSnapshot snapshot,
     required WorkspaceCommitPhase? forcedFailure,
   }) : _state = state,
        _preparedToken = preparedToken,
-       _install = install,
+       _snapshot = snapshot,
        _forcedFailure = forcedFailure;
 
   final _SynapseWorkspaceState _state;
   final Object _preparedToken;
-  final VoidCallback _install;
+  final _WorkspaceCommitSnapshot _snapshot;
   final WorkspaceCommitPhase? _forcedFailure;
   Object? _appliedToken;
   bool _isApplied = false;
@@ -157,7 +190,7 @@ final class _PreparedWorkspaceSnapshotMutation
     if (_forcedFailure == WorkspaceCommitPhase.apply) {
       throw StateError('Forced workspace commit apply failure.');
     }
-    _install();
+    _state._applyWorkspaceCommitSnapshot(_snapshot);
     _appliedToken = _state._advanceWorkspaceMutationToken();
     _isApplied = true;
   }
@@ -288,6 +321,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       serializeVisibleBody: _markdownForVisibleBody,
       onResult: _applyNoteSaveResult,
       onStateChanged: _handleNoteSaveCoordinatorStateChanged,
+      onFatalError: _handleNoteSaveFatalError,
     );
     _workspaceMutationBarrier = WorkspaceMutationBarrier(
       sessions: _noteSessionRegistry,
@@ -384,6 +418,43 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     setState(() {});
   }
 
+  void _applyWorkspaceCommitSnapshot(_WorkspaceCommitSnapshot snapshot) {
+    if (snapshot.resources case final field when field.isChanged) {
+      _resources = field.value!;
+    }
+    if (snapshot.selectedResource case final field when field.isChanged) {
+      _selectedResource = field.value;
+    }
+    if (snapshot.searchResults case final field when field.isChanged) {
+      _searchResults = field.value!;
+    }
+    if (snapshot.narrowSection case final field when field.isChanged) {
+      _narrowSection = field.value!;
+    }
+    if (snapshot.message case final field when field.isChanged) {
+      _message = field.value!;
+    }
+    if (snapshot.previewImageSrc case final field when field.isChanged) {
+      _setSelectedPreviewImageSrcSilently(field.value);
+    }
+    if (snapshot.aiServices case final field when field.isChanged) {
+      final services = field.value!;
+      _proposalService = services.proposalService;
+      _searchCache = services.searchCache;
+    }
+    if (snapshot.collapsedFolderIds case final field when field.isChanged) {
+      _collapsedFolderIds
+        ..clear()
+        ..addAll(field.value!);
+    }
+    if (snapshot.searchIndexFingerprints case final field
+        when field.isChanged) {
+      _searchIndexFingerprints
+        ..clear()
+        ..addAll(field.value!);
+    }
+  }
+
   WorkspaceCommitBatch<T> _prepareWorkspaceCommit<T>(
     VaultMutationDelta<T> delta, {
     Map<String, String>? remappedNoteIds,
@@ -394,7 +465,8 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     String? fallbackNoteId,
     Map<String, String?> paneNoteAssignments = const {},
     Set<String> closedPaneIds = const {},
-    VoidCallback? installWorkspace,
+    _WorkspaceCommitSnapshot workspaceSnapshot =
+        const _WorkspaceCommitSnapshot(),
   }) {
     if (widget.workspaceCommitFailureForTesting ==
         WorkspaceCommitPhase.prepare) {
@@ -427,7 +499,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       preparedWorkspace: _PreparedWorkspaceSnapshotMutation(
         state: this,
         preparedToken: _workspaceMutationToken,
-        install: installWorkspace ?? () {},
+        snapshot: workspaceSnapshot,
         forcedFailure: widget.workspaceCommitFailureForTesting,
       ),
     );
@@ -543,7 +615,9 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       WorkspaceMutationPlan<void>(
         affectedNoteIds: affectedNoteIds,
         dirtyDisposition: DirtyDisposition.flush,
-        execute: () async => const VaultMutationDelta<void>(value: null),
+        commitBackend: () async => WorkspaceBackendCommit<void>.completed(
+          const VaultMutationDelta<void>(value: null),
+        ),
         prepareCommit: (delta) {
           if (!mounted || !_paneMutationTargetStillOwnsSession(target)) {
             return _prepareWorkspaceCommit(delta);
@@ -573,10 +647,12 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
             delta,
             removedNoteIds: shouldRemoveSession ? {closingNoteId} : const {},
             closedPaneIds: {target.paneId},
-            installWorkspace: () {
-              _selectedResource = nextSelectedResource;
-              _setSelectedPreviewImageSrcSilently(null);
-            },
+            workspaceSnapshot: _WorkspaceCommitSnapshot(
+              selectedResource: _WorkspaceSnapshotField.set(
+                nextSelectedResource,
+              ),
+              previewImageSrc: const _WorkspaceSnapshotField.set(null),
+            ),
           );
         },
       ),
@@ -870,7 +946,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   }
 
   void _handleSessionMarkdownEdited(NoteDocumentSession session) {
-    if (session.isProgrammaticChange) {
+    if (_reloadRequired || session.isProgrammaticChange) {
       return;
     }
     if (!_hasDirtySession(session)) {
@@ -884,6 +960,13 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     if (mounted) {
       setState(() {});
     }
+  }
+
+  void _handleNoteSaveFatalError(WorkspaceCommitInvariantError error) {
+    if (_reloadRequired) {
+      return;
+    }
+    _handleWorkspaceCommitInvariant(error);
   }
 
   void _replaceEditorMarkdown(String markdown) {
@@ -904,6 +987,9 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   }
 
   void _scheduleAutoSave(NoteDocumentSession session) {
+    if (_reloadRequired) {
+      return;
+    }
     _noteSaveCoordinator.schedule(session);
   }
 
@@ -1075,6 +1161,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
 
   void _setVaultLocation(VaultLocation location) {
     _resetServices(_createVaultBackend(location.rootPath));
+    _noteSaveCoordinator.resetAfterReload();
     _vaultRootPath = location.rootPath;
     _vaultLabel = _formatVaultLabel(location.rootPath);
     _selectedResource = null;
@@ -1432,6 +1519,9 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   }
 
   Future<bool> _flushAllPendingMarkdown({String? successMessage}) async {
+    if (_reloadRequired) {
+      return false;
+    }
     final report = await _noteSaveCoordinator.flushAll(
       successMessage: successMessage,
     );
@@ -1450,6 +1540,9 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     NoteDocumentSession session, {
     String? successMessage,
   }) async {
+    if (_reloadRequired) {
+      return false;
+    }
     final report = await _noteSaveCoordinator.flush([
       session,
     ], successMessage: successMessage);
@@ -1462,6 +1555,9 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     required bool rescheduleIfDirty,
     String? successMessage,
   }) async {
+    if (_reloadRequired) {
+      return false;
+    }
     final result = await _noteSaveCoordinator.save(
       session,
       reason: automatic ? NoteSaveReason.debounce : NoteSaveReason.explicit,
@@ -1594,22 +1690,29 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
             savedNote: savedNote,
             preserveCurrentBody: result.stillDirty,
           ),
-          installWorkspace: () {
-            if (clearSearchResults) {
-              _searchResults = const [];
-            }
-            if (clearFocusedPreview) {
-              _setSelectedPreviewImageSrcSilently(null);
-            }
-            if (resources != null) {
-              _resources = resources;
-              _selectedResource = nextSelectedResource;
-              _installPreparedAiServices(preparedAiServices!);
-            }
-            if (successMessage != null) {
-              _message = successMessage;
-            }
-          },
+          workspaceSnapshot: _WorkspaceCommitSnapshot(
+            resources: resources == null
+                ? const _WorkspaceSnapshotField.unchanged()
+                : _WorkspaceSnapshotField.set(resources),
+            selectedResource: resources == null
+                ? const _WorkspaceSnapshotField.unchanged()
+                : _WorkspaceSnapshotField.set(nextSelectedResource),
+            searchResults: clearSearchResults
+                ? const _WorkspaceSnapshotField.set(<SearchResult>[])
+                : const _WorkspaceSnapshotField.unchanged(),
+            message: successMessage == null
+                ? const _WorkspaceSnapshotField.unchanged()
+                : _WorkspaceSnapshotField.set(successMessage),
+            previewImageSrc: clearFocusedPreview
+                ? const _WorkspaceSnapshotField.set(null)
+                : const _WorkspaceSnapshotField.unchanged(),
+            aiServices: preparedAiServices == null
+                ? const _WorkspaceSnapshotField.unchanged()
+                : _WorkspaceSnapshotField.set(preparedAiServices),
+            searchIndexFingerprints: preparedAiServices == null
+                ? const _WorkspaceSnapshotField.unchanged()
+                : const _WorkspaceSnapshotField.set(<String, String>{}),
+          ),
         );
       },
       originatingSession: session,
@@ -2189,7 +2292,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
             WorkspaceMutationPlan<_DeleteMutationPayload>(
               affectedNoteIds: affectedNoteIds,
               dirtyDisposition: DirtyDisposition.discard,
-              execute: () async {
+              commitBackend: () async {
                 final removedNoteIds = <String>{
                   ...resourceNoteIds,
                   for (final session in affectedSessions) session.noteId,
@@ -2204,21 +2307,27 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
                     ),
                   );
                 }
-                final resources = await vault.listResources();
-                final firstNote = _firstNote(resources);
-                VaultNoteContent? fallbackNote;
-                List<AiProposal> fallbackProposals = const [];
-                if (firstNote != null) {
-                  fallbackNote = await vault.readNote(firstNote.id);
-                  fallbackProposals = await vault.listProposals(firstNote.id);
-                }
-                return VaultMutationDelta<_DeleteMutationPayload>(
-                  value: _DeleteMutationPayload(
-                    fallbackNote: fallbackNote,
-                    fallbackProposals: fallbackProposals,
-                  ),
-                  removedNoteIds: removedNoteIds,
-                  resources: resources,
+                return WorkspaceBackendCommit<_DeleteMutationPayload>(
+                  postCommitHydrate: () async {
+                    final resources = await vault.listResources();
+                    final firstNote = _firstNote(resources);
+                    VaultNoteContent? fallbackNote;
+                    List<AiProposal> fallbackProposals = const [];
+                    if (firstNote != null) {
+                      fallbackNote = await vault.readNote(firstNote.id);
+                      fallbackProposals = await vault.listProposals(
+                        firstNote.id,
+                      );
+                    }
+                    return VaultMutationDelta<_DeleteMutationPayload>(
+                      value: _DeleteMutationPayload(
+                        fallbackNote: fallbackNote,
+                        fallbackProposals: fallbackProposals,
+                      ),
+                      removedNoteIds: removedNoteIds,
+                      resources: resources,
+                    );
+                  },
                 );
               },
               prepareCommit: (delta) {
@@ -2289,14 +2398,25 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
                   upsertedNotesById: upsertedNotes,
                   replacementProposalsByNoteId: replacementProposals,
                   paneNoteAssignments: paneAssignments,
-                  installWorkspace: () {
-                    _resources = resources;
-                    _searchResults = const [];
-                    _selectedResource = nextSelectedResource;
-                    _narrowSection = nextNarrowSection;
-                    _message = resource.isFolder ? '文件夹已删除' : '笔记已删除';
-                    _installPreparedAiServices(preparedAiServices);
-                  },
+                  workspaceSnapshot: _WorkspaceCommitSnapshot(
+                    resources: _WorkspaceSnapshotField.set(resources),
+                    selectedResource: _WorkspaceSnapshotField.set(
+                      nextSelectedResource,
+                    ),
+                    searchResults: const _WorkspaceSnapshotField.set(
+                      <SearchResult>[],
+                    ),
+                    narrowSection: _WorkspaceSnapshotField.set(
+                      nextNarrowSection,
+                    ),
+                    message: _WorkspaceSnapshotField.set(
+                      resource.isFolder ? '文件夹已删除' : '笔记已删除',
+                    ),
+                    aiServices: _WorkspaceSnapshotField.set(preparedAiServices),
+                    searchIndexFingerprints: const _WorkspaceSnapshotField.set(
+                      <String, String>{},
+                    ),
+                  ),
                 );
               },
             ),
@@ -2330,32 +2450,36 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
         WorkspaceMutationPlan<VaultResourceNode>(
           affectedNoteIds: affectedNoteIds,
           dirtyDisposition: DirtyDisposition.flush,
-          execute: () async {
+          commitBackend: () async {
             final renamed = await vault.renameFolder(
               folderPath: folder.path,
               title: title,
             );
-            final remappedNoteIds = <String, String>{};
-            final refreshedNotes = <String, VaultNoteContent>{};
-            for (final session in affectedSessions) {
-              final oldId = session.noteId;
-              if (!_pathIsInside(oldId, folder.path)) {
-                continue;
-              }
-              final newId = _replacePathPrefix(
-                oldId,
-                folder.path,
-                renamed.path,
-              );
-              remappedNoteIds[oldId] = newId;
-              refreshedNotes[newId] = await vault.readNote(newId);
-            }
-            final resources = await vault.listResources();
-            return VaultMutationDelta<VaultResourceNode>(
-              value: renamed,
-              remappedNoteIds: remappedNoteIds,
-              refreshedNotesByNewId: refreshedNotes,
-              resources: resources,
+            return WorkspaceBackendCommit<VaultResourceNode>(
+              postCommitHydrate: () async {
+                final remappedNoteIds = <String, String>{};
+                final refreshedNotes = <String, VaultNoteContent>{};
+                for (final session in affectedSessions) {
+                  final oldId = session.noteId;
+                  if (!_pathIsInside(oldId, folder.path)) {
+                    continue;
+                  }
+                  final newId = _replacePathPrefix(
+                    oldId,
+                    folder.path,
+                    renamed.path,
+                  );
+                  remappedNoteIds[oldId] = newId;
+                  refreshedNotes[newId] = await vault.readNote(newId);
+                }
+                final resources = await vault.listResources();
+                return VaultMutationDelta<VaultResourceNode>(
+                  value: renamed,
+                  remappedNoteIds: remappedNoteIds,
+                  refreshedNotesByNewId: refreshedNotes,
+                  resources: resources,
+                );
+              },
             );
           },
           prepareCommit: (delta) {
@@ -2368,19 +2492,28 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
             );
             final clearSearch = folder.path != delta.value.path;
             final preparedAiServices = _prepareAiServices();
+            final collapsedFolderIds = Set<String>.of(_collapsedFolderIds)
+              ..remove(folder.id)
+              ..remove(delta.value.id);
             return _prepareWorkspaceCommit(
               delta,
-              installWorkspace: () {
-                _resources = resources;
-                if (clearSearch) {
-                  _searchResults = const [];
-                }
-                _selectedResource = nextSelectedResource;
-                _collapsedFolderIds.remove(folder.id);
-                _collapsedFolderIds.remove(delta.value.id);
-                _message = '文件夹已重命名';
-                _installPreparedAiServices(preparedAiServices);
-              },
+              workspaceSnapshot: _WorkspaceCommitSnapshot(
+                resources: _WorkspaceSnapshotField.set(resources),
+                selectedResource: _WorkspaceSnapshotField.set(
+                  nextSelectedResource,
+                ),
+                searchResults: clearSearch
+                    ? const _WorkspaceSnapshotField.set(<SearchResult>[])
+                    : const _WorkspaceSnapshotField.unchanged(),
+                message: const _WorkspaceSnapshotField.set('文件夹已重命名'),
+                aiServices: _WorkspaceSnapshotField.set(preparedAiServices),
+                collapsedFolderIds: _WorkspaceSnapshotField.set(
+                  collapsedFolderIds,
+                ),
+                searchIndexFingerprints: const _WorkspaceSnapshotField.set(
+                  <String, String>{},
+                ),
+              ),
             );
           },
         ),
@@ -2409,16 +2542,23 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
         WorkspaceMutationPlan<_NoteMutationPayload>(
           affectedNoteIds: {affectedNoteId},
           dirtyDisposition: DirtyDisposition.flush,
-          execute: () async {
+          commitBackend: () async {
             final copied = await vault.copyNote(
               noteId: _ownedNoteId(sourceSession, fallback: note.id),
             );
-            final loaded = await vault.readNote(copied.id);
-            final resources = await vault.listResources();
-            final proposals = await vault.listProposals(copied.id);
-            return VaultMutationDelta<_NoteMutationPayload>(
-              value: _NoteMutationPayload(note: loaded, proposals: proposals),
-              resources: resources,
+            return WorkspaceBackendCommit<_NoteMutationPayload>(
+              postCommitHydrate: () async {
+                final loaded = await vault.readNote(copied.id);
+                final resources = await vault.listResources();
+                final proposals = await vault.listProposals(copied.id);
+                return VaultMutationDelta<_NoteMutationPayload>(
+                  value: _NoteMutationPayload(
+                    note: loaded,
+                    proposals: proposals,
+                  ),
+                  resources: resources,
+                );
+              },
             );
           },
           prepareCommit: (delta) {
@@ -2434,6 +2574,8 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
                 ? _findResource(resources, copiedNote.id)
                 : _selectedResource;
             final preparedAiServices = _prepareAiServices();
+            final collapsedFolderIds = Set<String>.of(_collapsedFolderIds)
+              ..remove(_parentFolderPath(copiedNote.path));
             return _prepareWorkspaceCommit(
               delta,
               upsertedNotesById: targetIsCurrent
@@ -2445,17 +2587,23 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
               paneNoteAssignments: targetIsCurrent
                   ? {paneTarget.paneId: copiedNote.id}
                   : const {},
-              installWorkspace: () {
-                _resources = resources;
-                _searchResults = const [];
-                if (targetIsFocused) {
-                  _selectedResource = nextSelectedResource;
-                  _narrowSection = _WorkspaceSection.notes;
-                }
-                _collapsedFolderIds.remove(_parentFolderPath(copiedNote.path));
-                _message = '笔记已复制';
-                _installPreparedAiServices(preparedAiServices);
-              },
+              workspaceSnapshot: _WorkspaceCommitSnapshot(
+                resources: _WorkspaceSnapshotField.set(resources),
+                selectedResource: targetIsFocused
+                    ? _WorkspaceSnapshotField.set(nextSelectedResource)
+                    : const _WorkspaceSnapshotField.unchanged(),
+                searchResults: const _WorkspaceSnapshotField.set(
+                  <SearchResult>[],
+                ),
+                narrowSection: targetIsFocused
+                    ? const _WorkspaceSnapshotField.set(_WorkspaceSection.notes)
+                    : const _WorkspaceSnapshotField.unchanged(),
+                message: const _WorkspaceSnapshotField.set('笔记已复制'),
+                aiServices: _WorkspaceSnapshotField.set(preparedAiServices),
+                collapsedFolderIds: _WorkspaceSnapshotField.set(
+                  collapsedFolderIds,
+                ),
+              ),
             );
           },
         ),
@@ -2481,20 +2629,27 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
         WorkspaceMutationPlan<_NoteMutationPayload>(
           affectedNoteIds: {affectedNoteId},
           dirtyDisposition: DirtyDisposition.flush,
-          execute: () async {
+          commitBackend: () async {
             final sourceNoteId = _ownedNoteId(sourceSession, fallback: note.id);
             final moved = await vault.moveNote(
               noteId: sourceNoteId,
               parentPath: parentPath,
             );
-            final loaded = await vault.readNote(moved.id);
-            final resources = await vault.listResources();
-            final proposals = await vault.listProposals(moved.id);
-            return VaultMutationDelta<_NoteMutationPayload>(
-              value: _NoteMutationPayload(note: loaded, proposals: proposals),
-              remappedNoteIds: {sourceNoteId: moved.id},
-              refreshedNotesByNewId: {moved.id: loaded},
-              resources: resources,
+            return WorkspaceBackendCommit<_NoteMutationPayload>(
+              postCommitHydrate: () async {
+                final loaded = await vault.readNote(moved.id);
+                final resources = await vault.listResources();
+                final proposals = await vault.listProposals(moved.id);
+                return VaultMutationDelta<_NoteMutationPayload>(
+                  value: _NoteMutationPayload(
+                    note: loaded,
+                    proposals: proposals,
+                  ),
+                  remappedNoteIds: {sourceNoteId: moved.id},
+                  refreshedNotesByNewId: {moved.id: loaded},
+                  resources: resources,
+                );
+              },
             );
           },
           prepareCommit: (delta) {
@@ -2519,6 +2674,8 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
               remappedNoteIds: delta.remappedNoteIds,
             );
             final preparedAiServices = _prepareAiServices();
+            final collapsedFolderIds = Set<String>.of(_collapsedFolderIds)
+              ..remove(parentPath);
             return _prepareWorkspaceCommit(
               delta,
               upsertedNotesById: sourceSessionWillRemap
@@ -2530,19 +2687,24 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
               paneNoteAssignments: targetIsCurrent
                   ? {paneTarget.paneId: movedNote.id}
                   : const {},
-              installWorkspace: () {
-                _resources = resources;
-                if (_actualNoteIdRemaps(delta.remappedNoteIds).isNotEmpty) {
-                  _searchResults = const [];
-                }
-                _selectedResource = nextSelectedResource;
-                if (targetIsFocused) {
-                  _narrowSection = _WorkspaceSection.notes;
-                }
-                _collapsedFolderIds.remove(parentPath);
-                _message = '笔记已移动';
-                _installPreparedAiServices(preparedAiServices);
-              },
+              workspaceSnapshot: _WorkspaceCommitSnapshot(
+                resources: _WorkspaceSnapshotField.set(resources),
+                selectedResource: _WorkspaceSnapshotField.set(
+                  nextSelectedResource,
+                ),
+                searchResults:
+                    _actualNoteIdRemaps(delta.remappedNoteIds).isNotEmpty
+                    ? const _WorkspaceSnapshotField.set(<SearchResult>[])
+                    : const _WorkspaceSnapshotField.unchanged(),
+                narrowSection: targetIsFocused
+                    ? const _WorkspaceSnapshotField.set(_WorkspaceSection.notes)
+                    : const _WorkspaceSnapshotField.unchanged(),
+                message: const _WorkspaceSnapshotField.set('笔记已移动'),
+                aiServices: _WorkspaceSnapshotField.set(preparedAiServices),
+                collapsedFolderIds: _WorkspaceSnapshotField.set(
+                  collapsedFolderIds,
+                ),
+              ),
             );
           },
         ),
@@ -2565,6 +2727,9 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     PaneEditorContext context,
     SourceItem source,
   ) async {
+    if (_reloadRequired) {
+      return PaneEditorCommandOutcome.unchanged;
+    }
     final confirmed = await _confirmDelete(
       title: '删除图片素材',
       message: '将删除这条图片素材和对应附件文件。此操作不可撤销。',
@@ -2576,47 +2741,87 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       return PaneEditorCommandOutcome.unchanged;
     }
     return _runPaneEditorBusy(context, () async {
-      var resolved = _resolvePaneEditorContext(context);
+      final resolved = _resolvePaneEditorContext(context);
       if (resolved == null) {
         return PaneEditorCommandOutcome.staleTarget;
       }
-      final flushFailure = await _flushPaneEditorSession(
-        context,
-        resolved.session,
+      final targetSession = resolved.session;
+      final vault = _requireVault();
+      String? deletedPreviewSrc;
+      final result = await _workspaceMutationBarrier.run<_NoteMutationPayload>(
+        WorkspaceMutationPlan<_NoteMutationPayload>(
+          affectedNoteIds: {targetSession.noteId},
+          dirtyDisposition: DirtyDisposition.flush,
+          commitBackend: () async {
+            SourceItem? currentSource;
+            for (final candidate in targetSession.note.sources) {
+              if (candidate.id == source.id) {
+                currentSource = candidate;
+                break;
+              }
+            }
+            if (currentSource == null) {
+              throw StateError('Source not found: ${source.id}');
+            }
+            final noteId = _ownedNoteId(
+              targetSession,
+              fallback: resolved.noteId,
+            );
+            deletedPreviewSrc = _markdownAttachmentSrc(
+              targetSession.note,
+              currentSource,
+            );
+            await vault.deleteSource(currentSource);
+            return WorkspaceBackendCommit<_NoteMutationPayload>(
+              postCommitHydrate: () async {
+                final resources = await vault.listResources();
+                final note = await vault.readNote(noteId);
+                return VaultMutationDelta<_NoteMutationPayload>(
+                  value: _NoteMutationPayload(note: note, proposals: const []),
+                  refreshedNotesByNewId: {note.id: note},
+                  resources: resources,
+                );
+              },
+            );
+          },
+          prepareCommit: (delta) {
+            final targetIsCurrent = _resolvePaneEditorContext(context) != null;
+            final targetIsFocused =
+                targetIsCurrent &&
+                _splitWorkspaceController.focusedPaneId == context.paneId;
+            final resources = delta.resources ?? const [];
+            final clearPreview =
+                targetIsFocused &&
+                deletedPreviewSrc != null &&
+                normalizeImageSrc(_selectedPreviewImageSrcNotifier.value) ==
+                    normalizeImageSrc(deletedPreviewSrc!);
+            return _prepareWorkspaceCommit(
+              delta,
+              upsertedNotesById: {delta.value.note.id: delta.value.note},
+              workspaceSnapshot: _WorkspaceCommitSnapshot(
+                resources: _WorkspaceSnapshotField.set(resources),
+                selectedResource: targetIsFocused
+                    ? _WorkspaceSnapshotField.set(
+                        _findResource(resources, delta.value.note.id),
+                      )
+                    : const _WorkspaceSnapshotField.unchanged(),
+                message: targetIsCurrent
+                    ? const _WorkspaceSnapshotField.set('图片素材已删除')
+                    : const _WorkspaceSnapshotField.unchanged(),
+                previewImageSrc: clearPreview
+                    ? const _WorkspaceSnapshotField.set(null)
+                    : const _WorkspaceSnapshotField.unchanged(),
+              ),
+            );
+          },
+        ),
       );
-      if (flushFailure != null) {
-        return flushFailure;
-      }
-      resolved = _resolvePaneEditorContext(context);
-      if (resolved == null) {
-        return PaneEditorCommandOutcome.staleTarget;
-      }
-      SourceItem? currentSource;
-      for (final candidate in resolved.session.note.sources) {
-        if (candidate.id == source.id) {
-          currentSource = candidate;
-          break;
-        }
-      }
-      if (currentSource == null) {
+      if (!_commitSucceededOrThrow(result)) {
         return PaneEditorCommandOutcome.unchanged;
       }
-      await _requireVault().deleteSource(currentSource);
-      if (_resolvePaneEditorContext(context) == null) {
-        await _recoverStaleBackendTarget(context);
-        return PaneEditorCommandOutcome.staleTarget;
-      }
-      final outcome = await _refreshPaneEditorTarget(
-        context,
-        refreshResources: true,
-      );
-      if (outcome == PaneEditorCommandOutcome.staleTarget) {
-        return outcome;
-      }
-      setState(() {
-        _message = '图片素材已删除';
-      });
-      return outcome;
+      return _resolvePaneEditorContext(context) == null
+          ? PaneEditorCommandOutcome.staleTarget
+          : PaneEditorCommandOutcome.committed;
     });
   }
 
@@ -2624,6 +2829,9 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     PaneEditorContext context,
     AiProposal proposal,
   ) async {
+    if (_reloadRequired) {
+      return PaneEditorCommandOutcome.unchanged;
+    }
     final confirmed = await _confirmDelete(
       title: '删除 AI 建议',
       message: '将删除这条 AI 建议缓存。已经手动写入笔记的内容不会受影响。',
@@ -2635,21 +2843,56 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       return PaneEditorCommandOutcome.unchanged;
     }
     return _runPaneEditorBusy(context, () async {
-      await _requireVault().deleteProposal(proposal.id);
-      if (_resolvePaneEditorContext(context) == null) {
-        await _recoverStaleBackendTarget(context, refreshProposals: true);
+      final resolved = _resolvePaneEditorContext(context);
+      if (resolved == null) {
         return PaneEditorCommandOutcome.staleTarget;
       }
-      final outcome = await _refreshPaneEditorTarget(
-        context,
-        refreshResources: false,
-        refreshProposals: true,
+      final targetSession = resolved.session;
+      final vault = _requireVault();
+      final result = await _workspaceMutationBarrier.run<_NoteMutationPayload>(
+        WorkspaceMutationPlan<_NoteMutationPayload>(
+          affectedNoteIds: {targetSession.noteId},
+          dirtyDisposition: DirtyDisposition.flush,
+          commitBackend: () async {
+            final noteId = _ownedNoteId(
+              targetSession,
+              fallback: resolved.noteId,
+            );
+            await vault.deleteProposal(proposal.id);
+            return WorkspaceBackendCommit<_NoteMutationPayload>(
+              postCommitHydrate: () async {
+                final note = await vault.readNote(noteId);
+                final proposals = await vault.listProposals(noteId);
+                return VaultMutationDelta<_NoteMutationPayload>(
+                  value: _NoteMutationPayload(note: note, proposals: proposals),
+                  refreshedNotesByNewId: {note.id: note},
+                );
+              },
+            );
+          },
+          prepareCommit: (delta) {
+            final targetIsCurrent = _resolvePaneEditorContext(context) != null;
+            return _prepareWorkspaceCommit(
+              delta,
+              upsertedNotesById: {delta.value.note.id: delta.value.note},
+              replacementProposalsByNoteId: {
+                delta.value.note.id: delta.value.proposals,
+              },
+              workspaceSnapshot: _WorkspaceCommitSnapshot(
+                message: targetIsCurrent
+                    ? const _WorkspaceSnapshotField.set('AI 建议已删除')
+                    : const _WorkspaceSnapshotField.unchanged(),
+              ),
+            );
+          },
+        ),
       );
-      if (outcome == PaneEditorCommandOutcome.staleTarget) {
-        return outcome;
+      if (!_commitSucceededOrThrow(result)) {
+        return PaneEditorCommandOutcome.unchanged;
       }
-      setState(() => _message = 'AI 建议已删除');
-      return outcome;
+      return _resolvePaneEditorContext(context) == null
+          ? PaneEditorCommandOutcome.staleTarget
+          : PaneEditorCommandOutcome.committed;
     });
   }
 
@@ -4021,7 +4264,9 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
                   )
                 : LiveMarkdownEditor(
                     controller: resolvedSession.controller,
-                    enabled: !_paneEditorCommandLocks.contains(resolvedSession),
+                    enabled:
+                        !_reloadRequired &&
+                        !_paneEditorCommandLocks.contains(resolvedSession),
                     busy: _busy || _autoSaving,
                     focused: focused,
                     onFocusPane: () {
@@ -4062,9 +4307,12 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     final resolved = editorContext == null
         ? null
         : _resolvePaneEditorContext(editorContext);
-    final sources = (resolved?.session.note.sources ?? const <SourceItem>[])
-        .where((source) => source.type == SourceType.image)
-        .toList();
+    final sources =
+        (_reloadRequired
+                ? const <SourceItem>[]
+                : resolved?.session.note.sources ?? const <SourceItem>[])
+            .where((source) => source.type == SourceType.image)
+            .toList();
     final materials = resolved == null
         ? NoteMaterialsSnapshot.empty
         : _noteMaterialsRegistry.snapshotFor(resolved.noteId);
@@ -4088,7 +4336,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
                       key: const Key('add-image-button'),
                       label: '导入图片',
                       icon: CupertinoIcons.photo,
-                      onPressed: _busy || !_hasVault
+                      onPressed: _busy || _reloadRequired || !_hasVault
                           ? null
                           : () async {
                               await _addImageSource(editorContext);
@@ -4101,7 +4349,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
                       key: const Key('paste-image-button'),
                       label: '粘贴图片',
                       icon: CupertinoIcons.doc_on_clipboard,
-                      onPressed: _busy || !_hasVault
+                      onPressed: _busy || _reloadRequired || !_hasVault
                           ? null
                           : () async {
                               await _pasteImageSource(editorContext);
@@ -4161,7 +4409,10 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
                 key: const Key('generate-proposal-button'),
                 label: '生成建议',
                 icon: CupertinoIcons.sparkles,
-                onPressed: materials.selectedSourceIds.isEmpty || _busy
+                onPressed:
+                    materials.selectedSourceIds.isEmpty ||
+                        _busy ||
+                        _reloadRequired
                     ? null
                     : () async {
                         await _generateProposal(editorContext);
@@ -4189,7 +4440,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
                         : 'delete-proposal-button-'
                               '${materials.proposals[index].id}',
                   ),
-                  busy: _busy,
+                  busy: _busy || _reloadRequired,
                   onCopy: editorContext == null
                       ? () {}
                       : () async {
@@ -4222,7 +4473,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     if (!_isPasteImageShortcutKeyUp(event)) {
       return KeyEventResult.ignored;
     }
-    if (!_busy && _hasVault) {
+    if (!_busy && !_reloadRequired && _hasVault) {
       unawaited(_pasteImageSource(editorContext));
     }
     return KeyEventResult.handled;

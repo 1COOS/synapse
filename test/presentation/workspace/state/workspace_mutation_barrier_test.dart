@@ -20,7 +20,9 @@ void main() {
         WorkspaceMutationPlan<void>(
           affectedNoteIds: const {},
           dirtyDisposition: DirtyDisposition.flush,
-          execute: () async => const VaultMutationDelta<void>(value: null),
+          commitBackend: () => _backendCommit(
+            () async => const VaultMutationDelta<void>(value: null),
+          ),
           prepareCommit: harness.prepareBatch,
         ),
       );
@@ -28,7 +30,7 @@ void main() {
         WorkspaceMutationPlan<void>(
           affectedNoteIds: const {},
           dirtyDisposition: DirtyDisposition.flush,
-          execute: () async => throw StateError('backend failed'),
+          commitBackend: () async => throw StateError('backend failed'),
           prepareCommit: harness.prepareBatch,
         ),
       );
@@ -72,10 +74,12 @@ void main() {
           WorkspaceMutationPlan<void>(
             affectedNoteIds: const {'A.md'},
             dirtyDisposition: DirtyDisposition.flush,
-            execute: () async => VaultMutationDelta<void>(
-              value: null,
-              remappedNoteIds: const {'A.md': 'B.md'},
-              refreshedNotesByNewId: {'B.md': _note('B.md', 'new')},
+            commitBackend: () => _backendCommit(
+              () async => VaultMutationDelta<void>(
+                value: null,
+                remappedNoteIds: const {'A.md': 'B.md'},
+                refreshedNotesByNewId: {'B.md': _note('B.md', 'new')},
+              ),
             ),
             prepareCommit: (delta) => harness.prepareBatch(
               delta,
@@ -104,10 +108,10 @@ void main() {
             WorkspaceMutationPlan<void>(
               affectedNoteIds: const {},
               dirtyDisposition: DirtyDisposition.flush,
-              execute: () async {
+              commitBackend: () => _backendCommit(() async {
                 backendCalls += 1;
                 return const VaultMutationDelta<void>(value: null);
-              },
+              }),
               prepareCommit: (_) => throw StateError('prepare failed'),
             ),
           ),
@@ -126,7 +130,49 @@ void main() {
     );
 
     test(
-      'commitPrepared preparation failure is fatal, not BackendFailed',
+      'hydrate failure after backend receipt is fatal and never retried',
+      () async {
+        final harness = _Stage6BarrierHarness();
+        addTearDown(harness.dispose);
+        var backendCalls = 0;
+        var hydrateCalls = 0;
+
+        await expectLater(
+          harness.barrier.run<void>(
+            WorkspaceMutationPlan<void>(
+              affectedNoteIds: const {},
+              dirtyDisposition: DirtyDisposition.flush,
+              commitBackend: () async {
+                backendCalls += 1;
+                return WorkspaceBackendCommit<void>(
+                  postCommitHydrate: () async {
+                    hydrateCalls += 1;
+                    throw StateError('hydrate failed');
+                  },
+                );
+              },
+            ),
+          ),
+          throwsA(
+            isA<WorkspaceCommitInvariantError>().having(
+              (error) => error.phase,
+              'phase',
+              WorkspaceCommitPhase.hydrate,
+            ),
+          ),
+        );
+
+        expect(backendCalls, 1);
+        expect(hydrateCalls, 1);
+        expect(
+          harness.invariantErrors.single.phase,
+          WorkspaceCommitPhase.hydrate,
+        );
+      },
+    );
+
+    test(
+      'commitPrepared hydration failure is fatal, not BackendFailed',
       () async {
         final harness = _Stage6BarrierHarness();
         addTearDown(harness.dispose);
@@ -139,7 +185,7 @@ void main() {
             isA<WorkspaceCommitInvariantError>().having(
               (error) => error.phase,
               'phase',
-              WorkspaceCommitPhase.prepare,
+              WorkspaceCommitPhase.hydrate,
             ),
           ),
         );
@@ -170,10 +216,10 @@ void main() {
             WorkspaceMutationPlan<void>(
               affectedNoteIds: const {},
               dirtyDisposition: DirtyDisposition.flush,
-              execute: () async {
+              commitBackend: () => _backendCommit(() async {
                 backendCalls += 1;
                 return const VaultMutationDelta<void>(value: null);
-              },
+              }),
               prepareCommit: (delta) =>
                   harness.prepareBatch(delta, workspace: workspace),
             ),
@@ -203,10 +249,10 @@ void main() {
         WorkspaceMutationPlan<void>(
           affectedNoteIds: const {'A.md'},
           dirtyDisposition: DirtyDisposition.flush,
-          execute: () async {
+          commitBackend: () => _backendCommit(() async {
             executed = true;
             return const VaultMutationDelta<void>(value: null);
-          },
+          }),
         ),
       );
 
@@ -225,11 +271,11 @@ void main() {
         WorkspaceMutationPlan<int>(
           affectedNoteIds: const {},
           dirtyDisposition: DirtyDisposition.flush,
-          execute: () async {
+          commitBackend: () => _backendCommit(() async {
             events.add('first:execute');
             await firstGate.future;
             return const VaultMutationDelta<int>(value: 1);
-          },
+          }),
           prepareCommit: (delta) => harness.prepareBatch(
             delta,
             workspace: _PreparedTestWorkspaceMutation(
@@ -243,10 +289,10 @@ void main() {
         WorkspaceMutationPlan<int>(
           affectedNoteIds: const {},
           dirtyDisposition: DirtyDisposition.flush,
-          execute: () async {
+          commitBackend: () => _backendCommit(() async {
             events.add('second:execute');
             return const VaultMutationDelta<int>(value: 2);
-          },
+          }),
           prepareCommit: (delta) => harness.prepareBatch(
             delta,
             workspace: _PreparedTestWorkspaceMutation(
@@ -282,11 +328,11 @@ void main() {
           WorkspaceMutationPlan<void>(
             affectedNoteIds: const {},
             dirtyDisposition: DirtyDisposition.flush,
-            execute: () async {
+            commitBackend: () => _backendCommit(() async {
               executeStarted.complete();
               await releaseExecute.future;
               return const VaultMutationDelta<void>(value: null);
-            },
+            }),
             prepareCommit: (delta) => harness.prepareBatch(
               delta,
               workspace: _PreparedTestWorkspaceMutation(
@@ -323,12 +369,14 @@ void main() {
         WorkspaceMutationPlan<void>(
           affectedNoteIds: const {'A.md'},
           dirtyDisposition: DirtyDisposition.flush,
-          execute: () async => VaultMutationDelta<void>(
-            value: null,
-            remappedNoteIds: const {'A.md': 'folder/A.md'},
-            refreshedNotesByNewId: {
-              'folder/A.md': _note('folder/A.md', 'body'),
-            },
+          commitBackend: () => _backendCommit(
+            () async => VaultMutationDelta<void>(
+              value: null,
+              remappedNoteIds: const {'A.md': 'folder/A.md'},
+              refreshedNotesByNewId: {
+                'folder/A.md': _note('folder/A.md', 'body'),
+              },
+            ),
           ),
         ),
       );
@@ -360,13 +408,13 @@ void main() {
         WorkspaceMutationPlan<void>(
           affectedNoteIds: const {'A.md', 'B.md'},
           dirtyDisposition: DirtyDisposition.discard,
-          execute: () async {
+          commitBackend: () => _backendCommit(() async {
             executed = true;
             return const VaultMutationDelta<void>(
               value: null,
               removedNoteIds: {'A.md', 'B.md'},
             );
-          },
+          }),
         ),
       );
       await _drainEventQueue();
@@ -390,7 +438,7 @@ void main() {
         WorkspaceMutationPlan<void>(
           affectedNoteIds: const {'A.md'},
           dirtyDisposition: DirtyDisposition.flush,
-          execute: () async => throw StateError('backend failed'),
+          commitBackend: () async => throw StateError('backend failed'),
           prepareCommit: (delta) => harness.prepareBatch(
             delta,
             workspace: _PreparedTestWorkspaceMutation(
@@ -460,8 +508,9 @@ void main() {
               WorkspaceMutationPlan<void>(
                 affectedNoteIds: const {'A.md'},
                 dirtyDisposition: DirtyDisposition.flush,
-                execute: () async =>
-                    const VaultMutationDelta<void>(value: null),
+                commitBackend: () => _backendCommit(
+                  () async => const VaultMutationDelta<void>(value: null),
+                ),
               ),
             )
             .timeout(const Duration(seconds: 1));
@@ -538,11 +587,11 @@ void main() {
           WorkspaceMutationPlan<void>(
             affectedNoteIds: const {},
             dirtyDisposition: DirtyDisposition.flush,
-            execute: () async {
+            commitBackend: () => _backendCommit(() async {
               blockerStarted.complete();
               await releaseBlocker.future;
               return const VaultMutationDelta<void>(value: null);
-            },
+            }),
           ),
         );
         await blockerStarted.future;
@@ -550,7 +599,9 @@ void main() {
           WorkspaceMutationPlan<void>(
             affectedNoteIds: const {'A.md'},
             dirtyDisposition: DirtyDisposition.flush,
-            execute: () async => const VaultMutationDelta<void>(value: null),
+            commitBackend: () => _backendCommit(
+              () async => const VaultMutationDelta<void>(value: null),
+            ),
           ),
         );
 
@@ -596,12 +647,14 @@ void main() {
           WorkspaceMutationPlan<void>(
             affectedNoteIds: const {'A.md'},
             dirtyDisposition: DirtyDisposition.flush,
-            execute: () async => VaultMutationDelta<void>(
-              value: null,
-              remappedNoteIds: const {'A.md': 'folder/A.md'},
-              refreshedNotesByNewId: {
-                'folder/A.md': _note('folder/A.md', 'body'),
-              },
+            commitBackend: () => _backendCommit(
+              () async => VaultMutationDelta<void>(
+                value: null,
+                remappedNoteIds: const {'A.md': 'folder/A.md'},
+                refreshedNotesByNewId: {
+                  'folder/A.md': _note('folder/A.md', 'body'),
+                },
+              ),
             ),
           ),
         );
@@ -641,9 +694,11 @@ void main() {
           WorkspaceMutationPlan<void>(
             affectedNoteIds: const {'A.md'},
             dirtyDisposition: DirtyDisposition.discard,
-            execute: () async => const VaultMutationDelta<void>(
-              value: null,
-              removedNoteIds: {'A.md'},
+            commitBackend: () => _backendCommit(
+              () async => const VaultMutationDelta<void>(
+                value: null,
+                removedNoteIds: {'A.md'},
+              ),
             ),
           ),
         );
@@ -675,14 +730,14 @@ void main() {
           WorkspaceMutationPlan<void>(
             affectedNoteIds: const {'A.md'},
             dirtyDisposition: DirtyDisposition.discard,
-            execute: () async {
+            commitBackend: () => _backendCommit(() async {
               executeStarted.complete();
               await releaseExecute.future;
               return const VaultMutationDelta<void>(
                 value: null,
                 removedNoteIds: {'A.md'},
               );
-            },
+            }),
           ),
         );
         await executeStarted.future;
@@ -723,7 +778,7 @@ void main() {
           WorkspaceMutationPlan<void>(
             affectedNoteIds: const {'A.md'},
             dirtyDisposition: DirtyDisposition.flush,
-            execute: () async {
+            commitBackend: () => _backendCommit(() async {
               executeStarted.complete();
               await releaseExecute.future;
               return VaultMutationDelta<void>(
@@ -733,7 +788,7 @@ void main() {
                   'folder/A.md': _note('folder/A.md', 'old'),
                 },
               );
-            },
+            }),
           ),
         );
         await executeStarted.future;
@@ -782,11 +837,13 @@ void main() {
         WorkspaceMutationPlan<void>(
           affectedNoteIds: const {'A.md', 'C.md'},
           dirtyDisposition: DirtyDisposition.flush,
-          execute: () async => VaultMutationDelta<void>(
-            value: null,
-            remappedNoteIds: const {'A.md': 'B.md'},
-            removedNoteIds: const {'C.md'},
-            refreshedNotesByNewId: {'B.md': _note('B.md', 'A')},
+          commitBackend: () => _backendCommit(
+            () async => VaultMutationDelta<void>(
+              value: null,
+              remappedNoteIds: const {'A.md': 'B.md'},
+              removedNoteIds: const {'C.md'},
+              refreshedNotesByNewId: {'B.md': _note('B.md', 'A')},
+            ),
           ),
         ),
       );
@@ -1164,6 +1221,13 @@ VaultNoteContent _note(String id, String markdown) {
     outline: const [],
     sources: const [],
   );
+}
+
+Future<WorkspaceBackendCommit<T>> _backendCommit<T>(
+  FutureOr<VaultMutationDelta<T>> Function() commit,
+) async {
+  final delta = await commit();
+  return WorkspaceBackendCommit<T>.completed(delta);
 }
 
 Future<void> _drainEventQueue() async {

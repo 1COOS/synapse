@@ -6,20 +6,32 @@ import 'note_save_coordinator.dart';
 import 'note_session_registry.dart';
 import 'split_workspace_controller.dart';
 import 'workspace_commit_batch.dart';
+import 'workspace_commit_error.dart';
 
 export 'workspace_commit_batch.dart';
+export 'workspace_commit_error.dart';
+
+final class WorkspaceBackendCommit<T> {
+  const WorkspaceBackendCommit({required this.postCommitHydrate});
+
+  final Future<VaultMutationDelta<T>> Function() postCommitHydrate;
+
+  factory WorkspaceBackendCommit.completed(VaultMutationDelta<T> delta) {
+    return WorkspaceBackendCommit<T>(postCommitHydrate: () async => delta);
+  }
+}
 
 final class WorkspaceMutationPlan<T> {
   const WorkspaceMutationPlan({
     required this.affectedNoteIds,
     required this.dirtyDisposition,
-    required this.execute,
+    required this.commitBackend,
     this.prepareCommit,
   });
 
   final Set<String> affectedNoteIds;
   final DirtyDisposition dirtyDisposition;
-  final Future<VaultMutationDelta<T>> Function() execute;
+  final Future<WorkspaceBackendCommit<T>> Function() commitBackend;
   final WorkspaceCommitBatch<T> Function(VaultMutationDelta<T> delta)?
   prepareCommit;
 }
@@ -47,25 +59,6 @@ final class BackendFailed<T> extends WorkspaceMutationResult<T> {
 
   final Object error;
   final StackTrace stackTrace;
-}
-
-enum WorkspaceCommitPhase { prepare, apply, publish }
-
-final class WorkspaceCommitInvariantError implements Exception {
-  const WorkspaceCommitInvariantError({
-    required this.phase,
-    required this.cause,
-    required this.causeStackTrace,
-  });
-
-  final WorkspaceCommitPhase phase;
-  final Object cause;
-  final StackTrace causeStackTrace;
-
-  @override
-  String toString() {
-    return 'Workspace commit invariant failed during ${phase.name}: $cause';
-  }
 }
 
 final class WorkspaceMutationBarrier {
@@ -117,11 +110,18 @@ final class WorkspaceMutationBarrier {
               return AbortedByFlush<T>(lease.report);
             }
 
-            late final VaultMutationDelta<T> delta;
+            late final WorkspaceBackendCommit<T> backendCommit;
             try {
-              delta = await plan.execute();
+              backendCommit = await plan.commitBackend();
             } catch (error, stackTrace) {
               return BackendFailed<T>(error: error, stackTrace: stackTrace);
+            }
+
+            late final VaultMutationDelta<T> delta;
+            try {
+              delta = await backendCommit.postCommitHydrate();
+            } catch (error, stackTrace) {
+              _throwInvariant(WorkspaceCommitPhase.hydrate, error, stackTrace);
             }
 
             return _commitAfterBackend(
@@ -202,7 +202,7 @@ final class WorkspaceMutationBarrier {
     try {
       delta = await prepare();
     } catch (error, stackTrace) {
-      _throwInvariant(WorkspaceCommitPhase.prepare, error, stackTrace);
+      _throwInvariant(WorkspaceCommitPhase.hydrate, error, stackTrace);
     }
     return _commitAfterBackend(delta, prepareCommit);
   }

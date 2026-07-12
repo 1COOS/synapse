@@ -6,6 +6,7 @@ import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
 import 'package:synapse/presentation/workspace/state/note_document_session.dart';
 import 'package:synapse/presentation/workspace/state/note_save_coordinator.dart';
 import 'package:synapse/presentation/workspace/state/note_session_registry.dart';
+import 'package:synapse/presentation/workspace/state/workspace_commit_error.dart';
 
 void main() {
   group('NoteSaveCoordinator', () {
@@ -286,6 +287,111 @@ void main() {
       expect(session.lastSaveError, isNull);
     });
 
+    test(
+      'rename readback failure is fatal and suppresses later saves',
+      () async {
+        final vault = _TrackingVault();
+        final harness = _Harness(vault, scheduleEdits: false);
+        addTearDown(harness.dispose);
+        final session = await harness.createSession('Old Title');
+        vault.resetTracking();
+        vault.failReads = true;
+        session.controller.text = '# New Title\nbody';
+
+        final result = await harness.coordinator.save(session);
+
+        expect(result.succeeded, isFalse);
+        expect(result.requiresReload, isTrue);
+        expect(result.error, isNull);
+        expect(result.fatalError, isA<WorkspaceCommitInvariantError>());
+        expect(result.fatalError!.phase, WorkspaceCommitPhase.hydrate);
+        expect(harness.fatalErrors, [same(result.fatalError)]);
+        expect(vault.updateCalls, 1);
+        expect(vault.renameCalls, 1);
+
+        session.controller.text = '# New Title\nlater edit';
+        harness.coordinator.schedule(session);
+        final report = await harness.coordinator.flush([session]);
+
+        expect(report.succeeded, isFalse);
+        expect(report.results.single.requiresReload, isTrue);
+        expect(vault.updateCalls, 1);
+        expect(vault.renameCalls, 1);
+      },
+    );
+
+    test(
+      'workspace commit invariant is fatal and suppresses later saves',
+      () async {
+        final vault = _TrackingVault();
+        final invariant = WorkspaceCommitInvariantError(
+          phase: WorkspaceCommitPhase.apply,
+          cause: StateError('commit apply failed'),
+          causeStackTrace: StackTrace.current,
+        );
+        final harness = _Harness(
+          vault,
+          scheduleEdits: false,
+          afterCommit: (result, request) => throw invariant,
+        );
+        addTearDown(harness.dispose);
+        final session = await harness.createSession('Alpha');
+        vault.resetTracking();
+        session.controller.text = '# Alpha\nchanged';
+
+        final result = await harness.coordinator.save(session);
+
+        expect(result.succeeded, isFalse);
+        expect(result.requiresReload, isTrue);
+        expect(result.error, isNull);
+        expect(result.fatalError, same(invariant));
+        expect(harness.fatalErrors, [same(invariant)]);
+        expect(vault.updateCalls, 1);
+
+        session.controller.text = '# Alpha\nlater edit';
+        final report = await harness.coordinator.flush([session]);
+
+        expect(report.succeeded, isFalse);
+        expect(report.results.single.fatalError, same(invariant));
+        expect(vault.updateCalls, 1);
+      },
+    );
+
+    test('reload reset clears the fatal save latch', () async {
+      final vault = _TrackingVault();
+      final invariant = WorkspaceCommitInvariantError(
+        phase: WorkspaceCommitPhase.apply,
+        cause: StateError('commit apply failed'),
+        causeStackTrace: StackTrace.current,
+      );
+      var failCommit = true;
+      final harness = _Harness(
+        vault,
+        scheduleEdits: false,
+        afterCommit: (result, request) {
+          if (failCommit) {
+            throw invariant;
+          }
+        },
+      );
+      addTearDown(harness.dispose);
+      final session = await harness.createSession('Alpha');
+      vault.resetTracking();
+      session.controller.text = '# Alpha\nfirst edit';
+
+      final fatalResult = await harness.coordinator.save(session);
+      expect(fatalResult.requiresReload, isTrue);
+      expect(vault.updateCalls, 1);
+
+      failCommit = false;
+      harness.coordinator.resetAfterReload();
+      session.controller.text = '# Alpha\nafter reload';
+      final recoveredResult = await harness.coordinator.save(session);
+
+      expect(recoveredResult.succeeded, isTrue);
+      expect(vault.updateCalls, 2);
+    });
+
     test('discard quiesce cancels debounce without writing', () async {
       final vault = _TrackingVault();
       final timers = _ManualTimerFactory();
@@ -498,7 +604,8 @@ final class _Harness {
     this.vault, {
     this.scheduleEdits = true,
     TimerFactory? timerFactory,
-    void Function(NoteSaveResult result, SaveRequest request)? afterCommit,
+    FutureOr<void> Function(NoteSaveResult result, SaveRequest request)?
+    afterCommit,
   }) {
     registry = NoteSessionRegistry(
       visibleBody: (markdown) => markdown,
@@ -513,10 +620,11 @@ final class _Harness {
       vault: () => vault,
       debounceDuration: () => const Duration(seconds: 1),
       serializeVisibleBody: (note, body) => body,
-      onResult: (result, request) {
+      onResult: (result, request) async {
         _commitResult(result, request);
-        afterCommit?.call(result, request);
+        await afterCommit?.call(result, request);
       },
+      onFatalError: fatalErrors.add,
       onStateChanged: () {},
       timerFactory: timerFactory,
     );
@@ -526,6 +634,8 @@ final class _Harness {
   final bool scheduleEdits;
   late final NoteSessionRegistry registry;
   late final NoteSaveCoordinator coordinator;
+  final List<WorkspaceCommitInvariantError> fatalErrors =
+      <WorkspaceCommitInvariantError>[];
 
   Future<NoteDocumentSession> createSession(String title) async {
     final created = await vault.createNote(parentPath: '', title: title);
@@ -568,6 +678,8 @@ final class _TrackingVault extends MemoryVaultBackend {
   final List<String> savedNoteIds = <String>[];
   final List<String> savedMarkdown = <String>[];
   int updateCalls = 0;
+  int renameCalls = 0;
+  bool failReads = false;
   int completedUpdates = 0;
   int concurrentUpdates = 0;
   int maxConcurrentUpdates = 0;
@@ -602,6 +714,8 @@ final class _TrackingVault extends MemoryVaultBackend {
     savedNoteIds.clear();
     savedMarkdown.clear();
     updateCalls = 0;
+    renameCalls = 0;
+    failReads = false;
     completedUpdates = 0;
     concurrentUpdates = 0;
     maxConcurrentUpdates = 0;
@@ -633,12 +747,35 @@ final class _TrackingVault extends MemoryVaultBackend {
       if (failingNoteIds.contains(noteId)) {
         throw StateError('save failed for $noteId');
       }
-      return await super.updateMarkdown(noteId: noteId, markdown: markdown);
+      final failReadback = failReads;
+      failReads = false;
+      try {
+        return await super.updateMarkdown(noteId: noteId, markdown: markdown);
+      } finally {
+        failReads = failReadback;
+      }
     } finally {
       concurrentUpdates -= 1;
       completedUpdates += 1;
       _completedSignals.remove(call)?.complete();
     }
+  }
+
+  @override
+  Future<VaultNote> renameNote({
+    required String noteId,
+    required String title,
+  }) async {
+    renameCalls += 1;
+    return super.renameNote(noteId: noteId, title: title);
+  }
+
+  @override
+  Future<VaultNoteContent> readNote(String noteId) {
+    if (failReads) {
+      throw StateError('readback failed for $noteId');
+    }
+    return super.readNote(noteId);
   }
 }
 

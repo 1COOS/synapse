@@ -9,6 +9,8 @@ import 'package:synapse/domain/vault/vault_resource.dart';
 import 'package:synapse/infrastructure/config/synapse_settings.dart';
 import 'package:synapse/infrastructure/config/vault_location_store.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
+import 'package:synapse/presentation/workspace/editor/live_markdown_editor.dart';
+import 'package:synapse/presentation/workspace/state/workspace_mutation_barrier.dart';
 
 import '../../support/workspace_fakes.dart';
 import '../../support/workspace_harness.dart';
@@ -617,6 +619,83 @@ void main() {
   });
 
   testWidgets(
+    'rename readback failure requires reload and suppresses later saves',
+    (tester) async {
+      final vault = _RenameReadbackFailureVault();
+      await vault.createNote(parentPath: '', title: '心经');
+      await vault.createNote(parentPath: '', title: '其他');
+      final reportedErrors = <FlutterErrorDetails>[];
+      final previousOnError = FlutterError.onError;
+      FlutterError.onError = reportedErrors.add;
+      addTearDown(() => FlutterError.onError = previousOnError);
+
+      await pumpWorkspace(tester, vault: vault);
+      await switchToSourceMode(tester);
+      vault.failRenameReadback = true;
+      await enterTextInLiveMarkdownBlock(tester, '# 金刚经\n正文');
+      await tester.pump(const Duration(milliseconds: 1000));
+      await tester.pumpAndSettle();
+      FlutterError.onError = previousOnError;
+
+      expect(vault.updateCalls, 1);
+      expect(vault.renameCalls, 1);
+      expect(reportedErrors, hasLength(1));
+      expect(find.text(_reloadRequiredMessage), findsOneWidget);
+      expect(
+        tester
+            .widget<LiveMarkdownEditor>(find.byType(LiveMarkdownEditor))
+            .enabled,
+        isFalse,
+      );
+
+      liveMarkdownDocumentController(tester, paneId: 1).text =
+          '# 金刚经\nlater edit';
+      await tester.pump(const Duration(milliseconds: 10000));
+      await tester.tap(find.byKey(const Key('resource-row-其他.md')));
+      await tester.pump(const Duration(milliseconds: 250));
+
+      expect(vault.updateCalls, 1);
+      expect(vault.renameCalls, 1);
+      vault.failRenameReadback = false;
+      expect((await vault.readNote('金刚经.md')).markdown, contains('正文'));
+    },
+  );
+
+  testWidgets(
+    'save commit invariant requires reload and suppresses later saves',
+    (tester) async {
+      final vault = CountingUpdateVaultBackend(seedExampleData: false);
+      await vault.createNote(parentPath: '', title: '心经');
+      final reportedErrors = <FlutterErrorDetails>[];
+      final previousOnError = FlutterError.onError;
+      FlutterError.onError = reportedErrors.add;
+      addTearDown(() => FlutterError.onError = previousOnError);
+
+      await pumpWorkspace(
+        tester,
+        vault: vault,
+        workspaceCommitFailureForTesting: WorkspaceCommitPhase.apply,
+      );
+      await switchToSourceMode(tester);
+      await enterTextInLiveMarkdownBlock(tester, '# 心经\n正文已保存');
+      await tester.pump(const Duration(milliseconds: 1000));
+      await tester.pumpAndSettle();
+      FlutterError.onError = previousOnError;
+
+      expect(vault.updateCalls, 1);
+      expect(reportedErrors, hasLength(1));
+      expect(find.text(_reloadRequiredMessage), findsOneWidget);
+
+      liveMarkdownDocumentController(tester, paneId: 1).text =
+          '# 心经\nlater edit';
+      await tester.pump(const Duration(milliseconds: 10000));
+
+      expect(vault.updateCalls, 1);
+      expect((await vault.readNote('心经.md')).markdown, contains('正文已保存'));
+    },
+  );
+
+  testWidgets(
     'title autosave cannot overwrite a newer structural resource tree',
     (tester) async {
       final vault = TitleSaveStructuralRaceVaultBackend(seedExampleData: false);
@@ -828,4 +907,33 @@ void main() {
     final noteEditor = activeLiveMarkdownTextField(tester);
     expect(noteEditor.controller.text, contains('# Second'));
   });
+}
+
+const _reloadRequiredMessage = '工作区状态提交异常。后端操作可能已完成，请重新加载工作区后再继续。';
+
+final class _RenameReadbackFailureVault extends CountingUpdateVaultBackend {
+  _RenameReadbackFailureVault() : super(seedExampleData: false);
+
+  bool failRenameReadback = false;
+  bool _renameCommitted = false;
+  int renameCalls = 0;
+
+  @override
+  Future<VaultNote> renameNote({
+    required String noteId,
+    required String title,
+  }) async {
+    renameCalls += 1;
+    final renamed = await super.renameNote(noteId: noteId, title: title);
+    _renameCommitted = true;
+    return renamed;
+  }
+
+  @override
+  Future<VaultNoteContent> readNote(String noteId) {
+    if (failRenameReadback && _renameCommitted) {
+      throw StateError('post-rename readNote failed');
+    }
+    return super.readNote(noteId);
+  }
 }
