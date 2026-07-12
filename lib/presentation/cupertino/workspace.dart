@@ -276,6 +276,9 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   String _message = '';
   Object _workspaceMutationToken = Object();
   Object? _startupOperationToken;
+  Future<SynapseSettings>? _startupSettingsLoadFuture;
+  Future<void>? _startupSettingsCommitFuture;
+  Object? _startupSettingsLoadError;
   Future<void> _settingsPersistenceTail = Future<void>.value();
   final _selectedPreviewImageSrcNotifier = _SilentValueNotifier<String?>(null);
   SynapseSettings _settings = SynapseSettings.defaults;
@@ -1028,8 +1031,16 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   Future<void> _initializeWorkspace() async {
     final startupToken = Object();
     _startupOperationToken = startupToken;
+    _startupSettingsLoadError = null;
+    final settingsLoad = _readSettings();
+    _startupSettingsLoadFuture = settingsLoad;
+    final settingsCommit = _loadSettings(startupToken, settingsLoad);
+    _startupSettingsCommitFuture = settingsCommit;
     try {
-      await _loadSettings(startupToken);
+      await settingsCommit;
+      if (_startupSettingsLoadError != null) {
+        return;
+      }
       if (!_isStartupCurrent(startupToken)) {
         return;
       }
@@ -1057,17 +1068,43 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     _startupOperationToken = null;
   }
 
+  Future<bool> _awaitStartupSettingsBaseline() async {
+    final settingsCommit = _startupSettingsCommitFuture;
+    if (settingsCommit != null) {
+      await settingsCommit;
+    } else {
+      final settingsLoad = _startupSettingsLoadFuture;
+      if (settingsLoad != null) {
+        try {
+          await settingsLoad;
+        } catch (_) {
+          return false;
+        }
+      }
+    }
+    return _startupSettingsLoadError == null;
+  }
+
   Future<SettingsStore> _getSettingsStore() async {
     return _dependencies.settingsStore();
   }
 
-  Future<void> _loadSettings(Object startupToken) async {
+  Future<SynapseSettings> _readSettings() async {
+    final store = await _getSettingsStore();
+    return store.load();
+  }
+
+  Future<void> _loadSettings(
+    Object startupToken,
+    Future<SynapseSettings> settingsLoad,
+  ) async {
     final SynapseSettings settings;
     try {
-      final store = await _getSettingsStore();
-      settings = await store.load();
+      settings = await settingsLoad;
+      _startupSettingsLoadError = null;
     } catch (error) {
       if (_isStartupCurrent(startupToken)) {
+        _startupSettingsLoadError = error;
         setState(() => _message = '设置读取失败：$error');
       }
       return;
@@ -1308,6 +1345,19 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     return false;
   }
 
+  Future<T?> _readResourceSnapshotWithMutationRetry<T>(
+    Future<T> Function(int attempt) read,
+  ) async {
+    for (var attempt = 0; attempt < 2; attempt += 1) {
+      final mutationToken = _workspaceMutationToken;
+      final result = await read(attempt);
+      if (identical(mutationToken, _workspaceMutationToken)) {
+        return result;
+      }
+    }
+    return null;
+  }
+
   Future<void> _loadResources(Object startupToken) async {
     if (!_isStartupCurrent(startupToken)) {
       return;
@@ -1333,7 +1383,12 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     String? message,
     Object? startupToken,
   }) async {
-    final result = await _resourceCoordinator.loadWorkspace();
+    final result = await _readResourceSnapshotWithMutationRetry(
+      (_) => _resourceCoordinator.loadWorkspace(),
+    );
+    if (result == null) {
+      return;
+    }
     if (!_canCommitStartup(startupToken)) {
       return;
     }
@@ -1386,7 +1441,18 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
         if (!await _flushPendingMarkdown()) {
           return;
         }
-        final result = await _resourceCoordinator.loadNote(resource.id);
+        final targetSession = _noteSessionRegistry.sessionFor(resource.id);
+        final result = await _readResourceSnapshotWithMutationRetry((attempt) {
+          final noteId = attempt == 0
+              ? resource.id
+              : targetSession?.noteId ?? resource.id;
+          return attempt == 0
+              ? _resourceCoordinator.loadNote(noteId)
+              : _resourceCoordinator.refreshNote(noteId);
+        });
+        if (result == null) {
+          return;
+        }
         if (result is WorkspaceResourceStale) {
           return;
         }
@@ -1407,7 +1473,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
             loaded.id,
             snapshot.proposals,
           );
-          _noteMaterialsRegistry.clearSelection(resource.id);
+          _noteMaterialsRegistry.clearSelection(loaded.id);
           _noteMode = _preferredNoteMode;
           _narrowSection = _WorkspaceSection.notes;
         });
@@ -1618,6 +1684,9 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       return;
     }
     if (!mounted) {
+      return;
+    }
+    if (!await _awaitStartupSettingsBaseline() || !mounted) {
       return;
     }
     _invalidateStartupOperation();
@@ -3176,10 +3245,21 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       if (!await _flushPendingMarkdown()) {
         return;
       }
-      final opened = await _resourceCoordinator.openSearchResult(
-        result,
-        resources: _resources,
-      );
+      final targetSession = _noteSessionRegistry.sessionFor(result.noteId);
+      final opened = await _readResourceSnapshotWithMutationRetry((attempt) {
+        if (attempt == 0) {
+          return _resourceCoordinator.openSearchResult(
+            result,
+            resources: _resources,
+          );
+        }
+        return _resourceCoordinator.refreshNote(
+          targetSession?.noteId ?? result.noteId,
+        );
+      });
+      if (opened == null) {
+        return;
+      }
       if (opened is WorkspaceResourceStale) {
         return;
       }
@@ -3244,6 +3324,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
           candidate = null;
           _workspaceMutationToken = Object();
         }
+        _startupSettingsLoadError = null;
         setState(() {
           _settings = savedSettings;
           _workspacePreferences = savedSettings.preferences;

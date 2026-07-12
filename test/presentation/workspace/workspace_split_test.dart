@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -67,6 +69,117 @@ void main() {
       );
     },
   );
+
+  testWidgets(
+    'gated note selection retries after an unfocused title rename commit',
+    (tester) async {
+      final vault = _GatedSnapshotReadVault();
+      final alpha = await vault.createNote(parentPath: '', title: 'Alpha');
+      final beta = await vault.createNote(parentPath: '', title: 'Beta');
+      final gamma = await vault.createNote(parentPath: '', title: 'Gamma');
+
+      await pumpWorkspace(tester, vault: vault);
+      await tester.tap(find.byKey(const Key('split-pane-right-button')));
+      await tester.pump(const Duration(milliseconds: 250));
+      await tester.tap(find.byKey(Key('resource-row-${beta.id}')));
+      await tester.pump(const Duration(milliseconds: 250));
+      tester
+          .widget<GestureDetector>(find.byKey(const Key('split-pane-pane-1')))
+          .onTap!();
+      await tester.pump();
+      await tester.tap(find.byKey(const Key('note-mode-source-pane-1')));
+      await tester.pump(const Duration(milliseconds: 250));
+      await enterTextInLiveMarkdownBlock(
+        tester,
+        '# Renamed Alpha\nbody',
+        paneId: 1,
+      );
+      tester
+          .widget<GestureDetector>(find.byKey(const Key('split-pane-pane-2')))
+          .onTap!();
+      await tester.pump();
+
+      vault.gateNextRead(gamma.id);
+      await tester.tap(find.byKey(Key('resource-row-${gamma.id}')));
+      await vault.readStarted.future;
+      await tester.pump(const Duration(milliseconds: 1000));
+      await vault.renameCompleted.future;
+      await tester.pump();
+      expect(
+        find.byKey(const Key('resource-row-Renamed Alpha.md')),
+        findsOneWidget,
+      );
+
+      vault.releaseRead();
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const Key('resource-row-Renamed Alpha.md')),
+        findsOneWidget,
+      );
+      expect(find.byKey(Key('resource-row-${alpha.id}')), findsNothing);
+      expect(
+        find.descendant(
+          of: find.byKey(const Key('split-pane-title-pane-2')),
+          matching: find.text('Gamma'),
+        ),
+        findsOneWidget,
+      );
+    },
+  );
+
+  testWidgets('gated target refresh retries with the remapped session ID', (
+    tester,
+  ) async {
+    final vault = _GatedSnapshotReadVault();
+    final alpha = await vault.createNote(parentPath: '', title: 'Alpha');
+    final beta = await vault.createNote(parentPath: '', title: 'Beta');
+
+    await pumpWorkspace(tester, vault: vault);
+    await tester.tap(find.byKey(const Key('split-pane-right-button')));
+    await tester.pump(const Duration(milliseconds: 250));
+    await tester.tap(find.byKey(Key('resource-row-${beta.id}')));
+    await tester.pump(const Duration(milliseconds: 250));
+    tester
+        .widget<GestureDetector>(find.byKey(const Key('split-pane-pane-1')))
+        .onTap!();
+    await tester.pump();
+    await tester.tap(find.byKey(const Key('note-mode-source-pane-1')));
+    await tester.pump(const Duration(milliseconds: 250));
+    await enterTextInLiveMarkdownBlock(
+      tester,
+      '# Renamed Alpha\nremapped body',
+      paneId: 1,
+    );
+    tester
+        .widget<GestureDetector>(find.byKey(const Key('split-pane-pane-2')))
+        .onTap!();
+    await tester.pump();
+
+    vault.gateNextRead(alpha.id);
+    await tester.tap(find.byKey(Key('resource-row-${alpha.id}')));
+    await vault.readStarted.future;
+    await tester.pump(const Duration(milliseconds: 1000));
+    await vault.renameCompleted.future;
+    await tester.pump();
+
+    vault.releaseRead();
+    await tester.pumpAndSettle();
+
+    expect(vault.readNoteIdsAfterRelease, contains('Renamed Alpha.md'));
+    expect(find.byKey(Key('resource-row-${alpha.id}')), findsNothing);
+    expect(
+      find.byKey(const Key('resource-row-Renamed Alpha.md')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(
+        of: find.byKey(const Key('split-pane-title-pane-2')),
+        matching: find.text('Renamed Alpha'),
+      ),
+      findsOneWidget,
+    );
+  });
 
   testWidgets(
     'split controls live in the center titlebar without save button',
@@ -850,4 +963,57 @@ void main() {
 
     expect(dividerLine, findsNothing);
   });
+}
+
+final class _GatedSnapshotReadVault extends MemoryVaultBackend {
+  _GatedSnapshotReadVault() : super(seedExampleData: false);
+
+  String? _gatedNoteId;
+  Completer<void> readStarted = Completer<void>();
+  Completer<void> _readRelease = Completer<void>();
+  final renameCompleted = Completer<void>();
+  final readNoteIdsAfterRelease = <String>[];
+  bool _released = false;
+
+  void gateNextRead(String noteId) {
+    _gatedNoteId = noteId;
+    readStarted = Completer<void>();
+    _readRelease = Completer<void>();
+    _released = false;
+  }
+
+  void releaseRead() {
+    _released = true;
+    if (!_readRelease.isCompleted) {
+      _readRelease.complete();
+    }
+  }
+
+  @override
+  Future<VaultNoteContent> readNote(String noteId) async {
+    if (_released) {
+      readNoteIdsAfterRelease.add(noteId);
+    }
+    final note = await super.readNote(noteId);
+    if (_gatedNoteId == noteId) {
+      _gatedNoteId = null;
+      if (!readStarted.isCompleted) {
+        readStarted.complete();
+      }
+      await _readRelease.future;
+    }
+    return note;
+  }
+
+  @override
+  Future<VaultNote> renameNote({
+    required String noteId,
+    required String title,
+  }) async {
+    final renamed = await super.renameNote(noteId: noteId, title: title);
+    if (!renameCompleted.isCompleted) {
+      renameCompleted.complete();
+    }
+    return renamed;
+  }
 }

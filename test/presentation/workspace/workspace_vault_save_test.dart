@@ -326,6 +326,100 @@ void main() {
     },
   );
 
+  testWidgets(
+    'early Vault selection preserves the pending loaded settings baseline',
+    (tester) async {
+      const newPath = '/vault/selected-before-settings';
+      const startupSettings = SynapseSettings(
+        providerConfig: ProviderConfig(
+          baseUrl: 'https://api.example.com/v1',
+          apiKey: 'secure-key',
+          chatModel: 'chat-model',
+          visionModel: 'vision-model',
+          embeddingModel: 'embedding-model',
+        ),
+        preferences: WorkspacePreferences(
+          defaultNoteMode: WorkspaceDefaultNoteMode.reading,
+          semanticSearchEnabled: false,
+          pastedImageWidth: 720,
+          autoSaveDelayMillis: 1600,
+          accentColor: WorkspaceAccentColor.green,
+          noteFontSize: 20,
+        ),
+      );
+      final settingsStore = _GatedBaselineSettingsStore(startupSettings);
+      final selectedVault = MemoryVaultBackend(seedExampleData: false);
+      await selectedVault.createNote(parentPath: '', title: 'Selected');
+      final pickerStarted = Completer<void>();
+      final dependencies = createWorkspaceDependencies(
+        settingsStore: settingsStore,
+        aiProvider: MockAiProvider(),
+        supportsDirectoryVaultOverride: true,
+        pickVaultLocation: () async {
+          pickerStarted.complete();
+          return const VaultLocation(rootPath: newPath);
+        },
+        vaultBackendFactory: (_) => selectedVault,
+      );
+
+      await pumpWorkspace(tester, vault: null, dependencies: dependencies);
+      await settingsStore.loadStarted.future;
+      await tester.tap(find.byKey(const Key('choose-vault-empty-button')));
+      await tester.pump();
+      await pickerStarted.future;
+      expect(settingsStore.savedSettings, isEmpty);
+
+      settingsStore.releaseLoad();
+      await tester.pumpAndSettle();
+
+      final saved = settingsStore.currentSettings;
+      expect(saved.vaultLocation?.rootPath, newPath);
+      expect(
+        saved.providerConfig.baseUrl,
+        startupSettings.providerConfig.baseUrl,
+      );
+      expect(saved.providerConfig.apiKey, 'secure-key');
+      expect(saved.providerConfig.chatModel, 'chat-model');
+      expect(saved.providerConfig.visionModel, 'vision-model');
+      expect(saved.providerConfig.embeddingModel, 'embedding-model');
+      expect(
+        saved.preferences.defaultNoteMode,
+        WorkspaceDefaultNoteMode.reading,
+      );
+      expect(saved.preferences.semanticSearchEnabled, isFalse);
+      expect(saved.preferences.pastedImageWidth, 720);
+      expect(saved.preferences.autoSaveDelayMillis, 1600);
+      expect(saved.preferences.accentColor, WorkspaceAccentColor.green);
+      expect(saved.preferences.noteFontSize, 20);
+      expect(find.text('Selected'), findsWidgets);
+    },
+  );
+
+  testWidgets('settings load failure prevents an early Vault location save', (
+    tester,
+  ) async {
+    var pickerCalls = 0;
+    final settingsStore = _FailingBaselineSettingsStore();
+    final dependencies = createWorkspaceDependencies(
+      settingsStore: settingsStore,
+      aiProvider: MockAiProvider(),
+      supportsDirectoryVaultOverride: true,
+      pickVaultLocation: () async {
+        pickerCalls += 1;
+        return const VaultLocation(rootPath: '/vault/not-saved');
+      },
+    );
+
+    await pumpWorkspace(tester, vault: null, dependencies: dependencies);
+    await tester.tap(find.byKey(const Key('choose-vault-empty-button')));
+    await tester.pumpAndSettle();
+
+    expect(pickerCalls, 1);
+    expect(settingsStore.savedSettings, isEmpty);
+    expect(find.textContaining('设置读取失败'), findsOneWidget);
+    expect(find.textContaining('baseline load failed'), findsOneWidget);
+  });
+
   testWidgets('prompts for a new vault when the saved path is unavailable', (
     tester,
   ) async {
@@ -1263,6 +1357,36 @@ final class _GatedListVault extends MemoryVaultBackend {
     }
     await _listRelease.future;
     return super.listResources();
+  }
+}
+
+final class _GatedBaselineSettingsStore extends FakeSettingsStore {
+  _GatedBaselineSettingsStore(this.baseline);
+
+  final SynapseSettings baseline;
+  final loadStarted = Completer<void>();
+  final _loadRelease = Completer<void>();
+
+  void releaseLoad() {
+    if (!_loadRelease.isCompleted) {
+      _loadRelease.complete();
+    }
+  }
+
+  @override
+  Future<SynapseSettings> load() async {
+    if (!loadStarted.isCompleted) {
+      loadStarted.complete();
+    }
+    await _loadRelease.future;
+    return baseline;
+  }
+}
+
+final class _FailingBaselineSettingsStore extends FakeSettingsStore {
+  @override
+  Future<SynapseSettings> load() {
+    throw StateError('baseline load failed');
   }
 }
 
