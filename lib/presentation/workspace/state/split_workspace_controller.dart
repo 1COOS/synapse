@@ -403,7 +403,6 @@ final class SplitWorkspaceController extends ChangeNotifier {
   String _createSplitId() => 'split-${_nextSplitNumber++}';
 
   Object _applyPreparedMutation(PreparedSplitWorkspaceMutation mutation) {
-    _ensurePreparedMutationCurrent(mutation._preparedToken);
     if (mutation._didChange) {
       _root = mutation._nextRoot;
       _focusedPaneId = mutation._nextFocusedPaneId;
@@ -478,6 +477,7 @@ final class PreparedSplitWorkspaceMutation {
   Object? _appliedToken;
   bool _isApplied = false;
   bool _isPublished = false;
+  bool _isPreflighted = false;
 
   void validateCurrent() {
     _controller._ensurePreparedMutationCurrent(
@@ -485,10 +485,27 @@ final class PreparedSplitWorkspaceMutation {
     );
   }
 
+  void preflightApply() {
+    if (_isApplied) {
+      return;
+    }
+    _controller._ensurePreparedMutationCurrent(_preparedToken);
+    _isPreflighted = true;
+  }
+
   void applySilently() {
     if (_isApplied) {
       return;
     }
+    preflightApply();
+    applySilentlyPreflighted();
+  }
+
+  void applySilentlyPreflighted() {
+    if (_isApplied) {
+      return;
+    }
+    assert(_isPreflighted);
     _appliedToken = _controller._applyPreparedMutation(this);
     _isApplied = true;
   }

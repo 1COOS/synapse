@@ -58,6 +58,40 @@ void main() {
       expect(proposal.proposedMarkdown, '# 原图标题\n- 提取文字：观照');
     },
   );
+
+  test('prepares OCR proposal without writes before explicit commit', () async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Image Study');
+    final source = await vault.addImageSource(
+      noteId: note.id,
+      filename: 'screen.png',
+      mimeType: 'image/png',
+      bytes: [1, 2, 3],
+    );
+    final service = ProposalService(
+      vault: vault,
+      aiProvider: _RecordingAiProvider(),
+    );
+
+    final prepared = await service.prepareOutlineProposal(
+      noteId: note.id,
+      sourceIds: [source.id],
+    );
+
+    expect(
+      (await vault.getSources(note.id, [source.id])).single.state,
+      SourceState.pending,
+    );
+    expect(await vault.listProposals(note.id), isEmpty);
+
+    final proposal = await service.commitPreparedOutlineProposal(prepared);
+
+    expect(
+      (await vault.getSources(note.id, [source.id])).single.state,
+      SourceState.processed,
+    );
+    expect((await vault.listProposals(note.id)).single.id, proposal.id);
+  });
 }
 
 class _RecordingAiProvider implements AiProvider {

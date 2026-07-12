@@ -1,5 +1,8 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
+
+import '../../../infrastructure/vault/vault_post_commit_error.dart';
 import 'note_document_session.dart';
 import 'note_materials_registry.dart';
 import 'note_save_coordinator.dart';
@@ -86,6 +89,9 @@ final class WorkspaceMutationBarrier {
       Map<NoteDocumentSession, int>.identity();
   final List<_PendingSaveCommit> _pendingSaveCommits = <_PendingSaveCommit>[];
 
+  @visibleForTesting
+  int get pendingSaveCommitCountForTesting => _pendingSaveCommits.length;
+
   Future<WorkspaceMutationResult<T>> run<T>(WorkspaceMutationPlan<T> plan) {
     final reservedSessions = _sessions
         .sessionsForIds(plan.affectedNoteIds)
@@ -93,7 +99,7 @@ final class WorkspaceMutationBarrier {
     _reserveSessions(reservedSessions);
     return _synchronized(() async {
       try {
-        _throwIfFatal();
+        _throwIfFatal(reservedSessions);
         final affectedSessions = _captureAffectedSessions(
           plan.affectedNoteIds,
           reservedSessions,
@@ -101,22 +107,28 @@ final class WorkspaceMutationBarrier {
         _activeSessions.addAll(affectedSessions);
         try {
           await _drainPendingSaveCommits(affectedSessions);
-          _throwIfFatal();
+          _throwIfFatal(affectedSessions);
           final lease = await _saveCoordinator.acquireQuiescence(
             affectedSessions,
             disposition: plan.dirtyDisposition,
           );
           try {
-            _throwIfFatal();
+            _throwIfFatal(affectedSessions);
             if (plan.dirtyDisposition == DirtyDisposition.flush &&
                 !lease.report.succeeded) {
               return AbortedByFlush<T>(lease.report);
             }
 
-            _throwIfFatal();
+            _throwIfFatal(affectedSessions);
             late final WorkspaceBackendCommit<T> backendCommit;
             try {
               backendCommit = await plan.commitBackend();
+            } on VaultPostCommitError catch (error) {
+              _throwInvariant(
+                WorkspaceCommitPhase.hydrate,
+                error.cause,
+                error.causeStackTrace,
+              );
             } catch (error, stackTrace) {
               return BackendFailed<T>(error: error, stackTrace: stackTrace);
             }
@@ -174,6 +186,11 @@ final class WorkspaceMutationBarrier {
       _pendingSaveCommits.add(
         _PendingSaveCommit(
           originatingSession: originatingSession,
+          abort: (error) {
+            if (!completer.isCompleted) {
+              completer.completeError(error, error.causeStackTrace);
+            }
+          },
           apply: () async {
             try {
               completer.complete(
@@ -253,9 +270,30 @@ final class WorkspaceMutationBarrier {
     Error.throwWithStackTrace(error, causeStackTrace);
   }
 
-  void _throwIfFatal() {
+  void _throwIfFatal([
+    Iterable<NoteDocumentSession> pendingSessions = const [],
+  ]) {
     if (_saveCoordinator.fatalError case final fatalError?) {
+      _abortPendingSaveCommits(fatalError, pendingSessions);
       Error.throwWithStackTrace(fatalError, fatalError.causeStackTrace);
+    }
+  }
+
+  void _abortPendingSaveCommits(
+    WorkspaceCommitInvariantError error,
+    Iterable<NoteDocumentSession> sessions,
+  ) {
+    final affected = Set<NoteDocumentSession>.identity()..addAll(sessions);
+    if (affected.isEmpty) {
+      return;
+    }
+    for (var index = _pendingSaveCommits.length - 1; index >= 0; index -= 1) {
+      final pending = _pendingSaveCommits[index];
+      if (!affected.contains(pending.originatingSession)) {
+        continue;
+      }
+      _pendingSaveCommits.removeAt(index);
+      pending.abort(error);
     }
   }
 
@@ -360,9 +398,11 @@ final class WorkspaceMutationBarrier {
 final class _PendingSaveCommit {
   const _PendingSaveCommit({
     required this.originatingSession,
+    required this.abort,
     required this.apply,
   });
 
   final NoteDocumentSession originatingSession;
+  final void Function(WorkspaceCommitInvariantError error) abort;
   final Future<void> Function() apply;
 }

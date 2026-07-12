@@ -550,14 +550,10 @@ final class NoteSessionRegistry extends ChangeNotifier {
   }
 
   Object _applyPreparedMutation(PreparedNoteSessionMutation mutation) {
-    _ensurePreparedMutationCurrent(mutation._preparedToken);
-    for (final update in mutation._preparedUpdates) {
-      update.validateCurrent();
-    }
     _isMutationTransactionActive = true;
     try {
       for (final update in mutation._preparedUpdates) {
-        update.applySilently();
+        update.applySilentlyPreflighted();
       }
       _sessions
         ..clear()
@@ -623,6 +619,7 @@ final class PreparedNoteSessionMutation {
   Object? _appliedToken;
   bool _isApplied = false;
   bool _isPublished = false;
+  bool _isPreflighted = false;
 
   void validateCurrent() {
     _registry._ensurePreparedMutationCurrent(
@@ -630,10 +627,30 @@ final class PreparedNoteSessionMutation {
     );
   }
 
+  void preflightApply() {
+    if (_isApplied) {
+      return;
+    }
+    _registry._ensurePreparedMutationCurrent(_preparedToken);
+    for (final update in _preparedUpdates) {
+      update.preflightApply();
+    }
+    _isPreflighted = true;
+  }
+
   void applySilently() {
     if (_isApplied) {
       return;
     }
+    preflightApply();
+    applySilentlyPreflighted();
+  }
+
+  void applySilentlyPreflighted() {
+    if (_isApplied) {
+      return;
+    }
+    assert(_isPreflighted);
     _appliedToken = _registry._applyPreparedMutation(this);
     _isApplied = true;
   }

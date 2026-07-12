@@ -126,6 +126,7 @@ final class NoteMaterialsRegistry extends ChangeNotifier {
     Map<String, VaultNoteContent> refreshedNotesByNewId =
         const <String, VaultNoteContent>{},
     Map<String, List<AiProposal>> replacementProposalsByNoteId = const {},
+    Map<String, Set<String>> selectedSourceIdsByNoteId = const {},
   }) {
     _ensureActive();
     final moves = <String, _MaterialsMove>{};
@@ -211,6 +212,34 @@ final class NoteMaterialsRegistry extends ChangeNotifier {
         next[entry.key] = replacement;
       }
     }
+    for (final entry in selectedSourceIdsByNoteId.entries) {
+      _validateNoteId(entry.key);
+      final refreshedNote = refreshedNotesByNewId[entry.key];
+      if (refreshedNote == null || refreshedNote.id != entry.key) {
+        throw ArgumentError(
+          'Selected sources require a refreshed note snapshot for '
+          '"${entry.key}".',
+        );
+      }
+      final availableSourceIds = {
+        for (final source in refreshedNote.sources) source.id,
+      };
+      if (!availableSourceIds.containsAll(entry.value)) {
+        throw ArgumentError(
+          'Selected sources for "${entry.key}" include an unknown source.',
+        );
+      }
+      final current = next[entry.key] ?? NoteMaterialsSnapshot.empty;
+      final replacement = NoteMaterialsSnapshot(
+        selectedSourceIds: entry.value,
+        proposals: current.proposals,
+      );
+      if (_isEmpty(replacement)) {
+        next.remove(entry.key);
+      } else {
+        next[entry.key] = replacement;
+      }
+    }
 
     return PreparedNoteMaterialsMutation._(
       registry: this,
@@ -248,7 +277,6 @@ final class NoteMaterialsRegistry extends ChangeNotifier {
   }
 
   Object _applyPreparedMutation(PreparedNoteMaterialsMutation mutation) {
-    _ensurePreparedMutationCurrent(mutation._preparedToken);
     if (mutation._didChange) {
       _snapshots
         ..clear()
@@ -321,6 +349,7 @@ final class PreparedNoteMaterialsMutation {
   Object? _appliedToken;
   bool _isApplied = false;
   bool _isPublished = false;
+  bool _isPreflighted = false;
 
   void validateCurrent() {
     _registry._ensurePreparedMutationCurrent(
@@ -328,10 +357,27 @@ final class PreparedNoteMaterialsMutation {
     );
   }
 
+  void preflightApply() {
+    if (_isApplied) {
+      return;
+    }
+    _registry._ensurePreparedMutationCurrent(_preparedToken);
+    _isPreflighted = true;
+  }
+
   void applySilently() {
     if (_isApplied) {
       return;
     }
+    preflightApply();
+    applySilentlyPreflighted();
+  }
+
+  void applySilentlyPreflighted() {
+    if (_isApplied) {
+      return;
+    }
+    assert(_isPreflighted);
     _appliedToken = _registry._applyPreparedMutation(this);
     _isApplied = true;
   }

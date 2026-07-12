@@ -15,22 +15,51 @@ class FileVaultBackend implements VaultBackend {
   final Directory root;
   final _uuid = const Uuid();
 
+  Future<void> writeFileString(File file, String contents) async {
+    await file.writeAsString(contents);
+  }
+
+  Future<void> writeFileBytes(File file, List<int> bytes) async {
+    await file.writeAsBytes(bytes);
+  }
+
+  Future<void> deleteFile(File file) async {
+    await file.delete();
+  }
+
+  Future<void> deleteDirectory(
+    Directory directory, {
+    required bool recursive,
+  }) async {
+    await directory.delete(recursive: recursive);
+  }
+
+  Future<File> renameFile(File file, String newPath) => file.rename(newPath);
+
+  Future<Directory> renameDirectory(Directory directory, String newPath) {
+    return directory.rename(newPath);
+  }
+
+  Future<File> copyFile(File file, String newPath) => file.copy(newPath);
+
   @override
   Future<VaultResourceNode> createFolder({
     required String parentPath,
     required String title,
   }) async {
-    await root.create(recursive: true);
-    final parent = _directoryForFolder(parentPath);
-    await parent.create(recursive: true);
-    final folder = await _uniqueDirectory(parent, title);
-    await folder.create(recursive: true);
-    return VaultResourceNode(
-      id: _relativePath(folder.path),
-      title: p.basename(folder.path),
-      path: _relativePath(folder.path),
-      type: VaultResourceType.folder,
-    );
+    return runVaultPostCommit(() async {
+      await root.create(recursive: true);
+      final parent = _directoryForFolder(parentPath);
+      await parent.create(recursive: true);
+      final folder = await _uniqueDirectory(parent, title);
+      await folder.create(recursive: true);
+      return VaultResourceNode(
+        id: _relativePath(folder.path),
+        title: p.basename(folder.path),
+        path: _relativePath(folder.path),
+        type: VaultResourceType.folder,
+      );
+    });
   }
 
   @override
@@ -38,17 +67,19 @@ class FileVaultBackend implements VaultBackend {
     required String parentPath,
     required String title,
   }) async {
-    await root.create(recursive: true);
-    final parent = _directoryForFolder(parentPath);
-    await parent.create(recursive: true);
-    final file = await _uniqueNoteFile(parent, title);
-    final now = DateTime.now().toUtc();
-    final note = _noteFromFile(file, createdAt: now, updatedAt: now);
-    await file.writeAsString(_initialMarkdown(note));
-    await Directory(note.assetsPath).create(recursive: true);
-    await _writeSources(note.id, const []);
-    await _writeProposals(note.id, const []);
-    return note;
+    return runVaultPostCommit(() async {
+      await root.create(recursive: true);
+      final parent = _directoryForFolder(parentPath);
+      await parent.create(recursive: true);
+      final file = await _uniqueNoteFile(parent, title);
+      final now = DateTime.now().toUtc();
+      final note = _noteFromFile(file, createdAt: now, updatedAt: now);
+      await writeFileString(file, _initialMarkdown(note));
+      await Directory(note.assetsPath).create(recursive: true);
+      await _writeSources(note.id, const []);
+      await _writeProposals(note.id, const []);
+      return note;
+    });
   }
 
   @override
@@ -86,8 +117,10 @@ class FileVaultBackend implements VaultBackend {
     required String markdown,
   }) async {
     final file = _fileForNoteId(noteId);
-    await file.writeAsString(markdown);
-    return _readNoteAfterWrite(noteId);
+    return runVaultPostCommit(() async {
+      await writeFileString(file, markdown);
+      return readNote(noteId);
+    });
   }
 
   @override
@@ -97,16 +130,13 @@ class FileVaultBackend implements VaultBackend {
   }) async {
     final file = _fileForNoteId(noteId);
     final current = await file.readAsString();
-    await file.writeAsString('${current.trimRight()}\n\n${markdown.trim()}\n');
-    return _readNoteAfterWrite(noteId);
-  }
-
-  Future<VaultNoteContent> _readNoteAfterWrite(String noteId) async {
-    try {
-      return await readNote(noteId);
-    } catch (error, stackTrace) {
-      throw VaultPostCommitError(cause: error, causeStackTrace: stackTrace);
-    }
+    return runVaultPostCommit(() async {
+      await writeFileString(
+        file,
+        '${current.trimRight()}\n\n${markdown.trim()}\n',
+      );
+      return readNote(noteId);
+    });
   }
 
   @override
@@ -116,10 +146,12 @@ class FileVaultBackend implements VaultBackend {
       throw StateError('Note not found: $noteId');
     }
     final assets = Directory(_assetsDirectoryPathForFile(file));
-    await file.delete();
-    if (await assets.exists()) {
-      await assets.delete(recursive: true);
-    }
+    await runVaultPostCommit(() async {
+      await deleteFile(file);
+      if (await assets.exists()) {
+        await deleteDirectory(assets, recursive: true);
+      }
+    });
   }
 
   @override
@@ -148,19 +180,22 @@ class FileVaultBackend implements VaultBackend {
     final target = await _uniqueNoteFile(file.parent, note.title);
     final copiedId = _relativePath(target.path);
     final copiedTitle = p.basenameWithoutExtension(target.path);
-    await target.writeAsString(
-      _retitleMarkdown(markdown, newTitle: copiedTitle, updatedAt: now),
-    );
+    return runVaultPostCommit(() async {
+      await writeFileString(
+        target,
+        _retitleMarkdown(markdown, newTitle: copiedTitle, updatedAt: now),
+      );
 
-    final assets = Directory(_assetsDirectoryPathForFile(file));
-    final copiedAssets = Directory(_assetsDirectoryPathForFile(target));
-    if (await assets.exists()) {
-      await _copyDirectory(assets, copiedAssets);
-    } else {
-      await copiedAssets.create(recursive: true);
-    }
-    await _rewriteCopiedNoteMetadata(noteId: copiedId);
-    return (await readNote(copiedId)).note;
+      final assets = Directory(_assetsDirectoryPathForFile(file));
+      final copiedAssets = Directory(_assetsDirectoryPathForFile(target));
+      if (await assets.exists()) {
+        await _copyDirectory(assets, copiedAssets);
+      } else {
+        await copiedAssets.create(recursive: true);
+      }
+      await _rewriteCopiedNoteMetadata(noteId: copiedId);
+      return (await readNote(copiedId)).note;
+    });
   }
 
   @override
@@ -191,7 +226,7 @@ class FileVaultBackend implements VaultBackend {
     if (!await directory.exists()) {
       throw StateError('Folder not found: $folderPath');
     }
-    await directory.delete(recursive: true);
+    await runVaultPostCommit(() => deleteDirectory(directory, recursive: true));
   }
 
   @override
@@ -232,17 +267,19 @@ class FileVaultBackend implements VaultBackend {
         ),
     };
 
-    final moved = await directory.rename(target.path);
-    for (final entry in noteIdMap.entries) {
-      await _rewriteMovedNoteMetadata(noteId: entry.value);
-    }
+    return runVaultPostCommit(() async {
+      final moved = await renameDirectory(directory, target.path);
+      for (final entry in noteIdMap.entries) {
+        await _rewriteMovedNoteMetadata(noteId: entry.value);
+      }
 
-    return VaultResourceNode(
-      id: _relativePath(moved.path),
-      title: p.basename(moved.path),
-      path: _relativePath(moved.path),
-      type: VaultResourceType.folder,
-    );
+      return VaultResourceNode(
+        id: _relativePath(moved.path),
+        title: p.basename(moved.path),
+        path: _relativePath(moved.path),
+        type: VaultResourceType.folder,
+      );
+    });
   }
 
   @override
@@ -271,8 +308,9 @@ class FileVaultBackend implements VaultBackend {
         '${sanitizeFileName(source.title)}-${source.id}.md',
       ),
     );
-    await sourceFile.parent.create(recursive: true);
-    await sourceFile.writeAsString('''---
+    return runVaultPostCommit(() async {
+      await sourceFile.parent.create(recursive: true);
+      await writeFileString(sourceFile, '''---
 id: ${source.id}
 type: text
 title: ${source.title}
@@ -284,9 +322,10 @@ createdAt: ${source.createdAt.toIso8601String()}
 $text
 ''');
 
-    final sources = await listSources(note.id);
-    await _writeSources(note.id, [...sources, source]);
-    return source;
+      final sources = await listSources(note.id);
+      await _writeSources(note.id, [...sources, source]);
+      return source;
+    });
   }
 
   @override
@@ -308,9 +347,6 @@ $text
       extension: extension,
     );
     final file = File(p.join(note.assetsPath, relative));
-    await file.parent.create(recursive: true);
-    await file.writeAsBytes(bytes);
-
     final source = SourceItem(
       id: _uuid.v4(),
       noteId: note.id,
@@ -322,9 +358,13 @@ $text
       attachmentPath: relative,
       mimeType: mimeType,
     );
-    final sources = await listSources(note.id);
-    await _writeSources(note.id, [...sources, source]);
-    return source;
+    return runVaultPostCommit(() async {
+      await file.parent.create(recursive: true);
+      await writeFileBytes(file, bytes);
+      final sources = await listSources(note.id);
+      await _writeSources(note.id, [...sources, source]);
+      return source;
+    });
   }
 
   Future<String> _uniqueAttachmentPath({
@@ -388,8 +428,10 @@ $text
     }
     final updated = [...sources];
     updated[index] = source;
-    await _writeSources(source.noteId, updated);
-    return source;
+    return runVaultPostCommit(() async {
+      await _writeSources(source.noteId, updated);
+      return source;
+    });
   }
 
   @override
@@ -404,20 +446,24 @@ $text
       attachment = await _attachmentFileFor(source);
     }
     final updated = [...sources]..removeAt(index);
-    if (attachment != null && await attachment.exists()) {
-      await attachment.delete();
-    }
-    await _writeSources(source.noteId, updated);
+    await runVaultPostCommit(() async {
+      if (attachment != null && await attachment.exists()) {
+        await deleteFile(attachment);
+      }
+      await _writeSources(source.noteId, updated);
+    });
   }
 
   @override
   Future<AiProposal> saveProposal(AiProposal proposal) async {
     final proposals = await listProposals(proposal.noteId);
-    await _writeProposals(proposal.noteId, [
-      ...proposals.where((item) => item.id != proposal.id),
-      proposal,
-    ]);
-    return proposal;
+    return runVaultPostCommit(() async {
+      await _writeProposals(proposal.noteId, [
+        ...proposals.where((item) => item.id != proposal.id),
+        proposal,
+      ]);
+      return proposal;
+    });
   }
 
   @override
@@ -442,11 +488,13 @@ $text
   @override
   Future<AiProposal> updateProposal(AiProposal proposal) async {
     final proposals = await listProposals(proposal.noteId);
-    await _writeProposals(proposal.noteId, [
-      ...proposals.where((item) => item.id != proposal.id),
-      proposal,
-    ]);
-    return proposal;
+    return runVaultPostCommit(() async {
+      await _writeProposals(proposal.noteId, [
+        ...proposals.where((item) => item.id != proposal.id),
+        proposal,
+      ]);
+      return proposal;
+    });
   }
 
   @override
@@ -458,7 +506,7 @@ $text
     final (noteId, proposal) = match;
     final proposals = await listProposals(noteId);
     final updated = proposals.where((item) => item.id != proposal.id).toList();
-    await _writeProposals(noteId, updated);
+    await runVaultPostCommit(() => _writeProposals(noteId, updated));
   }
 
   Future<List<VaultResourceNode>> _listChildren(Directory directory) async {
@@ -605,7 +653,8 @@ $text
   Future<void> _writeSources(String noteId, List<SourceItem> sources) async {
     final file = _sourcesFile(noteId);
     await file.parent.create(recursive: true);
-    await file.writeAsString(
+    await writeFileString(
+      file,
       const JsonEncoder.withIndent(
         '  ',
       ).convert(sources.map((source) => source.toJson()).toList()),
@@ -618,7 +667,8 @@ $text
   ) async {
     final file = _proposalsFile(noteId);
     await file.parent.create(recursive: true);
-    await file.writeAsString(
+    await writeFileString(
+      file,
       const JsonEncoder.withIndent(
         '  ',
       ).convert(proposals.map((proposal) => proposal.toJson()).toList()),
@@ -721,27 +771,29 @@ $text
       updatedAt: now,
     );
 
-    if (p.equals(p.normalize(file.path), p.normalize(target.path))) {
-      await file.writeAsString(updatedMarkdown);
-    } else {
-      await target.parent.create(recursive: true);
-      final movedFile = await file.rename(target.path);
-      await movedFile.writeAsString(updatedMarkdown);
-      final assets = Directory(_assetsDirectoryPathForFile(file));
-      final movedAssets = Directory(_assetsDirectoryPathForFile(target));
-      if (await assets.exists()) {
-        await assets.rename(movedAssets.path);
+    return runVaultPostCommit(() async {
+      if (p.equals(p.normalize(file.path), p.normalize(target.path))) {
+        await writeFileString(file, updatedMarkdown);
       } else {
-        await movedAssets.create(recursive: true);
+        await target.parent.create(recursive: true);
+        final movedFile = await renameFile(file, target.path);
+        await writeFileString(movedFile, updatedMarkdown);
+        final assets = Directory(_assetsDirectoryPathForFile(file));
+        final movedAssets = Directory(_assetsDirectoryPathForFile(target));
+        if (await assets.exists()) {
+          await renameDirectory(assets, movedAssets.path);
+        } else {
+          await movedAssets.create(recursive: true);
+        }
       }
-    }
-    await _rewriteMovedNoteMetadata(noteId: movedId);
-    return (await readNote(movedId)).note;
+      await _rewriteMovedNoteMetadata(noteId: movedId);
+      return (await readNote(movedId)).note;
+    });
   }
 
   Future<void> _copyDirectory(Directory source, Directory target) async {
     if (await target.exists()) {
-      await target.delete(recursive: true);
+      await deleteDirectory(target, recursive: true);
     }
     await target.create(recursive: true);
     await for (final entity in source.list(recursive: false)) {
@@ -749,7 +801,7 @@ $text
       if (entity is Directory) {
         await _copyDirectory(entity, Directory(targetPath));
       } else if (entity is File) {
-        await entity.copy(targetPath);
+        await copyFile(entity, targetPath);
       }
     }
   }

@@ -124,6 +124,93 @@ updatedAt: 2026-07-03 12:00
     );
   });
 
+  for (final operation in ['update', 'append']) {
+    test('classifies uncertain $operation markdown write failure', () async {
+      final backend = _FaultInjectingFileVaultBackend(root.path);
+      final note = await backend.createNote(parentPath: '', title: 'Alpha');
+      backend.failStringWriteSuffix = note.id;
+      backend.failStringWriteAfterCommit = true;
+
+      final write = operation == 'update'
+          ? backend.updateMarkdown(
+              noteId: note.id,
+              markdown: '# Alpha\nupdated',
+            )
+          : backend.appendMarkdown(noteId: note.id, markdown: 'appended');
+
+      await expectLater(write, throwsA(isA<VaultPostCommitError>()));
+      final contents = await File(p.join(root.path, note.id)).readAsString();
+      expect(
+        contents,
+        operation == 'update' ? '# Alpha\nupdated' : contains('appended'),
+      );
+    });
+  }
+
+  test('classifies note delete cleanup failure after file removal', () async {
+    final backend = _FaultInjectingFileVaultBackend(root.path);
+    final note = await backend.createNote(parentPath: '', title: 'Alpha');
+    backend.failDirectoryDeleteSuffix = 'Alpha.assets';
+
+    await expectLater(
+      backend.deleteNote(note.id),
+      throwsA(isA<VaultPostCommitError>()),
+    );
+
+    expect(File(p.join(root.path, note.id)).existsSync(), isFalse);
+  });
+
+  test(
+    'classifies source metadata failure after attachment deletion',
+    () async {
+      final backend = _FaultInjectingFileVaultBackend(root.path);
+      final note = await backend.createNote(parentPath: '', title: 'Alpha');
+      final source = await backend.addImageSource(
+        noteId: note.id,
+        filename: 'alpha.png',
+        mimeType: 'image/png',
+        bytes: const [1, 2, 3],
+      );
+      backend.failStringWriteSuffix = 'sources.json';
+      backend.failStringWriteAfterCommit = true;
+
+      await expectLater(
+        backend.deleteSource(source),
+        throwsA(isA<VaultPostCommitError>()),
+      );
+
+      await expectLater(
+        backend.readSourceAttachment(source),
+        throwsA(isA<StateError>()),
+      );
+    },
+  );
+
+  test('classifies uncertain proposal metadata write failure', () async {
+    final backend = _FaultInjectingFileVaultBackend(root.path);
+    final note = await backend.createNote(parentPath: '', title: 'Alpha');
+    final now = DateTime.utc(2026, 1, 1);
+    final proposal = AiProposal(
+      id: 'proposal-1',
+      noteId: note.id,
+      sourceIds: const [],
+      title: 'Outline',
+      proposedMarkdown: '# Outline',
+      status: ProposalStatus.pending,
+      createdAt: now,
+      updatedAt: now,
+    );
+    backend.failStringWriteSuffix = 'proposals.json';
+    backend.failStringWriteAfterCommit = true;
+
+    await expectLater(
+      backend.saveProposal(proposal),
+      throwsA(isA<VaultPostCommitError>()),
+    );
+
+    expect((await backend.listProposals(note.id)).single.id, proposal.id);
+  });
+
   test('hides assets directories and legacy project packages', () async {
     final backend = FileVaultBackend(root.path);
     await Directory(p.join(root.path, '心经.assets')).create(recursive: true);
@@ -677,5 +764,40 @@ final class _FailingReadbackFileVaultBackend extends FileVaultBackend {
       Error.throwWithStackTrace(readbackError, readbackStackTrace);
     }
     return super.listSources(noteId);
+  }
+}
+
+final class _FaultInjectingFileVaultBackend extends FileVaultBackend {
+  _FaultInjectingFileVaultBackend(super.rootPath);
+
+  String? failStringWriteSuffix;
+  bool failStringWriteAfterCommit = false;
+  String? failDirectoryDeleteSuffix;
+
+  @override
+  Future<void> writeFileString(File file, String contents) async {
+    if (failStringWriteSuffix case final suffix?
+        when file.path.endsWith(suffix)) {
+      if (failStringWriteAfterCommit) {
+        await super.writeFileString(file, contents);
+      }
+      throw FileSystemException('Injected string write failure', file.path);
+    }
+    await super.writeFileString(file, contents);
+  }
+
+  @override
+  Future<void> deleteDirectory(
+    Directory directory, {
+    required bool recursive,
+  }) async {
+    if (failDirectoryDeleteSuffix case final suffix?
+        when directory.path.endsWith(suffix)) {
+      throw FileSystemException(
+        'Injected directory delete failure',
+        directory.path,
+      );
+    }
+    await super.deleteDirectory(directory, recursive: recursive);
   }
 }

@@ -32,6 +32,27 @@ void main() {
 
       expect(notifications, 1);
     });
+
+    test(
+      'prepared mutation installs selected refreshed sources atomically',
+      () {
+        final registry = NoteMaterialsRegistry();
+        addTearDown(registry.dispose);
+        final note = _note('A.md', sourceIds: const ['source-1', 'source-2']);
+        final prepared = registry.prepareMutation(
+          refreshedNotesByNewId: {'A.md': note},
+          selectedSourceIdsByNoteId: const {
+            'A.md': {'source-2'},
+          },
+        );
+
+        expect(registry.snapshotFor('A.md').selectedSourceIds, isEmpty);
+
+        prepared.applySilently();
+
+        expect(registry.snapshotFor('A.md').selectedSourceIds, {'source-2'});
+      },
+    );
     test('returns the immutable empty snapshot for an unregistered note', () {
       final registry = NoteMaterialsRegistry();
       addTearDown(registry.dispose);

@@ -247,16 +247,33 @@ final class PreparedNoteDocumentUpdate {
   final Object? _lastSaveError;
   bool _isApplied = false;
   bool _isPublished = false;
+  bool _isPreflighted = false;
 
   void validateCurrent() {
     _session._ensurePreparedUpdateCanApply();
+  }
+
+  void preflightApply() {
+    if (_isApplied) {
+      return;
+    }
+    validateCurrent();
+    _isPreflighted = true;
   }
 
   void applySilently() {
     if (_isApplied) {
       return;
     }
-    _session._ensurePreparedUpdateCanApply();
+    preflightApply();
+    applySilentlyPreflighted();
+  }
+
+  void applySilentlyPreflighted() {
+    if (_isApplied) {
+      return;
+    }
+    assert(_isPreflighted);
     _session._applyPreparedUpdate(this);
     _isApplied = true;
   }

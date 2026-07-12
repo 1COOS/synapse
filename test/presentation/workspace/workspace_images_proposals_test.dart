@@ -56,6 +56,80 @@ void main() {
   });
 
   testWidgets(
+    'image import hydration failure requires reload and never duplicates write',
+    (tester) async {
+      final vault = _ImageImportHydrationFailureVault();
+      final note = await vault.createNote(parentPath: '', title: 'Alpha');
+      final imageInput = FakeImageInputService(
+        pickedImage: const ImportedImage(
+          filename: 'fatal-import.png',
+          mimeType: 'image/png',
+          bytes: tinyPng,
+        ),
+      );
+      final reportedErrors = <FlutterErrorDetails>[];
+      final previousOnError = FlutterError.onError;
+      FlutterError.onError = reportedErrors.add;
+      addTearDown(() => FlutterError.onError = previousOnError);
+
+      await pumpWorkspace(tester, vault: vault, imageInput: imageInput);
+      await tester.tap(find.byKey(const Key('add-image-button')));
+      await tester.pumpAndSettle();
+      FlutterError.onError = previousOnError;
+
+      expect(vault.addImageSourceCalls, 1);
+      expect(
+        (await vault.committedSources(note.id)).single.title,
+        'fatal-import.png',
+      );
+      expect(reportedErrors, hasLength(1));
+      expect(find.textContaining('后端操作可能已完成，请重新加载工作区'), findsOneWidget);
+
+      await tester.tap(find.byKey(const Key('add-image-button')));
+      await tester.pumpAndSettle();
+      expect(vault.addImageSourceCalls, 1);
+    },
+  );
+
+  testWidgets(
+    'OCR proposal hydration failure requires reload and never duplicates writes',
+    (tester) async {
+      final vault = _ProposalHydrationFailureVault();
+      final note = await vault.createNote(parentPath: '', title: 'Alpha');
+      await vault.addImageSource(
+        noteId: note.id,
+        filename: 'ocr.png',
+        mimeType: 'image/png',
+        bytes: tinyPng,
+      );
+      final aiProvider = GatedAiProvider(extractedText: 'OCR text');
+      final reportedErrors = <FlutterErrorDetails>[];
+      final previousOnError = FlutterError.onError;
+      FlutterError.onError = reportedErrors.add;
+      addTearDown(() => FlutterError.onError = previousOnError);
+
+      await pumpWorkspace(tester, vault: vault, aiProvider: aiProvider);
+      await tester.tap(find.bySemanticsLabel('ocr.png'));
+      await tester.pump();
+      await tester.tap(find.byKey(const Key('generate-proposal-button')));
+      await aiProvider.extractionStarted.future;
+      aiProvider.releaseExtraction();
+      await tester.pumpAndSettle();
+      FlutterError.onError = previousOnError;
+
+      expect(vault.updateSourceCalls, 1);
+      expect(vault.saveProposalCalls, 1);
+      expect(reportedErrors, hasLength(1));
+      expect(find.textContaining('后端操作可能已完成，请重新加载工作区'), findsOneWidget);
+
+      await tester.tap(find.byKey(const Key('generate-proposal-button')));
+      await tester.pumpAndSettle();
+      expect(vault.updateSourceCalls, 1);
+      expect(vault.saveProposalCalls, 1);
+    },
+  );
+
+  testWidgets(
     'delayed image import keeps its pane target after focus changes',
     (tester) async {
       final vault = MemoryVaultBackend(seedExampleData: false);
@@ -1041,6 +1115,74 @@ void main() {
     expect(await firstVault.listProposals(alpha.id), isEmpty);
     expect(await secondVault.listProposals(second.id), isEmpty);
   });
+}
+
+final class _ImageImportHydrationFailureVault extends MemoryVaultBackend {
+  _ImageImportHydrationFailureVault() : super(seedExampleData: false);
+
+  int addImageSourceCalls = 0;
+  bool _imageCommitted = false;
+
+  @override
+  Future<SourceItem> addImageSource({
+    required String noteId,
+    required String filename,
+    required String mimeType,
+    required List<int> bytes,
+  }) async {
+    addImageSourceCalls += 1;
+    final source = await super.addImageSource(
+      noteId: noteId,
+      filename: filename,
+      mimeType: mimeType,
+      bytes: bytes,
+    );
+    _imageCommitted = true;
+    return source;
+  }
+
+  @override
+  Future<VaultNoteContent> readNote(String noteId) {
+    if (_imageCommitted) {
+      throw StateError('post-image readNote failed');
+    }
+    return super.readNote(noteId);
+  }
+
+  Future<List<SourceItem>> committedSources(String noteId) {
+    _imageCommitted = false;
+    return listSources(noteId);
+  }
+}
+
+final class _ProposalHydrationFailureVault extends MemoryVaultBackend {
+  _ProposalHydrationFailureVault() : super(seedExampleData: false);
+
+  int updateSourceCalls = 0;
+  int saveProposalCalls = 0;
+  bool _proposalCommitted = false;
+
+  @override
+  Future<SourceItem> updateSource(SourceItem source) async {
+    updateSourceCalls += 1;
+    return super.updateSource(source);
+  }
+
+  @override
+  Future<AiProposal> saveProposal(AiProposal proposal) async {
+    saveProposalCalls += 1;
+    final saved = await super.saveProposal(proposal);
+    _proposalCommitted = true;
+    return saved;
+  }
+
+  @override
+  Future<List<AiProposal>> listProposals(String noteId) {
+    if (_proposalCommitted) {
+      throw StateError('post-proposal listProposals failed');
+    }
+    return super.listProposals(noteId);
+  }
 }
 
 final class _PostDeleteHydrationFailureVault extends MemoryVaultBackend {

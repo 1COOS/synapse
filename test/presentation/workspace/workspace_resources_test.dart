@@ -135,6 +135,31 @@ void main() {
   });
 
   testWidgets(
+    'create note hydration failure requires reload and never duplicates create',
+    (tester) async {
+      final vault = _CreateNoteHydrationFailureVault();
+      final reportedErrors = <FlutterErrorDetails>[];
+      final previousOnError = FlutterError.onError;
+      FlutterError.onError = reportedErrors.add;
+      addTearDown(() => FlutterError.onError = previousOnError);
+
+      await pumpWorkspace(tester, vault: vault);
+      await tester.tap(find.byKey(const Key('new-note-button')));
+      await tester.pumpAndSettle();
+      FlutterError.onError = previousOnError;
+
+      expect(vault.createNoteCalls, 1);
+      expect((await vault.readCommittedNote()).title, '未命名');
+      expect(reportedErrors, hasLength(1));
+      expect(find.text(_reloadRequiredMessage), findsOneWidget);
+
+      await tester.tap(find.byKey(const Key('new-note-button')));
+      await tester.pumpAndSettle();
+      expect(vault.createNoteCalls, 1);
+    },
+  );
+
+  testWidgets(
     'uses a folder context menu for child creation rename and delete',
     (tester) async {
       final vault = MemoryVaultBackend(seedExampleData: false);
@@ -796,6 +821,14 @@ void main() {
           .widget<GestureDetector>(find.byKey(const Key('split-pane-pane-1')))
           .onTap!();
       await tester.pump();
+      final originalPane1Controller = liveMarkdownDocumentController(
+        tester,
+        paneId: 1,
+      );
+      final originalPane2Controller = liveMarkdownDocumentController(
+        tester,
+        paneId: 2,
+      );
 
       Future<void> requestCopy() async {
         await tester.tap(
@@ -813,6 +846,16 @@ void main() {
       expect(vault.copyCalls, 1);
       expect(reportedErrors, hasLength(1));
       expect(find.text('工作区状态提交异常。后端操作可能已完成，请重新加载工作区后再继续。'), findsOneWidget);
+      expect(
+        liveMarkdownDocumentController(tester, paneId: 1),
+        same(originalPane1Controller),
+      );
+      expect(
+        liveMarkdownDocumentController(tester, paneId: 2),
+        same(originalPane2Controller),
+      );
+      expect(originalPane1Controller.text, contains('# 心经'));
+      expect(originalPane2Controller.text, '# 其他\npending autosave');
 
       await tester.pump(const Duration(milliseconds: 10000));
       await tester.pump();
@@ -1050,6 +1093,37 @@ final class _CountingCopyVault extends MemoryVaultBackend {
   }) {
     updateCalls += 1;
     return super.updateMarkdown(noteId: noteId, markdown: markdown);
+  }
+}
+
+final class _CreateNoteHydrationFailureVault extends MemoryVaultBackend {
+  _CreateNoteHydrationFailureVault() : super(seedExampleData: false);
+
+  int createNoteCalls = 0;
+  bool _created = false;
+
+  @override
+  Future<VaultNote> createNote({
+    required String parentPath,
+    required String title,
+  }) async {
+    createNoteCalls += 1;
+    final note = await super.createNote(parentPath: parentPath, title: title);
+    _created = true;
+    return note;
+  }
+
+  @override
+  Future<List<VaultResourceNode>> listResources() {
+    if (_created) {
+      throw StateError('post-create listResources failed');
+    }
+    return super.listResources();
+  }
+
+  Future<VaultNoteContent> readCommittedNote() {
+    _created = false;
+    return readNote('未命名.md');
   }
 }
 

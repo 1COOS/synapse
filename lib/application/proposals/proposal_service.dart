@@ -3,6 +3,17 @@ import 'package:uuid/uuid.dart';
 import '../../domain/vault/vault_resource.dart';
 import '../../infrastructure/ai/ai_provider.dart';
 import '../../infrastructure/vault/vault_backend.dart';
+import '../../infrastructure/vault/vault_post_commit_error.dart';
+
+final class PreparedOutlineProposal {
+  const PreparedOutlineProposal({
+    required this.sourceUpdates,
+    required this.proposal,
+  });
+
+  final List<SourceItem> sourceUpdates;
+  final AiProposal proposal;
+}
 
 class ProposalService {
   ProposalService({required this.vault, required this.aiProvider});
@@ -15,40 +26,68 @@ class ProposalService {
     required String noteId,
     required List<String> sourceIds,
   }) async {
+    final prepared = await prepareOutlineProposal(
+      noteId: noteId,
+      sourceIds: sourceIds,
+    );
+    return commitPreparedOutlineProposal(prepared);
+  }
+
+  Future<PreparedOutlineProposal> prepareOutlineProposal({
+    required String noteId,
+    required List<String> sourceIds,
+  }) async {
     final note = await vault.readNote(noteId);
-    var sources = await vault.getSources(noteId, sourceIds);
+    final sources = await vault.getSources(noteId, sourceIds);
     if (sources.isEmpty) {
       throw ArgumentError('At least one source is required.');
     }
+    final sourceUpdates = <SourceItem>[];
+    final preparedSources = <SourceItem>[];
     for (final source in sources) {
       if (source.type == SourceType.image &&
           source.state == SourceState.pending) {
-        await _extractImageSource(source);
+        final updated = await _prepareImageSource(source);
+        sourceUpdates.add(updated);
+        preparedSources.add(updated);
+      } else {
+        preparedSources.add(source);
       }
     }
-    sources = await vault.getSources(noteId, sourceIds);
     final now = DateTime.now().toUtc();
-    final imageOnly = sources.every(
+    final imageOnly = preparedSources.every(
       (source) => source.type == SourceType.image,
     );
     final markdown = imageOnly
-        ? _imageOcrMarkdown(sources)
+        ? _imageOcrMarkdown(preparedSources)
         : await aiProvider.createOutlineProposal(
             noteTitle: note.title,
             currentMarkdown: note.markdown,
-            sources: sources,
+            sources: preparedSources,
           );
     final proposal = AiProposal(
       id: _uuid.v4(),
       noteId: noteId,
       sourceIds: sourceIds,
-      title: '整理 ${sources.length} 条素材',
+      title: '整理 ${preparedSources.length} 条素材',
       proposedMarkdown: markdown,
       status: ProposalStatus.pending,
       createdAt: now,
       updatedAt: now,
     );
-    return vault.saveProposal(proposal);
+    return PreparedOutlineProposal(
+      sourceUpdates: List<SourceItem>.unmodifiable(sourceUpdates),
+      proposal: proposal,
+    );
+  }
+
+  Future<AiProposal> commitPreparedOutlineProposal(
+    PreparedOutlineProposal prepared,
+  ) async {
+    for (final source in prepared.sourceUpdates) {
+      await runVaultPostCommit(() => vault.updateSource(source));
+    }
+    return runVaultPostCommit(() => vault.saveProposal(prepared.proposal));
   }
 
   String _imageOcrMarkdown(List<SourceItem> sources) {
@@ -59,30 +98,18 @@ class ProposalService {
         .trim();
   }
 
-  Future<void> _extractImageSource(SourceItem source) async {
-    try {
-      final bytes = await vault.readSourceAttachment(source);
-      final extraction = await aiProvider.extractImageText(
-        filename: source.title,
-        mimeType: source.mimeType ?? 'application/octet-stream',
-        bytes: bytes,
-      );
-      await vault.updateSource(
-        source.copyWith(
-          state: SourceState.processed,
-          extractedText: extraction.text,
-          updatedAt: DateTime.now().toUtc(),
-        ),
-      );
-    } catch (_) {
-      await vault.updateSource(
-        source.copyWith(
-          state: SourceState.failed,
-          updatedAt: DateTime.now().toUtc(),
-        ),
-      );
-      rethrow;
-    }
+  Future<SourceItem> _prepareImageSource(SourceItem source) async {
+    final bytes = await vault.readSourceAttachment(source);
+    final extraction = await aiProvider.extractImageText(
+      filename: source.title,
+      mimeType: source.mimeType ?? 'application/octet-stream',
+      bytes: bytes,
+    );
+    return source.copyWith(
+      state: SourceState.processed,
+      extractedText: extraction.text,
+      updatedAt: DateTime.now().toUtc(),
+    );
   }
 
   Future<AiProposal> applyProposal(String proposalId) async {
@@ -90,14 +117,16 @@ class ProposalService {
     if (proposal.status != ProposalStatus.pending) {
       return proposal;
     }
-    await vault.appendMarkdown(
-      noteId: proposal.noteId,
-      markdown: proposal.proposedMarkdown,
-    );
-    final updated = proposal.copyWith(
-      status: ProposalStatus.applied,
-      updatedAt: DateTime.now().toUtc(),
-    );
-    return vault.updateProposal(updated);
+    return runVaultPostCommit(() async {
+      await vault.appendMarkdown(
+        noteId: proposal.noteId,
+        markdown: proposal.proposedMarkdown,
+      );
+      final updated = proposal.copyWith(
+        status: ProposalStatus.applied,
+        updatedAt: DateTime.now().toUtc(),
+      );
+      return vault.updateProposal(updated);
+    });
   }
 }

@@ -25,7 +25,11 @@ abstract interface class PreparedWorkspaceSnapshotMutation {
 
   void validateCurrent();
 
+  void preflightApply();
+
   void applySilently();
+
+  void applySilentlyPreflighted();
 
   void publish();
 }
@@ -46,6 +50,7 @@ final class WorkspaceCommitBatch<T> {
   final PreparedWorkspaceSnapshotMutation preparedWorkspace;
   bool _isApplied = false;
   bool _isPublished = false;
+  bool _isPreflighted = false;
 
   void validateCurrent() {
     preparedSessions.validateCurrent();
@@ -58,12 +63,23 @@ final class WorkspaceCommitBatch<T> {
     if (_isApplied) {
       return;
     }
-    validateCurrent();
-    preparedSessions.applySilently();
-    preparedSplits.applySilently();
-    preparedMaterials.applySilently();
-    preparedWorkspace.applySilently();
+    preflightApply();
+    preparedSessions.applySilentlyPreflighted();
+    preparedSplits.applySilentlyPreflighted();
+    preparedMaterials.applySilentlyPreflighted();
+    preparedWorkspace.applySilentlyPreflighted();
     _isApplied = true;
+  }
+
+  void preflightApply() {
+    if (_isApplied || _isPreflighted) {
+      return;
+    }
+    preparedSessions.preflightApply();
+    preparedSplits.preflightApply();
+    preparedMaterials.preflightApply();
+    preparedWorkspace.preflightApply();
+    _isPreflighted = true;
   }
 
   void publish() {
@@ -87,7 +103,13 @@ final class _NoopPreparedWorkspaceSnapshotMutation
   void validateCurrent() {}
 
   @override
+  void preflightApply() {}
+
+  @override
   void applySilently() {}
+
+  @override
+  void applySilentlyPreflighted() {}
 
   @override
   void publish() {}

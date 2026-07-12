@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:synapse/domain/vault/vault_resource.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
+import 'package:synapse/infrastructure/vault/vault_post_commit_error.dart';
 import 'package:synapse/presentation/workspace/state/note_document_session.dart';
 import 'package:synapse/presentation/workspace/state/note_materials_registry.dart';
 import 'package:synapse/presentation/workspace/state/note_save_coordinator.dart';
@@ -172,6 +173,50 @@ void main() {
     );
 
     test(
+      'vault post-commit backend error is fatal and preserves cause stack',
+      () async {
+        final harness = _Stage6BarrierHarness();
+        addTearDown(harness.dispose);
+        final cause = StateError('filesystem changed before failure');
+        final causeStackTrace = StackTrace.current;
+        var backendCalls = 0;
+
+        await expectLater(
+          harness.barrier.run<void>(
+            WorkspaceMutationPlan<void>(
+              affectedNoteIds: const {},
+              dirtyDisposition: DirtyDisposition.discard,
+              commitBackend: () async {
+                backendCalls += 1;
+                throw VaultPostCommitError(
+                  cause: cause,
+                  causeStackTrace: causeStackTrace,
+                );
+              },
+            ),
+          ),
+          throwsA(
+            isA<WorkspaceCommitInvariantError>()
+                .having(
+                  (error) => error.phase,
+                  'phase',
+                  WorkspaceCommitPhase.hydrate,
+                )
+                .having((error) => error.cause, 'cause', same(cause))
+                .having(
+                  (error) => error.causeStackTrace,
+                  'causeStackTrace',
+                  same(causeStackTrace),
+                ),
+          ),
+        );
+
+        expect(backendCalls, 1);
+        expect(harness.invariantErrors, hasLength(1));
+      },
+    );
+
+    test(
       'commitPrepared hydration failure is fatal, not BackendFailed',
       () async {
         final harness = _Stage6BarrierHarness();
@@ -199,13 +244,17 @@ void main() {
       WorkspaceCommitPhase.publish,
     ]) {
       test('post-backend ${failurePhase.name} failure is fatal', () async {
-        final harness = _Stage6BarrierHarness();
+        final harness = _Stage6BarrierHarness(initialNoteId: 'A.md');
         addTearDown(harness.dispose);
+        final session = harness.registry.upsert(_note('A.md', 'old'));
+        harness.materials.replaceProposals('A.md', [_proposal('A.md')]);
+        var workspaceValue = 'old';
         var backendCalls = 0;
         final workspace = _PreparedTestWorkspaceMutation(
-          apply: failurePhase == WorkspaceCommitPhase.apply
+          apply: () => workspaceValue = 'new',
+          onPreflight: failurePhase == WorkspaceCommitPhase.apply
               ? () => throw StateError('apply failed')
-              : () {},
+              : null,
           onPublish: failurePhase == WorkspaceCommitPhase.publish
               ? () => throw StateError('publish failed')
               : null,
@@ -218,7 +267,11 @@ void main() {
               dirtyDisposition: DirtyDisposition.flush,
               commitBackend: () => _backendCommit(() async {
                 backendCalls += 1;
-                return const VaultMutationDelta<void>(value: null);
+                return VaultMutationDelta<void>(
+                  value: null,
+                  remappedNoteIds: const {'A.md': 'B.md'},
+                  refreshedNotesByNewId: {'B.md': _note('B.md', 'new')},
+                );
               }),
               prepareCommit: (delta) =>
                   harness.prepareBatch(delta, workspace: workspace),
@@ -235,6 +288,14 @@ void main() {
 
         expect(backendCalls, 1);
         expect(harness.invariantErrors.single.phase, failurePhase);
+        if (failurePhase == WorkspaceCommitPhase.apply) {
+          expect(harness.registry.sessionFor('A.md'), same(session));
+          expect(harness.registry.sessionFor('B.md'), isNull);
+          expect(harness.splits.focusedPane?.noteId, 'A.md');
+          expect(harness.materials.snapshotFor('A.md').proposals, hasLength(1));
+          expect(harness.materials.snapshotFor('B.md').proposals, isEmpty);
+          expect(workspaceValue, 'old');
+        }
       });
     }
 
@@ -721,6 +782,103 @@ void main() {
       },
     );
 
+    test(
+      'fatal aborts a reserved pending save commit and allows reload reset',
+      () async {
+        final vault = _DelayedUpdateVault();
+        final registry = NoteSessionRegistry(
+          visibleBody: (markdown) => markdown,
+          onEdited: (_) {},
+        );
+        final splits = SplitWorkspaceController(initialNoteId: 'A.md');
+        final materials = NoteMaterialsRegistry();
+        late final WorkspaceMutationBarrier barrier;
+        final coordinator = NoteSaveCoordinator(
+          sessions: registry,
+          vault: () => vault,
+          debounceDuration: () => const Duration(seconds: 1),
+          serializeVisibleBody: (_, body) => body,
+          onResult: (result, _) async {
+            final saved = result.savedNote;
+            if (saved == null) {
+              return;
+            }
+            await barrier.commitPrepared<void>(
+              () => VaultMutationDelta<void>(
+                value: null,
+                remappedNoteIds: {result.oldNoteId: saved.id},
+                refreshedNotesByNewId: {saved.id: saved},
+              ),
+              originatingSession: result.session,
+            );
+          },
+          onStateChanged: () {},
+        );
+        barrier = WorkspaceMutationBarrier(
+          sessions: registry,
+          saveCoordinator: coordinator,
+          splits: splits,
+          materials: materials,
+        );
+        addTearDown(() {
+          coordinator.dispose();
+          materials.dispose();
+          registry.dispose();
+          splits.dispose();
+        });
+        final session = registry.upsert(_note('A.md', 'old'));
+        session.controller.text = 'dirty';
+        final save = coordinator.save(session);
+        await vault.updateStarted.future;
+
+        final blockerStarted = Completer<void>();
+        final releaseBlocker = Completer<void>();
+        final blocker = barrier.run<void>(
+          WorkspaceMutationPlan<void>(
+            affectedNoteIds: const {},
+            dirtyDisposition: DirtyDisposition.flush,
+            commitBackend: () => _backendCommit(() async {
+              blockerStarted.complete();
+              await releaseBlocker.future;
+              return const VaultMutationDelta<void>(value: null);
+            }),
+          ),
+        );
+        await blockerStarted.future;
+        var destructiveBackendCalls = 0;
+        final destructive = barrier.run<void>(
+          WorkspaceMutationPlan<void>(
+            affectedNoteIds: const {'A.md'},
+            dirtyDisposition: DirtyDisposition.discard,
+            commitBackend: () => _backendCommit(() async {
+              destructiveBackendCalls += 1;
+              return const VaultMutationDelta<void>(value: null);
+            }),
+          ),
+        );
+        vault.releaseUpdate.complete();
+        await _drainEventQueue();
+        expect(barrier.pendingSaveCommitCountForTesting, 1);
+        final invariant = WorkspaceCommitInvariantError(
+          phase: WorkspaceCommitPhase.apply,
+          cause: StateError('structural fatal while queued'),
+          causeStackTrace: StackTrace.current,
+        );
+
+        coordinator.enterFatal(invariant);
+        releaseBlocker.complete();
+
+        expect(await blocker, isA<Committed<void>>());
+        await expectLater(destructive, throwsA(same(invariant)));
+        final saveResult = await save.timeout(const Duration(seconds: 1));
+        expect(saveResult.requiresReload, isTrue);
+        expect(saveResult.fatalError, same(invariant));
+        expect(destructiveBackendCalls, 0);
+        expect(barrier.pendingSaveCommitCountForTesting, 0);
+        expect(coordinator.resetAfterReload, returnsNormally);
+      },
+    );
+
     for (final disposition in [
       DirtyDisposition.flush,
       DirtyDisposition.discard,
@@ -1075,21 +1233,46 @@ final class _Stage6BarrierHarness {
 
 final class _PreparedTestWorkspaceMutation
     implements PreparedWorkspaceSnapshotMutation {
-  _PreparedTestWorkspaceMutation({required this.apply, this.onPublish});
+  _PreparedTestWorkspaceMutation({
+    required this.apply,
+    this.onPreflight,
+    this.onPublish,
+  });
 
   final void Function() apply;
+  final void Function()? onPreflight;
   final void Function()? onPublish;
   bool _isApplied = false;
   bool _isPublished = false;
+  bool _isPreflighted = false;
 
   @override
   void validateCurrent() {}
+
+  @override
+  void preflightApply() {
+    if (_isApplied) {
+      return;
+    }
+    onPreflight?.call();
+    _isPreflighted = true;
+  }
 
   @override
   void applySilently() {
     if (_isApplied) {
       return;
     }
+    preflightApply();
+    applySilentlyPreflighted();
+  }
+
+  @override
+  void applySilentlyPreflighted() {
+    if (_isApplied) {
+      return;
+    }
+    assert(_isPreflighted);
     apply();
     _isApplied = true;
   }
