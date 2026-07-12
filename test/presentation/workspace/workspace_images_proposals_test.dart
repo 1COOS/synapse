@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:synapse/domain/vault/vault_resource.dart';
 import 'package:synapse/infrastructure/input/image_input_service.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
+import 'package:synapse/presentation/cupertino/workspace/workspace_resources.dart';
 import 'package:synapse/presentation/cupertino/workspace/workspace_sources.dart';
 
 import '../../support/workspace_fakes.dart';
@@ -113,6 +114,49 @@ void main() {
 
     expect(await vault.listSources(alpha.id), isEmpty);
     expect(await vault.listSources(beta.id), isEmpty);
+  });
+
+  testWidgets('delayed image import rejects a removed note session', (
+    tester,
+  ) async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final alpha = await vault.createNote(parentPath: '', title: 'Alpha');
+    final beta = await vault.createNote(parentPath: '', title: 'Beta');
+    final betaBefore = (await vault.readNote(beta.id)).markdown;
+    final imageInput = GatedImageInputService(
+      pickedImage: const ImportedImage(
+        filename: 'removed-session.png',
+        mimeType: 'image/png',
+        bytes: tinyPng,
+      ),
+    );
+
+    await pumpWorkspace(tester, vault: vault, imageInput: imageInput);
+    await tester.tap(find.byKey(const Key('add-image-button')));
+    await imageInput.pickStarted.future;
+
+    final resourceTree = tester.widget<ResourceTree>(find.byType(ResourceTree));
+    resourceTree.onDelete(
+      resourceTree.nodes.firstWhere((node) => node.id == alpha.id),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('删除'));
+    await tester.pumpAndSettle();
+    expect(find.byKey(Key('resource-row-${alpha.id}')), findsNothing);
+
+    imageInput.releasePick();
+    await tester.pumpAndSettle();
+
+    expect(await vault.listSources(beta.id), isEmpty);
+    expect((await vault.readNote(beta.id)).markdown, betaBefore);
+    expect(find.textContaining('removed-session.png'), findsNothing);
+    final generate = tester.widget<CupertinoButton>(
+      find.descendant(
+        of: find.byKey(const Key('generate-proposal-button')),
+        matching: find.byType(CupertinoButton),
+      ),
+    );
+    expect(generate.onPressed, isNull);
   });
 
   testWidgets('shows guidance when importing without an active note', (
@@ -241,6 +285,46 @@ void main() {
     expect(find.byType(Image), findsNothing);
     expect(find.text('暂无图片素材'), findsOneWidget);
     expect(await vault.listSources(note.id), isEmpty);
+  });
+
+  testWidgets('source deletion follows a same-session title remap', (
+    tester,
+  ) async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Image Study');
+    await vault.addImageSource(
+      noteId: note.id,
+      filename: 'delete-after-remap.png',
+      mimeType: 'image/png',
+      bytes: tinyPng,
+    );
+
+    await pumpWorkspace(tester, vault: vault);
+    await tester.tap(find.byKey(const Key('note-mode-source-pane-1')));
+    await tester.pump(const Duration(milliseconds: 250));
+    await activateLiveMarkdownBlock(tester);
+    final editorState = activeLiveMarkdownEditableTextState(tester);
+
+    await tester.tap(find.byKey(const Key('delete-image-button')));
+    await tester.pumpAndSettle();
+    editorState.updateEditingValue(
+      const TextEditingValue(
+        text: '# Remapped Study',
+        selection: TextSelection.collapsed(offset: 16),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 1000));
+    await tester.pump();
+
+    expect(
+      find.byKey(const Key('resource-row-Remapped Study.md')),
+      findsOneWidget,
+    );
+    await tester.tap(find.text('删除'));
+    await tester.pumpAndSettle();
+
+    expect(await vault.listSources('Remapped Study.md'), isEmpty);
+    expect(find.textContaining('Source not found'), findsNothing);
   });
 
   testWidgets('deletes an AI proposal from the source pane', (tester) async {
@@ -554,5 +638,65 @@ void main() {
     );
     expect(await secondVault.listProposals(second.id), isEmpty);
     expect(find.text('旧仓库 OCR'), findsNothing);
+  });
+
+  testWidgets('stale OCR failure does not write into a replacement Vault UI', (
+    tester,
+  ) async {
+    final firstVault = MemoryVaultBackend(seedExampleData: false);
+    final alpha = await firstVault.createNote(parentPath: '', title: 'Alpha');
+    await firstVault.addImageSource(
+      noteId: alpha.id,
+      filename: 'failing-runtime-ocr.png',
+      mimeType: 'image/png',
+      bytes: tinyPng,
+    );
+    final secondVault = MemoryVaultBackend(seedExampleData: false);
+    final second = await secondVault.createNote(
+      parentPath: '',
+      title: 'Second Vault',
+    );
+    final aiProvider = GatedAiProvider(
+      extractionError: StateError('stale OCR provider failed'),
+    );
+
+    await pumpWorkspace(
+      tester,
+      vault: firstVault,
+      aiProvider: aiProvider,
+      settingsStore: FakeSettingsStore(),
+      directoryPicker: () async => '/vault/second',
+      vaultBackendFactory: (_) => secondVault,
+      size: const Size(1600, 900),
+    );
+    await tester.tap(find.bySemanticsLabel('failing-runtime-ocr.png'));
+    await tester.pump();
+    final generate = tester
+        .widget<CupertinoButton>(
+          find.descendant(
+            of: find.byKey(const Key('generate-proposal-button')),
+            matching: find.byType(CupertinoButton),
+          ),
+        )
+        .onPressed!;
+    final switchVault = tester
+        .widget<CupertinoButton>(
+          find.descendant(
+            of: find.byKey(const Key('vault-location-button')),
+            matching: find.byType(CupertinoButton),
+          ),
+        )
+        .onPressed!;
+
+    generate();
+    await aiProvider.extractionStarted.future;
+    switchVault();
+    await tester.pump(const Duration(milliseconds: 500));
+    aiProvider.releaseExtraction();
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('stale OCR provider failed'), findsNothing);
+    expect(await firstVault.listProposals(alpha.id), isEmpty);
+    expect(await secondVault.listProposals(second.id), isEmpty);
   });
 }

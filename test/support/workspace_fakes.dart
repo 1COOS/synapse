@@ -437,11 +437,15 @@ class GatedImageInputService implements ImageInputService {
     this.pickedImage,
     this.pastedImage,
     this.gateCanPaste = false,
+    this.pickError,
+    this.pasteError,
   });
 
   final ImportedImage? pickedImage;
   final ImportedImage? pastedImage;
   final bool gateCanPaste;
+  final Object? pickError;
+  final Object? pasteError;
   final canPasteStarted = Completer<void>();
   final pickStarted = Completer<void>();
   final pasteStarted = Completer<void>();
@@ -476,6 +480,9 @@ class GatedImageInputService implements ImageInputService {
       pickStarted.complete();
     }
     await _pickRelease.future;
+    if (pickError != null) {
+      throw pickError!;
+    }
     return pickedImage;
   }
 
@@ -497,6 +504,9 @@ class GatedImageInputService implements ImageInputService {
       pasteStarted.complete();
     }
     await _pasteRelease.future;
+    if (pasteError != null) {
+      throw pasteError!;
+    }
     return pastedImage;
   }
 }
@@ -505,10 +515,14 @@ class GatedAiProvider implements AiProvider {
   GatedAiProvider({
     this.extractedText = '# 原图标题\n- 提取文字：观照',
     this.outlineText = '## 文本建议',
+    this.extractionError,
+    this.outlineError,
   });
 
   final String extractedText;
   final String outlineText;
+  final Object? extractionError;
+  final Object? outlineError;
   final extractionStarted = Completer<void>();
   final outlineStarted = Completer<void>();
   final _extractionRelease = Completer<void>();
@@ -539,6 +553,9 @@ class GatedAiProvider implements AiProvider {
       outlineStarted.complete();
     }
     await _outlineRelease.future;
+    if (outlineError != null) {
+      throw outlineError!;
+    }
     return outlineText;
   }
 
@@ -556,6 +573,9 @@ class GatedAiProvider implements AiProvider {
       extractionStarted.complete();
     }
     await _extractionRelease.future;
+    if (extractionError != null) {
+      throw extractionError!;
+    }
     return ImageExtraction(text: extractedText, description: '$filename OCR');
   }
 }

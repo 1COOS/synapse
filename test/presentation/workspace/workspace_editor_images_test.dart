@@ -363,6 +363,52 @@ void main() {
     expect(await vault.listSources(alpha.id), isEmpty);
   });
 
+  testWidgets(
+    'stale delayed paste failure does not replace workspace message',
+    (tester) async {
+      final vault = CountingUpdateVaultBackend(seedExampleData: false);
+      await vault.createNote(parentPath: '', title: 'Alpha');
+      final beta = await vault.createNote(parentPath: '', title: 'Beta');
+      final imageInput = GatedImageInputService(
+        pasteError: StateError('stale paste input failed'),
+      );
+
+      await pumpWorkspace(tester, vault: vault, imageInput: imageInput);
+      await tester.tap(find.byKey(const Key('split-pane-right-button')));
+      await tester.pump(const Duration(milliseconds: 250));
+      await tester.tap(find.byKey(Key('resource-row-${beta.id}')));
+      await tester.pump(const Duration(milliseconds: 250));
+      await tester.tap(find.byKey(const Key('note-mode-source-pane-1')));
+      await tester.pump(const Duration(milliseconds: 250));
+      final editor = tester.widget<LiveMarkdownEditor>(
+        inNotePane(find.byType(LiveMarkdownEditor), 1).first,
+      );
+      final closePane = tester
+          .widget<CupertinoButton>(
+            find.descendant(
+              of: find.byKey(const Key('close-split-pane-button')),
+              matching: find.byType(CupertinoButton),
+            ),
+          )
+          .onPressed!;
+
+      final paste = editor.onPaste();
+      await imageInput.pasteStarted.future;
+      closePane();
+      await tester.pump(const Duration(milliseconds: 250));
+      imageInput.releasePaste();
+      await paste;
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('stale paste input failed'), findsNothing);
+      expect(vault.updatedNoteIds, isEmpty);
+      expect(
+        (await vault.readNote(beta.id)).markdown,
+        isNot(contains('failed')),
+      );
+    },
+  );
+
   testWidgets('delayed pane paste rejects a replaced provider runtime', (
     tester,
   ) async {

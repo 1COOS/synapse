@@ -889,6 +889,35 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     }
   }
 
+  Future<PaneEditorCommandOutcome> _runPaneEditorBusy(
+    PaneEditorContext context,
+    Future<PaneEditorCommandOutcome> Function() action,
+  ) async {
+    if (_resolvePaneEditorContext(context) == null) {
+      return PaneEditorCommandOutcome.staleTarget;
+    }
+    if (_busy) {
+      return PaneEditorCommandOutcome.unchanged;
+    }
+    setState(() {
+      _busy = true;
+      _message = '';
+    });
+    try {
+      return await action();
+    } catch (error) {
+      if (!mounted || _resolvePaneEditorContext(context) == null) {
+        return PaneEditorCommandOutcome.staleTarget;
+      }
+      setState(() => _message = error.toString());
+      return PaneEditorCommandOutcome.unchanged;
+    } finally {
+      if (mounted) {
+        setState(() => _busy = false);
+      }
+    }
+  }
+
   bool _hasUsableAiProvider() {
     return _usesInjectedAiProvider || (_providerConfig?.isComplete ?? false);
   }
@@ -1263,11 +1292,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     if (_resolvePaneEditorContext(context) == null) {
       return PaneEditorCommandOutcome.staleTarget;
     }
-    setState(() {
-      _busy = true;
-      _message = '';
-    });
-    try {
+    return _runPaneEditorBusy(context, () async {
       final image = await _imageInput.pasteImage();
       if (_resolvePaneEditorContext(context) == null) {
         return PaneEditorCommandOutcome.staleTarget;
@@ -1285,16 +1310,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       }
       _replaceEditorSelection(resolved.session, text);
       return PaneEditorCommandOutcome.committed;
-    } catch (error) {
-      if (mounted) {
-        setState(() => _message = error.toString());
-      }
-      return PaneEditorCommandOutcome.unchanged;
-    } finally {
-      if (mounted) {
-        setState(() => _busy = false);
-      }
-    }
+    });
   }
 
   Future<NoteEditorPasteAvailability> _noteEditorPasteAvailability(
@@ -1485,37 +1501,32 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     if (_resolvePaneEditorContext(context) == null) {
       return PaneEditorCommandOutcome.staleTarget;
     }
-    var outcome = PaneEditorCommandOutcome.unchanged;
-    await _runBusy(() async {
+    return _runPaneEditorBusy(context, () async {
       var resolved = _resolvePaneEditorContext(context);
       if (resolved == null) {
-        outcome = PaneEditorCommandOutcome.staleTarget;
-        return;
+        return PaneEditorCommandOutcome.staleTarget;
       }
       if (!await _flushSessionMarkdown(resolved.session)) {
-        return;
+        return PaneEditorCommandOutcome.unchanged;
       }
       if (_resolvePaneEditorContext(context) == null) {
-        outcome = PaneEditorCommandOutcome.staleTarget;
-        return;
+        return PaneEditorCommandOutcome.staleTarget;
       }
       final image = await _imageInput.pasteImage();
       if (_resolvePaneEditorContext(context) == null) {
-        outcome = PaneEditorCommandOutcome.staleTarget;
-        return;
+        return PaneEditorCommandOutcome.staleTarget;
       }
       if (image == null) {
         setState(() => _message = '剪贴板中没有可导入的图片');
-        return;
+        return PaneEditorCommandOutcome.unchanged;
       }
-      outcome = await _saveImportedImage(
+      return _saveImportedImage(
         context,
         image,
         message: '剪贴板图片已导入：${image.filename}',
         wrapBusy: false,
       );
     });
-    return outcome;
   }
 
   Future<PaneEditorCommandOutcome> _saveImportedImage(
@@ -1575,11 +1586,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     if (!wrapBusy) {
       return save();
     }
-    var outcome = PaneEditorCommandOutcome.unchanged;
-    await _runBusy(() async {
-      outcome = await save();
-    });
-    return outcome;
+    return _runPaneEditorBusy(context, save);
   }
 
   Future<PaneEditorCommandOutcome> _refreshPaneEditorTarget(
@@ -1658,20 +1665,17 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     if (!_requireModelConfigured()) {
       return PaneEditorCommandOutcome.unchanged;
     }
-    var outcome = PaneEditorCommandOutcome.unchanged;
-    await _runBusy(() async {
+    return _runPaneEditorBusy(context, () async {
       resolved = _resolvePaneEditorContext(context);
       if (resolved == null) {
-        outcome = PaneEditorCommandOutcome.staleTarget;
-        return;
+        return PaneEditorCommandOutcome.staleTarget;
       }
       if (!await _flushSessionMarkdown(resolved!.session)) {
-        return;
+        return PaneEditorCommandOutcome.unchanged;
       }
       resolved = _resolvePaneEditorContext(context);
       if (resolved == null) {
-        outcome = PaneEditorCommandOutcome.staleTarget;
-        return;
+        return PaneEditorCommandOutcome.staleTarget;
       }
       await _requireProposalService().createOutlineProposal(
         noteId: resolved!.noteId,
@@ -1679,16 +1683,14 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       );
       if (_resolvePaneEditorContext(context) == null) {
         await _recoverStaleBackendTarget(context, refreshProposals: true);
-        outcome = PaneEditorCommandOutcome.staleTarget;
-        return;
+        return PaneEditorCommandOutcome.staleTarget;
       }
-      outcome = await _refreshPaneEditorTarget(
+      return _refreshPaneEditorTarget(
         context,
         refreshResources: true,
         refreshProposals: true,
       );
     });
-    return outcome;
   }
 
   Future<PaneEditorCommandOutcome> _copyProposal(
@@ -2152,35 +2154,45 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     if (!confirmed) {
       return PaneEditorCommandOutcome.unchanged;
     }
-    var outcome = PaneEditorCommandOutcome.unchanged;
-    await _runBusy(() async {
+    return _runPaneEditorBusy(context, () async {
       var resolved = _resolvePaneEditorContext(context);
       if (resolved == null) {
-        outcome = PaneEditorCommandOutcome.staleTarget;
-        return;
+        return PaneEditorCommandOutcome.staleTarget;
       }
       if (!await _flushSessionMarkdown(resolved.session)) {
-        return;
+        return PaneEditorCommandOutcome.unchanged;
       }
-      if (_resolvePaneEditorContext(context) == null) {
-        outcome = PaneEditorCommandOutcome.staleTarget;
-        return;
+      resolved = _resolvePaneEditorContext(context);
+      if (resolved == null) {
+        return PaneEditorCommandOutcome.staleTarget;
       }
-      await _requireVault().deleteSource(source);
+      SourceItem? currentSource;
+      for (final candidate in resolved.session.note.sources) {
+        if (candidate.id == source.id) {
+          currentSource = candidate;
+          break;
+        }
+      }
+      if (currentSource == null) {
+        return PaneEditorCommandOutcome.unchanged;
+      }
+      await _requireVault().deleteSource(currentSource);
       if (_resolvePaneEditorContext(context) == null) {
         await _recoverStaleBackendTarget(context);
-        outcome = PaneEditorCommandOutcome.staleTarget;
-        return;
+        return PaneEditorCommandOutcome.staleTarget;
       }
-      outcome = await _refreshPaneEditorTarget(context, refreshResources: true);
+      final outcome = await _refreshPaneEditorTarget(
+        context,
+        refreshResources: true,
+      );
       if (outcome == PaneEditorCommandOutcome.staleTarget) {
-        return;
+        return outcome;
       }
       setState(() {
         _message = '图片素材已删除';
       });
+      return outcome;
     });
-    return outcome;
   }
 
   Future<PaneEditorCommandOutcome> _deleteProposal(
@@ -2197,25 +2209,23 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     if (!confirmed) {
       return PaneEditorCommandOutcome.unchanged;
     }
-    var outcome = PaneEditorCommandOutcome.unchanged;
-    await _runBusy(() async {
+    return _runPaneEditorBusy(context, () async {
       await _requireVault().deleteProposal(proposal.id);
       if (_resolvePaneEditorContext(context) == null) {
         await _recoverStaleBackendTarget(context, refreshProposals: true);
-        outcome = PaneEditorCommandOutcome.staleTarget;
-        return;
+        return PaneEditorCommandOutcome.staleTarget;
       }
-      outcome = await _refreshPaneEditorTarget(
+      final outcome = await _refreshPaneEditorTarget(
         context,
         refreshResources: false,
         refreshProposals: true,
       );
       if (outcome == PaneEditorCommandOutcome.staleTarget) {
-        return;
+        return outcome;
       }
       setState(() => _message = 'AI 建议已删除');
+      return outcome;
     });
-    return outcome;
   }
 
   Future<void> _search() async {
