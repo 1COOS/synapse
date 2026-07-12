@@ -1,0 +1,797 @@
+import 'package:flutter/cupertino.dart';
+import 'package:flutter/gestures.dart';
+import 'package:flutter_markdown/flutter_markdown.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:synapse/infrastructure/config/synapse_settings.dart';
+import 'package:synapse/infrastructure/input/image_input_service.dart';
+import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
+
+import '../../support/workspace_fakes.dart';
+import '../../support/workspace_harness.dart';
+
+void main() {
+  testWidgets('live editor never shows image source tags', (tester) async {
+    final vault = CountingUpdateVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Image Study');
+    final source = await vault.addImageSource(
+      noteId: note.id,
+      filename: 'pasted.png',
+      mimeType: 'image/png',
+      bytes: tinyPng,
+    );
+    await vault.updateMarkdown(
+      noteId: note.id,
+      markdown:
+          '# Image Study\n\n'
+          '<img src="Image Study.assets/attachments/pasted.png" '
+          'width="360">',
+    );
+    vault.updateCalls = 0;
+    vault.lastSavedMarkdown = null;
+
+    await pumpWorkspace(tester, vault: vault);
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(Key('preview-image-${source.id}')), findsOneWidget);
+    expect(find.textContaining('<img'), findsNothing);
+    expect(
+      find.byKey(const Key('live-markdown-image-tag-editor-2')),
+      findsNothing,
+    );
+
+    await tester.tap(find.byKey(Key('preview-image-tap-${source.id}')));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(Key('preview-image-${source.id}')), findsOneWidget);
+    expect(
+      find.byKey(const Key('live-markdown-image-preview-2')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(
+        of: find.byKey(const Key('live-markdown-image-preview-2')),
+        matching: find.byType(Image),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      previewImageFrameBorderColor(tester, source),
+      CupertinoColors.activeBlue,
+    );
+    expect(find.byKey(const Key('live-markdown-block-editor-2')), findsNothing);
+    expect(
+      find.byKey(const Key('live-markdown-image-tag-editor-2')),
+      findsNothing,
+    );
+    expect(find.byKey(const Key('note-editor')), findsNothing);
+    expect(find.textContaining('<img'), findsNothing);
+  });
+
+  testWidgets('live editor keeps image preview for mixed image blocks', (
+    tester,
+  ) async {
+    final vault = CountingUpdateVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Image Study');
+    final first = await vault.addImageSource(
+      noteId: note.id,
+      filename: 'first.png',
+      mimeType: 'image/png',
+      bytes: tinyPng,
+    );
+    final second = await vault.addImageSource(
+      noteId: note.id,
+      filename: 'second.png',
+      mimeType: 'image/png',
+      bytes: tinyPng,
+    );
+    const firstTag =
+        '<img src="Image Study.assets/attachments/first.png" width="320">';
+    const secondTag =
+        '<img src="Image Study.assets/attachments/second.png" width="320">';
+    await vault.updateMarkdown(
+      noteId: note.id,
+      markdown: '# Image Study\n\n$firstTag $secondTag',
+    );
+
+    await pumpWorkspace(tester, vault: vault);
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(Key('preview-image-${first.id}')), findsOneWidget);
+    expect(find.byKey(Key('preview-image-${second.id}')), findsOneWidget);
+    expect(find.textContaining('<img'), findsNothing);
+
+    await tester.tap(find.byKey(Key('preview-image-tap-${first.id}')));
+    await tester.pumpAndSettle();
+
+    expect(
+      find.byKey(const Key('live-markdown-image-preview-2')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(
+        of: find.byKey(const Key('live-markdown-image-preview-2')),
+        matching: find.byType(Image),
+      ),
+      findsNWidgets(2),
+    );
+    expect(
+      find.byKey(const Key('live-markdown-image-tag-editor-2')),
+      findsNothing,
+    );
+    expect(find.byKey(const Key('note-editor')), findsNothing);
+    expect(find.textContaining('<img'), findsNothing);
+  });
+
+  testWidgets('can continue writing below a trailing image', (tester) async {
+    final vault = CountingUpdateVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Image Study');
+    await vault.addImageSource(
+      noteId: note.id,
+      filename: 'pasted.png',
+      mimeType: 'image/png',
+      bytes: tinyPng,
+    );
+    const imageTag =
+        '<img src="Image Study.assets/attachments/pasted.png" width="360">';
+    await vault.updateMarkdown(
+      noteId: note.id,
+      markdown: '# Image Study\n\n$imageTag',
+    );
+    vault.updateCalls = 0;
+    vault.lastSavedMarkdown = null;
+
+    await pumpWorkspace(tester, vault: vault);
+    await tester.tap(find.byKey(const Key('live-markdown-end-edit-target')));
+    await tester.pump(const Duration(milliseconds: 250));
+    await tester.tap(find.byKey(const Key('live-markdown-end-edit-target')));
+    await tester.pump(const Duration(milliseconds: 1200));
+
+    expect(vault.updateCalls, 0);
+    expect(vault.lastSavedMarkdown, isNull);
+    expect(activeLiveMarkdownTextField(tester).placeholder, isNull);
+    expect(
+      tester
+          .getSize(find.byKey(const Key('live-markdown-end-edit-target')))
+          .height,
+      lessThanOrEqualTo(32),
+    );
+
+    expect(
+      find.byKey(const Key('live-markdown-block-editor-3')),
+      findsOneWidget,
+    );
+    await tester.enterText(activeLiveMarkdownEditableText(), 'after image');
+    await tester.pump(const Duration(milliseconds: 1000));
+    await tester.pump();
+
+    expect(vault.lastSavedMarkdown, contains('$imageTag\n\nafter image'));
+  });
+
+  testWidgets('uses the configured auto-save delay', (tester) async {
+    final vault = CountingUpdateVaultBackend();
+
+    await pumpWorkspace(
+      tester,
+      vault: vault,
+      settingsStore: FakeSettingsStore(
+        initialSettings: const SynapseSettings(
+          preferences: WorkspacePreferences(
+            defaultNoteMode: WorkspaceDefaultNoteMode.source,
+            semanticSearchEnabled: true,
+            pastedImageWidth: 480,
+            autoSaveDelayMillis: 1500,
+          ),
+        ),
+      ),
+    );
+
+    await enterTextInLiveMarkdownBlock(tester, '# 心经学习\n延迟保存');
+    await tester.pump(const Duration(milliseconds: 1000));
+    expect(vault.updateCalls, 0);
+
+    await tester.pump(const Duration(milliseconds: 500));
+    await tester.pump();
+    expect(vault.lastSavedMarkdown, contains('延迟保存'));
+  });
+
+  testWidgets('keeps the note editor editable and top aligned', (tester) async {
+    await pumpWorkspace(tester, vault: MemoryVaultBackend());
+    await switchToSourceMode(tester);
+    await activateLiveMarkdownBlock(tester);
+
+    final noteEditorFinder = find.byKey(const Key('note-editor'));
+    final noteEditor = activeLiveMarkdownTextField(tester);
+
+    expect(noteEditor.enabled, isTrue);
+    expect(noteEditor.readOnly, isFalse);
+    expect(noteEditor.textAlignVertical, TextAlignVertical.top);
+
+    await tester.tap(noteEditorFinder);
+    await tester.pump();
+
+    expect(find.byKey(const Key('note-editor')), findsOneWidget);
+
+    tester.testTextInput.enterText('# 手动笔记\n正文');
+    await tester.pump();
+
+    expect(find.textContaining('正文'), findsWidgets);
+  });
+
+  testWidgets('renders note preview with Cupertino Markdown styling', (
+    tester,
+  ) async {
+    await pumpWorkspace(tester, vault: MemoryVaultBackend());
+    await tester.tap(find.byKey(const Key('note-mode-reading')));
+    await tester.pump(const Duration(milliseconds: 250));
+
+    final markdown = tester.widget<MarkdownBody>(
+      find.byType(MarkdownBody).first,
+    );
+    expect(find.byKey(const Key('markdown-reading-preview')), findsOneWidget);
+    expect(markdown.softLineBreak, isTrue);
+    expect(markdown.styleSheetTheme, MarkdownStyleSheetBaseTheme.cupertino);
+    expect(find.textContaining('title:'), findsNothing);
+    expect(find.textContaining('createdAt:'), findsNothing);
+    expect(markdown.styleSheet?.h1?.fontSize, 20);
+    expect(markdown.styleSheet?.h1?.fontWeight, FontWeight.w600);
+  });
+
+  testWidgets('pastes a clipboard image into the note editor and saves it', (
+    tester,
+  ) async {
+    final vault = CountingUpdateVaultBackend();
+    final imageInput = FakeImageInputService(
+      pastedImage: const ImportedImage(
+        filename: 'clipboard-1783082971508.png',
+        mimeType: 'image/png',
+        bytes: tinyPng,
+      ),
+    );
+
+    await pumpWorkspace(tester, vault: vault, imageInput: imageInput);
+    await switchToSourceMode(tester);
+    await enterTextInLiveMarkdownBlock(tester, '# 心经学习\n正文');
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.metaLeft);
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.keyV);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.keyV);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.metaLeft);
+    await tester.pumpAndSettle();
+
+    const expectedImageTag =
+        '<img src="preview-note.assets/attachments/1783082971508.png" '
+        'width="480">';
+    final note = await vault.readNote('preview-note.md');
+    expect(imageInput.pasteCalls, 1);
+    expect(vault.updateCalls, 1);
+    expect(note.markdown, contains(expectedImageTag));
+    expect(note.markdown, isNot(contains(' alt=')));
+    expect(find.textContaining('图片已粘贴到笔记：1783082971508.png'), findsOneWidget);
+  });
+
+  testWidgets('uses the configured pasted image width', (tester) async {
+    final vault = CountingUpdateVaultBackend();
+    final imageInput = FakeImageInputService(
+      pastedImage: const ImportedImage(
+        filename: 'clipboard-1783082971508.png',
+        mimeType: 'image/png',
+        bytes: tinyPng,
+      ),
+    );
+
+    await pumpWorkspace(
+      tester,
+      vault: vault,
+      imageInput: imageInput,
+      settingsStore: FakeSettingsStore(
+        initialSettings: const SynapseSettings(
+          preferences: WorkspacePreferences(
+            defaultNoteMode: WorkspaceDefaultNoteMode.source,
+            semanticSearchEnabled: true,
+            pastedImageWidth: 720,
+            autoSaveDelayMillis: 1000,
+          ),
+        ),
+      ),
+    );
+    await enterTextInLiveMarkdownBlock(tester, '# 心经学习\n正文');
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.metaLeft);
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.keyV);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.keyV);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.metaLeft);
+    await tester.pumpAndSettle();
+
+    final note = await vault.readNote('preview-note.md');
+    expect(note.markdown, contains('width="720"'));
+  });
+
+  testWidgets('falls back to text paste when the clipboard has no image', (
+    tester,
+  ) async {
+    final vault = CountingUpdateVaultBackend();
+    final imageInput = FakeImageInputService();
+    mockClipboardText('普通剪贴板文本');
+
+    await pumpWorkspace(tester, vault: vault, imageInput: imageInput);
+    await switchToSourceMode(tester);
+    await enterTextInLiveMarkdownBlock(tester, '# 心经学习\n');
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.metaLeft);
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.keyV);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.keyV);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.metaLeft);
+    await tester.pumpAndSettle();
+
+    final noteEditor = activeLiveMarkdownTextField(tester);
+    expect(imageInput.pasteCalls, 1);
+    expect(noteEditor.controller?.text, contains('普通剪贴板文本'));
+
+    await tester.pump(const Duration(milliseconds: 1000));
+    await tester.pump();
+    expect(vault.lastSavedMarkdown, contains('普通剪贴板文本'));
+  });
+
+  testWidgets('shows guidance when pasting an image without an active note', (
+    tester,
+  ) async {
+    final imageInput = FakeImageInputService(
+      pastedImage: const ImportedImage(
+        filename: 'clipboard-shot.png',
+        mimeType: 'image/png',
+        bytes: tinyPng,
+      ),
+    );
+
+    await pumpWorkspace(
+      tester,
+      vault: MemoryVaultBackend(seedExampleData: false),
+      imageInput: imageInput,
+    );
+    await switchToSourceMode(tester);
+    await tester.tap(find.byKey(const Key('note-editor-paste-target')));
+    await tester.pump();
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.metaLeft);
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.keyV);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.keyV);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.metaLeft);
+    await tester.pump();
+
+    expect(imageInput.pasteCalls, 0);
+    expect(find.textContaining('请先选择或创建笔记'), findsOneWidget);
+  });
+
+  testWidgets('renders pasted HTML images in the note preview', (tester) async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Image Study');
+    final source = await vault.addImageSource(
+      noteId: note.id,
+      filename: 'pasted.png',
+      mimeType: 'image/png',
+      bytes: tinyPng,
+    );
+    await vault.updateMarkdown(
+      noteId: note.id,
+      markdown:
+          '# Image Study\n\n'
+          '<img src="Image Study.assets/attachments/pasted.png" '
+          'width="360" alt="pasted.png">',
+    );
+
+    await pumpWorkspace(tester, vault: vault);
+    await tester.pumpAndSettle();
+
+    final previewImage = find.byKey(Key('preview-image-${source.id}'));
+    expect(previewImage, findsOneWidget);
+    final image = tester.widget<Image>(
+      find.descendant(of: previewImage, matching: find.byType(Image)),
+    );
+    expect(image.fit, BoxFit.contain);
+  });
+
+  testWidgets('renders HTML images whose src contains percent signs', (
+    tester,
+  ) async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Image Study');
+    final source = await vault.addImageSource(
+      noteId: note.id,
+      filename: 'progress 100%.png',
+      mimeType: 'image/png',
+      bytes: tinyPng,
+    );
+    await vault.updateMarkdown(
+      noteId: note.id,
+      markdown:
+          '# Image Study\n\n'
+          '<img src="Image Study.assets/attachments/progress 100%.png" '
+          'width="360" alt="progress 100%.png">',
+    );
+
+    await pumpWorkspace(tester, vault: vault);
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(Key('preview-image-${source.id}')), findsOneWidget);
+  });
+
+  testWidgets('selects a preview image and reveals resize hint only on hover', (
+    tester,
+  ) async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Image Study');
+    final source = await vault.addImageSource(
+      noteId: note.id,
+      filename: 'pasted.png',
+      mimeType: 'image/png',
+      bytes: tinyPng,
+    );
+    await vault.updateMarkdown(
+      noteId: note.id,
+      markdown:
+          '# Image Study\n\n'
+          '<img src="Image Study.assets/attachments/pasted.png" '
+          'width="360">',
+    );
+
+    await pumpWorkspace(tester, vault: vault);
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(Key('preview-image-${source.id}')), findsOneWidget);
+    expect(
+      find.byIcon(CupertinoIcons.arrow_down_right_arrow_up_left),
+      findsNothing,
+    );
+    expect(
+      previewImageFrameBorderColor(tester, source),
+      const Color(0xFFE5E5EA),
+    );
+
+    await tester.tap(find.byKey(Key('preview-image-tap-${source.id}')));
+    await tester.pumpAndSettle();
+
+    expect(
+      previewImageFrameBorderColor(tester, source),
+      CupertinoColors.activeBlue,
+    );
+
+    final rect = tester.getRect(
+      find.byKey(Key('preview-image-tap-${source.id}')),
+    );
+    final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+    await mouse.addPointer(location: rect.bottomRight - const Offset(8, 8));
+    await tester.pump();
+
+    expect(
+      find.byKey(Key('image-resize-handle-icon-${source.id}')),
+      findsOneWidget,
+    );
+    expect(
+      find.byIcon(CupertinoIcons.arrow_down_right_arrow_up_left),
+      findsOneWidget,
+    );
+
+    await mouse.moveTo(rect.topLeft + const Offset(8, 8));
+    await tester.pump();
+
+    expect(
+      find.byKey(Key('image-resize-handle-icon-${source.id}')),
+      findsNothing,
+    );
+
+    await mouse.removePointer();
+  });
+
+  testWidgets('updates pasted image width by dragging the preview handle', (
+    tester,
+  ) async {
+    final vault = CountingUpdateVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Image Study');
+    final source = await vault.addImageSource(
+      noteId: note.id,
+      filename: 'pasted.png',
+      mimeType: 'image/png',
+      bytes: tinyPng,
+    );
+    await vault.updateMarkdown(
+      noteId: note.id,
+      markdown:
+          '# Image Study\n\n'
+          '<img src="Image Study.assets/attachments/pasted.png" '
+          'width="360" alt="pasted.png">',
+    );
+    vault.updateCalls = 0;
+    vault.lastSavedMarkdown = null;
+
+    await pumpWorkspace(tester, vault: vault);
+    await tester.pumpAndSettle();
+    final previewImage = find.byKey(Key('preview-image-${source.id}'));
+    expect(previewImage, findsOneWidget);
+    expect(find.byType(CupertinoSlider), findsNothing);
+    expect(find.byKey(Key('decrease-image-width-${source.id}')), findsNothing);
+    expect(find.byKey(Key('increase-image-width-${source.id}')), findsNothing);
+
+    await tester.drag(
+      find.byKey(Key('image-resize-handle-${source.id}')),
+      const Offset(280, 0),
+    );
+    await tester.pumpAndSettle();
+
+    expect(vault.updateCalls, greaterThanOrEqualTo(1));
+    expect(vault.lastSavedMarkdown, contains('width="640"'));
+    expect((await vault.readNote(note.id)).markdown, contains('width="640"'));
+  });
+
+  testWidgets('reading mode hides image resize controls', (tester) async {
+    final vault = CountingUpdateVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Image Study');
+    final source = await vault.addImageSource(
+      noteId: note.id,
+      filename: 'pasted.png',
+      mimeType: 'image/png',
+      bytes: tinyPng,
+    );
+    await vault.updateMarkdown(
+      noteId: note.id,
+      markdown:
+          '# Image Study\n\n'
+          '<img src="Image Study.assets/attachments/pasted.png" '
+          'width="360">',
+    );
+    vault.updateCalls = 0;
+    vault.lastSavedMarkdown = null;
+
+    await pumpWorkspace(tester, vault: vault);
+    await tester.tap(find.byKey(const Key('note-mode-reading')));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(Key('preview-image-${source.id}')), findsOneWidget);
+    expect(find.byKey(Key('image-resize-handle-${source.id}')), findsNothing);
+    expect(
+      find.byKey(Key('image-resize-handle-icon-${source.id}')),
+      findsNothing,
+    );
+
+    await tester.tap(find.byKey(Key('preview-image-tap-${source.id}')));
+    await tester.pumpAndSettle();
+
+    expect(vault.updateCalls, 0);
+    expect(vault.lastSavedMarkdown, isNull);
+  });
+
+  testWidgets('clamps dragged preview image width to the allowed range', (
+    tester,
+  ) async {
+    final vault = CountingUpdateVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Image Study');
+    final source = await vault.addImageSource(
+      noteId: note.id,
+      filename: 'pasted.png',
+      mimeType: 'image/png',
+      bytes: tinyPng,
+    );
+    await vault.updateMarkdown(
+      noteId: note.id,
+      markdown:
+          '# Image Study\n\n'
+          '<img src="Image Study.assets/attachments/pasted.png" '
+          'width="360" alt="pasted.png">',
+    );
+    vault.updateCalls = 0;
+    vault.lastSavedMarkdown = null;
+
+    await pumpWorkspace(tester, vault: vault);
+    await tester.pumpAndSettle();
+
+    final handle = find.byKey(Key('image-resize-handle-${source.id}'));
+    await tester.drag(handle, const Offset(-1000, 0));
+    await tester.pumpAndSettle();
+    expect(vault.lastSavedMarkdown, contains('width="120"'));
+
+    await tester.drag(handle, const Offset(2000, 0));
+    await tester.pumpAndSettle();
+    expect(vault.lastSavedMarkdown, contains('width="1200"'));
+    expect((await vault.readNote(note.id)).markdown, contains('width="1200"'));
+  });
+
+  testWidgets('drags a preview image to the right of another image row', (
+    tester,
+  ) async {
+    final vault = CountingUpdateVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Image Study');
+    final first = await vault.addImageSource(
+      noteId: note.id,
+      filename: 'first.png',
+      mimeType: 'image/png',
+      bytes: tinyPng,
+    );
+    final second = await vault.addImageSource(
+      noteId: note.id,
+      filename: 'second.png',
+      mimeType: 'image/png',
+      bytes: tinyPng,
+    );
+    const firstTag =
+        '<img src="Image Study.assets/attachments/first.png" width="320">';
+    const secondTag =
+        '<img src="Image Study.assets/attachments/second.png" width="320">';
+    await vault.updateMarkdown(
+      noteId: note.id,
+      markdown: '# Image Study\n\n$firstTag\n\n$secondTag',
+    );
+    vault.updateCalls = 0;
+    vault.lastSavedMarkdown = null;
+
+    await pumpWorkspace(tester, vault: vault);
+    await tester.pumpAndSettle();
+
+    await dragPreviewImageToSide(
+      tester,
+      from: first,
+      to: second,
+      side: PreviewImageDropSide.right,
+    );
+
+    expect(vault.updateCalls, greaterThanOrEqualTo(1));
+    expect(vault.lastSavedMarkdown, contains('$secondTag $firstTag'));
+    expect(vault.lastSavedMarkdown, isNot(contains('$firstTag\n\n$secondTag')));
+    expect(
+      (await vault.readNote(note.id)).markdown,
+      contains('$secondTag $firstTag'),
+    );
+  });
+
+  testWidgets('drags a preview image to the left of another image row', (
+    tester,
+  ) async {
+    final vault = CountingUpdateVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Image Study');
+    final first = await vault.addImageSource(
+      noteId: note.id,
+      filename: 'first.png',
+      mimeType: 'image/png',
+      bytes: tinyPng,
+    );
+    final second = await vault.addImageSource(
+      noteId: note.id,
+      filename: 'second.png',
+      mimeType: 'image/png',
+      bytes: tinyPng,
+    );
+    const firstTag =
+        '<img src="Image Study.assets/attachments/first.png" width="320">';
+    const secondTag =
+        '<img src="Image Study.assets/attachments/second.png" width="320">';
+    await vault.updateMarkdown(
+      noteId: note.id,
+      markdown: '# Image Study\n\n$firstTag\n\n$secondTag',
+    );
+    vault.updateCalls = 0;
+    vault.lastSavedMarkdown = null;
+
+    await pumpWorkspace(tester, vault: vault);
+    await tester.pumpAndSettle();
+
+    await dragPreviewImageToSide(
+      tester,
+      from: second,
+      to: first,
+      side: PreviewImageDropSide.left,
+    );
+
+    expect(vault.updateCalls, greaterThanOrEqualTo(1));
+    expect(vault.lastSavedMarkdown, contains('$secondTag $firstTag'));
+    expect(
+      (await vault.readNote(note.id)).markdown,
+      contains('$secondTag $firstTag'),
+    );
+  });
+
+  testWidgets('dragging the resize handle does not move preview images', (
+    tester,
+  ) async {
+    final vault = CountingUpdateVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Image Study');
+    final first = await vault.addImageSource(
+      noteId: note.id,
+      filename: 'first.png',
+      mimeType: 'image/png',
+      bytes: tinyPng,
+    );
+    final second = await vault.addImageSource(
+      noteId: note.id,
+      filename: 'second.png',
+      mimeType: 'image/png',
+      bytes: tinyPng,
+    );
+    const firstTag =
+        '<img src="Image Study.assets/attachments/first.png" width="320">';
+    const secondTag =
+        '<img src="Image Study.assets/attachments/second.png" width="320">';
+    await vault.updateMarkdown(
+      noteId: note.id,
+      markdown: '# Image Study\n\n$firstTag\n\n$secondTag',
+    );
+    vault.updateCalls = 0;
+    vault.lastSavedMarkdown = null;
+
+    await pumpWorkspace(tester, vault: vault);
+    await tester.pumpAndSettle();
+
+    await tester.drag(
+      find.byKey(Key('image-resize-handle-${first.id}')),
+      const Offset(80, 0),
+    );
+    await tester.pumpAndSettle();
+
+    expect(vault.lastSavedMarkdown, contains('first.png" width="400"'));
+    expect(vault.lastSavedMarkdown, contains('width="400">\n\n$secondTag'));
+    expect(vault.lastSavedMarkdown, isNot(contains('$firstTag $secondTag')));
+    expect(find.byKey(Key('preview-image-${second.id}')), findsOneWidget);
+  });
+
+  testWidgets('dragging onto a non Synapse image does not change markdown', (
+    tester,
+  ) async {
+    final vault = CountingUpdateVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Image Study');
+    final source = await vault.addImageSource(
+      noteId: note.id,
+      filename: 'local.png',
+      mimeType: 'image/png',
+      bytes: tinyPng,
+    );
+    const localTag =
+        '<img src="Image Study.assets/attachments/local.png" width="320">';
+    const remoteTag = '<img src="https://example.com/remote.png" width="320">';
+    await vault.updateMarkdown(
+      noteId: note.id,
+      markdown: '# Image Study\n\n$localTag\n\n$remoteTag',
+    );
+    vault.updateCalls = 0;
+    vault.lastSavedMarkdown = null;
+
+    await pumpWorkspace(tester, vault: vault);
+    await tester.pumpAndSettle();
+
+    final start = tester.getCenter(
+      find.byKey(Key('preview-image-tap-${source.id}')),
+    );
+    await tester.dragFrom(start, const Offset(260, 0));
+    await tester.pumpAndSettle();
+
+    expect(vault.updateCalls, 0);
+    expect((await vault.readNote(note.id)).markdown, contains(remoteTag));
+  });
+
+  testWidgets('hides frontmatter in the note editor but keeps it on save', (
+    tester,
+  ) async {
+    final vault = CountingUpdateVaultBackend();
+
+    await pumpWorkspace(tester, vault: vault);
+    await switchToSourceMode(tester);
+    await activateLiveMarkdownBlock(tester);
+
+    final noteEditor = activeLiveMarkdownTextField(tester);
+
+    expect(noteEditor.controller?.text.trimLeft().startsWith('# 心经学习'), isTrue);
+    expect(noteEditor.controller?.text, isNot(contains('---')));
+    expect(noteEditor.controller?.text, isNot(contains('title:')));
+    expect(noteEditor.controller?.text, isNot(contains('createdAt:')));
+    expect(noteEditor.controller?.text, isNot(contains('updatedAt:')));
+    expect(noteEditor.controller?.text, isNot(contains('id:')));
+
+    await tester.enterText(
+      find.byKey(const Key('note-editor')),
+      '# 心经学习\n隐藏元信息保存',
+    );
+    await tester.pump(const Duration(milliseconds: 1000));
+    await tester.pump();
+
+    expect(vault.lastSavedMarkdown?.trimLeft().startsWith('---'), isTrue);
+    expect(vault.lastSavedMarkdown, contains('title: 心经学习'));
+    expect(
+      vault.lastSavedMarkdown,
+      matches(RegExp(r'createdAt: \d{4}-\d{2}-\d{2} \d{2}:\d{2}')),
+    );
+    expect(vault.lastSavedMarkdown, contains('# 心经学习\n隐藏元信息保存'));
+  });
+}
