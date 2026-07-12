@@ -2,7 +2,8 @@
 
 **分支：** `codex/state-layer-rewrite`
 **Foundation implementation baseline：** `3cc85d9c9b3e54920a98b91e8d1fc69b76b08ac9`
-**文档历史 checkpoint：** `92d5576`
+**Initial documentation checkpoint：** `92d5576`
+**Review clarification commit：** `d4c5310`
 
 > Foundation baseline 捕获时，分支相对 `main` 有 15 个实现提交。该数字只描述 baseline 捕获时点，不声明后续分支的固定提交总数。
 

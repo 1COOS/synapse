@@ -4,7 +4,8 @@
 **状态：** Foundation checkpoint 已完成，按批准顺序继续执行
 **目标分支：** `codex/state-layer-rewrite`
 **Foundation implementation baseline：** `3cc85d9c9b3e54920a98b91e8d1fc69b76b08ac9`
-**文档 checkpoint：** `92d5576`
+**Initial documentation checkpoint：** `92d5576`
+**Review clarification commit：** `d4c5310`
 
 > Foundation baseline 捕获时，分支相对 `main` 有 15 个实现提交，任务 1-5 的 session/save/split/mutation foundation 已完成。该 baseline 的 fresh evidence 为状态层 65 tests pass、workspace 140 tests pass，共 205 tests pass，`flutter analyze --no-pub` 无 issue，`git diff --check` clean。提交数量仅描述 baseline 捕获时点，不作为后续分支总提交数。
 
