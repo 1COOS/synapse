@@ -23,6 +23,7 @@ import '../../infrastructure/input/image_input_service.dart';
 import '../../infrastructure/vault/default_vault_backend.dart';
 import '../../infrastructure/vault/vault_backend.dart';
 import '../workspace/state/note_document_session.dart';
+import '../workspace/state/note_materials_registry.dart';
 import '../workspace/state/note_save_coordinator.dart';
 import '../workspace/state/note_session_registry.dart';
 import '../workspace/state/split_workspace_controller.dart';
@@ -129,6 +130,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
 
   final _emptyMarkdownController = TextEditingController();
   late final NoteSessionRegistry _noteSessionRegistry;
+  late final NoteMaterialsRegistry _noteMaterialsRegistry;
   late final NoteSaveCoordinator _noteSaveCoordinator;
   late final SplitWorkspaceController _splitWorkspaceController;
   late final WorkspaceMutationBarrier _workspaceMutationBarrier;
@@ -139,8 +141,6 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   List<VaultResourceNode> _resources = const [];
   VaultResourceNode? _selectedResource;
   List<SearchResult> _searchResults = const [];
-  final Set<String> _inactiveSelectedSourceIds = <String>{};
-  List<AiProposal> _inactiveProposals = const [];
   final Set<String> _collapsedFolderIds = <String>{};
   final Map<String, String> _searchIndexFingerprints = <String, String>{};
   _WorkspaceSection _narrowSection = _WorkspaceSection.resources;
@@ -172,6 +172,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       visibleBody: _visibleMarkdownBody,
       onEdited: _handleSessionMarkdownEdited,
     );
+    _noteMaterialsRegistry = NoteMaterialsRegistry();
     _noteSaveCoordinator = NoteSaveCoordinator(
       sessions: _noteSessionRegistry,
       vault: _requireVault,
@@ -221,6 +222,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   @override
   void dispose() {
     _noteSaveCoordinator.dispose();
+    _noteMaterialsRegistry.dispose();
     _noteSessionRegistry.dispose();
     _splitWorkspaceController.dispose();
     _emptyMarkdownController.dispose();
@@ -264,13 +266,14 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     if (disposeSessions) {
       _noteSessionRegistry.clear();
     }
-    _inactiveSelectedSourceIds.clear();
-    _inactiveProposals = const [];
+    _noteMaterialsRegistry.clear();
     _splitWorkspaceController.reset(defaultMode: _preferredNoteMode);
   }
 
   NoteDocumentSession _upsertNoteSession(VaultNoteContent note) {
-    return _noteSessionRegistry.upsert(note);
+    final session = _noteSessionRegistry.upsert(note);
+    _noteMaterialsRegistry.reconcileNote(note);
+    return session;
   }
 
   void _focusPane(String paneId) {
@@ -329,34 +332,21 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     };
   }
 
-  void _syncRemappedSessionMaterials(
-    Map<String, String> remaps, {
+  void _applyMaterialsMutation({
+    required Map<String, String> remappedNoteIds,
+    required Set<String> removedNoteIds,
+    required Map<String, VaultNoteContent> refreshedNotesByNewId,
     bool clearFocusedPreview = false,
   }) {
-    if (remaps.isEmpty) {
-      return;
+    _noteMaterialsRegistry.applyMutation(
+      remappedNoteIds: _actualNoteIdRemaps(remappedNoteIds),
+      removedNoteIds: removedNoteIds,
+      refreshedNotesByNewId: refreshedNotesByNewId,
+    );
+    if (remappedNoteIds.isNotEmpty) {
+      _searchResults = const [];
     }
-    final focusedSession = _activeSession;
-    var shouldClearFocusedPreviewSelection = false;
-    for (final newNoteId in remaps.values) {
-      final session = _noteSessionRegistry.sessionFor(newNoteId);
-      if (session == null) {
-        continue;
-      }
-      final sourceIds = session.note.sources.map((source) => source.id).toSet();
-      session.selectedSourceIds.retainWhere(sourceIds.contains);
-      session.proposals = <AiProposal>[
-        for (final proposal in session.proposals)
-          proposal.noteId == newNoteId
-              ? proposal
-              : proposal.copyWith(noteId: newNoteId),
-      ];
-      if (clearFocusedPreview && identical(session, focusedSession)) {
-        shouldClearFocusedPreviewSelection = true;
-      }
-    }
-    _searchResults = const [];
-    if (shouldClearFocusedPreviewSelection) {
+    if (clearFocusedPreview && remappedNoteIds.isNotEmpty) {
       _setSelectedPreviewImageSrc(null);
     }
   }
@@ -406,6 +396,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
                 target.session,
               )) {
             _noteSessionRegistry.remove([closingNoteId]);
+            _noteMaterialsRegistry.remove([closingNoteId]);
           }
           _syncFocusedPaneSelection();
         });
@@ -551,20 +542,17 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   }
 
   Set<String> get _selectedSourceIds {
-    return _activeSession?.selectedSourceIds ?? _inactiveSelectedSourceIds;
+    final noteId = _activeSession?.noteId;
+    return noteId == null
+        ? NoteMaterialsSnapshot.empty.selectedSourceIds
+        : _noteMaterialsRegistry.snapshotFor(noteId).selectedSourceIds;
   }
 
   List<AiProposal> get _proposals {
-    return _activeSession?.proposals ?? _inactiveProposals;
-  }
-
-  set _proposals(List<AiProposal> value) {
-    final session = _activeSession;
-    if (session == null) {
-      _inactiveProposals = value;
-      return;
-    }
-    session.proposals = value;
+    final noteId = _activeSession?.noteId;
+    return noteId == null
+        ? NoteMaterialsSnapshot.empty.proposals
+        : _noteMaterialsRegistry.snapshotFor(noteId).proposals;
   }
 
   set _noteMode(NoteMode value) {
@@ -867,9 +855,10 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       _selectedResource = firstNote;
       _activeNote = active;
       _replaceEditorMarkdown(active?.markdown ?? '');
-      _proposals = proposals;
+      if (active != null) {
+        _noteMaterialsRegistry.replaceProposals(active.id, proposals);
+      }
       _searchResults = const [];
-      _selectedSourceIds.clear();
       if (message != null) {
         _message = message;
       }
@@ -905,15 +894,12 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       _resources = resources;
       _selectedResource = _findResource(resources, refreshed.id);
       _activeNote = refreshed;
-      _selectedSourceIds.removeWhere(
-        (sourceId) => !refreshed.sources.any((source) => source.id == sourceId),
-      );
     });
   }
 
   Future<void> _refreshProposals(String noteId) async {
     final proposals = await _requireVault().listProposals(noteId);
-    setState(() => _proposals = proposals);
+    setState(() => _noteMaterialsRegistry.replaceProposals(noteId, proposals));
   }
 
   Future<void> _selectResource(VaultResourceNode resource) async {
@@ -935,7 +921,6 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       setState(() {
         _selectedResource = resource;
         _activeNote = loaded;
-        _selectedSourceIds.clear();
         _noteMode = _preferredNoteMode;
         _narrowSection = _WorkspaceSection.notes;
       });
@@ -990,8 +975,6 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
         _selectedResource = _findResource(resources, note.id);
         _activeNote = loaded;
         _replaceEditorMarkdown(loaded.markdown);
-        _proposals = const [];
-        _selectedSourceIds.clear();
         _collapsedFolderIds.remove(parentPath);
         _noteMode = _preferredNoteMode;
         _narrowSection = _WorkspaceSection.notes;
@@ -1203,8 +1186,10 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
           return;
         }
         setState(() {
-          _syncRemappedSessionMaterials(
-            _actualNoteIdRemaps(delta.remappedNoteIds),
+          _applyMaterialsMutation(
+            remappedNoteIds: delta.remappedNoteIds,
+            removedNoteIds: delta.removedNoteIds,
+            refreshedNotesByNewId: delta.refreshedNotesByNewId,
             clearFocusedPreview: true,
           );
           final resources = delta.resources;
@@ -1298,7 +1283,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       return;
     }
     setState(() {
-      _selectedSourceIds.add(source.id);
+      _noteMaterialsRegistry.setSourceSelected(active.id, source.id, true);
       _setSelectedPreviewImageSrc(_markdownAttachmentSrc(active, source));
     });
   }
@@ -1433,7 +1418,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       );
       await _refreshActiveNote();
       setState(() {
-        _selectedSourceIds.add(source.id);
+        _noteMaterialsRegistry.setSourceSelected(active.id, source.id, true);
         _narrowSection = _WorkspaceSection.sources;
         _message = message;
       });
@@ -1608,6 +1593,11 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
               setState(() {
                 _resources = delta.resources ?? const [];
                 _searchResults = const [];
+                _applyMaterialsMutation(
+                  remappedNoteIds: delta.remappedNoteIds,
+                  removedNoteIds: delta.removedNoteIds,
+                  refreshedNotesByNewId: delta.refreshedNotesByNewId,
+                );
                 bool canReceiveFallback(_PaneMutationTarget target) {
                   return _paneMutationTargetHasCurrentGeneration(target) &&
                       _splitWorkspaceController.pane(target.paneId)?.noteId ==
@@ -1629,8 +1619,11 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
                   fallbackPaneTarget = paneTarget;
                 }
                 if (fallbackNote != null && fallbackPaneTarget != null) {
-                  final fallbackSession = _upsertNoteSession(fallbackNote);
-                  fallbackSession.proposals = delta.value.fallbackProposals;
+                  _upsertNoteSession(fallbackNote);
+                  _noteMaterialsRegistry.replaceProposals(
+                    fallbackNote.id,
+                    delta.value.fallbackProposals,
+                  );
                   _splitWorkspaceController.setPaneNote(
                     fallbackPaneTarget.paneId,
                     fallbackNote.id,
@@ -1713,8 +1706,10 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
           }
           setState(() {
             _resources = delta.resources ?? const [];
-            _syncRemappedSessionMaterials(
-              _actualNoteIdRemaps(delta.remappedNoteIds),
+            _applyMaterialsMutation(
+              remappedNoteIds: delta.remappedNoteIds,
+              removedNoteIds: delta.removedNoteIds,
+              refreshedNotesByNewId: delta.refreshedNotesByNewId,
             );
             if (folder.path != delta.value.path) {
               _searchResults = const [];
@@ -1779,8 +1774,11 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
             _resources = delta.resources ?? const [];
             _searchResults = const [];
             if (targetIsCurrent) {
-              final copiedSession = _upsertNoteSession(delta.value.note);
-              copiedSession.proposals = delta.value.proposals;
+              _upsertNoteSession(delta.value.note);
+              _noteMaterialsRegistry.replaceProposals(
+                delta.value.note.id,
+                delta.value.proposals,
+              );
               _splitWorkspaceController.setPaneNote(
                 paneTarget.paneId,
                 delta.value.note.id,
@@ -1849,13 +1847,17 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
               _paneMutationTargetStillOwnsSession(paneTarget);
           setState(() {
             _resources = delta.resources ?? const [];
-            _syncRemappedSessionMaterials(
-              _actualNoteIdRemaps(delta.remappedNoteIds),
+            _applyMaterialsMutation(
+              remappedNoteIds: delta.remappedNoteIds,
+              removedNoteIds: delta.removedNoteIds,
+              refreshedNotesByNewId: delta.refreshedNotesByNewId,
             );
-            final movedSession =
-                _noteSessionRegistry.sessionFor(delta.value.note.id) ??
+            _noteMaterialsRegistry.replaceProposals(
+              delta.value.note.id,
+              delta.value.proposals,
+            );
+            _noteSessionRegistry.sessionFor(delta.value.note.id) ??
                 _upsertNoteSession(delta.value.note);
-            movedSession.proposals = delta.value.proposals;
             if (targetIsCurrent) {
               _splitWorkspaceController.setPaneNote(
                 paneTarget.paneId,
@@ -1904,7 +1906,6 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       await _requireVault().deleteSource(source);
       await _refreshActiveNote();
       setState(() {
-        _selectedSourceIds.remove(source.id);
         _message = '图片素材已删除';
       });
     });
@@ -3227,12 +3228,15 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
                       busy: _busy,
                       imageBytes: _requireVault().readSourceAttachment(source),
                       onToggle: () {
+                        final active = _activeNote;
+                        if (active == null) {
+                          return;
+                        }
                         setState(() {
-                          if (_selectedSourceIds.contains(source.id)) {
-                            _selectedSourceIds.remove(source.id);
-                          } else {
-                            _selectedSourceIds.add(source.id);
-                          }
+                          _noteMaterialsRegistry.toggleSource(
+                            active.id,
+                            source.id,
+                          );
                         });
                       },
                       onDelete: () => _deleteSource(source),

@@ -23,9 +23,6 @@ final class NoteDocumentSession extends ChangeNotifier {
   final void Function(NoteDocumentSession session) _onEdited;
   final _SessionTextEditingController _controller;
 
-  final Set<String> selectedSourceIds = <String>{};
-  List<AiProposal> proposals = const [];
-
   bool _isProgrammaticChange = false;
   bool _isDisposed = false;
   NoteSavePhase _savePhase = NoteSavePhase.clean;
