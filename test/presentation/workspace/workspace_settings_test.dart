@@ -389,6 +389,37 @@ void main() {
   );
 
   testWidgets(
+    'canceling settings leaves delayed startup initialization active',
+    (tester) async {
+      final vault = MemoryVaultBackend(seedExampleData: false);
+      await vault.createNote(parentPath: '', title: 'Alpha');
+      final settingsStore = _GatedLoadSettingsStore(
+        startupSettings: _replacementSettings,
+      );
+      final dependencies = createWorkspaceDependencies(
+        initialVault: vault,
+        settingsStore: settingsStore,
+      );
+
+      await pumpWorkspace(tester, vault: null, dependencies: dependencies);
+      await settingsStore.loadStarted.future;
+      await tester.tap(find.byKey(const Key('settings-button')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('取消'));
+      await tester.pumpAndSettle();
+
+      settingsStore.releaseLoad();
+      await tester.pumpAndSettle();
+
+      expect(find.text('Alpha'), findsWidgets);
+      expect(
+        primaryButtonColor(tester, const Key('add-image-button')),
+        CupertinoColors.systemPurple,
+      );
+    },
+  );
+
+  testWidgets(
     'runtime build failure keeps old settings runtime and provider behavior',
     (tester) async {
       final vault = MemoryVaultBackend(seedExampleData: false);

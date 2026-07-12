@@ -1601,13 +1601,8 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   }
 
   Future<void> _chooseVault() async {
-    _invalidateStartupOperation();
     if (!_dependencies.supportsDirectoryVault) {
       setState(() => _message = 'H5 预览使用浏览器沙盒库');
-      return;
-    }
-    final saved = _reloadRequired || await _autoSaveDirtyMarkdownBeforeSwitch();
-    if (!saved || !mounted) {
       return;
     }
     VaultLocation? pickedLocation;
@@ -1623,6 +1618,11 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       return;
     }
     if (!mounted) {
+      return;
+    }
+    _invalidateStartupOperation();
+    final saved = _reloadRequired || await _autoSaveDirtyMarkdownBeforeSwitch();
+    if (!saved || !mounted) {
       return;
     }
     await _runBusy(() async {
@@ -3209,7 +3209,6 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   }
 
   Future<void> _openSettings() async {
-    _invalidateStartupOperation();
     final store = await _getSettingsStore();
     final initialSettings = _settings.copyWith(
       providerConfig: _providerConfig ?? ProviderConfig.empty,
@@ -3231,6 +3230,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     if (savedSettings == null) {
       return;
     }
+    _invalidateStartupOperation();
     await _runBusy(() async {
       final current = _runtimeManager.current;
       WorkspaceRuntime? candidate;

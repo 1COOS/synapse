@@ -283,6 +283,49 @@ void main() {
     },
   );
 
+  testWidgets(
+    'canceling the Vault picker leaves delayed startup restore active',
+    (tester) async {
+      const savedPath = '/vault/saved-after-cancel';
+      final savedVault = MemoryVaultBackend(seedExampleData: false);
+      await savedVault.createNote(parentPath: '', title: 'Saved');
+      final restoreStarted = Completer<void>();
+      final restoreRelease = Completer<void>();
+      var pickerCalls = 0;
+      final dependencies = createWorkspaceDependencies(
+        settingsStore: FakeSettingsStore(
+          initialSettings: const SynapseSettings(
+            vaultLocation: VaultLocation(rootPath: savedPath),
+          ),
+        ),
+        aiProvider: MockAiProvider(),
+        supportsDirectoryVaultOverride: true,
+        restoreVaultAccess: (location) async {
+          restoreStarted.complete();
+          await restoreRelease.future;
+          return location;
+        },
+        pickVaultLocation: () async {
+          pickerCalls += 1;
+          return null;
+        },
+        vaultBackendFactory: (_) => savedVault,
+      );
+
+      await pumpWorkspace(tester, vault: null, dependencies: dependencies);
+      await restoreStarted.future;
+      await tester.tap(find.byKey(const Key('choose-vault-empty-button')));
+      await tester.pumpAndSettle();
+      expect(pickerCalls, 1);
+
+      restoreRelease.complete();
+      await tester.pumpAndSettle();
+
+      expect(find.text('Saved'), findsWidgets);
+      expect(find.byKey(const Key('choose-vault-empty-button')), findsNothing);
+    },
+  );
+
   testWidgets('prompts for a new vault when the saved path is unavailable', (
     tester,
   ) async {
@@ -511,9 +554,7 @@ void main() {
     },
   );
 
-  testWidgets('flushes every dirty pane before opening the vault picker', (
-    tester,
-  ) async {
+  testWidgets('flushes every dirty pane after Vault selection', (tester) async {
     const firstPath = '/vault/first';
     const secondPath = '/vault/second';
     final events = <String>[];
@@ -566,7 +607,7 @@ void main() {
       events.where((event) => event.startsWith('save:')),
       unorderedEquals(['save:Alpha.md', 'save:Beta.md']),
     );
-    expect(events.last, 'picker');
+    expect(events.first, 'picker');
     expect(
       (await firstVault.readNote('Gamma.md')).markdown,
       contains('alpha dirty'),
@@ -579,7 +620,7 @@ void main() {
     expect(find.text('Second'), findsWidgets);
   });
 
-  testWidgets('does not open the vault picker after workspace unmounts', (
+  testWidgets('does not continue a Vault switch after unmount during save', (
     tester,
   ) async {
     const firstPath = '/vault/first';
@@ -621,11 +662,11 @@ void main() {
     await tester.pump();
     await tester.pump();
 
-    expect(pickerCalls, 0);
+    expect(pickerCalls, 1);
   });
 
   testWidgets(
-    'keeps every pane and skips the vault picker when an unfocused save fails',
+    'keeps every pane and aborts a selected Vault when an unfocused save fails',
     (tester) async {
       const firstPath = '/vault/first';
       const secondPath = '/vault/second';
@@ -694,7 +735,8 @@ void main() {
             .where((event) => event.startsWith('save:')),
         isEmpty,
       );
-      expect(pickerCalls, 0);
+      expect(pickerCalls, 1);
+      expect(events.first, 'picker');
       expect(locationStore.savedLocations, isEmpty);
       expect(find.byKey(const Key('split-pane-pane-1')), findsOneWidget);
       expect(find.byKey(const Key('split-pane-pane-2')), findsOneWidget);
