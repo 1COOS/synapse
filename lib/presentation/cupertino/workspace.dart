@@ -3289,6 +3289,9 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   }
 
   Future<void> _openSettings() async {
+    if (!await _awaitStartupSettingsBaseline() || !mounted) {
+      return;
+    }
     final store = await _getSettingsStore();
     final initialSettings = _settings.copyWith(
       providerConfig: _providerConfig ?? ProviderConfig.empty,

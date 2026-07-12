@@ -8,6 +8,7 @@ import 'package:synapse/domain/vault/vault_resource.dart';
 import 'package:synapse/infrastructure/ai/ai_provider.dart';
 import 'package:synapse/infrastructure/bootstrap/workspace_dependencies_factory.dart';
 import 'package:synapse/infrastructure/config/synapse_settings.dart';
+import 'package:synapse/infrastructure/config/vault_location_store.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
 
 import '../../support/workspace_fakes.dart';
@@ -366,13 +367,16 @@ void main() {
       await pumpWorkspace(tester, vault: null, dependencies: dependencies);
       await settingsStore.loadStarted.future;
 
-      await _enterReplacementSettings(tester);
-      await tester.tap(find.text('保存设置'));
-      await tester.pumpAndSettle();
-      expect(settingsStore.currentSettings.providerConfig.baseUrl, 'new-url');
+      await tester.tap(find.byKey(const Key('settings-button')));
+      await tester.pump();
+      expect(find.text('设置'), findsNothing);
 
       settingsStore.releaseLoad();
       await tester.pumpAndSettle();
+      await _enterReplacementSettingsInOpenDialog(tester);
+      await tester.tap(find.text('保存设置'));
+      await tester.pumpAndSettle();
+      expect(settingsStore.currentSettings.providerConfig.baseUrl, 'new-url');
 
       expect(settingsStore.currentSettings.providerConfig.baseUrl, 'new-url');
       expect(
@@ -383,8 +387,74 @@ void main() {
       final userProvider = providers.singleWhere(
         (provider) => provider.id == 'new-url',
       );
+      final loadedProvider = providers.singleWhere(
+        (provider) => provider.id == 'old-url',
+      );
       expect(userProvider.embeddingCalls, 1);
-      expect(providers.where((provider) => provider.id == 'old-url'), isEmpty);
+      expect(loadedProvider.embeddingCalls, 0);
+      expect(loadedProvider.disposeCalls, 1);
+    },
+  );
+
+  testWidgets(
+    'settings dialog waits for and preserves the startup settings baseline',
+    (tester) async {
+      const startupSettings = SynapseSettings(
+        vaultLocation: VaultLocation(rootPath: '/vault/loaded'),
+        providerConfig: ProviderConfig(
+          baseUrl: 'loaded-url',
+          apiKey: 'loaded-key',
+          chatModel: 'loaded-chat',
+          visionModel: 'loaded-vision',
+          embeddingModel: 'loaded-embedding',
+        ),
+        preferences: WorkspacePreferences(
+          defaultNoteMode: WorkspaceDefaultNoteMode.reading,
+          semanticSearchEnabled: false,
+          pastedImageWidth: 720,
+          autoSaveDelayMillis: 1600,
+          accentColor: WorkspaceAccentColor.green,
+          noteFontSize: 20,
+        ),
+      );
+      final settingsStore = _GatedLoadSettingsStore(
+        startupSettings: startupSettings,
+      );
+      final vault = MemoryVaultBackend(seedExampleData: false);
+      await vault.createNote(parentPath: '', title: 'Alpha');
+
+      await pumpWorkspace(tester, vault: vault, settingsStore: settingsStore);
+      await settingsStore.loadStarted.future;
+
+      await tester.tap(find.byKey(const Key('settings-button')));
+      await tester.pump();
+
+      expect(find.text('设置'), findsNothing);
+      expect(settingsStore.savedSettings, isEmpty);
+
+      settingsStore.releaseLoad();
+      await tester.pumpAndSettle();
+
+      expect(find.text('设置'), findsOneWidget);
+      await tester.tap(find.byKey(const Key('settings-nav-appearance')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('settings-accent-purple')));
+      await tester.tap(find.text('保存设置'));
+      await tester.pumpAndSettle();
+
+      final saved = settingsStore.savedSettings.single;
+      expect(saved.vaultLocation, startupSettings.vaultLocation);
+      expect(saved.providerConfig.baseUrl, 'loaded-url');
+      expect(saved.providerConfig.apiKey, 'loaded-key');
+      expect(saved.providerConfig.chatModel, 'loaded-chat');
+      expect(saved.providerConfig.visionModel, 'loaded-vision');
+      expect(saved.providerConfig.embeddingModel, 'loaded-embedding');
+      expect(
+        saved.preferences,
+        startupSettings.preferences.copyWith(
+          accentColor: WorkspaceAccentColor.purple,
+        ),
+      );
     },
   );
 
@@ -404,11 +474,12 @@ void main() {
       await pumpWorkspace(tester, vault: null, dependencies: dependencies);
       await settingsStore.loadStarted.future;
       await tester.tap(find.byKey(const Key('settings-button')));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('取消'));
-      await tester.pumpAndSettle();
+      await tester.pump();
+      expect(find.text('设置'), findsNothing);
 
       settingsStore.releaseLoad();
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('取消'));
       await tester.pumpAndSettle();
 
       expect(find.text('Alpha'), findsWidgets);
@@ -564,6 +635,10 @@ const _replacementSettings = SynapseSettings(
 Future<void> _enterReplacementSettings(WidgetTester tester) async {
   await tester.tap(find.byKey(const Key('settings-button')));
   await tester.pumpAndSettle();
+  await _enterReplacementSettingsInOpenDialog(tester);
+}
+
+Future<void> _enterReplacementSettingsInOpenDialog(WidgetTester tester) async {
   await tester.tap(find.byKey(const Key('settings-nav-appearance')));
   await tester.pumpAndSettle();
   await tester.tap(find.byKey(const Key('settings-accent-purple')));
