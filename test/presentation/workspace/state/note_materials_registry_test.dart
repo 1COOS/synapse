@@ -46,6 +46,37 @@ void main() {
       },
     );
 
+    test('copies nested proposal source IDs from replace input', () {
+      final registry = NoteMaterialsRegistry();
+      addTearDown(registry.dispose);
+      final proposal = _proposal(
+        noteId: 'A.md',
+        sourceIds: <String>['source-1'],
+      );
+
+      registry.replaceProposals('A.md', [proposal]);
+      proposal.sourceIds.add('source-2');
+
+      expect(registry.snapshotFor('A.md').proposals.single.sourceIds, [
+        'source-1',
+      ]);
+    });
+
+    test('freezes nested proposal source IDs exposed by snapshots', () {
+      final registry = NoteMaterialsRegistry();
+      addTearDown(registry.dispose);
+      registry.replaceProposals('A.md', [
+        _proposal(noteId: 'A.md', sourceIds: <String>['source-1']),
+      ]);
+
+      final sourceIds = registry.snapshotFor('A.md').proposals.single.sourceIds;
+
+      expect(() => sourceIds.add('source-2'), throwsUnsupportedError);
+      expect(registry.snapshotFor('A.md').proposals.single.sourceIds, [
+        'source-1',
+      ]);
+    });
+
     test('reconcileNote retains existing source IDs and keeps proposals', () {
       final registry = NoteMaterialsRegistry();
       addTearDown(registry.dispose);
@@ -59,7 +90,11 @@ void main() {
 
       final snapshot = registry.snapshotFor(noteId);
       expect(snapshot.selectedSourceIds, {'keep'});
-      expect(snapshot.proposals, [proposal]);
+      expect(snapshot.proposals, hasLength(1));
+      expect(snapshot.proposals.single, isNot(same(proposal)));
+      expect(snapshot.proposals.single.id, proposal.id);
+      expect(snapshot.proposals.single.noteId, proposal.noteId);
+      expect(snapshot.proposals.single.sourceIds, proposal.sourceIds);
     });
 
     test('replaceProposals validates and normalizes proposal note IDs', () {
@@ -99,6 +134,10 @@ void main() {
         final snapshot = registry.snapshotFor('B.md');
         expect(snapshot.selectedSourceIds, {'keep'});
         expect(snapshot.proposals.single.noteId, 'B.md');
+        expect(
+          () => snapshot.proposals.single.sourceIds.add('mutated'),
+          throwsUnsupportedError,
+        );
       },
     );
 
@@ -234,11 +273,15 @@ void main() {
   });
 }
 
-AiProposal _proposal({String id = 'proposal-1', required String noteId}) {
+AiProposal _proposal({
+  String id = 'proposal-1',
+  required String noteId,
+  List<String> sourceIds = const <String>['source'],
+}) {
   return AiProposal(
     id: id,
     noteId: noteId,
-    sourceIds: const ['source'],
+    sourceIds: sourceIds,
     title: 'Proposal',
     proposedMarkdown: 'proposal',
     status: ProposalStatus.pending,

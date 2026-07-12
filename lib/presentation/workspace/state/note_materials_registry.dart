@@ -8,12 +8,27 @@ final class NoteMaterialsSnapshot {
     Set<String> selectedSourceIds = const <String>{},
     List<AiProposal> proposals = const <AiProposal>[],
   }) : selectedSourceIds = Set<String>.unmodifiable(selectedSourceIds),
-       proposals = List<AiProposal>.unmodifiable(proposals);
+       proposals = List<AiProposal>.unmodifiable(
+         proposals.map(_freezeProposal),
+       );
 
   static final NoteMaterialsSnapshot empty = NoteMaterialsSnapshot();
 
   final Set<String> selectedSourceIds;
   final List<AiProposal> proposals;
+}
+
+AiProposal _freezeProposal(AiProposal proposal) {
+  return AiProposal(
+    id: proposal.id,
+    noteId: proposal.noteId,
+    sourceIds: List<String>.unmodifiable(proposal.sourceIds),
+    title: proposal.title,
+    proposedMarkdown: proposal.proposedMarkdown,
+    status: proposal.status,
+    createdAt: proposal.createdAt,
+    updatedAt: proposal.updatedAt,
+  );
 }
 
 final class NoteMaterialsRegistry extends ChangeNotifier {
