@@ -31,6 +31,7 @@ import '../workspace/state/workspace_mutation_barrier.dart';
 import '../workspace/editor/markdown_image_transform.dart';
 import '../workspace/editor/live_markdown_editor.dart';
 import '../workspace/editor/markdown_table_editor.dart';
+import '../workspace/editor/pane_editor_context.dart';
 import '../workspace/editor/preview_image_block.dart';
 import 'browser_context_menu_guard.dart';
 import 'markdown_live_blocks.dart';
@@ -157,6 +158,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   WorkspacePreferences _workspacePreferences = WorkspacePreferences.defaults;
   ProviderConfig? _providerConfig;
   bool _usesInjectedAiProvider = false;
+  int _runtimeGeneration = 0;
 
   WorkspaceAppearance get _workspaceAppearance {
     return WorkspaceAppearance.fromPreferences(_workspacePreferences);
@@ -241,11 +243,17 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   }
 
   void _resetServices(VaultBackend vault) {
+    if (!identical(_vault, vault)) {
+      _runtimeGeneration += 1;
+    }
     _vault = vault;
     _resetAiServices();
   }
 
   void _clearVaultLocationState() {
+    if (_vault != null) {
+      _runtimeGeneration += 1;
+    }
     _vault = null;
     _proposalService = null;
     _vaultRootPath = null;
@@ -524,6 +532,87 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
 
   SplitLeaf? get _focusedPane => _splitWorkspaceController.focusedPane;
 
+  PaneEditorContext? _capturePaneEditorContext({
+    SplitLeaf? pane,
+    NoteDocumentSession? session,
+  }) {
+    final resolvedPane = pane ?? _focusedPane;
+    if (resolvedPane == null) {
+      return null;
+    }
+    final resolvedSession =
+        session ??
+        (resolvedPane.noteId == null
+            ? null
+            : _noteSessionRegistry.sessionFor(resolvedPane.noteId!));
+    if (resolvedSession == null ||
+        resolvedPane.noteId == null ||
+        !identical(
+          _noteSessionRegistry.sessionFor(resolvedPane.noteId!),
+          resolvedSession,
+        )) {
+      return null;
+    }
+    return capturePaneEditorContext(
+      paneId: resolvedPane.paneId,
+      splits: _splitWorkspaceController,
+      sessions: _noteSessionRegistry,
+      runtimeGeneration: _runtimeGeneration,
+    );
+  }
+
+  ResolvedPaneEditorContext? _resolvePaneEditorContext(
+    PaneEditorContext context,
+  ) {
+    return resolvePaneEditorContext(
+      context,
+      splits: _splitWorkspaceController,
+      sessions: _noteSessionRegistry,
+      runtimeGeneration: _runtimeGeneration,
+    );
+  }
+
+  Future<void> _recoverStaleBackendTarget(
+    PaneEditorContext context, {
+    bool refreshProposals = false,
+  }) async {
+    if (context.runtimeGeneration != _runtimeGeneration ||
+        context.sessionIdentity is! NoteDocumentSession) {
+      return;
+    }
+    final session = context.sessionIdentity as NoteDocumentSession;
+    final noteId = session.noteId;
+    if (!identical(_noteSessionRegistry.sessionFor(noteId), session)) {
+      return;
+    }
+    try {
+      final vault = _requireVault();
+      final note = await vault.readNote(noteId);
+      if (context.runtimeGeneration != _runtimeGeneration ||
+          note.id != session.noteId ||
+          !identical(_noteSessionRegistry.sessionFor(note.id), session)) {
+        return;
+      }
+      final proposals = refreshProposals
+          ? await vault.listProposals(note.id)
+          : null;
+      if (!mounted ||
+          context.runtimeGeneration != _runtimeGeneration ||
+          !identical(_noteSessionRegistry.sessionFor(note.id), session)) {
+        return;
+      }
+      setState(() {
+        _noteSessionRegistry.upsert(note);
+        _noteMaterialsRegistry.reconcileNote(note);
+        if (proposals != null) {
+          _noteMaterialsRegistry.replaceProposals(note.id, proposals);
+        }
+      });
+    } catch (_) {
+      // Recovery is best-effort after the command has already become stale.
+    }
+  }
+
   NoteDocumentSession? get _activeSession {
     final noteId = _focusedPane?.noteId;
     if (noteId == null) {
@@ -545,24 +634,6 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     }
     _upsertNoteSession(note);
     _splitWorkspaceController.setPaneNote(pane.paneId, note.id);
-  }
-
-  TextEditingController get _markdownController {
-    return _activeSession?.controller ?? _emptyMarkdownController;
-  }
-
-  Set<String> get _selectedSourceIds {
-    final noteId = _activeSession?.noteId;
-    return noteId == null
-        ? NoteMaterialsSnapshot.empty.selectedSourceIds
-        : _noteMaterialsRegistry.snapshotFor(noteId).selectedSourceIds;
-  }
-
-  List<AiProposal> get _proposals {
-    final noteId = _activeSession?.noteId;
-    return noteId == null
-        ? NoteMaterialsSnapshot.empty.proposals
-        : _noteMaterialsRegistry.snapshotFor(noteId).proposals;
   }
 
   set _noteMode(NoteMode value) {
@@ -664,6 +735,9 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   }
 
   void _useAiProvider(AiProvider provider) {
+    if (!identical(_aiProvider, provider)) {
+      _runtimeGeneration += 1;
+    }
     _aiProvider = provider;
     _resetAiServices();
   }
@@ -872,38 +946,6 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       if (message != null) {
         _message = message;
       }
-    });
-  }
-
-  Future<void> _refreshActiveNote() async {
-    final active = _activeNote;
-    if (active == null) {
-      return;
-    }
-    final vault = _requireVault();
-    final refreshed = await vault.readNote(active.id);
-    final resources = await vault.listResources();
-    setState(() {
-      _resources = resources;
-      _selectedResource = _findResource(resources, refreshed.id);
-      _activeNote = refreshed;
-      _replaceEditorMarkdown(refreshed.markdown);
-    });
-    await _refreshProposals(refreshed.id);
-  }
-
-  Future<void> _refreshActiveNoteMetadata() async {
-    final active = _activeNote;
-    if (active == null) {
-      return;
-    }
-    final vault = _requireVault();
-    final refreshed = await vault.readNote(active.id);
-    final resources = await vault.listResources();
-    setState(() {
-      _resources = resources;
-      _selectedResource = _findResource(resources, refreshed.id);
-      _activeNote = refreshed;
     });
   }
 
@@ -1124,23 +1166,6 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     return report.succeeded;
   }
 
-  Future<bool> _saveCurrentMarkdown({
-    required bool automatic,
-    required bool rescheduleIfDirty,
-    String? successMessage,
-  }) {
-    final session = _activeSession;
-    if (session == null) {
-      return Future.value(true);
-    }
-    return _saveSessionMarkdown(
-      session,
-      automatic: automatic,
-      rescheduleIfDirty: rescheduleIfDirty,
-      successMessage: successMessage,
-    );
-  }
-
   Future<bool> _saveSessionMarkdown(
     NoteDocumentSession session, {
     required bool automatic,
@@ -1225,14 +1250,18 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     }
   }
 
-  Future<void> _pasteIntoNoteEditor() async {
+  Future<PaneEditorCommandOutcome> _pasteIntoNoteEditor(
+    PaneEditorContext? context,
+  ) async {
     if (_busy || _autoSaving) {
-      return;
+      return PaneEditorCommandOutcome.unchanged;
     }
-    final active = _activeNote;
-    if (active == null) {
+    if (context == null) {
       setState(() => _message = '请先选择或创建笔记');
-      return;
+      return PaneEditorCommandOutcome.unchanged;
+    }
+    if (_resolvePaneEditorContext(context) == null) {
+      return PaneEditorCommandOutcome.staleTarget;
     }
     setState(() {
       _busy = true;
@@ -1240,19 +1269,27 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     });
     try {
       final image = await _imageInput.pasteImage();
+      if (_resolvePaneEditorContext(context) == null) {
+        return PaneEditorCommandOutcome.staleTarget;
+      }
       if (image != null) {
-        await _insertPastedImage(active: active, image: image);
-        return;
+        return _insertPastedImage(context: context, image: image);
       }
       final text = (await Clipboard.getData(Clipboard.kTextPlain))?.text;
-      if (text == null || text.isEmpty) {
-        return;
+      final resolved = _resolvePaneEditorContext(context);
+      if (resolved == null) {
+        return PaneEditorCommandOutcome.staleTarget;
       }
-      _replaceEditorSelection(text);
+      if (text == null || text.isEmpty) {
+        return PaneEditorCommandOutcome.unchanged;
+      }
+      _replaceEditorSelection(resolved.session, text);
+      return PaneEditorCommandOutcome.committed;
     } catch (error) {
       if (mounted) {
         setState(() => _message = error.toString());
       }
+      return PaneEditorCommandOutcome.unchanged;
     } finally {
       if (mounted) {
         setState(() => _busy = false);
@@ -1260,43 +1297,75 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     }
   }
 
-  Future<NoteEditorPasteAvailability> _noteEditorPasteAvailability() async {
-    if (_busy || _autoSaving || _activeNote == null) {
+  Future<NoteEditorPasteAvailability> _noteEditorPasteAvailability(
+    PaneEditorContext? context,
+  ) async {
+    if (_busy ||
+        _autoSaving ||
+        context == null ||
+        _resolvePaneEditorContext(context) == null) {
       return NoteEditorPasteAvailability.empty;
     }
     final results = await Future.wait<bool>([
       Clipboard.hasStrings(),
       _imageInput.canPasteImage(),
     ]);
+    if (_resolvePaneEditorContext(context) == null) {
+      return NoteEditorPasteAvailability.empty;
+    }
     return NoteEditorPasteAvailability(
       hasText: results[0],
       hasImage: results[1],
     );
   }
 
-  Future<void> _insertPastedImage({
-    required VaultNoteContent active,
+  Future<PaneEditorCommandOutcome> _insertPastedImage({
+    required PaneEditorContext context,
     required ImportedImage image,
   }) async {
+    var resolved = _resolvePaneEditorContext(context);
+    if (resolved == null) {
+      return PaneEditorCommandOutcome.staleTarget;
+    }
     final filename = _noteEditorPastedImageFilename(image.filename);
     final source = await _requireVault().addImageSource(
-      noteId: active.id,
+      noteId: resolved.noteId,
       filename: filename,
       mimeType: image.mimeType,
       bytes: image.bytes,
     );
-    final tag = _imageMarkdownTag(active, source);
-    _replaceEditorSelection(_blockInsertionForCurrentSelection(tag));
-    final saved = await _flushPendingMarkdown(
+    resolved = _resolvePaneEditorContext(context);
+    if (resolved == null) {
+      await _recoverStaleBackendTarget(context);
+      return PaneEditorCommandOutcome.staleTarget;
+    }
+    final tag = _imageMarkdownTag(resolved.session.note, source);
+    _replaceEditorSelection(
+      resolved.session,
+      _blockInsertionForCurrentSelection(resolved.session, tag),
+    );
+    final saved = await _flushSessionMarkdown(
+      resolved.session,
       successMessage: '图片已粘贴到笔记：$filename',
     );
+    resolved = _resolvePaneEditorContext(context);
+    if (resolved == null) {
+      return PaneEditorCommandOutcome.staleTarget;
+    }
     if (!saved || !mounted) {
-      return;
+      return PaneEditorCommandOutcome.unchanged;
     }
     setState(() {
-      _noteMaterialsRegistry.setSourceSelected(active.id, source.id, true);
-      _setSelectedPreviewImageSrc(_markdownAttachmentSrc(active, source));
+      _noteMaterialsRegistry.setSourceSelected(
+        resolved!.noteId,
+        source.id,
+        true,
+      );
+      _setSelectedPreviewImageSrc(
+        _markdownAttachmentSrc(resolved.session.note, source),
+      );
     });
+    return PaneEditorCommandOutcome.committed;
   }
 
   String _imageMarkdownTag(VaultNoteContent note, SourceItem source) {
@@ -1328,8 +1397,11 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     return '$assetsDirectory/$attachmentPath'.replaceAll('\\', '/');
   }
 
-  String _blockInsertionForCurrentSelection(String block) {
-    final value = _markdownController.value;
+  String _blockInsertionForCurrentSelection(
+    NoteDocumentSession session,
+    String block,
+  ) {
+    final value = session.controller.value;
     final text = value.text;
     final selection = _normalizedSelection(value);
     return blockImageInsertion(
@@ -1340,8 +1412,12 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     );
   }
 
-  void _replaceEditorSelection(String replacement) {
-    final value = _markdownController.value;
+  void _replaceEditorSelection(
+    NoteDocumentSession session,
+    String replacement,
+  ) {
+    final controller = session.controller;
+    final value = controller.value;
     final selection = _normalizedSelection(value);
     final text = value.text;
     final updated = text.replaceRange(
@@ -1350,7 +1426,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       replacement,
     );
     final offset = selection.start + replacement.length;
-    _markdownController.value = value.copyWith(
+    controller.value = value.copyWith(
       text: updated,
       selection: TextSelection.collapsed(offset: offset),
       composing: TextRange.empty,
@@ -1367,109 +1443,269 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     return TextSelection(baseOffset: start, extentOffset: end);
   }
 
-  Future<void> _addImageSource() async {
-    final active = _activeNote;
-    if (active == null) {
+  Future<PaneEditorCommandOutcome> _addImageSource(
+    PaneEditorContext? context,
+  ) async {
+    if (context == null) {
       setState(() => _message = '请先选择或创建笔记');
-      return;
+      return PaneEditorCommandOutcome.unchanged;
     }
-    if (!await _flushPendingMarkdown()) {
-      return;
+    var resolved = _resolvePaneEditorContext(context);
+    if (resolved == null) {
+      return PaneEditorCommandOutcome.staleTarget;
+    }
+    if (!await _flushSessionMarkdown(resolved.session)) {
+      return PaneEditorCommandOutcome.unchanged;
+    }
+    if (_resolvePaneEditorContext(context) == null) {
+      return PaneEditorCommandOutcome.staleTarget;
     }
     final image = await _imageInput.pickImage();
+    if (_resolvePaneEditorContext(context) == null) {
+      return PaneEditorCommandOutcome.staleTarget;
+    }
     if (image == null) {
       setState(() => _message = '未选择图片');
-      return;
+      return PaneEditorCommandOutcome.unchanged;
     }
-    await _saveImportedImage(image, message: '图片已导入：${image.filename}');
+    return _saveImportedImage(
+      context,
+      image,
+      message: '图片已导入：${image.filename}',
+    );
   }
 
-  Future<void> _pasteImageSource() async {
-    final active = _activeNote;
-    if (active == null) {
+  Future<PaneEditorCommandOutcome> _pasteImageSource(
+    PaneEditorContext? context,
+  ) async {
+    if (context == null) {
       setState(() => _message = '请先选择或创建笔记');
-      return;
+      return PaneEditorCommandOutcome.unchanged;
     }
+    if (_resolvePaneEditorContext(context) == null) {
+      return PaneEditorCommandOutcome.staleTarget;
+    }
+    var outcome = PaneEditorCommandOutcome.unchanged;
     await _runBusy(() async {
-      if (!await _flushPendingMarkdown()) {
+      var resolved = _resolvePaneEditorContext(context);
+      if (resolved == null) {
+        outcome = PaneEditorCommandOutcome.staleTarget;
+        return;
+      }
+      if (!await _flushSessionMarkdown(resolved.session)) {
+        return;
+      }
+      if (_resolvePaneEditorContext(context) == null) {
+        outcome = PaneEditorCommandOutcome.staleTarget;
         return;
       }
       final image = await _imageInput.pasteImage();
+      if (_resolvePaneEditorContext(context) == null) {
+        outcome = PaneEditorCommandOutcome.staleTarget;
+        return;
+      }
       if (image == null) {
         setState(() => _message = '剪贴板中没有可导入的图片');
         return;
       }
-      await _saveImportedImage(
+      outcome = await _saveImportedImage(
+        context,
         image,
         message: '剪贴板图片已导入：${image.filename}',
         wrapBusy: false,
       );
     });
+    return outcome;
   }
 
-  Future<void> _saveImportedImage(
+  Future<PaneEditorCommandOutcome> _saveImportedImage(
+    PaneEditorContext context,
     ImportedImage image, {
     required String message,
     bool wrapBusy = true,
   }) async {
-    final active = _activeNote;
-    if (active == null) {
-      setState(() => _message = '请先选择或创建笔记');
-      return;
+    if (_resolvePaneEditorContext(context) == null) {
+      return PaneEditorCommandOutcome.staleTarget;
     }
-    Future<void> save() async {
-      if (!await _flushPendingMarkdown()) {
-        return;
+    Future<PaneEditorCommandOutcome> save() async {
+      var resolved = _resolvePaneEditorContext(context);
+      if (resolved == null) {
+        return PaneEditorCommandOutcome.staleTarget;
+      }
+      if (!await _flushSessionMarkdown(resolved.session)) {
+        return PaneEditorCommandOutcome.unchanged;
+      }
+      resolved = _resolvePaneEditorContext(context);
+      if (resolved == null) {
+        return PaneEditorCommandOutcome.staleTarget;
       }
       final source = await _requireVault().addImageSource(
-        noteId: active.id,
+        noteId: resolved.noteId,
         filename: image.filename,
         mimeType: image.mimeType,
         bytes: image.bytes,
       );
-      await _refreshActiveNote();
+      if (_resolvePaneEditorContext(context) == null) {
+        await _recoverStaleBackendTarget(context);
+        return PaneEditorCommandOutcome.staleTarget;
+      }
+      final refreshOutcome = await _refreshPaneEditorTarget(
+        context,
+        refreshResources: true,
+      );
+      if (refreshOutcome == PaneEditorCommandOutcome.staleTarget) {
+        return refreshOutcome;
+      }
+      resolved = _resolvePaneEditorContext(context);
+      if (resolved == null) {
+        return PaneEditorCommandOutcome.staleTarget;
+      }
       setState(() {
-        _noteMaterialsRegistry.setSourceSelected(active.id, source.id, true);
+        _noteMaterialsRegistry.setSourceSelected(
+          resolved!.noteId,
+          source.id,
+          true,
+        );
         _narrowSection = _WorkspaceSection.sources;
         _message = message;
       });
+      return PaneEditorCommandOutcome.committed;
     }
 
     if (!wrapBusy) {
-      await save();
-      return;
+      return save();
     }
+    var outcome = PaneEditorCommandOutcome.unchanged;
     await _runBusy(() async {
-      await save();
+      outcome = await save();
     });
+    return outcome;
   }
 
-  Future<void> _generateProposal() async {
-    final active = _activeNote;
-    if (active == null || _selectedSourceIds.isEmpty) {
-      return;
+  Future<PaneEditorCommandOutcome> _refreshPaneEditorTarget(
+    PaneEditorContext context, {
+    required bool refreshResources,
+    bool refreshProposals = false,
+  }) async {
+    var resolved = _resolvePaneEditorContext(context);
+    if (resolved == null) {
+      return PaneEditorCommandOutcome.staleTarget;
+    }
+    final vault = _requireVault();
+    final resources = refreshResources ? await vault.listResources() : null;
+    resolved = _resolvePaneEditorContext(context);
+    if (resolved == null) {
+      return PaneEditorCommandOutcome.staleTarget;
+    }
+    while (true) {
+      final currentTarget = resolved;
+      if (currentTarget == null) {
+        return PaneEditorCommandOutcome.staleTarget;
+      }
+      final targetNoteId = currentTarget.noteId;
+      final note = await vault.readNote(targetNoteId);
+      resolved = _resolvePaneEditorContext(context);
+      if (resolved == null) {
+        return PaneEditorCommandOutcome.staleTarget;
+      }
+      if (resolved.noteId != targetNoteId) {
+        continue;
+      }
+      final proposals = refreshProposals
+          ? await vault.listProposals(targetNoteId)
+          : null;
+      resolved = _resolvePaneEditorContext(context);
+      if (resolved == null) {
+        return PaneEditorCommandOutcome.staleTarget;
+      }
+      if (resolved.noteId != targetNoteId) {
+        continue;
+      }
+      setState(() {
+        _noteSessionRegistry.upsert(note);
+        _noteMaterialsRegistry.reconcileNote(note);
+        if (resources != null) {
+          _resources = resources;
+          if (_splitWorkspaceController.focusedPaneId == context.paneId) {
+            _selectedResource = _findResource(resources, targetNoteId);
+          }
+        }
+        if (proposals != null) {
+          _noteMaterialsRegistry.replaceProposals(targetNoteId, proposals);
+        }
+      });
+      return PaneEditorCommandOutcome.committed;
+    }
+  }
+
+  Future<PaneEditorCommandOutcome> _generateProposal(
+    PaneEditorContext? context,
+  ) async {
+    if (context == null) {
+      return PaneEditorCommandOutcome.unchanged;
+    }
+    var resolved = _resolvePaneEditorContext(context);
+    if (resolved == null) {
+      return PaneEditorCommandOutcome.staleTarget;
+    }
+    final sourceIds = _noteMaterialsRegistry
+        .snapshotFor(resolved.noteId)
+        .selectedSourceIds
+        .toList();
+    if (sourceIds.isEmpty) {
+      return PaneEditorCommandOutcome.unchanged;
     }
     if (!_requireModelConfigured()) {
-      return;
+      return PaneEditorCommandOutcome.unchanged;
     }
+    var outcome = PaneEditorCommandOutcome.unchanged;
     await _runBusy(() async {
-      if (!await _flushPendingMarkdown()) {
+      resolved = _resolvePaneEditorContext(context);
+      if (resolved == null) {
+        outcome = PaneEditorCommandOutcome.staleTarget;
+        return;
+      }
+      if (!await _flushSessionMarkdown(resolved!.session)) {
+        return;
+      }
+      resolved = _resolvePaneEditorContext(context);
+      if (resolved == null) {
+        outcome = PaneEditorCommandOutcome.staleTarget;
         return;
       }
       await _requireProposalService().createOutlineProposal(
-        noteId: active.id,
-        sourceIds: _selectedSourceIds.toList(),
+        noteId: resolved!.noteId,
+        sourceIds: sourceIds,
       );
-      await _refreshActiveNoteMetadata();
-      await _refreshProposals(active.id);
+      if (_resolvePaneEditorContext(context) == null) {
+        await _recoverStaleBackendTarget(context, refreshProposals: true);
+        outcome = PaneEditorCommandOutcome.staleTarget;
+        return;
+      }
+      outcome = await _refreshPaneEditorTarget(
+        context,
+        refreshResources: true,
+        refreshProposals: true,
+      );
     });
+    return outcome;
   }
 
-  Future<void> _copyProposal(AiProposal proposal) async {
+  Future<PaneEditorCommandOutcome> _copyProposal(
+    PaneEditorContext context,
+    AiProposal proposal,
+  ) async {
+    if (_resolvePaneEditorContext(context) == null) {
+      return PaneEditorCommandOutcome.staleTarget;
+    }
     await Clipboard.setData(
       ClipboardData(text: _normalizeLineBreaks(proposal.proposedMarkdown)),
     );
+    if (_resolvePaneEditorContext(context) == null) {
+      return PaneEditorCommandOutcome.staleTarget;
+    }
     setState(() => _message = '建议已复制到剪贴板');
+    return PaneEditorCommandOutcome.committed;
   }
 
   String _normalizeLineBreaks(String value) {
@@ -1902,42 +2138,84 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     );
   }
 
-  Future<void> _deleteSource(SourceItem source) async {
+  Future<PaneEditorCommandOutcome> _deleteSource(
+    PaneEditorContext context,
+    SourceItem source,
+  ) async {
     final confirmed = await _confirmDelete(
       title: '删除图片素材',
       message: '将删除这条图片素材和对应附件文件。此操作不可撤销。',
     );
-    if (!confirmed) {
-      return;
+    if (_resolvePaneEditorContext(context) == null) {
+      return PaneEditorCommandOutcome.staleTarget;
     }
+    if (!confirmed) {
+      return PaneEditorCommandOutcome.unchanged;
+    }
+    var outcome = PaneEditorCommandOutcome.unchanged;
     await _runBusy(() async {
-      if (!await _flushPendingMarkdown()) {
+      var resolved = _resolvePaneEditorContext(context);
+      if (resolved == null) {
+        outcome = PaneEditorCommandOutcome.staleTarget;
+        return;
+      }
+      if (!await _flushSessionMarkdown(resolved.session)) {
+        return;
+      }
+      if (_resolvePaneEditorContext(context) == null) {
+        outcome = PaneEditorCommandOutcome.staleTarget;
         return;
       }
       await _requireVault().deleteSource(source);
-      await _refreshActiveNote();
+      if (_resolvePaneEditorContext(context) == null) {
+        await _recoverStaleBackendTarget(context);
+        outcome = PaneEditorCommandOutcome.staleTarget;
+        return;
+      }
+      outcome = await _refreshPaneEditorTarget(context, refreshResources: true);
+      if (outcome == PaneEditorCommandOutcome.staleTarget) {
+        return;
+      }
       setState(() {
         _message = '图片素材已删除';
       });
     });
+    return outcome;
   }
 
-  Future<void> _deleteProposal(AiProposal proposal) async {
+  Future<PaneEditorCommandOutcome> _deleteProposal(
+    PaneEditorContext context,
+    AiProposal proposal,
+  ) async {
     final confirmed = await _confirmDelete(
       title: '删除 AI 建议',
       message: '将删除这条 AI 建议缓存。已经手动写入笔记的内容不会受影响。',
     );
-    if (!confirmed) {
-      return;
+    if (_resolvePaneEditorContext(context) == null) {
+      return PaneEditorCommandOutcome.staleTarget;
     }
+    if (!confirmed) {
+      return PaneEditorCommandOutcome.unchanged;
+    }
+    var outcome = PaneEditorCommandOutcome.unchanged;
     await _runBusy(() async {
       await _requireVault().deleteProposal(proposal.id);
-      final active = _activeNote;
-      if (active != null) {
-        await _refreshProposals(active.id);
+      if (_resolvePaneEditorContext(context) == null) {
+        await _recoverStaleBackendTarget(context, refreshProposals: true);
+        outcome = PaneEditorCommandOutcome.staleTarget;
+        return;
+      }
+      outcome = await _refreshPaneEditorTarget(
+        context,
+        refreshResources: false,
+        refreshProposals: true,
+      );
+      if (outcome == PaneEditorCommandOutcome.staleTarget) {
+        return;
       }
       setState(() => _message = 'AI 建议已删除');
     });
+    return outcome;
   }
 
   Future<void> _search() async {
@@ -2683,6 +2961,10 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     final session = pane.noteId == null
         ? null
         : _noteSessionRegistry.sessionFor(pane.noteId!);
+    final editorContext = _capturePaneEditorContext(
+      pane: pane,
+      session: session,
+    );
     final accentColor = _workspaceAppearance.accentColor;
     return GestureDetector(
       key: Key('split-pane-${pane.paneId}'),
@@ -2702,7 +2984,10 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
                 child: pane.mode == NoteMode.reading
                     ? session == null
                           ? const EmptyState(text: '选择或创建笔记后开始整理 Markdown')
-                          : _buildMarkdownPreview(session: session)
+                          : _buildMarkdownPreview(
+                              session: session,
+                              editorContext: editorContext!,
+                            )
                     : _buildNoteEditor(session: session, pane: pane),
               ),
               Positioned(
@@ -2814,10 +3099,11 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     return KeyedSubtree(key: Key('note-mode-$suffix'), child: button);
   }
 
-  Widget _buildMarkdownPreview({NoteDocumentSession? session}) {
-    final markdown = MarkdownDocument.parse(
-      (session ?? _activeSession)?.controller.text ?? '',
-    ).body;
+  Widget _buildMarkdownPreview({
+    required NoteDocumentSession session,
+    required PaneEditorContext editorContext,
+  }) {
+    final markdown = MarkdownDocument.parse(session.controller.text).body;
     final blocks = splitMarkdownLiveBlocks(markdown);
     return CupertinoScrollbar(
       child: SingleChildScrollView(
@@ -2827,14 +3113,18 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             for (var index = 0; index < blocks.length; index += 1)
-              _buildReadingMarkdownBlock(blocks[index], index),
+              _buildReadingMarkdownBlock(blocks[index], index, editorContext),
           ],
         ),
       ),
     );
   }
 
-  Widget _buildReadingMarkdownBlock(MarkdownLiveBlock block, int index) {
+  Widget _buildReadingMarkdownBlock(
+    MarkdownLiveBlock block,
+    int index,
+    PaneEditorContext editorContext,
+  ) {
     if (block.isBlank) {
       return const SizedBox(height: 12);
     }
@@ -2853,21 +3143,30 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     }
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 3),
-      child: _buildMarkdownBody(block.text, mode: ImagePreviewMode.reading),
+      child: _buildMarkdownBody(
+        block.text,
+        mode: ImagePreviewMode.reading,
+        editorContext: editorContext,
+      ),
     );
   }
 
   Widget _buildMarkdownBody(
     String markdown, {
     required ImagePreviewMode mode,
+    required PaneEditorContext editorContext,
     VoidCallback? onImageTap,
   }) {
     return MarkdownBody(
-      data: _markdownPreviewData(markdown),
+      data: _markdownPreviewData(markdown, editorContext),
       selectable: false,
       softLineBreak: true,
-      sizedImageBuilder: (config) =>
-          _buildPreviewImage(config, mode: mode, onImageTap: onImageTap),
+      sizedImageBuilder: (config) => _buildPreviewImage(
+        config,
+        mode: mode,
+        editorContext: editorContext,
+        onImageTap: onImageTap,
+      ),
       styleSheetTheme: MarkdownStyleSheetBaseTheme.cupertino,
       styleSheet: _noteMarkdownStyleSheet(),
     );
@@ -2918,6 +3217,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
 
   Widget _buildLivePreviewMarkdownBlock(
     String markdown, {
+    required PaneEditorContext editorContext,
     VoidCallback? onImageTap,
   }) {
     if (markdown.trim().isEmpty) {
@@ -2933,6 +3233,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     return _buildMarkdownBody(
       markdown,
       mode: ImagePreviewMode.editing,
+      editorContext: editorContext,
       onImageTap: onImageTap,
     );
   }
@@ -2958,11 +3259,15 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     );
   }
 
-  String _markdownPreviewData(String markdown) {
+  String _markdownPreviewData(
+    String markdown,
+    PaneEditorContext editorContext,
+  ) {
     return markdown.replaceAllMapped(htmlImageTagPattern, (match) {
       final tag = match.group(0)!;
       final src = htmlAttribute(tag, 'src');
-      if (src == null || _imageSourceForMarkdownSrc(src) == null) {
+      if (src == null ||
+          _imageSourceForMarkdownSrc(editorContext, src) == null) {
         return tag;
       }
       final width = imageWidthFromTag(tag);
@@ -2975,10 +3280,11 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   Widget _buildPreviewImage(
     MarkdownImageConfig config, {
     required ImagePreviewMode mode,
+    required PaneEditorContext editorContext,
     VoidCallback? onImageTap,
   }) {
     final src = safeUriDecode(config.uri.toString());
-    final source = _imageSourceForMarkdownSrc(src);
+    final source = _imageSourceForMarkdownSrc(editorContext, src);
     if (source == null) {
       return Text(
         config.alt ?? src,
@@ -2997,18 +3303,26 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       selectedImageSrc: _selectedPreviewImageSrcNotifier,
       imageBytes: _requireVault().readSourceAttachment(source),
       onTap: () {
-        if (mode != ImagePreviewMode.editing) {
+        if (mode != ImagePreviewMode.editing ||
+            _resolvePaneEditorContext(editorContext) == null) {
           return;
         }
         onImageTap?.call();
         _setSelectedPreviewImageSrc(src);
       },
       onWidthChanged: (value) {
-        _applyImageWidth(src: src, width: clampImageWidth(value.round()));
+        unawaited(
+          _applyImageWidth(
+            editorContext,
+            src: src,
+            width: clampImageWidth(value.round()),
+          ),
+        );
       },
       onImageDropped: (draggedSrc, targetSrc, side) {
         unawaited(
           _applyImageDrop(
+            editorContext,
             draggedSrc: draggedSrc,
             targetSrc: targetSrc,
             beforeTarget: side == ImageDropSide.before,
@@ -3018,64 +3332,102 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     );
   }
 
-  Future<void> _applyImageDrop({
+  Future<PaneEditorCommandOutcome> _applyImageDrop(
+    PaneEditorContext context, {
     required String draggedSrc,
     required String targetSrc,
     required bool beforeTarget,
   }) async {
     if (normalizeImageSrc(draggedSrc) == normalizeImageSrc(targetSrc) ||
-        _imageSourceForMarkdownSrc(draggedSrc) == null ||
-        _imageSourceForMarkdownSrc(targetSrc) == null) {
-      return;
+        _imageSourceForMarkdownSrc(context, draggedSrc) == null ||
+        _imageSourceForMarkdownSrc(context, targetSrc) == null) {
+      return PaneEditorCommandOutcome.unchanged;
     }
+    var resolved = _resolvePaneEditorContext(context);
+    if (resolved == null) {
+      return PaneEditorCommandOutcome.staleTarget;
+    }
+    final controller = resolved.session.controller;
     final updated = moveImageTagInMarkdown(
-      markdown: _markdownController.text,
+      markdown: controller.text,
       draggedSrc: draggedSrc,
       targetSrc: targetSrc,
       beforeTarget: beforeTarget,
     );
-    if (updated == _markdownController.text) {
-      return;
+    if (updated == controller.text) {
+      return PaneEditorCommandOutcome.unchanged;
+    }
+    resolved = _resolvePaneEditorContext(context);
+    if (resolved == null) {
+      return PaneEditorCommandOutcome.staleTarget;
     }
     setState(() {
       _setSelectedPreviewImageSrc(draggedSrc);
-      _replaceEditorMarkdown(updated);
+      _replaceSessionMarkdown(resolved!.session, updated);
     });
-    await _saveCurrentMarkdown(
+    final saved = await _saveSessionMarkdown(
+      resolved.session,
       successMessage: '图片位置已更新',
       automatic: false,
       rescheduleIfDirty: false,
     );
+    if (_resolvePaneEditorContext(context) == null) {
+      return PaneEditorCommandOutcome.staleTarget;
+    }
+    return saved
+        ? PaneEditorCommandOutcome.committed
+        : PaneEditorCommandOutcome.unchanged;
   }
 
-  Future<void> _applyImageWidth({
+  Future<PaneEditorCommandOutcome> _applyImageWidth(
+    PaneEditorContext context, {
     required String src,
     required int width,
   }) async {
+    var resolved = _resolvePaneEditorContext(context);
+    if (resolved == null) {
+      return PaneEditorCommandOutcome.staleTarget;
+    }
+    final controller = resolved.session.controller;
     final updated = replaceImageWidthInMarkdown(
-      markdown: _markdownController.text,
+      markdown: controller.text,
       src: src,
       width: width,
     );
-    if (updated == _markdownController.text) {
-      return;
+    if (updated == controller.text) {
+      return PaneEditorCommandOutcome.unchanged;
+    }
+    resolved = _resolvePaneEditorContext(context);
+    if (resolved == null) {
+      return PaneEditorCommandOutcome.staleTarget;
     }
     setState(() {
       _setSelectedPreviewImageSrc(src);
-      _replaceEditorMarkdown(updated);
+      _replaceSessionMarkdown(resolved!.session, updated);
     });
-    await _saveCurrentMarkdown(
+    final saved = await _saveSessionMarkdown(
+      resolved.session,
       successMessage: '图片宽度已更新',
       automatic: false,
       rescheduleIfDirty: false,
     );
+    if (_resolvePaneEditorContext(context) == null) {
+      return PaneEditorCommandOutcome.staleTarget;
+    }
+    return saved
+        ? PaneEditorCommandOutcome.committed
+        : PaneEditorCommandOutcome.unchanged;
   }
 
-  SourceItem? _imageSourceForMarkdownSrc(String? src) {
-    final active = _activeNote;
-    if (active == null || src == null) {
+  SourceItem? _imageSourceForMarkdownSrc(
+    PaneEditorContext context,
+    String? src,
+  ) {
+    final resolved = _resolvePaneEditorContext(context);
+    if (resolved == null || src == null) {
       return null;
     }
+    final active = resolved.session.note;
     final normalizedSrc = normalizeImageSrc(src);
     for (final source in active.sources) {
       if (source.type != SourceType.image || source.attachmentPath == null) {
@@ -3090,20 +3442,25 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   }
 
   Widget _buildNoteEditor({NoteDocumentSession? session, SplitLeaf? pane}) {
-    final resolvedSession = session ?? _activeSession;
+    final resolvedSession = pane == null ? session ?? _activeSession : session;
     final resolvedPane = pane ?? _focusedPane;
+    final editorContext = _capturePaneEditorContext(
+      pane: resolvedPane,
+      session: resolvedSession,
+    );
     final focused =
         resolvedPane?.paneId == _splitWorkspaceController.focusedPaneId;
     final appearance = _workspaceAppearance;
     return Focus(
       focusNode: _editorPasteFocusNode,
-      onKeyEvent: _handleEmptyNoteEditorKeyEvent,
+      onKeyEvent: (node, event) =>
+          _handleEmptyNoteEditorKeyEvent(node, event, editorContext),
       child: CallbackShortcuts(
         bindings: <ShortcutActivator, VoidCallback>{
           const SingleActivator(LogicalKeyboardKey.keyV, meta: true): () =>
-              unawaited(_pasteIntoNoteEditor()),
+              unawaited(_pasteIntoNoteEditor(editorContext)),
           const SingleActivator(LogicalKeyboardKey.keyV, control: true): () =>
-              unawaited(_pasteIntoNoteEditor()),
+              unawaited(_pasteIntoNoteEditor(editorContext)),
         },
         child: GestureDetector(
           key: focused
@@ -3156,9 +3513,17 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
                         setState(() => _focusPane(resolvedPane.paneId));
                       }
                     },
-                    pasteAvailability: _noteEditorPasteAvailability,
-                    onPaste: _pasteIntoNoteEditor,
-                    previewBuilder: _buildLivePreviewMarkdownBlock,
+                    pasteAvailability: () =>
+                        _noteEditorPasteAvailability(editorContext),
+                    onPaste: () async {
+                      await _pasteIntoNoteEditor(editorContext);
+                    },
+                    previewBuilder: (markdown, {onImageTap}) =>
+                        _buildLivePreviewMarkdownBlock(
+                          markdown,
+                          editorContext: editorContext!,
+                          onImageTap: onImageTap,
+                        ),
                   ),
           ),
         ),
@@ -3169,23 +3534,32 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   KeyEventResult _handleEmptyNoteEditorKeyEvent(
     FocusNode node,
     KeyEvent event,
+    PaneEditorContext? editorContext,
   ) {
-    if (_activeNote != null || !_isPasteImageShortcutKeyUp(event)) {
+    if (editorContext != null || !_isPasteImageShortcutKeyUp(event)) {
       return KeyEventResult.ignored;
     }
-    unawaited(_pasteIntoNoteEditor());
+    unawaited(_pasteIntoNoteEditor(null));
     return KeyEventResult.handled;
   }
 
   Widget _buildSourcePane() {
-    final sources = (_activeNote?.sources ?? const <SourceItem>[])
+    final editorContext = _capturePaneEditorContext();
+    final resolved = editorContext == null
+        ? null
+        : _resolvePaneEditorContext(editorContext);
+    final sources = (resolved?.session.note.sources ?? const <SourceItem>[])
         .where((source) => source.type == SourceType.image)
         .toList();
+    final materials = resolved == null
+        ? NoteMaterialsSnapshot.empty
+        : _noteMaterialsRegistry.snapshotFor(resolved.noteId);
     return WorkspacePane(
       key: const Key('source-pane'),
       child: Focus(
         focusNode: _sourcePaneFocusNode,
-        onKeyEvent: _handleSourcePaneKeyEvent,
+        onKeyEvent: (node, event) =>
+            _handleSourcePaneKeyEvent(node, event, editorContext),
         child: GestureDetector(
           key: const Key('image-input-area'),
           behavior: HitTestBehavior.opaque,
@@ -3200,7 +3574,11 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
                       key: const Key('add-image-button'),
                       label: '导入图片',
                       icon: CupertinoIcons.photo,
-                      onPressed: _busy || !_hasVault ? null : _addImageSource,
+                      onPressed: _busy || !_hasVault
+                          ? null
+                          : () async {
+                              await _addImageSource(editorContext);
+                            },
                     ),
                   ),
                   const SizedBox(width: 8),
@@ -3209,7 +3587,11 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
                       key: const Key('paste-image-button'),
                       label: '粘贴图片',
                       icon: CupertinoIcons.doc_on_clipboard,
-                      onPressed: _busy || !_hasVault ? null : _pasteImageSource,
+                      onPressed: _busy || !_hasVault
+                          ? null
+                          : () async {
+                              await _pasteImageSource(editorContext);
+                            },
                     ),
                   ),
                 ],
@@ -3235,22 +3617,28 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
                     final source = sources[index];
                     return ImageSourceTile(
                       source: source,
-                      selected: _selectedSourceIds.contains(source.id),
+                      selected: materials.selectedSourceIds.contains(source.id),
                       busy: _busy,
                       imageBytes: _requireVault().readSourceAttachment(source),
                       onToggle: () {
-                        final active = _activeNote;
-                        if (active == null) {
+                        final target = editorContext == null
+                            ? null
+                            : _resolvePaneEditorContext(editorContext);
+                        if (target == null) {
                           return;
                         }
                         setState(() {
                           _noteMaterialsRegistry.toggleSource(
-                            active.id,
+                            target.noteId,
                             source.id,
                           );
                         });
                       },
-                      onDelete: () => _deleteSource(source),
+                      onDelete: editorContext == null
+                          ? () {}
+                          : () async {
+                              await _deleteSource(editorContext, source);
+                            },
                     );
                   },
                 ),
@@ -3259,33 +3647,51 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
                 key: const Key('generate-proposal-button'),
                 label: '生成建议',
                 icon: CupertinoIcons.sparkles,
-                onPressed: _selectedSourceIds.isEmpty || _busy
+                onPressed: materials.selectedSourceIds.isEmpty || _busy
                     ? null
-                    : _generateProposal,
+                    : () async {
+                        await _generateProposal(editorContext);
+                      },
               ),
               const SizedBox(height: 12),
               const PaneSubheading('AI 建议'),
               const SizedBox(height: 8),
-              for (var index = 0; index < _proposals.length; index++)
+              for (var index = 0; index < materials.proposals.length; index++)
                 ProposalCard(
                   key: Key(
-                    'proposal-${_proposals[index].noteId}-'
-                    '${_proposals[index].id}',
+                    'proposal-${materials.proposals[index].noteId}-'
+                    '${materials.proposals[index].id}',
                   ),
-                  proposal: _proposals[index],
+                  proposal: materials.proposals[index],
                   copyKey: Key(
                     index == 0
                         ? 'copy-proposal-button'
-                        : 'copy-proposal-button-${_proposals[index].id}',
+                        : 'copy-proposal-button-'
+                              '${materials.proposals[index].id}',
                   ),
                   deleteKey: Key(
                     index == 0
                         ? 'delete-proposal-button'
-                        : 'delete-proposal-button-${_proposals[index].id}',
+                        : 'delete-proposal-button-'
+                              '${materials.proposals[index].id}',
                   ),
                   busy: _busy,
-                  onCopy: () => _copyProposal(_proposals[index]),
-                  onDelete: () => _deleteProposal(_proposals[index]),
+                  onCopy: editorContext == null
+                      ? () {}
+                      : () async {
+                          await _copyProposal(
+                            editorContext,
+                            materials.proposals[index],
+                          );
+                        },
+                  onDelete: editorContext == null
+                      ? () {}
+                      : () async {
+                          await _deleteProposal(
+                            editorContext,
+                            materials.proposals[index],
+                          );
+                        },
                 ),
             ],
           ),
@@ -3294,12 +3700,16 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     );
   }
 
-  KeyEventResult _handleSourcePaneKeyEvent(FocusNode node, KeyEvent event) {
+  KeyEventResult _handleSourcePaneKeyEvent(
+    FocusNode node,
+    KeyEvent event,
+    PaneEditorContext? editorContext,
+  ) {
     if (!_isPasteImageShortcutKeyUp(event)) {
       return KeyEventResult.ignored;
     }
     if (!_busy && _hasVault) {
-      _pasteImageSource();
+      unawaited(_pasteImageSource(editorContext));
     }
     return KeyEventResult.handled;
   }

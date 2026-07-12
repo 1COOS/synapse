@@ -3,6 +3,7 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:synapse/domain/vault/vault_resource.dart';
+import 'package:synapse/infrastructure/ai/ai_provider.dart';
 import 'package:synapse/infrastructure/config/provider_config_store.dart';
 import 'package:synapse/infrastructure/config/settings_store.dart';
 import 'package:synapse/infrastructure/config/synapse_settings.dart';
@@ -103,6 +104,7 @@ Future<void> pumpWorkspace(
   WidgetTester tester, {
   required MemoryVaultBackend? vault,
   ImageInputService? imageInput,
+  AiProvider? aiProvider,
   ProviderConfigStore? configStore,
   SettingsStore? settingsStore,
   VaultLocationStore? vaultLocationStore,
@@ -119,6 +121,7 @@ Future<void> pumpWorkspace(
     SynapseApp(
       vault: vault,
       imageInput: imageInput,
+      aiProvider: aiProvider,
       settingsStore: settingsStore,
       providerConfigStore: configStore ?? FakeProviderConfigStore(),
       vaultLocationStore: vaultLocationStore,

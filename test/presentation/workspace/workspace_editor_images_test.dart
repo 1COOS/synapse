@@ -6,6 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:synapse/infrastructure/config/synapse_settings.dart';
 import 'package:synapse/infrastructure/input/image_input_service.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
+import 'package:synapse/presentation/workspace/editor/live_markdown_editor.dart';
 
 import '../../support/workspace_fakes.dart';
 import '../../support/workspace_harness.dart';
@@ -267,6 +268,239 @@ void main() {
     expect(note.markdown, contains(expectedImageTag));
     expect(note.markdown, isNot(contains(' alt=')));
     expect(find.textContaining('图片已粘贴到笔记：1783082971508.png'), findsOneWidget);
+  });
+
+  testWidgets('delayed pane paste keeps its target after focus changes', (
+    tester,
+  ) async {
+    final vault = CountingUpdateVaultBackend(seedExampleData: false);
+    final alpha = await vault.createNote(parentPath: '', title: 'Alpha');
+    final beta = await vault.createNote(parentPath: '', title: 'Beta');
+    final imageInput = GatedImageInputService(
+      pastedImage: const ImportedImage(
+        filename: 'alpha-paste.png',
+        mimeType: 'image/png',
+        bytes: tinyPng,
+      ),
+    );
+
+    await pumpWorkspace(tester, vault: vault, imageInput: imageInput);
+    await tester.tap(find.byKey(const Key('split-pane-right-button')));
+    await tester.pump(const Duration(milliseconds: 250));
+    await tester.tap(find.byKey(Key('resource-row-${beta.id}')));
+    await tester.pump(const Duration(milliseconds: 250));
+    await tester.tap(find.byKey(const Key('note-mode-source-pane-1')));
+    await tester.pump(const Duration(milliseconds: 250));
+    await activateLiveMarkdownBlock(tester, paneId: 1);
+
+    final editor = tester.widget<LiveMarkdownEditor>(
+      inNotePane(find.byType(LiveMarkdownEditor), 1).first,
+    );
+    final paste = editor.onPaste();
+    await imageInput.pasteStarted.future;
+
+    tester
+        .widget<GestureDetector>(find.byKey(const Key('split-pane-pane-2')))
+        .onTap!();
+    await tester.pump();
+    imageInput.releasePaste();
+    await paste;
+    await tester.pumpAndSettle();
+
+    expect(vault.updatedNoteIds, contains(alpha.id));
+    expect(vault.updatedNoteIds, isNot(contains(beta.id)));
+    expect(
+      vault.lastSavedMarkdown,
+      contains('Alpha.assets/attachments/alpha-paste.png'),
+    );
+    expect(
+      (await vault.readNote(beta.id)).markdown,
+      isNot(contains('alpha-paste.png')),
+    );
+  });
+
+  testWidgets('delayed pane paste rejects a closed pane target', (
+    tester,
+  ) async {
+    final vault = CountingUpdateVaultBackend(seedExampleData: false);
+    final alpha = await vault.createNote(parentPath: '', title: 'Alpha');
+    await vault.createNote(parentPath: '', title: 'Beta');
+    final imageInput = GatedImageInputService(
+      pastedImage: const ImportedImage(
+        filename: 'closed-paste.png',
+        mimeType: 'image/png',
+        bytes: tinyPng,
+      ),
+    );
+
+    await pumpWorkspace(tester, vault: vault, imageInput: imageInput);
+    await tester.tap(find.byKey(const Key('split-pane-right-button')));
+    await tester.pump(const Duration(milliseconds: 250));
+    await tester.tap(find.byKey(const Key('note-mode-source-pane-1')));
+    await tester.pump(const Duration(milliseconds: 250));
+    final editor = tester.widget<LiveMarkdownEditor>(
+      inNotePane(find.byType(LiveMarkdownEditor), 1).first,
+    );
+    final closePane = tester
+        .widget<CupertinoButton>(
+          find.descendant(
+            of: find.byKey(const Key('close-split-pane-button')),
+            matching: find.byType(CupertinoButton),
+          ),
+        )
+        .onPressed!;
+
+    final paste = editor.onPaste();
+    await imageInput.pasteStarted.future;
+    closePane();
+    await tester.pump(const Duration(milliseconds: 250));
+    expect(find.byKey(const Key('split-pane-pane-1')), findsNothing);
+    imageInput.releasePaste();
+    await paste;
+    await tester.pumpAndSettle();
+
+    expect(vault.updatedNoteIds, isEmpty);
+    expect(await vault.listSources(alpha.id), isEmpty);
+  });
+
+  testWidgets('delayed pane paste rejects a replaced provider runtime', (
+    tester,
+  ) async {
+    final vault = CountingUpdateVaultBackend(seedExampleData: false);
+    final alpha = await vault.createNote(parentPath: '', title: 'Alpha');
+    final imageInput = GatedImageInputService(
+      pastedImage: const ImportedImage(
+        filename: 'runtime-paste.png',
+        mimeType: 'image/png',
+        bytes: tinyPng,
+      ),
+    );
+    final settingsStore = FakeSettingsStore();
+
+    await pumpWorkspace(
+      tester,
+      vault: vault,
+      imageInput: imageInput,
+      settingsStore: settingsStore,
+    );
+    await tester.tap(find.byKey(const Key('note-mode-source-pane-1')));
+    await tester.pump(const Duration(milliseconds: 250));
+    final editor = tester.widget<LiveMarkdownEditor>(
+      inNotePane(find.byType(LiveMarkdownEditor), 1).first,
+    );
+    final openSettings = tester
+        .widget<CupertinoButton>(
+          find.descendant(
+            of: find.byKey(const Key('settings-button')),
+            matching: find.byType(CupertinoButton),
+          ),
+        )
+        .onPressed!;
+
+    final paste = editor.onPaste();
+    await imageInput.pasteStarted.future;
+    openSettings();
+    await tester.pump(const Duration(milliseconds: 250));
+    await tester.tap(find.byKey(const Key('settings-nav-models')));
+    await tester.pump();
+    await tester.enterText(
+      find.byKey(const Key('provider-base-url')),
+      'https://api.example.com/v1',
+    );
+    await tester.enterText(
+      find.byKey(const Key('provider-api-key')),
+      'secret-key',
+    );
+    await tester.enterText(
+      find.byKey(const Key('provider-chat-model')),
+      'chat-model',
+    );
+    await tester.enterText(
+      find.byKey(const Key('provider-vision-model')),
+      'vision-model',
+    );
+    await tester.tap(find.text('保存设置'));
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(settingsStore.savedSettings, isNotEmpty);
+
+    imageInput.releasePaste();
+    await paste;
+    await tester.pumpAndSettle();
+
+    expect(vault.updatedNoteIds, isEmpty);
+    expect(await vault.listSources(alpha.id), isEmpty);
+  });
+
+  testWidgets('delayed paste availability ignores focus changes', (
+    tester,
+  ) async {
+    mockClipboardText(null);
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    await vault.createNote(parentPath: '', title: 'Alpha');
+    final beta = await vault.createNote(parentPath: '', title: 'Beta');
+    final imageInput = GatedImageInputService(
+      pastedImage: const ImportedImage(
+        filename: 'available.png',
+        mimeType: 'image/png',
+        bytes: tinyPng,
+      ),
+      gateCanPaste: true,
+    );
+
+    await pumpWorkspace(tester, vault: vault, imageInput: imageInput);
+    await tester.tap(find.byKey(const Key('split-pane-right-button')));
+    await tester.pump(const Duration(milliseconds: 250));
+    await tester.tap(find.byKey(Key('resource-row-${beta.id}')));
+    await tester.pump(const Duration(milliseconds: 250));
+    await tester.tap(find.byKey(const Key('note-mode-source-pane-1')));
+    await tester.pump(const Duration(milliseconds: 250));
+    final editor = tester.widget<LiveMarkdownEditor>(
+      inNotePane(find.byType(LiveMarkdownEditor), 1).first,
+    );
+
+    final availability = editor.pasteAvailability();
+    await imageInput.canPasteStarted.future;
+    tester
+        .widget<GestureDetector>(find.byKey(const Key('split-pane-pane-2')))
+        .onTap!();
+    await tester.pump();
+    imageInput.releaseCanPaste();
+    await tester.pump();
+
+    expect((await availability).hasImage, isTrue);
+  });
+
+  testWidgets('delayed paste availability rejects a rebound pane', (
+    tester,
+  ) async {
+    mockClipboardText(null);
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    await vault.createNote(parentPath: '', title: 'Alpha');
+    final beta = await vault.createNote(parentPath: '', title: 'Beta');
+    final imageInput = GatedImageInputService(
+      pastedImage: const ImportedImage(
+        filename: 'stale-availability.png',
+        mimeType: 'image/png',
+        bytes: tinyPng,
+      ),
+      gateCanPaste: true,
+    );
+
+    await pumpWorkspace(tester, vault: vault, imageInput: imageInput);
+    await tester.tap(find.byKey(const Key('note-mode-source-pane-1')));
+    await tester.pump(const Duration(milliseconds: 250));
+    final editor = tester.widget<LiveMarkdownEditor>(
+      inNotePane(find.byType(LiveMarkdownEditor), 1).first,
+    );
+
+    final availability = editor.pasteAvailability();
+    await imageInput.canPasteStarted.future;
+    await tester.tap(find.byKey(Key('resource-row-${beta.id}')));
+    await tester.pump(const Duration(milliseconds: 250));
+    imageInput.releaseCanPaste();
+    await tester.pump();
+
+    expect((await availability).canPaste, isFalse);
   });
 
   testWidgets('uses the configured pasted image width', (tester) async {
@@ -682,6 +916,78 @@ void main() {
       (await vault.readNote(note.id)).markdown,
       contains('$secondTag $firstTag'),
     );
+  });
+
+  testWidgets('non-focused pane resize and drop write only its session', (
+    tester,
+  ) async {
+    final vault = CountingUpdateVaultBackend(seedExampleData: false);
+    final alpha = await vault.createNote(parentPath: '', title: 'Alpha');
+    final beta = await vault.createNote(parentPath: '', title: 'Beta');
+    final first = await vault.addImageSource(
+      noteId: alpha.id,
+      filename: 'first.png',
+      mimeType: 'image/png',
+      bytes: tinyPng,
+    );
+    final second = await vault.addImageSource(
+      noteId: alpha.id,
+      filename: 'second.png',
+      mimeType: 'image/png',
+      bytes: tinyPng,
+    );
+    await vault.addImageSource(
+      noteId: beta.id,
+      filename: 'beta.png',
+      mimeType: 'image/png',
+      bytes: tinyPng,
+    );
+    const firstTag =
+        '<img src="Alpha.assets/attachments/first.png" width="320">';
+    const secondTag =
+        '<img src="Alpha.assets/attachments/second.png" width="320">';
+    const betaTag = '<img src="Beta.assets/attachments/beta.png" width="360">';
+    await vault.updateMarkdown(
+      noteId: alpha.id,
+      markdown: '# Alpha\n\n$firstTag\n\n$secondTag',
+    );
+    await vault.updateMarkdown(noteId: beta.id, markdown: '# Beta\n\n$betaTag');
+    vault
+      ..updateCalls = 0
+      ..lastSavedMarkdown = null
+      ..updatedNoteIds.clear();
+
+    await pumpWorkspace(tester, vault: vault, size: const Size(2400, 1000));
+    await tester.tap(find.byKey(const Key('split-pane-right-button')));
+    await tester.pump(const Duration(milliseconds: 250));
+    await tester.tap(find.byKey(Key('resource-row-${beta.id}')));
+    await tester.pump(const Duration(milliseconds: 250));
+    await tester.tap(find.byKey(const Key('note-mode-source-pane-1')));
+    await tester.pump(const Duration(milliseconds: 250));
+    tester
+        .widget<GestureDetector>(find.byKey(const Key('split-pane-pane-2')))
+        .onTap!();
+    await tester.pumpAndSettle();
+
+    final firstHandle = inNotePane(
+      find.byKey(Key('image-resize-handle-${first.id}')),
+      1,
+    );
+    expect(firstHandle, findsOneWidget);
+    await tester.drag(firstHandle, const Offset(80, 0));
+    await tester.pumpAndSettle();
+    await dragPreviewImageToSide(
+      tester,
+      from: second,
+      to: first,
+      side: PreviewImageDropSide.left,
+    );
+
+    expect(vault.updatedNoteIds, isNotEmpty);
+    expect(vault.updatedNoteIds, everyElement(alpha.id));
+    expect(vault.lastSavedMarkdown, contains('first.png" width="400"'));
+    expect(vault.lastSavedMarkdown, contains('$secondTag '));
+    expect((await vault.readNote(beta.id)).markdown, contains(betaTag));
   });
 
   testWidgets('dragging the resize handle does not move preview images', (

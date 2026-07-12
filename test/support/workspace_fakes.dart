@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:synapse/domain/vault/vault_resource.dart';
+import 'package:synapse/infrastructure/ai/ai_provider.dart';
 import 'package:synapse/infrastructure/config/provider_config_store.dart';
 import 'package:synapse/infrastructure/config/settings_store.dart';
 import 'package:synapse/infrastructure/config/synapse_settings.dart';
@@ -146,6 +147,7 @@ class CountingUpdateVaultBackend extends MemoryVaultBackend {
 
   int updateCalls = 0;
   String? lastSavedMarkdown;
+  final List<String> updatedNoteIds = <String>[];
 
   @override
   Future<VaultNoteContent> updateMarkdown({
@@ -153,6 +155,7 @@ class CountingUpdateVaultBackend extends MemoryVaultBackend {
     required String markdown,
   }) {
     updateCalls += 1;
+    updatedNoteIds.add(noteId);
     lastSavedMarkdown = markdown;
     return super.updateMarkdown(noteId: noteId, markdown: markdown);
   }
@@ -426,6 +429,134 @@ class FakeImageInputService implements ImageInputService {
   Future<ImportedImage?> pasteImage() async {
     pasteCalls += 1;
     return pastedImage;
+  }
+}
+
+class GatedImageInputService implements ImageInputService {
+  GatedImageInputService({
+    this.pickedImage,
+    this.pastedImage,
+    this.gateCanPaste = false,
+  });
+
+  final ImportedImage? pickedImage;
+  final ImportedImage? pastedImage;
+  final bool gateCanPaste;
+  final canPasteStarted = Completer<void>();
+  final pickStarted = Completer<void>();
+  final pasteStarted = Completer<void>();
+  final _pickRelease = Completer<void>();
+  final _pasteRelease = Completer<void>();
+  final _canPasteRelease = Completer<void>();
+  int pickCalls = 0;
+  int pasteCalls = 0;
+
+  void releasePick() {
+    if (!_pickRelease.isCompleted) {
+      _pickRelease.complete();
+    }
+  }
+
+  void releasePaste() {
+    if (!_pasteRelease.isCompleted) {
+      _pasteRelease.complete();
+    }
+  }
+
+  void releaseCanPaste() {
+    if (!_canPasteRelease.isCompleted) {
+      _canPasteRelease.complete();
+    }
+  }
+
+  @override
+  Future<ImportedImage?> pickImage() async {
+    pickCalls += 1;
+    if (!pickStarted.isCompleted) {
+      pickStarted.complete();
+    }
+    await _pickRelease.future;
+    return pickedImage;
+  }
+
+  @override
+  Future<bool> canPasteImage() async {
+    if (!canPasteStarted.isCompleted) {
+      canPasteStarted.complete();
+    }
+    if (gateCanPaste) {
+      await _canPasteRelease.future;
+    }
+    return pastedImage != null;
+  }
+
+  @override
+  Future<ImportedImage?> pasteImage() async {
+    pasteCalls += 1;
+    if (!pasteStarted.isCompleted) {
+      pasteStarted.complete();
+    }
+    await _pasteRelease.future;
+    return pastedImage;
+  }
+}
+
+class GatedAiProvider implements AiProvider {
+  GatedAiProvider({
+    this.extractedText = '# 原图标题\n- 提取文字：观照',
+    this.outlineText = '## 文本建议',
+  });
+
+  final String extractedText;
+  final String outlineText;
+  final extractionStarted = Completer<void>();
+  final outlineStarted = Completer<void>();
+  final _extractionRelease = Completer<void>();
+  final _outlineRelease = Completer<void>();
+  int extractionCalls = 0;
+  int outlineCalls = 0;
+
+  void releaseExtraction() {
+    if (!_extractionRelease.isCompleted) {
+      _extractionRelease.complete();
+    }
+  }
+
+  void releaseOutline() {
+    if (!_outlineRelease.isCompleted) {
+      _outlineRelease.complete();
+    }
+  }
+
+  @override
+  Future<String> createOutlineProposal({
+    required String noteTitle,
+    required String currentMarkdown,
+    required List<SourceItem> sources,
+  }) async {
+    outlineCalls += 1;
+    if (!outlineStarted.isCompleted) {
+      outlineStarted.complete();
+    }
+    await _outlineRelease.future;
+    return outlineText;
+  }
+
+  @override
+  Future<List<double>> createEmbedding(String text) async => const [1, 0, 0];
+
+  @override
+  Future<ImageExtraction> extractImageText({
+    required String filename,
+    required String mimeType,
+    required List<int> bytes,
+  }) async {
+    extractionCalls += 1;
+    if (!extractionStarted.isCompleted) {
+      extractionStarted.complete();
+    }
+    await _extractionRelease.future;
+    return ImageExtraction(text: extractedText, description: '$filename OCR');
   }
 }
 
