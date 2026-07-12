@@ -469,6 +469,107 @@ void main() {
       expect(afterCommitCalls, 0);
     });
 
+    test('prepared mutation is side effect free until silent apply', () {
+      final registry = _createRegistry();
+      addTearDown(registry.dispose);
+      final sessionA = registry.upsert(_note('A.md', 'old A'));
+      final sessionB = registry.upsert(_note('B.md', 'old B'));
+      var registryChanges = 0;
+      var sessionChanges = 0;
+      registry.addListener(() => registryChanges += 1);
+      sessionB.addListener(() => sessionChanges += 1);
+
+      final prepared = registry.prepareMutation(
+        remappedNoteIds: const {'A.md': 'B.md', 'B.md': 'A.md'},
+        removedNoteIds: const {'B.md'},
+        refreshedNotesByNewId: {
+          'A.md': _note('A.md', 'new A'),
+          'B.md': _note('B.md', 'new B'),
+        },
+      );
+
+      expect(registry.sessionFor('A.md'), same(sessionA));
+      expect(registry.sessionFor('B.md'), same(sessionB));
+      expect(sessionA.noteId, 'A.md');
+      expect(sessionB.noteId, 'B.md');
+
+      prepared.applySilently();
+
+      expect(registry.sessionFor('A.md'), same(sessionB));
+      expect(registry.sessionFor('B.md'), isNull);
+      expect(sessionB.noteId, 'A.md');
+      expect(sessionB.controller.text, 'new A');
+      expect(registryChanges, 0);
+      expect(sessionChanges, 0);
+
+      prepared.publish();
+      prepared.publish();
+
+      expect(registryChanges, 1);
+      expect(sessionChanges, 1);
+      expect(sessionB.savePhase, isNot(NoteSavePhase.disposed));
+      expect(sessionA.savePhase, NoteSavePhase.disposed);
+    });
+
+    test('prepared mutation rejects stale apply without overwriting state', () {
+      final registry = _createRegistry();
+      addTearDown(registry.dispose);
+      final session = registry.upsert(_note('A.md', 'old A'));
+      final prepared = registry.prepareMutation(
+        remappedNoteIds: const {'A.md': 'B.md'},
+        removedNoteIds: const {},
+        refreshedNotesByNewId: {'B.md': _note('B.md', 'new B')},
+      );
+      final newer = registry.upsert(_note('C.md', 'newer C'));
+
+      expect(prepared.applySilently, throwsStateError);
+
+      expect(registry.sessionFor('A.md'), same(session));
+      expect(registry.sessionFor('B.md'), isNull);
+      expect(registry.sessionFor('C.md'), same(newer));
+      expect(session.noteId, 'A.md');
+    });
+
+    test('prepared mutation rejects apply after registry disposal', () {
+      final registry = _createRegistry();
+      final session = registry.upsert(_note('A.md', 'old A'));
+      final prepared = registry.prepareMutation(
+        remappedNoteIds: const {'A.md': 'B.md'},
+        removedNoteIds: const {},
+        refreshedNotesByNewId: {'B.md': _note('B.md', 'new B')},
+      );
+
+      registry.dispose();
+
+      expect(prepared.applySilently, throwsStateError);
+      expect(session.savePhase, NoteSavePhase.disposed);
+    });
+
+    test('prepared mutation can install a new session before publishing', () {
+      final registry = _createRegistry();
+      addTearDown(registry.dispose);
+      var notifications = 0;
+      registry.addListener(() => notifications += 1);
+
+      final prepared = registry.prepareMutation(
+        remappedNoteIds: const {},
+        removedNoteIds: const {},
+        refreshedNotesByNewId: const {},
+        upsertedNotesById: {'B.md': _note('B.md', 'new B')},
+      );
+
+      expect(registry.sessionFor('B.md'), isNull);
+
+      prepared.applySilently();
+
+      expect(registry.sessionFor('B.md')?.controller.text, 'new B');
+      expect(notifications, 0);
+
+      prepared.publish();
+
+      expect(notifications, 1);
+    });
+
     test('prepared saved note preserves a concurrent edit until publish', () {
       final registry = _createRegistry();
       addTearDown(registry.dispose);

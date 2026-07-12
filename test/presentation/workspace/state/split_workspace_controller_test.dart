@@ -180,6 +180,94 @@ void main() {
       expect(controller.paneGeneration('pane-1'), isNot(replacementGeneration));
     });
 
+    test('prepared mutation applies silently and publishes once', () {
+      final controller = SplitWorkspaceController(initialNoteId: 'A.md');
+      addTearDown(controller.dispose);
+      final originalPane = controller.focusedPane!;
+      final originalGeneration = controller.paneGeneration(originalPane.paneId);
+      var notifications = 0;
+      controller.addListener(() => notifications += 1);
+
+      final prepared = controller.prepareMutation(
+        remappedNoteIds: const {'A.md': 'B.md'},
+        removedNoteIds: const {},
+      );
+
+      expect(controller.focusedPane!.noteId, 'A.md');
+
+      prepared.applySilently();
+
+      expect(controller.focusedPane!.noteId, 'B.md');
+      expect(
+        controller.paneGeneration(originalPane.paneId),
+        originalGeneration,
+      );
+      expect(notifications, 0);
+
+      prepared.publish();
+      prepared.publish();
+
+      expect(notifications, 1);
+    });
+
+    test(
+      'prepared mutation rejects stale apply without replacing newer panes',
+      () {
+        final controller = SplitWorkspaceController(initialNoteId: 'A.md');
+        addTearDown(controller.dispose);
+        final paneId = controller.focusedPaneId;
+        final prepared = controller.prepareMutation(
+          remappedNoteIds: const {'A.md': 'B.md'},
+          removedNoteIds: const {},
+        );
+        controller.setPaneNote(paneId, 'C.md');
+
+        expect(prepared.applySilently, throwsStateError);
+        expect(controller.pane(paneId)!.noteId, 'C.md');
+      },
+    );
+
+    test('prepared mutation rejects apply after disposal', () {
+      final controller = SplitWorkspaceController(initialNoteId: 'A.md');
+      final prepared = controller.prepareMutation(
+        remappedNoteIds: const {'A.md': 'B.md'},
+        removedNoteIds: const {},
+      );
+
+      controller.dispose();
+
+      expect(prepared.applySilently, throwsStateError);
+    });
+
+    test('prepared mutation combines pane assignment and pane close', () {
+      final controller = SplitWorkspaceController(initialNoteId: 'A.md');
+      addTearDown(controller.dispose);
+      final secondPane = controller.splitFocused(SplitDirection.right);
+      final firstGeneration = controller.paneGeneration('pane-1');
+      var notifications = 0;
+      controller.addListener(() => notifications += 1);
+
+      final prepared = controller.prepareMutation(
+        remappedNoteIds: const {},
+        removedNoteIds: const {},
+        paneNoteAssignments: const {'pane-1': 'B.md'},
+        closedPaneIds: {secondPane},
+      );
+
+      prepared.applySilently();
+
+      expect(controller.panes, hasLength(1));
+      expect(controller.pane('pane-1')?.noteId, 'B.md');
+      expect(controller.pane(secondPane), isNull);
+      expect(controller.paneGeneration('pane-1'), isNot(firstGeneration));
+      expect(controller.paneGeneration(secondPane), isNull);
+      expect(notifications, 0);
+
+      prepared.publish();
+
+      expect(notifications, 1);
+    });
+
     test(
       'close keeps one pane, compresses the tree, and focuses predictably',
       () {

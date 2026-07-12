@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:synapse/domain/vault/vault_resource.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
 import 'package:synapse/presentation/workspace/state/note_document_session.dart';
+import 'package:synapse/presentation/workspace/state/note_materials_registry.dart';
 import 'package:synapse/presentation/workspace/state/note_save_coordinator.dart';
 import 'package:synapse/presentation/workspace/state/note_session_registry.dart';
 import 'package:synapse/presentation/workspace/state/split_workspace_controller.dart';
@@ -11,6 +12,186 @@ import 'package:synapse/presentation/workspace/state/workspace_mutation_barrier.
 
 void main() {
   group('WorkspaceMutationBarrier', () {
+    test('returns only the three strict mutation result variants', () async {
+      final harness = _Stage6BarrierHarness();
+      addTearDown(harness.dispose);
+
+      final committed = await harness.barrier.run<void>(
+        WorkspaceMutationPlan<void>(
+          affectedNoteIds: const {},
+          dirtyDisposition: DirtyDisposition.flush,
+          execute: () async => const VaultMutationDelta<void>(value: null),
+          prepareCommit: harness.prepareBatch,
+        ),
+      );
+      final backendFailed = await harness.barrier.run<void>(
+        WorkspaceMutationPlan<void>(
+          affectedNoteIds: const {},
+          dirtyDisposition: DirtyDisposition.flush,
+          execute: () async => throw StateError('backend failed'),
+          prepareCommit: harness.prepareBatch,
+        ),
+      );
+
+      expect(committed, isA<Committed<void>>());
+      expect(backendFailed, isA<BackendFailed<void>>());
+      expect(committed, isNot(isA<BackendFailed<void>>()));
+      expect(backendFailed, isNot(isA<Committed<void>>()));
+    });
+
+    test(
+      'combined batch listeners observe every installed component',
+      () async {
+        final harness = _Stage6BarrierHarness(initialNoteId: 'A.md');
+        addTearDown(harness.dispose);
+        final session = harness.registry.upsert(_note('A.md', 'old'));
+        harness.materials.replaceProposals('A.md', [_proposal('A.md')]);
+        var workspaceValue = 'old';
+        final observations = <bool>[];
+        bool isCombinedStateInstalled() {
+          return harness.registry.sessionFor('A.md') == null &&
+              identical(harness.registry.sessionFor('B.md'), session) &&
+              harness.splits.focusedPane?.noteId == 'B.md' &&
+              harness.materials.snapshotFor('A.md').proposals.isEmpty &&
+              harness.materials.snapshotFor('B.md').proposals.single.noteId ==
+                  'B.md' &&
+              workspaceValue == 'new';
+        }
+
+        harness.registry.addListener(
+          () => observations.add(isCombinedStateInstalled()),
+        );
+        harness.splits.addListener(
+          () => observations.add(isCombinedStateInstalled()),
+        );
+        harness.materials.addListener(
+          () => observations.add(isCombinedStateInstalled()),
+        );
+
+        final result = await harness.barrier.run<void>(
+          WorkspaceMutationPlan<void>(
+            affectedNoteIds: const {'A.md'},
+            dirtyDisposition: DirtyDisposition.flush,
+            execute: () async => VaultMutationDelta<void>(
+              value: null,
+              remappedNoteIds: const {'A.md': 'B.md'},
+              refreshedNotesByNewId: {'B.md': _note('B.md', 'new')},
+            ),
+            prepareCommit: (delta) => harness.prepareBatch(
+              delta,
+              workspace: _PreparedTestWorkspaceMutation(
+                apply: () => workspaceValue = 'new',
+              ),
+            ),
+          ),
+        );
+
+        expect(result, isA<Committed<void>>());
+        expect(observations, isNotEmpty);
+        expect(observations, everyElement(isTrue));
+      },
+    );
+
+    test(
+      'post-backend prepare failure is fatal and backend runs once',
+      () async {
+        final harness = _Stage6BarrierHarness();
+        addTearDown(harness.dispose);
+        var backendCalls = 0;
+
+        await expectLater(
+          harness.barrier.run<void>(
+            WorkspaceMutationPlan<void>(
+              affectedNoteIds: const {},
+              dirtyDisposition: DirtyDisposition.flush,
+              execute: () async {
+                backendCalls += 1;
+                return const VaultMutationDelta<void>(value: null);
+              },
+              prepareCommit: (_) => throw StateError('prepare failed'),
+            ),
+          ),
+          throwsA(
+            isA<WorkspaceCommitInvariantError>().having(
+              (error) => error.phase,
+              'phase',
+              WorkspaceCommitPhase.prepare,
+            ),
+          ),
+        );
+
+        expect(backendCalls, 1);
+        expect(harness.invariantErrors, hasLength(1));
+      },
+    );
+
+    test(
+      'commitPrepared preparation failure is fatal, not BackendFailed',
+      () async {
+        final harness = _Stage6BarrierHarness();
+        addTearDown(harness.dispose);
+
+        await expectLater(
+          harness.barrier.commitPrepared<void>(
+            () => throw StateError('saved result preparation failed'),
+          ),
+          throwsA(
+            isA<WorkspaceCommitInvariantError>().having(
+              (error) => error.phase,
+              'phase',
+              WorkspaceCommitPhase.prepare,
+            ),
+          ),
+        );
+
+        expect(harness.invariantErrors, hasLength(1));
+      },
+    );
+
+    for (final failurePhase in [
+      WorkspaceCommitPhase.apply,
+      WorkspaceCommitPhase.publish,
+    ]) {
+      test('post-backend ${failurePhase.name} failure is fatal', () async {
+        final harness = _Stage6BarrierHarness();
+        addTearDown(harness.dispose);
+        var backendCalls = 0;
+        final workspace = _PreparedTestWorkspaceMutation(
+          apply: failurePhase == WorkspaceCommitPhase.apply
+              ? () => throw StateError('apply failed')
+              : () {},
+          onPublish: failurePhase == WorkspaceCommitPhase.publish
+              ? () => throw StateError('publish failed')
+              : null,
+        );
+
+        await expectLater(
+          harness.barrier.run<void>(
+            WorkspaceMutationPlan<void>(
+              affectedNoteIds: const {},
+              dirtyDisposition: DirtyDisposition.flush,
+              execute: () async {
+                backendCalls += 1;
+                return const VaultMutationDelta<void>(value: null);
+              },
+              prepareCommit: (delta) =>
+                  harness.prepareBatch(delta, workspace: workspace),
+            ),
+          ),
+          throwsA(
+            isA<WorkspaceCommitInvariantError>().having(
+              (error) => error.phase,
+              'phase',
+              failurePhase,
+            ),
+          ),
+        );
+
+        expect(backendCalls, 1);
+        expect(harness.invariantErrors.single.phase, failurePhase);
+      });
+    }
+
     test('does not execute backend when a flush fails', () async {
       final harness = _BarrierHarness(vault: _FailingUpdateVault());
       addTearDown(harness.dispose);
@@ -29,7 +210,7 @@ void main() {
         ),
       );
 
-      expect(result, isA<MutationAborted<void>>());
+      expect(result, isA<AbortedByFlush<void>>());
       expect(executed, isFalse);
       expect(harness.registry.sessionFor('A.md'), same(session));
     });
@@ -49,8 +230,13 @@ void main() {
             await firstGate.future;
             return const VaultMutationDelta<int>(value: 1);
           },
+          prepareCommit: (delta) => harness.prepareBatch(
+            delta,
+            workspace: _PreparedTestWorkspaceMutation(
+              apply: () => events.add('first:commit'),
+            ),
+          ),
         ),
-        onCommitted: (_) => events.add('first:commit'),
       );
       await _drainEventQueue();
       final second = harness.barrier.run<int>(
@@ -61,15 +247,20 @@ void main() {
             events.add('second:execute');
             return const VaultMutationDelta<int>(value: 2);
           },
+          prepareCommit: (delta) => harness.prepareBatch(
+            delta,
+            workspace: _PreparedTestWorkspaceMutation(
+              apply: () => events.add('second:commit'),
+            ),
+          ),
         ),
-        onCommitted: (_) => events.add('second:commit'),
       );
       await _drainEventQueue();
 
       expect(events, ['first:execute']);
       firstGate.complete();
-      expect(await first, isA<MutationCommitted<int>>());
-      expect(await second, isA<MutationCommitted<int>>());
+      expect(await first, isA<Committed<int>>());
+      expect(await second, isA<Committed<int>>());
       expect(events, [
         'first:execute',
         'first:commit',
@@ -96,8 +287,13 @@ void main() {
               await releaseExecute.future;
               return const VaultMutationDelta<void>(value: null);
             },
+            prepareCommit: (delta) => harness.prepareBatch(
+              delta,
+              workspace: _PreparedTestWorkspaceMutation(
+                apply: () => resourceTreeVersion = 'moved-tree',
+              ),
+            ),
           ),
-          onCommitted: (_) => resourceTreeVersion = 'moved-tree',
         );
         await executeStarted.future;
         var prepared = false;
@@ -110,10 +306,10 @@ void main() {
         expect(prepared, isFalse);
         releaseExecute.complete();
 
-        expect(await mutation, isA<MutationCommitted<void>>());
+        expect(await mutation, isA<Committed<void>>());
         final committed = await saveCommit;
-        expect(committed, isA<MutationCommitted<String>>());
-        expect((committed as MutationCommitted<String>).value, 'moved-tree');
+        expect(committed, isA<Committed<String>>());
+        expect((committed as Committed<String>).value, 'moved-tree');
       },
     );
 
@@ -137,7 +333,7 @@ void main() {
         ),
       );
 
-      expect(result, isA<MutationCommitted<void>>());
+      expect(result, isA<Committed<void>>());
       expect(harness.registry.sessionFor('A.md'), isNull);
       expect(harness.registry.sessionFor('folder/A.md'), same(session));
       expect(
@@ -179,7 +375,7 @@ void main() {
       expect(executed, isFalse);
       vault.releaseUpdate.complete();
       await save;
-      expect(await mutation, isA<MutationCommitted<void>>());
+      expect(await mutation, isA<Committed<void>>());
       expect(executed, isTrue);
       expect(harness.registry.noteIds, isEmpty);
     });
@@ -195,11 +391,16 @@ void main() {
           affectedNoteIds: const {'A.md'},
           dirtyDisposition: DirtyDisposition.flush,
           execute: () async => throw StateError('backend failed'),
+          prepareCommit: (delta) => harness.prepareBatch(
+            delta,
+            workspace: _PreparedTestWorkspaceMutation(
+              apply: () => committed = true,
+            ),
+          ),
         ),
-        onCommitted: (_) => committed = true,
       );
 
-      expect(result, isA<MutationFailed<void>>());
+      expect(result, isA<BackendFailed<void>>());
       expect(committed, isFalse);
       expect(harness.registry.sessionFor('A.md'), same(session));
       expect(harness.registry.sessionFor('B.md'), isNull);
@@ -216,6 +417,7 @@ void main() {
           onEdited: (_) {},
         );
         final splits = SplitWorkspaceController(initialNoteId: 'A.md');
+        final materials = NoteMaterialsRegistry();
         late final WorkspaceMutationBarrier barrier;
         final coordinator = NoteSaveCoordinator(
           sessions: registry,
@@ -242,9 +444,11 @@ void main() {
           sessions: registry,
           saveCoordinator: coordinator,
           splits: splits,
+          materials: materials,
         );
         addTearDown(() {
           coordinator.dispose();
+          materials.dispose();
           registry.dispose();
           splits.dispose();
         });
@@ -262,7 +466,7 @@ void main() {
             )
             .timeout(const Duration(seconds: 1));
 
-        expect(result, isA<MutationCommitted<void>>());
+        expect(result, isA<Committed<void>>());
         expect(registry.sessionFor('A.md'), isNull);
         expect(registry.sessionFor('B.md'), same(session));
         expect(splits.focusedPane?.noteId, 'B.md');
@@ -282,6 +486,7 @@ void main() {
           onEdited: (_) {},
         );
         final splits = SplitWorkspaceController(initialNoteId: 'A.md');
+        final materials = NoteMaterialsRegistry();
         late final WorkspaceMutationBarrier barrier;
         final coordinator = NoteSaveCoordinator(
           sessions: registry,
@@ -301,7 +506,7 @@ void main() {
               ),
               originatingSession: result.session,
             );
-            if (commitResult case MutationFailed<void>(
+            if (commitResult case BackendFailed<void>(
               :final error,
               :final stackTrace,
             )) {
@@ -314,9 +519,11 @@ void main() {
           sessions: registry,
           saveCoordinator: coordinator,
           splits: splits,
+          materials: materials,
         );
         addTearDown(() {
           coordinator.dispose();
+          materials.dispose();
           registry.dispose();
           splits.dispose();
         });
@@ -353,9 +560,9 @@ void main() {
 
         expect(
           await target.timeout(const Duration(seconds: 1)),
-          isA<MutationCommitted<void>>(),
+          isA<Committed<void>>(),
         );
-        expect(await blocker, isA<MutationCommitted<void>>());
+        expect(await blocker, isA<Committed<void>>());
         expect((await save).succeeded, isTrue);
         expect(session.isDirty, isFalse);
       },
@@ -399,7 +606,7 @@ void main() {
           ),
         );
 
-        expect(result, isA<MutationCommitted<void>>());
+        expect(result, isA<Committed<void>>());
         expect(registryNotified, isTrue);
         expect(splitNotified, isTrue);
         expect(registryObservedCommittedSplit, isTrue);
@@ -441,7 +648,7 @@ void main() {
           ),
         );
 
-        expect(result, isA<MutationCommitted<void>>());
+        expect(result, isA<Committed<void>>());
         expect(registryNotified, isTrue);
         expect(splitNotified, isTrue);
         expect(registryObservedCommittedSplit, isTrue);
@@ -486,7 +693,7 @@ void main() {
         final writesDuringExecute = List<String>.of(harness.vault.savedNoteIds);
 
         releaseExecute.complete();
-        expect(await mutation, isA<MutationCommitted<void>>());
+        expect(await mutation, isA<Committed<void>>());
         timers.fireAll();
         await _drainEventQueue();
 
@@ -534,7 +741,7 @@ void main() {
         final activeDuringExecute = timers.activeCount;
 
         releaseExecute.complete();
-        expect(await mutation, isA<MutationCommitted<void>>());
+        expect(await mutation, isA<Committed<void>>());
         final activeAfterCommit = timers.activeCount;
         timers.fireActive();
         await _drainEventQueue();
@@ -584,11 +791,109 @@ void main() {
         ),
       );
 
-      expect(result, isA<MutationCommitted<void>>());
+      expect(result, isA<Committed<void>>());
       expect(observations, isNotEmpty);
       expect(observations, everyElement(isTrue));
     });
   });
+}
+
+final class _Stage6BarrierHarness {
+  _Stage6BarrierHarness({String? initialNoteId}) {
+    splits = SplitWorkspaceController(initialNoteId: initialNoteId);
+    registry = NoteSessionRegistry(
+      visibleBody: (markdown) => markdown,
+      onEdited: (_) {},
+    );
+    materials = NoteMaterialsRegistry();
+    coordinator = NoteSaveCoordinator(
+      sessions: registry,
+      vault: () => vault,
+      debounceDuration: () => const Duration(seconds: 1),
+      serializeVisibleBody: (_, body) => body,
+      onResult: (_, _) {},
+      onStateChanged: () {},
+    );
+    barrier = WorkspaceMutationBarrier(
+      sessions: registry,
+      saveCoordinator: coordinator,
+      splits: splits,
+      materials: materials,
+      onInvariantFailure: invariantErrors.add,
+    );
+  }
+
+  final MemoryVaultBackend vault = MemoryVaultBackend(seedExampleData: false);
+  final List<WorkspaceCommitInvariantError> invariantErrors = [];
+  late final NoteSessionRegistry registry;
+  late final NoteMaterialsRegistry materials;
+  late final NoteSaveCoordinator coordinator;
+  late final SplitWorkspaceController splits;
+  late final WorkspaceMutationBarrier barrier;
+
+  WorkspaceCommitBatch<T> prepareBatch<T>(
+    VaultMutationDelta<T> delta, {
+    PreparedWorkspaceSnapshotMutation? workspace,
+  }) {
+    return WorkspaceCommitBatch<T>(
+      delta: delta,
+      preparedSessions: registry.prepareMutation(
+        remappedNoteIds: delta.remappedNoteIds,
+        removedNoteIds: delta.removedNoteIds,
+        refreshedNotesByNewId: delta.refreshedNotesByNewId,
+      ),
+      preparedSplits: splits.prepareMutation(
+        remappedNoteIds: delta.remappedNoteIds,
+        removedNoteIds: delta.removedNoteIds,
+      ),
+      preparedMaterials: materials.prepareMutation(
+        remappedNoteIds: delta.remappedNoteIds,
+        removedNoteIds: delta.removedNoteIds,
+        refreshedNotesByNewId: delta.refreshedNotesByNewId,
+      ),
+      preparedWorkspace:
+          workspace ?? const PreparedWorkspaceSnapshotMutation.none(),
+    );
+  }
+
+  void dispose() {
+    coordinator.dispose();
+    materials.dispose();
+    registry.dispose();
+    splits.dispose();
+  }
+}
+
+final class _PreparedTestWorkspaceMutation
+    implements PreparedWorkspaceSnapshotMutation {
+  _PreparedTestWorkspaceMutation({required this.apply, this.onPublish});
+
+  final void Function() apply;
+  final void Function()? onPublish;
+  bool _isApplied = false;
+  bool _isPublished = false;
+
+  @override
+  void validateCurrent() {}
+
+  @override
+  void applySilently() {
+    if (_isApplied) {
+      return;
+    }
+    apply();
+    _isApplied = true;
+  }
+
+  @override
+  void publish() {
+    if (_isPublished) {
+      return;
+    }
+    applySilently();
+    onPublish?.call();
+    _isPublished = true;
+  }
 }
 
 final class _BarrierHarness {
@@ -598,6 +903,7 @@ final class _BarrierHarness {
     String? initialNoteId,
   }) : vault = vault ?? MemoryVaultBackend(seedExampleData: false) {
     splits = SplitWorkspaceController(initialNoteId: initialNoteId);
+    materials = NoteMaterialsRegistry();
     registry = NoteSessionRegistry(
       visibleBody: (markdown) => markdown,
       onEdited: (_) {},
@@ -632,25 +938,68 @@ final class _BarrierHarness {
       sessions: registry,
       saveCoordinator: coordinator,
       splits: splits,
+      materials: materials,
     );
   }
 
   final MemoryVaultBackend vault;
   late final NoteSessionRegistry registry;
+  late final NoteMaterialsRegistry materials;
   late final NoteSaveCoordinator coordinator;
   late final SplitWorkspaceController splits;
   late final WorkspaceMutationBarrier barrier;
 
+  WorkspaceCommitBatch<T> prepareBatch<T>(
+    VaultMutationDelta<T> delta, {
+    PreparedWorkspaceSnapshotMutation? workspace,
+  }) {
+    return WorkspaceCommitBatch<T>(
+      delta: delta,
+      preparedSessions: registry.prepareMutation(
+        remappedNoteIds: delta.remappedNoteIds,
+        removedNoteIds: delta.removedNoteIds,
+        refreshedNotesByNewId: delta.refreshedNotesByNewId,
+      ),
+      preparedSplits: splits.prepareMutation(
+        remappedNoteIds: delta.remappedNoteIds,
+        removedNoteIds: delta.removedNoteIds,
+      ),
+      preparedMaterials: materials.prepareMutation(
+        remappedNoteIds: delta.remappedNoteIds,
+        removedNoteIds: delta.removedNoteIds,
+        refreshedNotesByNewId: delta.refreshedNotesByNewId,
+      ),
+      preparedWorkspace:
+          workspace ?? const PreparedWorkspaceSnapshotMutation.none(),
+    );
+  }
+
   void dispose() {
     coordinator.dispose();
+    materials.dispose();
     registry.dispose();
     splits.dispose();
   }
 }
 
+AiProposal _proposal(String noteId) {
+  final now = DateTime.utc(2026, 7, 12);
+  return AiProposal(
+    id: 'proposal-1',
+    noteId: noteId,
+    sourceIds: const [],
+    title: 'Proposal',
+    proposedMarkdown: 'body',
+    status: ProposalStatus.pending,
+    createdAt: now,
+    updatedAt: now,
+  );
+}
+
 final class _LeaseHarness {
   _LeaseHarness({required String initialNoteId, TimerFactory? timerFactory}) {
     splits = SplitWorkspaceController(initialNoteId: initialNoteId);
+    materials = NoteMaterialsRegistry();
     late NoteSaveCoordinator createdCoordinator;
     registry = NoteSessionRegistry(
       visibleBody: (markdown) => markdown,
@@ -685,17 +1034,20 @@ final class _LeaseHarness {
       sessions: registry,
       saveCoordinator: coordinator,
       splits: splits,
+      materials: materials,
     );
   }
 
   final _RecordingUpdateVault vault = _RecordingUpdateVault();
   late final NoteSessionRegistry registry;
   late final NoteSaveCoordinator coordinator;
+  late final NoteMaterialsRegistry materials;
   late final SplitWorkspaceController splits;
   late final WorkspaceMutationBarrier barrier;
 
   void dispose() {
     coordinator.dispose();
+    materials.dispose();
     registry.dispose();
     splits.dispose();
   }

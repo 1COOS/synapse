@@ -70,6 +70,8 @@ final class SplitWorkspaceController extends ChangeNotifier {
   int _nextSplitNumber = 1;
   int _nextPaneGeneration = 1;
   final Map<String, int> _paneGenerations = <String, int>{};
+  bool _isDisposed = false;
+  Object _stateToken = Object();
 
   SplitNode get root => _root;
 
@@ -93,6 +95,7 @@ final class SplitWorkspaceController extends ChangeNotifier {
   }
 
   void reset({NoteMode? defaultMode, String? initialNoteId}) {
+    _ensureCanMutate();
     if (defaultMode != null) {
       _defaultMode = defaultMode;
     }
@@ -108,22 +111,24 @@ final class SplitWorkspaceController extends ChangeNotifier {
     _paneGenerations
       ..clear()
       ..[initialPane.paneId] = _createPaneGeneration();
-    notifyListeners();
+    _notifyStateChanged();
   }
 
   bool focus(String paneId) {
+    _ensureCanMutate();
     final target = pane(paneId);
     if (target == null) {
       return false;
     }
     if (_focusedPaneId != paneId) {
       _focusedPaneId = paneId;
-      notifyListeners();
+      _notifyStateChanged();
     }
     return true;
   }
 
   String splitFocused(SplitDirection direction) {
+    _ensureCanMutate();
     final focused = focusedPane;
     if (focused == null) {
       throw StateError('The focused split pane does not exist.');
@@ -148,11 +153,12 @@ final class SplitWorkspaceController extends ChangeNotifier {
     _root = _replaceNode(_root, focused.paneId, branch);
     _focusedPaneId = newPane.paneId;
     _paneGenerations[newPane.paneId] = _createPaneGeneration();
-    notifyListeners();
+    _notifyStateChanged();
     return newPane.paneId;
   }
 
   void setPaneNote(String paneId, String? noteId) {
+    _ensureCanMutate();
     final target = pane(paneId);
     if (target == null || target.noteId == noteId) {
       return;
@@ -163,10 +169,11 @@ final class SplitWorkspaceController extends ChangeNotifier {
       SplitLeaf(paneId: paneId, noteId: noteId, mode: target.mode),
     );
     _paneGenerations[paneId] = _createPaneGeneration();
-    notifyListeners();
+    _notifyStateChanged();
   }
 
   void setPaneMode(String paneId, NoteMode mode) {
+    _ensureCanMutate();
     final target = pane(paneId);
     if (target == null || target.mode == mode) {
       return;
@@ -176,10 +183,11 @@ final class SplitWorkspaceController extends ChangeNotifier {
       paneId,
       SplitLeaf(paneId: paneId, noteId: target.noteId, mode: mode),
     );
-    notifyListeners();
+    _notifyStateChanged();
   }
 
   void updateDefaultMode(NoteMode mode, {bool updateEmptyPanes = true}) {
+    _ensureCanMutate();
     final defaultChanged = _defaultMode != mode;
     _defaultMode = mode;
     final updatedRoot = updateEmptyPanes
@@ -198,10 +206,11 @@ final class SplitWorkspaceController extends ChangeNotifier {
       return;
     }
     _root = updatedRoot;
-    notifyListeners();
+    _notifyStateChanged();
   }
 
   void resizeBranch(String branchId, double delta, double extent) {
+    _ensureCanMutate();
     if (!delta.isFinite || !extent.isFinite || extent <= 0) {
       return;
     }
@@ -224,7 +233,7 @@ final class SplitWorkspaceController extends ChangeNotifier {
         ratio: ratio,
       ),
     );
-    notifyListeners();
+    _notifyStateChanged();
   }
 
   PaneCloseImpact closeImpact(String paneId) {
@@ -240,6 +249,7 @@ final class SplitWorkspaceController extends ChangeNotifier {
   }
 
   bool closePane(String paneId) {
+    _ensureCanMutate();
     final impact = closeImpact(paneId);
     if (!impact.canClose) {
       return false;
@@ -253,34 +263,16 @@ final class SplitWorkspaceController extends ChangeNotifier {
     if (_focusedPaneId == paneId) {
       _focusedPaneId = _splitLeaves(_root).first.paneId;
     }
-    notifyListeners();
+    _notifyStateChanged();
     return true;
   }
 
   void remapNoteIds(Map<String, String> idMap) {
-    if (idMap.isEmpty) {
-      return;
-    }
-    final updatedRoot = _mapLeaves(_root, (pane) {
-      final noteId = pane.noteId;
-      final remappedId = noteId == null ? null : idMap[noteId];
-      if (remappedId == null || remappedId == noteId) {
-        return pane;
-      }
-      return SplitLeaf(
-        paneId: pane.paneId,
-        noteId: remappedId,
-        mode: pane.mode,
-      );
-    });
-    if (identical(updatedRoot, _root)) {
-      return;
-    }
-    _root = updatedRoot;
-    notifyListeners();
+    applyMutation(remappedNoteIds: idMap, removedNoteIds: const {});
   }
 
   Set<String> clearNoteIds(Set<String> removedIds, {String? fallbackNoteId}) {
+    _ensureCanMutate();
     if (removedIds.isEmpty) {
       return const <String>{};
     }
@@ -304,7 +296,7 @@ final class SplitWorkspaceController extends ChangeNotifier {
       return const <String>{};
     }
     _root = updatedRoot;
-    notifyListeners();
+    _notifyStateChanged();
     return Set<String>.unmodifiable(clearedIds);
   }
 
@@ -313,13 +305,36 @@ final class SplitWorkspaceController extends ChangeNotifier {
     required Set<String> removedNoteIds,
     String? fallbackNoteId,
   }) {
-    if (remappedNoteIds.isEmpty && removedNoteIds.isEmpty) {
-      return;
+    prepareMutation(
+        remappedNoteIds: remappedNoteIds,
+        removedNoteIds: removedNoteIds,
+        fallbackNoteId: fallbackNoteId,
+      )
+      ..applySilently()
+      ..publish();
+  }
+
+  PreparedSplitWorkspaceMutation prepareMutation({
+    required Map<String, String> remappedNoteIds,
+    required Set<String> removedNoteIds,
+    String? fallbackNoteId,
+    Map<String, String?> paneNoteAssignments = const {},
+    Set<String> closedPaneIds = const {},
+  }) {
+    _ensureCanMutate();
+    for (final remappedId in remappedNoteIds.values) {
+      if (remappedId.isEmpty) {
+        throw ArgumentError.value(
+          remappedId,
+          'remappedNoteIds',
+          'New note id is empty.',
+        );
+      }
     }
     final replacement = removedNoteIds.contains(fallbackNoteId)
         ? null
         : fallbackNoteId;
-    final updatedRoot = _mapLeaves(_root, (pane) {
+    var updatedRoot = _mapLeaves(_root, (pane) {
       final noteId = pane.noteId;
       if (noteId == null) {
         return pane;
@@ -337,11 +352,48 @@ final class SplitWorkspaceController extends ChangeNotifier {
         mode: pane.mode,
       );
     });
-    if (identical(updatedRoot, _root)) {
-      return;
+    final updatedGenerations = Map<String, int>.of(_paneGenerations);
+    var updatedFocusedPaneId = _focusedPaneId;
+    var updatedNextPaneGeneration = _nextPaneGeneration;
+    for (final entry in paneNoteAssignments.entries) {
+      final target = _findSplitLeaf(updatedRoot, entry.key);
+      if (target == null || target.noteId == entry.value) {
+        continue;
+      }
+      updatedRoot = _replaceNode(
+        updatedRoot,
+        entry.key,
+        SplitLeaf(paneId: entry.key, noteId: entry.value, mode: target.mode),
+      );
+      updatedGenerations[entry.key] = updatedNextPaneGeneration++;
     }
-    _root = updatedRoot;
-    notifyListeners();
+    for (final paneId in closedPaneIds) {
+      if (_findSplitLeaf(updatedRoot, paneId) == null ||
+          _splitLeaves(updatedRoot).length <= 1) {
+        continue;
+      }
+      final nextRoot = _removeSplitLeaf(updatedRoot, paneId);
+      if (nextRoot == null) {
+        continue;
+      }
+      updatedRoot = nextRoot;
+      updatedGenerations.remove(paneId);
+      if (updatedFocusedPaneId == paneId) {
+        updatedFocusedPaneId = _splitLeaves(updatedRoot).first.paneId;
+      }
+    }
+    return PreparedSplitWorkspaceMutation._(
+      controller: this,
+      nextRoot: updatedRoot,
+      nextFocusedPaneId: updatedFocusedPaneId,
+      nextPaneGenerations: Map<String, int>.unmodifiable(updatedGenerations),
+      nextPaneGeneration: updatedNextPaneGeneration,
+      didChange:
+          !identical(updatedRoot, _root) ||
+          updatedFocusedPaneId != _focusedPaneId ||
+          !mapEquals(updatedGenerations, _paneGenerations),
+      preparedToken: _stateToken,
+    );
   }
 
   String _createPaneId() => 'pane-${_nextPaneNumber++}';
@@ -349,6 +401,109 @@ final class SplitWorkspaceController extends ChangeNotifier {
   int _createPaneGeneration() => _nextPaneGeneration++;
 
   String _createSplitId() => 'split-${_nextSplitNumber++}';
+
+  Object _applyPreparedMutation(PreparedSplitWorkspaceMutation mutation) {
+    _ensurePreparedMutationCurrent(mutation._preparedToken);
+    if (mutation._didChange) {
+      _root = mutation._nextRoot;
+      _focusedPaneId = mutation._nextFocusedPaneId;
+      _paneGenerations
+        ..clear()
+        ..addAll(mutation._nextPaneGenerations);
+      _nextPaneGeneration = mutation._nextPaneGeneration;
+    }
+    final appliedToken = Object();
+    _stateToken = appliedToken;
+    return appliedToken;
+  }
+
+  void _ensurePreparedMutationCurrent(Object token) {
+    _ensureCanMutate();
+    if (!identical(_stateToken, token)) {
+      throw StateError('Prepared split workspace mutation is stale.');
+    }
+  }
+
+  void _publishPreparedMutation(Object appliedToken) {
+    _ensurePreparedMutationCurrent(appliedToken);
+    notifyListeners();
+  }
+
+  void _notifyStateChanged() {
+    _stateToken = Object();
+    notifyListeners();
+  }
+
+  void _ensureCanMutate() {
+    if (_isDisposed) {
+      throw StateError('Split workspace controller has been disposed.');
+    }
+  }
+
+  @override
+  void dispose() {
+    if (_isDisposed) {
+      return;
+    }
+    _isDisposed = true;
+    _stateToken = Object();
+    super.dispose();
+  }
+}
+
+final class PreparedSplitWorkspaceMutation {
+  PreparedSplitWorkspaceMutation._({
+    required SplitWorkspaceController controller,
+    required SplitNode nextRoot,
+    required String nextFocusedPaneId,
+    required Map<String, int> nextPaneGenerations,
+    required int nextPaneGeneration,
+    required bool didChange,
+    required Object preparedToken,
+  }) : _controller = controller,
+       _nextRoot = nextRoot,
+       _nextFocusedPaneId = nextFocusedPaneId,
+       _nextPaneGenerations = nextPaneGenerations,
+       _nextPaneGeneration = nextPaneGeneration,
+       _didChange = didChange,
+       _preparedToken = preparedToken;
+
+  final SplitWorkspaceController _controller;
+  final SplitNode _nextRoot;
+  final String _nextFocusedPaneId;
+  final Map<String, int> _nextPaneGenerations;
+  final int _nextPaneGeneration;
+  final bool _didChange;
+  final Object _preparedToken;
+  Object? _appliedToken;
+  bool _isApplied = false;
+  bool _isPublished = false;
+
+  void validateCurrent() {
+    _controller._ensurePreparedMutationCurrent(
+      _isApplied ? _appliedToken! : _preparedToken,
+    );
+  }
+
+  void applySilently() {
+    if (_isApplied) {
+      return;
+    }
+    _appliedToken = _controller._applyPreparedMutation(this);
+    _isApplied = true;
+  }
+
+  void publish() {
+    if (_isPublished) {
+      return;
+    }
+    applySilently();
+    _controller._ensurePreparedMutationCurrent(_appliedToken!);
+    _isPublished = true;
+    if (_didChange) {
+      _controller._publishPreparedMutation(_appliedToken!);
+    }
+  }
 }
 
 SplitLeaf? _findSplitLeaf(SplitNode node, String paneId) {

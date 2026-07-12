@@ -8,6 +8,7 @@ import 'infrastructure/config/vault_location_store.dart';
 import 'infrastructure/input/image_input_service.dart';
 import 'infrastructure/vault/vault_backend.dart';
 import 'presentation/cupertino/workspace.dart';
+import 'presentation/workspace/state/workspace_mutation_barrier.dart';
 
 void main() {
   runApp(const SynapseApp());
@@ -25,6 +26,7 @@ class SynapseApp extends StatelessWidget {
     this.directoryPicker,
     this.vaultBackendFactory,
     this.providerConfigTester,
+    this.workspaceCommitFailureForTesting,
   });
 
   final VaultBackend? vault;
@@ -36,6 +38,8 @@ class SynapseApp extends StatelessWidget {
   final DirectoryPicker? directoryPicker;
   final VaultBackendFactory? vaultBackendFactory;
   final ProviderConfigTester? providerConfigTester;
+  @visibleForTesting
+  final WorkspaceCommitPhase? workspaceCommitFailureForTesting;
 
   @override
   Widget build(BuildContext context) {
@@ -58,6 +62,7 @@ class SynapseApp extends StatelessWidget {
           directoryPicker: directoryPicker,
           vaultBackendFactory: vaultBackendFactory,
           providerConfigTester: providerConfigTester,
+          workspaceCommitFailureForTesting: workspaceCommitFailureForTesting,
         ),
       ),
     );

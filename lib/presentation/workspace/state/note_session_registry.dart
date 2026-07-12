@@ -3,6 +3,20 @@ import 'package:flutter/foundation.dart';
 import '../../../domain/vault/vault_resource.dart';
 import 'note_document_session.dart';
 
+final class SavedNoteSessionCommit {
+  const SavedNoteSessionCommit({
+    required this.session,
+    required this.oldNoteId,
+    required this.savedNote,
+    required this.preserveCurrentBody,
+  });
+
+  final NoteDocumentSession session;
+  final String oldNoteId;
+  final VaultNoteContent savedNote;
+  final bool preserveCurrentBody;
+}
+
 final class NoteSessionRegistry extends ChangeNotifier {
   NoteSessionRegistry({
     required String Function(String markdown) visibleBody,
@@ -16,6 +30,7 @@ final class NoteSessionRegistry extends ChangeNotifier {
       <String, NoteDocumentSession>{};
   bool _isDisposed = false;
   bool _isMutationTransactionActive = false;
+  Object _stateToken = Object();
 
   NoteDocumentSession upsert(
     VaultNoteContent note, {
@@ -25,6 +40,7 @@ final class NoteSessionRegistry extends ChangeNotifier {
     final existing = _sessions[note.id];
     if (existing != null) {
       existing.replaceFromVault(note, preserveDirtyBody: preserveDirtyBody);
+      _stateToken = Object();
       notifyListeners();
       return existing;
     }
@@ -34,6 +50,7 @@ final class NoteSessionRegistry extends ChangeNotifier {
       onEdited: _onEdited,
     );
     _sessions[note.id] = session;
+    _stateToken = Object();
     notifyListeners();
     return session;
   }
@@ -171,6 +188,7 @@ final class NoteSessionRegistry extends ChangeNotifier {
       _sessions
         ..clear()
         ..addAll(remapped);
+      _stateToken = Object();
       try {
         afterCommitBeforeNotify?.call();
       } catch (error, stackTrace) {
@@ -233,6 +251,7 @@ final class NoteSessionRegistry extends ChangeNotifier {
       _sessions
         ..clear()
         ..addAll(remapped);
+      _stateToken = Object();
       try {
         afterCommitBeforeNotify?.call();
       } catch (error, stackTrace) {
@@ -256,9 +275,53 @@ final class NoteSessionRegistry extends ChangeNotifier {
     bool preserveDirtyBody = true,
     VoidCallback? afterCommitBeforeNotify,
   }) {
+    final prepared = prepareMutation(
+      remappedNoteIds: remappedNoteIds,
+      removedNoteIds: removedNoteIds,
+      refreshedNotesByNewId: refreshedNotesByNewId,
+      preserveDirtyBody: preserveDirtyBody,
+    );
+    prepared.applySilently();
+    Object? commitHookError;
+    StackTrace? commitHookStackTrace;
+    try {
+      afterCommitBeforeNotify?.call();
+    } catch (error, stackTrace) {
+      commitHookError = error;
+      commitHookStackTrace = stackTrace;
+    }
+    prepared.publish();
+    if (commitHookError case final error?) {
+      Error.throwWithStackTrace(error, commitHookStackTrace!);
+    }
+  }
+
+  PreparedNoteSessionMutation prepareMutation({
+    required Map<String, String> remappedNoteIds,
+    required Set<String> removedNoteIds,
+    required Map<String, VaultNoteContent> refreshedNotesByNewId,
+    Map<String, VaultNoteContent> upsertedNotesById = const {},
+    SavedNoteSessionCommit? savedNoteCommit,
+    bool preserveDirtyBody = true,
+  }) {
     _ensureCanMutate();
-    if (remappedNoteIds.isEmpty && removedNoteIds.isEmpty) {
-      return;
+    if (savedNoteCommit case final commit?) {
+      final oldOwner = _sessions[commit.oldNoteId];
+      final newOwner = _sessions[commit.savedNote.id];
+      if (!identical(oldOwner, commit.session) &&
+          !identical(newOwner, commit.session)) {
+        throw StateError(
+          'Saved note session is not registered as "${commit.oldNoteId}" '
+          'or "${commit.savedNote.id}".',
+        );
+      }
+      if (remappedNoteIds[commit.oldNoteId] != commit.savedNote.id ||
+          refreshedNotesByNewId[commit.savedNote.id]?.id !=
+              commit.savedNote.id) {
+        throw StateError(
+          'Saved note commit does not match the mutation delta.',
+        );
+      }
     }
 
     final moves = <String, _SessionMove>{};
@@ -331,52 +394,65 @@ final class NoteSessionRegistry extends ChangeNotifier {
       committedSessions.remove(removedId);
     }
 
-    final retainedSessions = Set<NoteDocumentSession>.identity()
-      ..addAll(committedSessions.values);
     final preparedUpdates = <PreparedNoteDocumentUpdate>[
       for (final move in moves.values)
-        if (retainedSessions.contains(move.session))
-          move.session.prepareReplaceFromVault(
-            move.refreshedNote,
+        if (committedSessions.containsValue(move.session))
+          savedNoteCommit != null &&
+                  identical(move.session, savedNoteCommit.session) &&
+                  move.newId == savedNoteCommit.savedNote.id
+              ? move.session.prepareApplySavedNote(
+                  savedNoteCommit.savedNote,
+                  preserveCurrentBody: savedNoteCommit.preserveCurrentBody,
+                )
+              : move.session.prepareReplaceFromVault(
+                  move.refreshedNote,
+                  preserveDirtyBody: preserveDirtyBody,
+                ),
+    ];
+    for (final entry in upsertedNotesById.entries) {
+      if (entry.key.isEmpty || entry.value.id != entry.key) {
+        throw ArgumentError(
+          'Upserted note key "${entry.key}" must match its non-empty id.',
+        );
+      }
+      final existing = committedSessions[entry.key];
+      if (existing != null) {
+        preparedUpdates.add(
+          existing.prepareReplaceFromVault(
+            entry.value,
             preserveDirtyBody: preserveDirtyBody,
           ),
-    ];
+        );
+        continue;
+      }
+      committedSessions[entry.key] = NoteDocumentSession(
+        note: entry.value,
+        visibleBody: _visibleBody,
+        onEdited: _onEdited,
+      );
+    }
+    final retainedSessions = Set<NoteDocumentSession>.identity()
+      ..addAll(committedSessions.values);
     final removedSessions = <NoteDocumentSession>[
       for (final session in _sessions.values)
         if (!retainedSessions.contains(session)) session,
     ];
-    final shouldNotify = moves.isNotEmpty || removedSessions.isNotEmpty;
-    Object? commitHookError;
-    StackTrace? commitHookStackTrace;
-    _isMutationTransactionActive = true;
-    try {
-      for (final update in preparedUpdates) {
-        update.applySilently();
-      }
-      _sessions
-        ..clear()
-        ..addAll(committedSessions);
-      try {
-        afterCommitBeforeNotify?.call();
-      } catch (error, stackTrace) {
-        commitHookError = error;
-        commitHookStackTrace = stackTrace;
-      }
-      for (final session in removedSessions) {
-        session.dispose();
-      }
-      for (final update in preparedUpdates) {
-        update.publish();
-      }
-      if (shouldNotify) {
-        notifyListeners();
-      }
-    } finally {
-      _isMutationTransactionActive = false;
-    }
-    if (commitHookError case final error?) {
-      Error.throwWithStackTrace(error, commitHookStackTrace!);
-    }
+    final shouldNotify =
+        moves.isNotEmpty ||
+        removedSessions.isNotEmpty ||
+        upsertedNotesById.isNotEmpty;
+    return PreparedNoteSessionMutation._(
+      registry: this,
+      nextSessions: Map<String, NoteDocumentSession>.unmodifiable(
+        committedSessions,
+      ),
+      preparedUpdates: List<PreparedNoteDocumentUpdate>.unmodifiable(
+        preparedUpdates,
+      ),
+      removedSessions: List<NoteDocumentSession>.unmodifiable(removedSessions),
+      shouldNotify: shouldNotify,
+      preparedToken: _stateToken,
+    );
   }
 
   List<NoteDocumentSession> remove(
@@ -416,6 +492,7 @@ final class NoteSessionRegistry extends ChangeNotifier {
         }
       }
       if (removed.isNotEmpty) {
+        _stateToken = Object();
         notifyListeners();
       }
     } finally {
@@ -448,6 +525,7 @@ final class NoteSessionRegistry extends ChangeNotifier {
       );
     }
     _isDisposed = true;
+    _stateToken = Object();
     final sessions = _sessions.values.toList(growable: false);
     _sessions.clear();
     for (final session in sessions) {
@@ -469,6 +547,105 @@ final class NoteSessionRegistry extends ChangeNotifier {
         'Cannot mutate the note session registry during a mutation transaction.',
       );
     }
+  }
+
+  Object _applyPreparedMutation(PreparedNoteSessionMutation mutation) {
+    _ensurePreparedMutationCurrent(mutation._preparedToken);
+    for (final update in mutation._preparedUpdates) {
+      update.validateCurrent();
+    }
+    _isMutationTransactionActive = true;
+    try {
+      for (final update in mutation._preparedUpdates) {
+        update.applySilently();
+      }
+      _sessions
+        ..clear()
+        ..addAll(mutation._nextSessions);
+    } finally {
+      _isMutationTransactionActive = false;
+    }
+    final appliedToken = Object();
+    _stateToken = appliedToken;
+    return appliedToken;
+  }
+
+  void _publishPreparedMutation(
+    PreparedNoteSessionMutation mutation,
+    Object appliedToken,
+  ) {
+    _ensurePreparedMutationCurrent(appliedToken);
+    _isMutationTransactionActive = true;
+    try {
+      for (final session in mutation._removedSessions) {
+        session.dispose();
+      }
+      for (final update in mutation._preparedUpdates) {
+        update.publish();
+      }
+      if (mutation._shouldNotify) {
+        notifyListeners();
+      }
+    } finally {
+      _isMutationTransactionActive = false;
+    }
+  }
+
+  void _ensurePreparedMutationCurrent(Object token) {
+    _ensureActive();
+    if (!identical(_stateToken, token)) {
+      throw StateError('Prepared note session mutation is stale.');
+    }
+  }
+}
+
+final class PreparedNoteSessionMutation {
+  PreparedNoteSessionMutation._({
+    required NoteSessionRegistry registry,
+    required Map<String, NoteDocumentSession> nextSessions,
+    required List<PreparedNoteDocumentUpdate> preparedUpdates,
+    required List<NoteDocumentSession> removedSessions,
+    required bool shouldNotify,
+    required Object preparedToken,
+  }) : _registry = registry,
+       _nextSessions = nextSessions,
+       _preparedUpdates = preparedUpdates,
+       _removedSessions = removedSessions,
+       _shouldNotify = shouldNotify,
+       _preparedToken = preparedToken;
+
+  final NoteSessionRegistry _registry;
+  final Map<String, NoteDocumentSession> _nextSessions;
+  final List<PreparedNoteDocumentUpdate> _preparedUpdates;
+  final List<NoteDocumentSession> _removedSessions;
+  final bool _shouldNotify;
+  final Object _preparedToken;
+  Object? _appliedToken;
+  bool _isApplied = false;
+  bool _isPublished = false;
+
+  void validateCurrent() {
+    _registry._ensurePreparedMutationCurrent(
+      _isApplied ? _appliedToken! : _preparedToken,
+    );
+  }
+
+  void applySilently() {
+    if (_isApplied) {
+      return;
+    }
+    _appliedToken = _registry._applyPreparedMutation(this);
+    _isApplied = true;
+  }
+
+  void publish() {
+    if (_isPublished) {
+      return;
+    }
+    applySilently();
+    _registry._ensurePreparedMutationCurrent(_appliedToken!);
+    _isPublished = true;
+    _registry._publishPreparedMutation(this, _appliedToken!);
   }
 }
 

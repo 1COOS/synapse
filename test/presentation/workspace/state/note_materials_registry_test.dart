@@ -4,6 +4,34 @@ import 'package:synapse/presentation/workspace/state/note_materials_registry.dar
 
 void main() {
   group('NoteMaterialsRegistry', () {
+    test('prepared mutation replaces proposals before one publish', () {
+      final registry = NoteMaterialsRegistry();
+      addTearDown(registry.dispose);
+      var notifications = 0;
+      registry.addListener(() => notifications += 1);
+      final proposal = _proposal(noteId: 'B.md');
+
+      final prepared = registry.prepareMutation(
+        replacementProposalsByNoteId: {
+          'B.md': [proposal],
+        },
+      );
+
+      expect(registry.snapshotFor('B.md').proposals, isEmpty);
+
+      prepared.applySilently();
+
+      expect(registry.snapshotFor('B.md').proposals.single.id, proposal.id);
+      expect(
+        registry.snapshotFor('B.md').proposals.single.noteId,
+        proposal.noteId,
+      );
+      expect(notifications, 0);
+
+      prepared.publish();
+
+      expect(notifications, 1);
+    });
     test('returns the immutable empty snapshot for an unregistered note', () {
       final registry = NoteMaterialsRegistry();
       addTearDown(registry.dispose);

@@ -1,62 +1,71 @@
 import 'dart:async';
 
-import '../../../domain/vault/vault_resource.dart';
 import 'note_document_session.dart';
+import 'note_materials_registry.dart';
 import 'note_save_coordinator.dart';
 import 'note_session_registry.dart';
 import 'split_workspace_controller.dart';
+import 'workspace_commit_batch.dart';
+
+export 'workspace_commit_batch.dart';
 
 final class WorkspaceMutationPlan<T> {
   const WorkspaceMutationPlan({
     required this.affectedNoteIds,
     required this.dirtyDisposition,
     required this.execute,
+    this.prepareCommit,
   });
 
   final Set<String> affectedNoteIds;
   final DirtyDisposition dirtyDisposition;
   final Future<VaultMutationDelta<T>> Function() execute;
-}
-
-final class VaultMutationDelta<T> {
-  const VaultMutationDelta({
-    required this.value,
-    this.remappedNoteIds = const {},
-    this.removedNoteIds = const {},
-    this.refreshedNotesByNewId = const {},
-    this.resources,
-  });
-
-  final T value;
-  final Map<String, String> remappedNoteIds;
-  final Set<String> removedNoteIds;
-  final Map<String, VaultNoteContent> refreshedNotesByNewId;
-  final List<VaultResourceNode>? resources;
+  final WorkspaceCommitBatch<T> Function(VaultMutationDelta<T> delta)?
+  prepareCommit;
 }
 
 sealed class WorkspaceMutationResult<T> {
   const WorkspaceMutationResult();
 }
 
-final class MutationCommitted<T> extends WorkspaceMutationResult<T> {
-  const MutationCommitted(this.delta);
+final class Committed<T> extends WorkspaceMutationResult<T> {
+  const Committed(this.delta);
 
   final VaultMutationDelta<T> delta;
 
   T get value => delta.value;
 }
 
-final class MutationAborted<T> extends WorkspaceMutationResult<T> {
-  const MutationAborted(this.flushReport);
+final class AbortedByFlush<T> extends WorkspaceMutationResult<T> {
+  const AbortedByFlush(this.flushReport);
 
   final FlushReport flushReport;
 }
 
-final class MutationFailed<T> extends WorkspaceMutationResult<T> {
-  const MutationFailed({required this.error, required this.stackTrace});
+final class BackendFailed<T> extends WorkspaceMutationResult<T> {
+  const BackendFailed({required this.error, required this.stackTrace});
 
   final Object error;
   final StackTrace stackTrace;
+}
+
+enum WorkspaceCommitPhase { prepare, apply, publish }
+
+final class WorkspaceCommitInvariantError implements Exception {
+  const WorkspaceCommitInvariantError({
+    required this.phase,
+    required this.cause,
+    required this.causeStackTrace,
+  });
+
+  final WorkspaceCommitPhase phase;
+  final Object cause;
+  final StackTrace causeStackTrace;
+
+  @override
+  String toString() {
+    return 'Workspace commit invariant failed during ${phase.name}: $cause';
+  }
 }
 
 final class WorkspaceMutationBarrier {
@@ -64,13 +73,19 @@ final class WorkspaceMutationBarrier {
     required NoteSessionRegistry sessions,
     required NoteSaveCoordinator saveCoordinator,
     required SplitWorkspaceController splits,
+    required NoteMaterialsRegistry materials,
+    void Function(WorkspaceCommitInvariantError error)? onInvariantFailure,
   }) : _sessions = sessions,
        _saveCoordinator = saveCoordinator,
-       _splits = splits;
+       _splits = splits,
+       _materials = materials,
+       _onInvariantFailure = onInvariantFailure;
 
   final NoteSessionRegistry _sessions;
   final NoteSaveCoordinator _saveCoordinator;
   final SplitWorkspaceController _splits;
+  final NoteMaterialsRegistry _materials;
+  final void Function(WorkspaceCommitInvariantError error)? _onInvariantFailure;
   Future<void> _tail = Future<void>.value();
   final Set<NoteDocumentSession> _activeSessions =
       Set<NoteDocumentSession>.identity();
@@ -78,10 +93,7 @@ final class WorkspaceMutationBarrier {
       Map<NoteDocumentSession, int>.identity();
   final List<_PendingSaveCommit> _pendingSaveCommits = <_PendingSaveCommit>[];
 
-  Future<WorkspaceMutationResult<T>> run<T>(
-    WorkspaceMutationPlan<T> plan, {
-    FutureOr<void> Function(VaultMutationDelta<T> delta)? onCommitted,
-  }) {
+  Future<WorkspaceMutationResult<T>> run<T>(WorkspaceMutationPlan<T> plan) {
     final reservedSessions = _sessions
         .sessionsForIds(plan.affectedNoteIds)
         .toList(growable: false);
@@ -102,17 +114,20 @@ final class WorkspaceMutationBarrier {
           try {
             if (plan.dirtyDisposition == DirtyDisposition.flush &&
                 !lease.report.succeeded) {
-              return MutationAborted<T>(lease.report);
+              return AbortedByFlush<T>(lease.report);
             }
 
             late final VaultMutationDelta<T> delta;
             try {
               delta = await plan.execute();
             } catch (error, stackTrace) {
-              return MutationFailed<T>(error: error, stackTrace: stackTrace);
+              return BackendFailed<T>(error: error, stackTrace: stackTrace);
             }
 
-            return await _commitAndNotify(delta, onCommitted: onCommitted);
+            return _commitAfterBackend(
+              delta,
+              plan.prepareCommit ?? _prepareDefaultBatch,
+            );
           } finally {
             lease.release();
           }
@@ -127,22 +142,27 @@ final class WorkspaceMutationBarrier {
 
   Future<WorkspaceMutationResult<T>> commit<T>(
     VaultMutationDelta<T> delta, {
+    WorkspaceCommitBatch<T> Function(VaultMutationDelta<T> delta)?
+    prepareCommit,
     NoteDocumentSession? originatingSession,
-    FutureOr<void> Function(VaultMutationDelta<T> delta)? onCommitted,
   }) => commitPrepared<T>(
     () => delta,
+    prepareCommit: prepareCommit,
     originatingSession: originatingSession,
-    onCommitted: onCommitted,
   );
 
   Future<WorkspaceMutationResult<T>> commitPrepared<T>(
     FutureOr<VaultMutationDelta<T>> Function() prepare, {
+    WorkspaceCommitBatch<T> Function(VaultMutationDelta<T> delta)?
+    prepareCommit,
     NoteDocumentSession? originatingSession,
-    FutureOr<void> Function(VaultMutationDelta<T> delta)? onCommitted,
   }) {
     if (originatingSession != null &&
         _activeSessions.contains(originatingSession)) {
-      return _prepareCommitAndNotify(prepare, onCommitted: onCommitted);
+      return _prepareCommittedDelta(
+        prepare,
+        prepareCommit ?? _prepareDefaultBatch,
+      );
     }
     if (originatingSession != null &&
         _reservedSessions.containsKey(originatingSession)) {
@@ -153,9 +173,9 @@ final class WorkspaceMutationBarrier {
           apply: () async {
             try {
               completer.complete(
-                await _prepareCommitAndNotify(
+                await _prepareCommittedDelta(
                   prepare,
-                  onCommitted: onCommitted,
+                  prepareCommit ?? _prepareDefaultBatch,
                 ),
               );
             } catch (error, stackTrace) {
@@ -167,7 +187,84 @@ final class WorkspaceMutationBarrier {
       return completer.future;
     }
     return _synchronized(
-      () => _prepareCommitAndNotify(prepare, onCommitted: onCommitted),
+      () => _prepareCommittedDelta(
+        prepare,
+        prepareCommit ?? _prepareDefaultBatch,
+      ),
+    );
+  }
+
+  Future<WorkspaceMutationResult<T>> _prepareCommittedDelta<T>(
+    FutureOr<VaultMutationDelta<T>> Function() prepare,
+    WorkspaceCommitBatch<T> Function(VaultMutationDelta<T> delta) prepareCommit,
+  ) async {
+    late final VaultMutationDelta<T> delta;
+    try {
+      delta = await prepare();
+    } catch (error, stackTrace) {
+      _throwInvariant(WorkspaceCommitPhase.prepare, error, stackTrace);
+    }
+    return _commitAfterBackend(delta, prepareCommit);
+  }
+
+  WorkspaceMutationResult<T> _commitAfterBackend<T>(
+    VaultMutationDelta<T> delta,
+    WorkspaceCommitBatch<T> Function(VaultMutationDelta<T> delta) prepareCommit,
+  ) {
+    late final WorkspaceCommitBatch<T> batch;
+    try {
+      batch = prepareCommit(delta);
+      batch.validateCurrent();
+    } catch (error, stackTrace) {
+      _throwInvariant(WorkspaceCommitPhase.prepare, error, stackTrace);
+    }
+    try {
+      batch.applySilently();
+    } catch (error, stackTrace) {
+      _throwInvariant(WorkspaceCommitPhase.apply, error, stackTrace);
+    }
+    try {
+      batch.publish();
+    } catch (error, stackTrace) {
+      _throwInvariant(WorkspaceCommitPhase.publish, error, stackTrace);
+    }
+    return Committed<T>(delta);
+  }
+
+  Never _throwInvariant(
+    WorkspaceCommitPhase phase,
+    Object cause,
+    StackTrace causeStackTrace,
+  ) {
+    final error = WorkspaceCommitInvariantError(
+      phase: phase,
+      cause: cause,
+      causeStackTrace: causeStackTrace,
+    );
+    try {
+      _onInvariantFailure?.call(error);
+    } catch (_) {}
+    Error.throwWithStackTrace(error, causeStackTrace);
+  }
+
+  WorkspaceCommitBatch<T> _prepareDefaultBatch<T>(VaultMutationDelta<T> delta) {
+    return WorkspaceCommitBatch<T>(
+      delta: delta,
+      preparedSessions: _sessions.prepareMutation(
+        remappedNoteIds: delta.remappedNoteIds,
+        removedNoteIds: delta.removedNoteIds,
+        refreshedNotesByNewId: delta.refreshedNotesByNewId,
+      ),
+      preparedSplits: _splits.prepareMutation(
+        remappedNoteIds: delta.remappedNoteIds,
+        removedNoteIds: delta.removedNoteIds,
+      ),
+      preparedMaterials: _materials.prepareMutation(
+        remappedNoteIds: delta.remappedNoteIds,
+        removedNoteIds: delta.removedNoteIds,
+        refreshedNotesByNewId: delta.refreshedNotesByNewId,
+      ),
+      preparedWorkspace: const PreparedWorkspaceSnapshotMutation.none(),
     );
   }
 
@@ -245,49 +342,6 @@ final class WorkspaceMutationBarrier {
     } finally {
       release.complete();
     }
-  }
-
-  Future<WorkspaceMutationResult<T>> _commitAndNotify<T>(
-    VaultMutationDelta<T> delta, {
-    FutureOr<void> Function(VaultMutationDelta<T> delta)? onCommitted,
-  }) async {
-    try {
-      _commitDelta(delta);
-      await onCommitted?.call(delta);
-    } catch (error, stackTrace) {
-      return MutationFailed<T>(error: error, stackTrace: stackTrace);
-    }
-    return MutationCommitted<T>(delta);
-  }
-
-  Future<WorkspaceMutationResult<T>> _prepareCommitAndNotify<T>(
-    FutureOr<VaultMutationDelta<T>> Function() prepare, {
-    FutureOr<void> Function(VaultMutationDelta<T> delta)? onCommitted,
-  }) async {
-    late final VaultMutationDelta<T> delta;
-    try {
-      delta = await prepare();
-    } catch (error, stackTrace) {
-      return MutationFailed<T>(error: error, stackTrace: stackTrace);
-    }
-    return _commitAndNotify(delta, onCommitted: onCommitted);
-  }
-
-  void _commitDelta<T>(VaultMutationDelta<T> delta) {
-    if (delta.remappedNoteIds.isEmpty && delta.removedNoteIds.isEmpty) {
-      return;
-    }
-    _sessions.applyMutation(
-      remappedNoteIds: delta.remappedNoteIds,
-      removedNoteIds: delta.removedNoteIds,
-      refreshedNotesByNewId: delta.refreshedNotesByNewId,
-      afterCommitBeforeNotify: () {
-        _splits.applyMutation(
-          remappedNoteIds: delta.remappedNoteIds,
-          removedNoteIds: delta.removedNoteIds,
-        );
-      },
-    );
   }
 }
 

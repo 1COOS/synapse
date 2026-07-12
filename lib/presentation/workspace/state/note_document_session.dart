@@ -248,6 +248,10 @@ final class PreparedNoteDocumentUpdate {
   bool _isApplied = false;
   bool _isPublished = false;
 
+  void validateCurrent() {
+    _session._ensurePreparedUpdateCanApply();
+  }
+
   void applySilently() {
     if (_isApplied) {
       return;

@@ -125,6 +125,7 @@ final class NoteMaterialsRegistry extends ChangeNotifier {
     Set<String> removedNoteIds = const <String>{},
     Map<String, VaultNoteContent> refreshedNotesByNewId =
         const <String, VaultNoteContent>{},
+    Map<String, List<AiProposal>> replacementProposalsByNoteId = const {},
   }) {
     _ensureActive();
     final moves = <String, _MaterialsMove>{};
@@ -191,6 +192,24 @@ final class NoteMaterialsRegistry extends ChangeNotifier {
         throw StateError('Note materials target "$targetId" is already owned.');
       }
       next[targetId] = snapshot;
+    }
+    for (final entry in replacementProposalsByNoteId.entries) {
+      _validateNoteId(entry.key);
+      final current = next[entry.key] ?? NoteMaterialsSnapshot.empty;
+      final replacement = NoteMaterialsSnapshot(
+        selectedSourceIds: current.selectedSourceIds,
+        proposals: [
+          for (final proposal in entry.value)
+            proposal.noteId == entry.key
+                ? proposal
+                : proposal.copyWith(noteId: entry.key),
+        ],
+      );
+      if (_isEmpty(replacement)) {
+        next.remove(entry.key);
+      } else {
+        next[entry.key] = replacement;
+      }
     }
 
     return PreparedNoteMaterialsMutation._(
@@ -302,6 +321,12 @@ final class PreparedNoteMaterialsMutation {
   Object? _appliedToken;
   bool _isApplied = false;
   bool _isPublished = false;
+
+  void validateCurrent() {
+    _registry._ensurePreparedMutationCurrent(
+      _isApplied ? _appliedToken! : _preparedToken,
+    );
+  }
 
   void applySilently() {
     if (_isApplied) {

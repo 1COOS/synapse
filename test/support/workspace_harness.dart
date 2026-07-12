@@ -12,6 +12,7 @@ import 'package:synapse/infrastructure/input/image_input_service.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
 import 'package:synapse/infrastructure/vault/vault_backend.dart';
 import 'package:synapse/main.dart';
+import 'package:synapse/presentation/workspace/state/workspace_mutation_barrier.dart';
 import 'package:synapse/presentation/workspace/editor/live_markdown_editable_text.dart';
 import 'package:synapse/presentation/workspace/editor/live_markdown_editor.dart';
 
@@ -111,6 +112,7 @@ Future<void> pumpWorkspace(
   Future<String?> Function()? directoryPicker,
   VaultBackend Function(String rootPath)? vaultBackendFactory,
   Future<String> Function(ProviderConfig config)? providerConfigTester,
+  WorkspaceCommitPhase? workspaceCommitFailureForTesting,
   Size size = const Size(1280, 820),
 }) async {
   await tester.binding.setSurfaceSize(size);
@@ -128,6 +130,7 @@ Future<void> pumpWorkspace(
       directoryPicker: directoryPicker,
       vaultBackendFactory: vaultBackendFactory,
       providerConfigTester: providerConfigTester,
+      workspaceCommitFailureForTesting: workspaceCommitFailureForTesting,
     ),
   );
   await tester.pump(const Duration(milliseconds: 250));

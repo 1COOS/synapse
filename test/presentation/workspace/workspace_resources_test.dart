@@ -6,6 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:synapse/domain/vault/vault_resource.dart';
 import 'package:synapse/infrastructure/config/synapse_settings.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
+import 'package:synapse/presentation/workspace/state/workspace_mutation_barrier.dart';
 
 import '../../support/workspace_fakes.dart';
 import '../../support/workspace_harness.dart';
@@ -753,6 +754,44 @@ void main() {
   });
 
   testWidgets(
+    'post-backend invariant failure requires reload and never retries copy',
+    (tester) async {
+      final vault = _CountingCopyVault();
+      final note = await vault.createNote(parentPath: '', title: '心经');
+      final reportedErrors = <FlutterErrorDetails>[];
+      final previousOnError = FlutterError.onError;
+      FlutterError.onError = reportedErrors.add;
+      addTearDown(() => FlutterError.onError = previousOnError);
+
+      await pumpWorkspace(
+        tester,
+        vault: vault,
+        workspaceCommitFailureForTesting: WorkspaceCommitPhase.apply,
+      );
+
+      Future<void> requestCopy() async {
+        await tester.tap(
+          find.byKey(Key('resource-row-${note.id}')),
+          buttons: kSecondaryMouseButton,
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(Key('note-menu-copy-${note.id}')));
+        await tester.pumpAndSettle();
+      }
+
+      await requestCopy();
+
+      expect(vault.copyCalls, 1);
+      expect(reportedErrors, hasLength(1));
+      expect(find.text('工作区状态提交异常。后端操作可能已完成，请重新加载工作区后再继续。'), findsOneWidget);
+
+      await requestCopy();
+
+      expect(vault.copyCalls, 1);
+    },
+  );
+
+  testWidgets(
     'deletes a folder recursively and resets contained active notes',
     (tester) async {
       final vault = MemoryVaultBackend(seedExampleData: false);
@@ -788,6 +827,18 @@ void main() {
       expect(find.text('读书'), findsNothing);
     },
   );
+}
+
+final class _CountingCopyVault extends MemoryVaultBackend {
+  _CountingCopyVault() : super(seedExampleData: false);
+
+  int copyCalls = 0;
+
+  @override
+  Future<VaultNote> copyNote({required String noteId}) {
+    copyCalls += 1;
+    return super.copyNote(noteId: noteId);
+  }
 }
 
 bool _sourceTileIsSelected(WidgetTester tester, String title) {
