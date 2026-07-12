@@ -1389,13 +1389,17 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   }
 
   bool _paneEditorSaveResultIsRuntimeStale(NoteSaveResult result) {
+    var foundMatch = false;
     for (final scope in _paneEditorSaveScopes) {
       if (identical(scope.session, result.session) &&
           scope.bodySnapshot == result.bodySnapshot) {
-        return scope.runtimeGeneration != _runtimeGeneration;
+        foundMatch = true;
+        if (scope.runtimeGeneration == _runtimeGeneration) {
+          return false;
+        }
       }
     }
-    return false;
+    return foundMatch;
   }
 
   Future<PaneEditorCommandOutcome> _pasteIntoNoteEditor(
@@ -3632,7 +3636,45 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
         return source;
       }
     }
-    return null;
+
+    final markdownBasename = p.basename(normalizedSrc);
+    if (markdownBasename.isEmpty) {
+      return null;
+    }
+    SourceItem? attachmentFallback;
+    for (final source in active.sources) {
+      final attachmentPath = source.attachmentPath;
+      if (source.type != SourceType.image || attachmentPath == null) {
+        continue;
+      }
+      final attachmentBasename = p.basename(normalizeImageSrc(attachmentPath));
+      if (attachmentBasename != markdownBasename) {
+        continue;
+      }
+      if (attachmentFallback != null && attachmentFallback.id != source.id) {
+        return null;
+      }
+      attachmentFallback = source;
+    }
+    if (attachmentFallback != null) {
+      return attachmentFallback;
+    }
+
+    SourceItem? titleFallback;
+    for (final source in active.sources) {
+      if (source.type != SourceType.image || source.attachmentPath == null) {
+        continue;
+      }
+      final sourceTitleBasename = p.basename(normalizeImageSrc(source.title));
+      if (sourceTitleBasename != markdownBasename) {
+        continue;
+      }
+      if (titleFallback != null && titleFallback.id != source.id) {
+        return null;
+      }
+      titleFallback = source;
+    }
+    return titleFallback;
   }
 
   Widget _buildNoteEditor({NoteDocumentSession? session, SplitLeaf? pane}) {
