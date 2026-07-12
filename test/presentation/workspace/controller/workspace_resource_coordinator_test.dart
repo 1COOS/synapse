@@ -42,6 +42,124 @@ void main() {
       expect(snapshot.proposals.single.noteId, note.id);
     });
 
+    test('snapshots deeply clone and freeze nested vault data', () {
+      final resourceChildren = <VaultResourceNode>[
+        const VaultResourceNode(
+          id: 'Alpha.md',
+          title: 'Alpha',
+          path: 'Alpha.md',
+          type: VaultResourceType.note,
+        ),
+      ];
+      final resources = <VaultResourceNode>[
+        VaultResourceNode(
+          id: 'folder',
+          title: 'Folder',
+          path: 'folder',
+          type: VaultResourceType.folder,
+          children: resourceChildren,
+        ),
+      ];
+      final nestedOutline = <OutlineNode>[
+        const OutlineNode(
+          id: 'child',
+          title: 'Child',
+          level: 2,
+          line: 2,
+          children: [],
+        ),
+      ];
+      final outline = <OutlineNode>[
+        OutlineNode(
+          id: 'root',
+          title: 'Root',
+          level: 1,
+          line: 1,
+          children: nestedOutline,
+        ),
+      ];
+      final now = DateTime.utc(2026, 7, 13);
+      final sources = <SourceItem>[
+        SourceItem(
+          id: 'source',
+          noteId: 'Alpha.md',
+          type: SourceType.text,
+          title: 'Source',
+          state: SourceState.ready,
+          createdAt: now,
+          updatedAt: now,
+          text: 'text',
+        ),
+      ];
+      final sourceIds = <String>['source'];
+      final proposals = <AiProposal>[
+        AiProposal(
+          id: 'proposal',
+          noteId: 'Alpha.md',
+          sourceIds: sourceIds,
+          title: 'Proposal',
+          proposedMarkdown: '# Proposed',
+          status: ProposalStatus.pending,
+          createdAt: now,
+          updatedAt: now,
+        ),
+      ];
+      final note = VaultNoteContent(
+        id: 'Alpha.md',
+        title: 'Alpha',
+        path: 'Alpha.md',
+        markdownPath: 'Alpha.md',
+        assetsPath: 'Alpha.assets',
+        createdAt: now,
+        updatedAt: now,
+        markdown: '# Alpha',
+        outline: outline,
+        sources: sources,
+      );
+
+      final snapshot = WorkspaceResourceSnapshot(
+        resources: resources,
+        selectedResource: resourceChildren.single,
+        note: note,
+        proposals: proposals,
+      );
+      resources.clear();
+      resourceChildren.clear();
+      outline.clear();
+      nestedOutline.clear();
+      sources.clear();
+      sourceIds.clear();
+      proposals.clear();
+
+      expect(snapshot.resources.single.children.single.id, 'Alpha.md');
+      expect(
+        snapshot.selectedResource,
+        same(snapshot.resources.single.children.single),
+      );
+      expect(snapshot.note?.outline.single.children.single.id, 'child');
+      expect(snapshot.note?.sources.single.id, 'source');
+      expect(snapshot.proposals.single.sourceIds, ['source']);
+      expect(
+        () => snapshot.resources.add(snapshot.resources.single),
+        throwsUnsupportedError,
+      );
+      expect(
+        () => snapshot.resources.single.children.clear(),
+        throwsUnsupportedError,
+      );
+      expect(() => snapshot.note!.outline.clear(), throwsUnsupportedError);
+      expect(
+        () => snapshot.note!.outline.single.children.clear(),
+        throwsUnsupportedError,
+      );
+      expect(() => snapshot.note!.sources.clear(), throwsUnsupportedError);
+      expect(() => snapshot.proposals.clear(), throwsUnsupportedError);
+      expect(
+        () => snapshot.proposals.single.sourceIds.clear(),
+        throwsUnsupportedError,
+      );
+    });
+
     test('selects and refreshes a note by id', () async {
       final vault = MemoryVaultBackend(seedExampleData: false);
       final first = await vault.createNote(parentPath: '', title: 'Alpha');
@@ -131,6 +249,56 @@ void main() {
       expect(await load, isA<WorkspaceResourceStale>());
     });
 
+    test('list error after runtime replacement returns stale', () async {
+      final oldVault = _GatedVault(
+        gate: _Gate.list,
+        errorAfterRelease: StateError('old list failed'),
+      );
+      final manager = WorkspaceRuntimeManager()..install(_runtime(oldVault));
+      final coordinator = WorkspaceResourceCoordinator(manager);
+
+      final load = coordinator.listResources();
+      await oldVault.started.future;
+      manager.install(_runtime(MemoryVaultBackend(seedExampleData: false)));
+      oldVault.release();
+
+      expect(await load, isA<WorkspaceResourceStale>());
+    });
+
+    test('read error after runtime replacement returns stale', () async {
+      final oldVault = _GatedVault(
+        gate: _Gate.read,
+        errorAfterRelease: StateError('old read failed'),
+      );
+      await oldVault.createNote(parentPath: '', title: 'Old');
+      final manager = WorkspaceRuntimeManager()..install(_runtime(oldVault));
+      final coordinator = WorkspaceResourceCoordinator(manager);
+
+      final load = coordinator.loadWorkspace();
+      await oldVault.started.future;
+      manager.install(_runtime(MemoryVaultBackend(seedExampleData: false)));
+      oldVault.release();
+
+      expect(await load, isA<WorkspaceResourceStale>());
+    });
+
+    test('proposal error after runtime replacement returns stale', () async {
+      final oldVault = _GatedVault(
+        gate: _Gate.proposals,
+        errorAfterRelease: StateError('old proposals failed'),
+      );
+      await oldVault.createNote(parentPath: '', title: 'Old');
+      final manager = WorkspaceRuntimeManager()..install(_runtime(oldVault));
+      final coordinator = WorkspaceResourceCoordinator(manager);
+
+      final load = coordinator.loadWorkspace();
+      await oldVault.started.future;
+      manager.install(_runtime(MemoryVaultBackend(seedExampleData: false)));
+      oldVault.release();
+
+      expect(await load, isA<WorkspaceResourceStale>());
+    });
+
     test(
       'retries once when the first listed note is externally renamed',
       () async {
@@ -208,9 +376,11 @@ AiProposal _proposal(String noteId) {
 enum _Gate { list, read, proposals }
 
 final class _GatedVault extends MemoryVaultBackend {
-  _GatedVault({required this.gate}) : super(seedExampleData: false);
+  _GatedVault({required this.gate, this.errorAfterRelease})
+    : super(seedExampleData: false);
 
   final _Gate gate;
+  final Object? errorAfterRelease;
   final started = Completer<void>();
   final _released = Completer<void>();
 
@@ -224,6 +394,9 @@ final class _GatedVault extends MemoryVaultBackend {
       started.complete();
     }
     await _released.future;
+    if (errorAfterRelease case final error?) {
+      throw error;
+    }
   }
 
   @override

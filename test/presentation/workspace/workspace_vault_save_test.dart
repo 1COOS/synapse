@@ -300,10 +300,11 @@ void main() {
       final secondVault = MemoryVaultBackend(seedExampleData: false);
       await secondVault.createNote(parentPath: '', title: 'Second');
       var failRuntimeConstruction = false;
+      final settingsStore = FakeSettingsStore();
       final dependencies = WorkspaceDependencies(
         initialVault: firstVault,
         injectedAiProvider: MockAiProvider(),
-        settingsStore: FakeSettingsStore(),
+        settingsStore: settingsStore,
         supportsDirectoryVaultOverride: true,
         pickVaultLocation: () async =>
             const VaultLocation(rootPath: secondPath),
@@ -325,6 +326,8 @@ void main() {
 
       expect(find.text('First'), findsWidgets);
       expect(find.text('Second'), findsNothing);
+      expect(settingsStore.savedSettings, isEmpty);
+      expect(settingsStore.currentSettings.vaultLocation, isNull);
       expect(
         find.textContaining('runtime construction failed'),
         findsOneWidget,
@@ -332,6 +335,104 @@ void main() {
       await tester.tap(find.byKey(const Key('resource-row-First.md')));
       await tester.pump(const Duration(milliseconds: 250));
       expect(find.text('First'), findsWidgets);
+    },
+  );
+
+  testWidgets(
+    'unreadable constructed candidate keeps old runtime and location active',
+    (tester) async {
+      const firstPath = '/vault/first';
+      const secondPath = '/vault/unreadable';
+      final firstVault = MemoryVaultBackend(seedExampleData: false);
+      await firstVault.createNote(parentPath: '', title: 'First');
+      final candidateVault = _UnreadableListVault();
+      final settingsStore = FakeSettingsStore(
+        initialSettings: const SynapseSettings(
+          vaultLocation: VaultLocation(rootPath: firstPath),
+        ),
+      );
+      final indexes = <_RecordingSearchIndex>[];
+      final dependencies = WorkspaceDependencies(
+        initialVault: firstVault,
+        injectedAiProvider: MockAiProvider(),
+        settingsStore: settingsStore,
+        supportsDirectoryVaultOverride: true,
+        pickVaultLocation: () async =>
+            const VaultLocation(rootPath: secondPath),
+        vaultBackendFactory: (_) => candidateVault,
+        searchIndexFactory: (_, _) {
+          final index = _RecordingSearchIndex();
+          indexes.add(index);
+          return index;
+        },
+      );
+
+      await pumpWorkspace(tester, vault: null, dependencies: dependencies);
+      final oldIndex = indexes.last;
+      await tester.tap(find.byKey(const Key('vault-location-button')));
+      await tester.pump(const Duration(milliseconds: 500));
+
+      expect(indexes, hasLength(greaterThanOrEqualTo(2)));
+      expect(oldIndex.disposeCalls, 0);
+      expect(indexes.last.disposeCalls, 1);
+      expect(settingsStore.currentSettings.vaultLocation?.rootPath, firstPath);
+      expect(
+        settingsStore.savedSettings.where(
+          (settings) => settings.vaultLocation?.rootPath == secondPath,
+        ),
+        isEmpty,
+      );
+      expect(find.text('First'), findsWidgets);
+      expect(find.textContaining('candidate unreadable'), findsOneWidget);
+      await tester.tap(find.byKey(const Key('resource-row-First.md')));
+      await tester.pump(const Duration(milliseconds: 250));
+      expect(find.text('First'), findsWidgets);
+    },
+  );
+
+  testWidgets(
+    'settings save failure disposes validated candidate and keeps old vault',
+    (tester) async {
+      const firstPath = '/vault/first';
+      const secondPath = '/vault/second';
+      final firstVault = MemoryVaultBackend(seedExampleData: false);
+      await firstVault.createNote(parentPath: '', title: 'First');
+      final secondVault = MemoryVaultBackend(seedExampleData: false);
+      await secondVault.createNote(parentPath: '', title: 'Second');
+      final settingsStore = _FailingSettingsStore(
+        initialSettings: const SynapseSettings(
+          vaultLocation: VaultLocation(rootPath: firstPath),
+        ),
+      );
+      final indexes = <_RecordingSearchIndex>[];
+      final dependencies = WorkspaceDependencies(
+        initialVault: firstVault,
+        injectedAiProvider: MockAiProvider(),
+        settingsStore: settingsStore,
+        supportsDirectoryVaultOverride: true,
+        pickVaultLocation: () async =>
+            const VaultLocation(rootPath: secondPath),
+        vaultBackendFactory: (_) => secondVault,
+        searchIndexFactory: (_, _) {
+          final index = _RecordingSearchIndex();
+          indexes.add(index);
+          return index;
+        },
+      );
+
+      await pumpWorkspace(tester, vault: null, dependencies: dependencies);
+      final oldIndex = indexes.last;
+      settingsStore.failSaves = true;
+      await tester.tap(find.byKey(const Key('vault-location-button')));
+      await tester.pump(const Duration(milliseconds: 500));
+
+      expect(indexes, hasLength(greaterThanOrEqualTo(2)));
+      expect(oldIndex.disposeCalls, 0);
+      expect(indexes.last.disposeCalls, 1);
+      expect(settingsStore.currentSettings.vaultLocation?.rootPath, firstPath);
+      expect(find.text('First'), findsWidgets);
+      expect(find.text('Second'), findsNothing);
+      expect(find.textContaining('settings save failed'), findsOneWidget);
     },
   );
 
@@ -985,7 +1086,7 @@ final class _RenameReadbackFailureVault extends CountingUpdateVaultBackend {
   }
 }
 
-final class _EmptySearchIndex implements SearchIndex {
+class _EmptySearchIndex implements SearchIndex {
   @override
   Future<Set<String>> documentIds() async => <String>{};
 
@@ -1006,4 +1107,36 @@ final class _EmptySearchIndex implements SearchIndex {
 
   @override
   void dispose() {}
+}
+
+final class _RecordingSearchIndex extends _EmptySearchIndex {
+  int disposeCalls = 0;
+
+  @override
+  void dispose() {
+    disposeCalls += 1;
+  }
+}
+
+final class _UnreadableListVault extends MemoryVaultBackend {
+  _UnreadableListVault() : super(seedExampleData: false);
+
+  @override
+  Future<List<VaultResourceNode>> listResources() async {
+    throw StateError('candidate unreadable');
+  }
+}
+
+final class _FailingSettingsStore extends FakeSettingsStore {
+  _FailingSettingsStore({required super.initialSettings});
+
+  bool failSaves = false;
+
+  @override
+  Future<void> save(SynapseSettings settings) async {
+    if (failSaves) {
+      throw StateError('settings save failed');
+    }
+    await super.save(settings);
+  }
 }

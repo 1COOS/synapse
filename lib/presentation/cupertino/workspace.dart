@@ -297,6 +297,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   bool _leftPaneCollapsed = false;
   bool _rightPaneCollapsed = false;
   bool _busy = false;
+  bool _resourceSelectionInProgress = false;
   bool _reloadRequired = false;
   String _message = '';
   Object _workspaceMutationToken = Object();
@@ -540,20 +541,6 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     );
   }
 
-  void _clearVaultLocationState() {
-    _runtimeManager.clear();
-    _workspaceMutationToken = Object();
-    _selectedResource = null;
-    _resources = const [];
-    _searchResults = const [];
-    _resetSplitWorkspace();
-    _setSelectedPreviewImageSrc(null);
-    _leftPaneMode = _LeftPaneMode.resources;
-    _leftPaneCollapsed = false;
-    _rightPaneCollapsed = false;
-    _narrowSection = _WorkspaceSection.resources;
-  }
-
   void _resetSplitWorkspace({bool disposeSessions = true}) {
     if (disposeSessions) {
       _noteSessionRegistry.clear();
@@ -601,6 +588,9 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   }
 
   Future<void> _closeFocusedPane() async {
+    if (_resourceSelectionInProgress) {
+      return;
+    }
     if (_reloadRequired) {
       setState(() => _message = _reloadRequiredMessage);
       return;
@@ -972,6 +962,67 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     _workspaceMutationToken = Object();
   }
 
+  WorkspaceRuntime _createDetachedRuntime(VaultLocation location) {
+    return _dependencies.createRuntime(
+      vault: _dependencies.createVault(location.rootPath),
+      aiProvider: _dependencies.createAiProvider(
+        _providerConfig ?? ProviderConfig.empty,
+      ),
+      semanticSearchEnabled: _semanticSearchEnabled,
+      rootPath: location.rootPath,
+      label: _dependencies.formatVaultLabel(location.rootPath),
+    );
+  }
+
+  Future<void> _activateVaultLocation(
+    VaultLocation location, {
+    required String message,
+  }) async {
+    WorkspaceRuntime? candidate;
+    try {
+      candidate = _createDetachedRuntime(location);
+      final snapshot = await _resourceCoordinator.loadDetachedRuntime(
+        candidate,
+      );
+      await _saveSettings(_settings.copyWith(vaultLocation: location));
+      _noteSaveCoordinator.resetAfterReload();
+      _workspaceMutationBarrier.resetAfterReload();
+      _runtimeManager.install(candidate);
+      candidate = null;
+      _workspaceMutationToken = Object();
+      _applyInstalledRuntimeSnapshot(snapshot, message: message);
+    } catch (_) {
+      candidate?.dispose();
+      rethrow;
+    }
+  }
+
+  void _applyInstalledRuntimeSnapshot(
+    WorkspaceResourceSnapshot snapshot, {
+    required String message,
+  }) {
+    setState(() {
+      _resources = snapshot.resources;
+      _selectedResource = snapshot.selectedResource;
+      _searchResults = const [];
+      _resetSplitWorkspace();
+      _activeNote = snapshot.note;
+      _replaceEditorMarkdown(snapshot.note?.markdown ?? '');
+      if (snapshot.note case final note?) {
+        _noteMaterialsRegistry.replaceProposals(note.id, snapshot.proposals);
+      }
+      _leftPaneMode = _LeftPaneMode.resources;
+      _leftPaneCollapsed = false;
+      _rightPaneCollapsed = false;
+      _narrowSection = snapshot.note == null
+          ? _WorkspaceSection.resources
+          : _WorkspaceSection.notes;
+      _reloadRequired = false;
+      _setSelectedPreviewImageSrc(null);
+      _message = message;
+    });
+  }
+
   Future<VaultLocation?> _pickVaultLocation() async {
     return _dependencies.pickVaultLocation();
   }
@@ -1059,17 +1110,10 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
         _message = '';
       });
       try {
-        _setVaultLocation(restoredLocation);
-        await _loadResourcesFromCurrentVault(message: '仓库已打开');
-        await _saveSettings(
-          _settings.copyWith(vaultLocation: restoredLocation),
-        );
+        await _activateVaultLocation(restoredLocation, message: '仓库已打开');
       } catch (error) {
         if (mounted) {
-          setState(() {
-            _clearVaultLocationState();
-            _message = '仓库位置读取失败：$error';
-          });
+          setState(() => _message = '仓库位置读取失败：$error');
         }
       } finally {
         if (mounted) {
@@ -1081,25 +1125,6 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
         setState(() => _message = '仓库位置读取失败：$error');
       }
     }
-  }
-
-  void _setVaultLocation(VaultLocation location) {
-    _noteSaveCoordinator.resetAfterReload();
-    _workspaceMutationBarrier.resetAfterReload();
-    _installRuntime(
-      vault: _dependencies.createVault(location.rootPath),
-      rootPath: location.rootPath,
-      label: _dependencies.formatVaultLabel(location.rootPath),
-    );
-    _selectedResource = null;
-    _resources = const [];
-    _searchResults = const [];
-    _resetSplitWorkspace();
-    _leftPaneMode = _LeftPaneMode.resources;
-    _leftPaneCollapsed = false;
-    _rightPaneCollapsed = false;
-    _narrowSection = _WorkspaceSection.resources;
-    _reloadRequired = false;
   }
 
   Future<void> _runBusy(
@@ -1272,33 +1297,41 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       });
       return;
     }
-    await _runBusy(() async {
-      if (!await _flushPendingMarkdown()) {
-        return;
-      }
-      final result = await _resourceCoordinator.loadNote(resource.id);
-      if (result is WorkspaceResourceStale) {
-        return;
-      }
-      if (result case WorkspaceResourceMissing(:final resources)) {
+    _resourceSelectionInProgress = true;
+    try {
+      await _runBusy(() async {
+        if (!await _flushPendingMarkdown()) {
+          return;
+        }
+        final result = await _resourceCoordinator.loadNote(resource.id);
+        if (result is WorkspaceResourceStale) {
+          return;
+        }
+        if (result case WorkspaceResourceMissing(:final resources)) {
+          setState(() {
+            _resources = resources;
+            _message = '资源已不存在：${resource.title}';
+          });
+          return;
+        }
+        final snapshot = (result as WorkspaceResourceCurrent).snapshot;
+        final loaded = snapshot.note!;
         setState(() {
-          _resources = resources;
-          _message = '资源已不存在：${resource.title}';
+          _resources = snapshot.resources;
+          _selectedResource = snapshot.selectedResource;
+          _activeNote = loaded;
+          _noteMaterialsRegistry.replaceProposals(
+            loaded.id,
+            snapshot.proposals,
+          );
+          _noteMaterialsRegistry.clearSelection(resource.id);
+          _noteMode = _preferredNoteMode;
+          _narrowSection = _WorkspaceSection.notes;
         });
-        return;
-      }
-      final snapshot = (result as WorkspaceResourceCurrent).snapshot;
-      final loaded = snapshot.note!;
-      setState(() {
-        _resources = snapshot.resources;
-        _selectedResource = snapshot.selectedResource;
-        _activeNote = loaded;
-        _noteMaterialsRegistry.replaceProposals(loaded.id, snapshot.proposals);
-        _noteMaterialsRegistry.clearSelection(resource.id);
-        _noteMode = _preferredNoteMode;
-        _narrowSection = _WorkspaceSection.notes;
       });
-    });
+    } finally {
+      _resourceSelectionInProgress = false;
+    }
   }
 
   Future<void> _createFolder({String parentPath = ''}) async {
@@ -1509,11 +1542,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       return;
     }
     await _runBusy(() async {
-      var location = pickedLocation!;
-      await _saveSettings(_settings.copyWith(vaultLocation: location));
-      location = _settings.vaultLocation ?? location;
-      _setVaultLocation(location);
-      await _loadResourcesFromCurrentVault(message: '仓库已切换');
+      await _activateVaultLocation(pickedLocation!, message: '仓库已切换');
     }, allowReloadRequired: true);
   }
 
