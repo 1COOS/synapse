@@ -338,15 +338,25 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     required Map<String, VaultNoteContent> refreshedNotesByNewId,
     bool clearFocusedPreview = false,
   }) {
+    final actualRemappedNoteIds = _actualNoteIdRemaps(remappedNoteIds);
+    final focusedSession = _activeSession;
+    final remappedFocusedSession =
+        focusedSession != null &&
+        actualRemappedNoteIds.values.any(
+          (noteId) => identical(
+            _noteSessionRegistry.sessionFor(noteId),
+            focusedSession,
+          ),
+        );
     _noteMaterialsRegistry.applyMutation(
-      remappedNoteIds: _actualNoteIdRemaps(remappedNoteIds),
+      remappedNoteIds: actualRemappedNoteIds,
       removedNoteIds: removedNoteIds,
       refreshedNotesByNewId: refreshedNotesByNewId,
     );
-    if (remappedNoteIds.isNotEmpty) {
+    if (actualRemappedNoteIds.isNotEmpty) {
       _searchResults = const [];
     }
-    if (clearFocusedPreview && remappedNoteIds.isNotEmpty) {
+    if (clearFocusedPreview && remappedFocusedSession) {
       _setSelectedPreviewImageSrc(null);
     }
   }
@@ -921,6 +931,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       setState(() {
         _selectedResource = resource;
         _activeNote = loaded;
+        _noteMaterialsRegistry.clearSelection(resource.id);
         _noteMode = _preferredNoteMode;
         _narrowSection = _WorkspaceSection.notes;
       });

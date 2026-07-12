@@ -10,6 +10,65 @@ import '../../support/workspace_harness.dart';
 
 void main() {
   testWidgets(
+    'renaming an unfocused pane keeps the focused preview image selected',
+    (tester) async {
+      final vault = MemoryVaultBackend(seedExampleData: false);
+      final alpha = await vault.createNote(parentPath: '', title: 'Alpha');
+      final beta = await vault.createNote(parentPath: '', title: 'Beta');
+      final alphaSource = await vault.addImageSource(
+        noteId: alpha.id,
+        filename: 'alpha.png',
+        mimeType: 'image/png',
+        bytes: tinyPng,
+      );
+      await vault.addImageSource(
+        noteId: beta.id,
+        filename: 'beta.png',
+        mimeType: 'image/png',
+        bytes: tinyPng,
+      );
+      await vault.updateMarkdown(
+        noteId: alpha.id,
+        markdown:
+            '# Alpha\n\n'
+            '<img src="Alpha.assets/attachments/alpha.png" width="360">',
+      );
+
+      await pumpWorkspace(tester, vault: vault);
+      await tester.tap(find.byKey(const Key('split-pane-right-button')));
+      await tester.pump(const Duration(milliseconds: 250));
+      await tester.tap(find.byKey(Key('resource-row-${beta.id}')));
+      await tester.pump(const Duration(milliseconds: 250));
+      await tester.tap(find.byKey(const Key('note-mode-source-pane-2')));
+      await tester.pump(const Duration(milliseconds: 250));
+      await enterTextInLiveMarkdownBlock(
+        tester,
+        '# Renamed Beta\nbody',
+        paneId: 2,
+      );
+
+      tester
+          .widget<GestureDetector>(find.byKey(const Key('split-pane-pane-1')))
+          .onTap!();
+      await tester.pump(const Duration(milliseconds: 250));
+      await tester.tap(find.byKey(Key('preview-image-tap-${alphaSource.id}')));
+      await tester.pump();
+      expect(
+        previewImageFrameBorderColor(tester, alphaSource),
+        CupertinoColors.activeBlue,
+      );
+
+      await tester.pump(const Duration(milliseconds: 1000));
+      await tester.pumpAndSettle();
+
+      expect(
+        previewImageFrameBorderColor(tester, alphaSource),
+        CupertinoColors.activeBlue,
+      );
+    },
+  );
+
+  testWidgets(
     'split controls live in the center titlebar without save button',
     (tester) async {
       await pumpWorkspace(tester, vault: MemoryVaultBackend());

@@ -1,3 +1,5 @@
+import 'dart:ui' show Tristate;
+
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -9,6 +11,54 @@ import '../../support/workspace_fakes.dart';
 import '../../support/workspace_harness.dart';
 
 void main() {
+  testWidgets('selecting a note clears only that note source selection', (
+    tester,
+  ) async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final alpha = await vault.createNote(parentPath: '', title: 'Alpha');
+    final beta = await vault.createNote(parentPath: '', title: 'Beta');
+    final alphaSource = await vault.addImageSource(
+      noteId: alpha.id,
+      filename: 'alpha.png',
+      mimeType: 'image/png',
+      bytes: tinyPng,
+    );
+    final betaSource = await vault.addImageSource(
+      noteId: beta.id,
+      filename: 'beta.png',
+      mimeType: 'image/png',
+      bytes: tinyPng,
+    );
+
+    await pumpWorkspace(tester, vault: vault);
+    await tester.tap(find.byKey(const Key('split-pane-right-button')));
+    await tester.pump(const Duration(milliseconds: 250));
+    await tester.tap(find.byKey(Key('resource-row-${beta.id}')));
+    await tester.pump(const Duration(milliseconds: 250));
+
+    await tester.tap(find.bySemanticsLabel(betaSource.title));
+    await tester.pump();
+    expect(_sourceTileIsSelected(tester, betaSource.title), isTrue);
+
+    tester
+        .widget<GestureDetector>(find.byKey(const Key('split-pane-pane-1')))
+        .onTap!();
+    await tester.pump(const Duration(milliseconds: 250));
+    await tester.tap(find.bySemanticsLabel(alphaSource.title));
+    await tester.pump();
+    expect(_sourceTileIsSelected(tester, alphaSource.title), isTrue);
+
+    await tester.tap(find.byKey(Key('resource-row-${alpha.id}')));
+    await tester.pump(const Duration(milliseconds: 250));
+    expect(_sourceTileIsSelected(tester, alphaSource.title), isFalse);
+
+    tester
+        .widget<GestureDetector>(find.byKey(const Key('split-pane-pane-2')))
+        .onTap!();
+    await tester.pump(const Duration(milliseconds: 250));
+    expect(_sourceTileIsSelected(tester, betaSource.title), isTrue);
+  });
+
   testWidgets('creates notes in the selected folder from the toolbar', (
     tester,
   ) async {
@@ -738,4 +788,12 @@ void main() {
       expect(find.text('读书'), findsNothing);
     },
   );
+}
+
+bool _sourceTileIsSelected(WidgetTester tester, String title) {
+  return tester
+          .getSemantics(find.bySemanticsLabel(title))
+          .flagsCollection
+          .isSelected ==
+      Tristate.isTrue;
 }
