@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:synapse/domain/vault/vault_resource.dart';
 import 'package:synapse/infrastructure/vault/file_vault_backend.dart';
+import 'package:synapse/infrastructure/vault/vault_post_commit_error.dart';
 
 void main() {
   late Directory root;
@@ -71,6 +72,56 @@ updatedAt: 2026-07-03 12:00
 
     expect(loaded.title, '可见标题');
     expect(resources.single.title, '可见标题');
+  });
+
+  test('classifies update readback failure after the file write', () async {
+    final cause = StateError('sources unavailable after write');
+    final causeStackTrace = StackTrace.current;
+    final backend = _FailingReadbackFileVaultBackend(
+      root.path,
+      readbackError: cause,
+      readbackStackTrace: causeStackTrace,
+    );
+    final note = await backend.createNote(parentPath: '', title: 'Alpha');
+    backend.failReadback = true;
+
+    await expectLater(
+      backend.updateMarkdown(noteId: note.id, markdown: '# Alpha\nchanged'),
+      throwsA(
+        isA<VaultPostCommitError>()
+            .having((error) => error.cause, 'cause', same(cause))
+            .having(
+              (error) => error.causeStackTrace,
+              'causeStackTrace',
+              same(causeStackTrace),
+            ),
+      ),
+    );
+
+    expect(
+      await File(p.join(root.path, note.id)).readAsString(),
+      '# Alpha\nchanged',
+    );
+  });
+
+  test('classifies append readback failure after the file write', () async {
+    final backend = _FailingReadbackFileVaultBackend(
+      root.path,
+      readbackError: StateError('readback unavailable after append'),
+      readbackStackTrace: StackTrace.current,
+    );
+    final note = await backend.createNote(parentPath: '', title: 'Alpha');
+    backend.failReadback = true;
+
+    await expectLater(
+      backend.appendMarkdown(noteId: note.id, markdown: 'appended'),
+      throwsA(isA<VaultPostCommitError>()),
+    );
+
+    expect(
+      await File(p.join(root.path, note.id)).readAsString(),
+      contains('appended'),
+    );
   });
 
   test('hides assets directories and legacy project packages', () async {
@@ -607,4 +658,24 @@ updatedAt: 2026-01-01 00:00
       throwsA(isA<StateError>()),
     );
   });
+}
+
+final class _FailingReadbackFileVaultBackend extends FileVaultBackend {
+  _FailingReadbackFileVaultBackend(
+    super.rootPath, {
+    required this.readbackError,
+    required this.readbackStackTrace,
+  });
+
+  final Object readbackError;
+  final StackTrace readbackStackTrace;
+  bool failReadback = false;
+
+  @override
+  Future<List<SourceItem>> listSources(String noteId) {
+    if (failReadback) {
+      Error.throwWithStackTrace(readbackError, readbackStackTrace);
+    }
+    return super.listSources(noteId);
+  }
 }

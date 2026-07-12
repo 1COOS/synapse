@@ -93,6 +93,7 @@ final class WorkspaceMutationBarrier {
     _reserveSessions(reservedSessions);
     return _synchronized(() async {
       try {
+        _throwIfFatal();
         final affectedSessions = _captureAffectedSessions(
           plan.affectedNoteIds,
           reservedSessions,
@@ -100,16 +101,19 @@ final class WorkspaceMutationBarrier {
         _activeSessions.addAll(affectedSessions);
         try {
           await _drainPendingSaveCommits(affectedSessions);
+          _throwIfFatal();
           final lease = await _saveCoordinator.acquireQuiescence(
             affectedSessions,
             disposition: plan.dirtyDisposition,
           );
           try {
+            _throwIfFatal();
             if (plan.dirtyDisposition == DirtyDisposition.flush &&
                 !lease.report.succeeded) {
               return AbortedByFlush<T>(lease.report);
             }
 
+            _throwIfFatal();
             late final WorkspaceBackendCommit<T> backendCommit;
             try {
               backendCommit = await plan.commitBackend();
@@ -199,9 +203,7 @@ final class WorkspaceMutationBarrier {
     FutureOr<VaultMutationDelta<T>> Function() prepare,
     WorkspaceCommitBatch<T> Function(VaultMutationDelta<T> delta) prepareCommit,
   ) async {
-    if (_saveCoordinator.fatalError case final fatalError?) {
-      Error.throwWithStackTrace(fatalError, fatalError.causeStackTrace);
-    }
+    _throwIfFatal();
     late final VaultMutationDelta<T> delta;
     try {
       delta = await prepare();
@@ -249,6 +251,12 @@ final class WorkspaceMutationBarrier {
       _onInvariantFailure?.call(error);
     } catch (_) {}
     Error.throwWithStackTrace(error, causeStackTrace);
+  }
+
+  void _throwIfFatal() {
+    if (_saveCoordinator.fatalError case final fatalError?) {
+      Error.throwWithStackTrace(fatalError, fatalError.causeStackTrace);
+    }
   }
 
   WorkspaceCommitBatch<T> _prepareDefaultBatch<T>(VaultMutationDelta<T> delta) {

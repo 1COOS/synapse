@@ -721,6 +721,56 @@ void main() {
       },
     );
 
+    for (final disposition in [
+      DirtyDisposition.flush,
+      DirtyDisposition.discard,
+    ]) {
+      test(
+        'queued ${disposition.name} aborts before backend when fatal latches',
+        () async {
+          final harness = _Stage6BarrierHarness();
+          addTearDown(harness.dispose);
+          final blockerStarted = Completer<void>();
+          final releaseBlocker = Completer<void>();
+          final blocker = harness.barrier.run<void>(
+            WorkspaceMutationPlan<void>(
+              affectedNoteIds: const {},
+              dirtyDisposition: DirtyDisposition.flush,
+              commitBackend: () => _backendCommit(() async {
+                blockerStarted.complete();
+                await releaseBlocker.future;
+                return const VaultMutationDelta<void>(value: null);
+              }),
+            ),
+          );
+          await blockerStarted.future;
+          var destructiveBackendCalls = 0;
+          final queued = harness.barrier.run<void>(
+            WorkspaceMutationPlan<void>(
+              affectedNoteIds: const {},
+              dirtyDisposition: disposition,
+              commitBackend: () => _backendCommit(() async {
+                destructiveBackendCalls += 1;
+                return const VaultMutationDelta<void>(value: null);
+              }),
+            ),
+          );
+          final invariant = WorkspaceCommitInvariantError(
+            phase: WorkspaceCommitPhase.apply,
+            cause: StateError('external structural fatal'),
+            causeStackTrace: StackTrace.current,
+          );
+
+          harness.coordinator.enterFatal(invariant);
+          releaseBlocker.complete();
+
+          expect(await blocker, isA<Committed<void>>());
+          await expectLater(queued, throwsA(same(invariant)));
+          expect(destructiveBackendCalls, 0);
+        },
+      );
+    }
+
     test(
       'remap listeners observe registry and split after one commit',
       () async {

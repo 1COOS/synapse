@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 
 import '../../../domain/vault/vault_resource.dart';
 import '../../../infrastructure/vault/vault_backend.dart';
+import '../../../infrastructure/vault/vault_post_commit_error.dart';
 import 'note_document_session.dart';
 import 'note_session_registry.dart';
 import 'workspace_commit_error.dart';
@@ -500,6 +501,7 @@ final class NoteSaveCoordinator {
     final noteSnapshot = flight.noteSnapshot;
     final oldNoteId = noteSnapshot.id;
     final bodySnapshot = flight.bodySnapshot;
+    var backendCommitted = false;
     if (_fatalError case final fatalError?) {
       return _fatalResult(
         session,
@@ -515,6 +517,7 @@ final class NoteSaveCoordinator {
         noteId: oldNoteId,
         markdown: markdown,
       );
+      backendCommitted = true;
       if (_fatalError case final fatalError?) {
         return _fatalResult(
           session,
@@ -536,32 +539,11 @@ final class NoteSaveCoordinator {
             bodySnapshot: bodySnapshot,
           );
         }
-        try {
-          savedNote = await vault.readNote(renamed.id);
-          if (_fatalError case final fatalError?) {
-            return _fatalResult(
-              session,
-              fatalError,
-              oldNoteId: oldNoteId,
-              bodySnapshot: bodySnapshot,
-            );
-          }
-        } catch (error, stackTrace) {
-          if (_fatalError case final fatalError?) {
-            return _fatalResult(
-              session,
-              fatalError,
-              oldNoteId: oldNoteId,
-              bodySnapshot: bodySnapshot,
-            );
-          }
+        savedNote = await vault.readNote(renamed.id);
+        if (_fatalError case final fatalError?) {
           return _fatalResult(
             session,
-            WorkspaceCommitInvariantError(
-              phase: WorkspaceCommitPhase.hydrate,
-              cause: error,
-              causeStackTrace: stackTrace,
-            ),
+            fatalError,
             oldNoteId: oldNoteId,
             bodySnapshot: bodySnapshot,
           );
@@ -581,6 +563,33 @@ final class NoteSaveCoordinator {
         return _fatalResult(
           session,
           fatalError,
+          oldNoteId: oldNoteId,
+          bodySnapshot: bodySnapshot,
+        );
+      }
+      if (error case VaultPostCommitError(
+        :final cause,
+        :final causeStackTrace,
+      )) {
+        return _fatalResult(
+          session,
+          WorkspaceCommitInvariantError(
+            phase: WorkspaceCommitPhase.hydrate,
+            cause: cause,
+            causeStackTrace: causeStackTrace,
+          ),
+          oldNoteId: oldNoteId,
+          bodySnapshot: bodySnapshot,
+        );
+      }
+      if (backendCommitted) {
+        return _fatalResult(
+          session,
+          WorkspaceCommitInvariantError(
+            phase: WorkspaceCommitPhase.hydrate,
+            cause: error,
+            causeStackTrace: stackTrace,
+          ),
           oldNoteId: oldNoteId,
           bodySnapshot: bodySnapshot,
         );

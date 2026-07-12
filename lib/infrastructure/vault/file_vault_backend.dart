@@ -7,6 +7,7 @@ import 'package:uuid/uuid.dart';
 import '../../domain/markdown/markdown_document.dart';
 import '../../domain/vault/vault_resource.dart';
 import 'vault_backend.dart';
+import 'vault_post_commit_error.dart';
 
 class FileVaultBackend implements VaultBackend {
   FileVaultBackend(String rootPath) : root = Directory(rootPath);
@@ -86,7 +87,7 @@ class FileVaultBackend implements VaultBackend {
   }) async {
     final file = _fileForNoteId(noteId);
     await file.writeAsString(markdown);
-    return readNote(noteId);
+    return _readNoteAfterWrite(noteId);
   }
 
   @override
@@ -97,7 +98,15 @@ class FileVaultBackend implements VaultBackend {
     final file = _fileForNoteId(noteId);
     final current = await file.readAsString();
     await file.writeAsString('${current.trimRight()}\n\n${markdown.trim()}\n');
-    return readNote(noteId);
+    return _readNoteAfterWrite(noteId);
+  }
+
+  Future<VaultNoteContent> _readNoteAfterWrite(String noteId) async {
+    try {
+      return await readNote(noteId);
+    } catch (error, stackTrace) {
+      throw VaultPostCommitError(cause: error, causeStackTrace: stackTrace);
+    }
   }
 
   @override

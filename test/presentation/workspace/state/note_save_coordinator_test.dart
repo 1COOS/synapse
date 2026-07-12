@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:synapse/domain/vault/vault_resource.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
+import 'package:synapse/infrastructure/vault/vault_post_commit_error.dart';
 import 'package:synapse/presentation/workspace/state/note_document_session.dart';
 import 'package:synapse/presentation/workspace/state/note_save_coordinator.dart';
 import 'package:synapse/presentation/workspace/state/note_session_registry.dart';
@@ -63,6 +64,8 @@ void main() {
       final report = await harness.coordinator.flushAll();
 
       expect(report.succeeded, isFalse);
+      expect(report.results.single.requiresReload, isFalse);
+      expect(report.results.single.error, isA<StateError>());
       expect(vault.savedNoteIds, [first.noteId]);
       expect(first.controller.text, '# Alpha\nunsaved A');
       expect(first.savePhase, NoteSavePhase.failed);
@@ -286,6 +289,66 @@ void main() {
       expect(session.savePhase, NoteSavePhase.clean);
       expect(session.lastSaveError, isNull);
     });
+
+    test(
+      'rename failure after markdown update is fatal and suppresses retries',
+      () async {
+        final vault = _TrackingVault();
+        final harness = _Harness(vault, scheduleEdits: false);
+        addTearDown(harness.dispose);
+        final session = await harness.createSession('Old Title');
+        vault.resetTracking();
+        vault.failRenames = true;
+        session.controller.text = '# New Title\nbody';
+
+        final result = await harness.coordinator.save(session);
+
+        expect(result.succeeded, isFalse);
+        expect(result.requiresReload, isTrue);
+        expect(result.error, isNull);
+        expect(result.fatalError, isA<WorkspaceCommitInvariantError>());
+        expect(result.fatalError!.phase, WorkspaceCommitPhase.hydrate);
+        expect(result.fatalError!.cause, isA<StateError>());
+        expect(harness.fatalErrors, [same(result.fatalError)]);
+        expect(vault.updateCalls, 1);
+        expect(vault.renameCalls, 1);
+
+        session.controller.text = '# New Title\nlater edit';
+        final retry = await harness.coordinator.save(session);
+
+        expect(retry.requiresReload, isTrue);
+        expect(vault.updateCalls, 1);
+        expect(vault.renameCalls, 1);
+      },
+    );
+
+    test(
+      'vault post-commit update failure is fatal and preserves the cause',
+      () async {
+        final cause = StateError('readback failed after write');
+        final causeStackTrace = StackTrace.current;
+        final vault = _TrackingVault();
+        final harness = _Harness(vault, scheduleEdits: false);
+        addTearDown(harness.dispose);
+        final session = await harness.createSession('Alpha');
+        vault.resetTracking();
+        vault.postCommitUpdateError = VaultPostCommitError(
+          cause: cause,
+          causeStackTrace: causeStackTrace,
+        );
+        session.controller.text = '# Alpha\nchanged';
+
+        final result = await harness.coordinator.save(session);
+
+        expect(result.requiresReload, isTrue);
+        expect(result.error, isNull);
+        expect(result.fatalError!.phase, WorkspaceCommitPhase.hydrate);
+        expect(result.fatalError!.cause, same(cause));
+        expect(result.fatalError!.causeStackTrace, same(causeStackTrace));
+        expect(harness.fatalErrors, [same(result.fatalError)]);
+        expect(vault.updateCalls, 1);
+      },
+    );
 
     test(
       'rename readback failure is fatal and suppresses later saves',
@@ -775,6 +838,8 @@ class _TrackingVault extends MemoryVaultBackend {
   int updateCalls = 0;
   int renameCalls = 0;
   bool failReads = false;
+  bool failRenames = false;
+  VaultPostCommitError? postCommitUpdateError;
   int completedUpdates = 0;
   int concurrentUpdates = 0;
   int maxConcurrentUpdates = 0;
@@ -811,6 +876,8 @@ class _TrackingVault extends MemoryVaultBackend {
     updateCalls = 0;
     renameCalls = 0;
     failReads = false;
+    failRenames = false;
+    postCommitUpdateError = null;
     completedUpdates = 0;
     concurrentUpdates = 0;
     maxConcurrentUpdates = 0;
@@ -842,6 +909,9 @@ class _TrackingVault extends MemoryVaultBackend {
       if (failingNoteIds.contains(noteId)) {
         throw StateError('save failed for $noteId');
       }
+      if (postCommitUpdateError case final error?) {
+        throw error;
+      }
       final failReadback = failReads;
       failReads = false;
       try {
@@ -862,6 +932,9 @@ class _TrackingVault extends MemoryVaultBackend {
     required String title,
   }) async {
     renameCalls += 1;
+    if (failRenames) {
+      throw StateError('rename failed for $noteId');
+    }
     return super.renameNote(noteId: noteId, title: title);
   }
 
