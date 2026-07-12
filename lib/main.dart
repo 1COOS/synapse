@@ -2,6 +2,7 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'infrastructure/ai/ai_provider.dart';
+import 'infrastructure/bootstrap/workspace_dependencies_factory.dart';
 import 'infrastructure/config/provider_config_store.dart';
 import 'infrastructure/config/settings_store.dart';
 import 'infrastructure/config/vault_location_store.dart';
@@ -45,17 +46,9 @@ class SynapseApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return ProviderScope(
-      child: CupertinoApp(
-        debugShowCheckedModeBanner: false,
-        title: 'Synapse',
-        theme: const CupertinoThemeData(
-          brightness: Brightness.light,
-          primaryColor: CupertinoColors.activeBlue,
-          scaffoldBackgroundColor: Color(0xFFF5F5F7),
-        ),
-        home: SynapseWorkspace(
-          dependencies: dependencies,
+    final workspaceDependencies =
+        dependencies ??
+        createWorkspaceDependencies(
           initialVault: vault,
           imageInput: imageInput,
           settingsStore: settingsStore,
@@ -66,7 +59,17 @@ class SynapseApp extends StatelessWidget {
           vaultBackendFactory: vaultBackendFactory,
           providerConfigTester: providerConfigTester,
           workspaceCommitFailureForTesting: workspaceCommitFailureForTesting,
+        );
+    return ProviderScope(
+      child: CupertinoApp(
+        debugShowCheckedModeBanner: false,
+        title: 'Synapse',
+        theme: const CupertinoThemeData(
+          brightness: Brightness.light,
+          primaryColor: CupertinoColors.activeBlue,
+          scaffoldBackgroundColor: Color(0xFFF5F5F7),
         ),
+        home: SynapseWorkspace(dependencies: workspaceDependencies),
       ),
     );
   }

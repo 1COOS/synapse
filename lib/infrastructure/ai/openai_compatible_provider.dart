@@ -5,12 +5,29 @@ import 'package:http/http.dart' as http;
 import '../../domain/vault/vault_resource.dart';
 import 'ai_provider.dart';
 
-class OpenAICompatibleProvider implements AiProvider {
-  OpenAICompatibleProvider({required this.config, http.Client? client})
-    : _client = client ?? http.Client();
+class OpenAICompatibleProvider implements DisposableAiProvider {
+  OpenAICompatibleProvider({
+    required this.config,
+    http.Client? client,
+    bool? ownsClient,
+  }) : _client = client ?? http.Client(),
+       _ownsClient = ownsClient ?? client == null;
 
   final ProviderConfig config;
   final http.Client _client;
+  final bool _ownsClient;
+  bool _isDisposed = false;
+
+  @override
+  void dispose() {
+    if (_isDisposed) {
+      return;
+    }
+    _isDisposed = true;
+    if (_ownsClient) {
+      _client.close();
+    }
+  }
 
   Future<String> testConnection() async {
     final json = await _postJson('/chat/completions', {
@@ -112,6 +129,9 @@ class OpenAICompatibleProvider implements AiProvider {
     String path,
     Map<String, Object?> body,
   ) async {
+    if (_isDisposed) {
+      throw StateError('OpenAICompatibleProvider has been disposed.');
+    }
     final response = await _client.post(
       Uri.parse('${config.normalizedBaseUrl}$path'),
       headers: {

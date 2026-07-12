@@ -1,6 +1,8 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:synapse/application/proposals/proposal_service.dart';
 import 'package:synapse/application/search/search_index.dart';
+import 'package:synapse/domain/vault/vault_resource.dart';
+import 'package:synapse/infrastructure/ai/ai_provider.dart';
 import 'package:synapse/infrastructure/ai/mock_ai_provider.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
 import 'package:synapse/presentation/workspace/controller/workspace_runtime.dart';
@@ -67,7 +69,12 @@ void main() {
     test('successful replacement disposes old search resources once', () {
       final manager = WorkspaceRuntimeManager();
       final oldIndex = _RecordingSearchIndex();
-      final oldRuntime = _runtime(index: oldIndex);
+      final oldProvider = _RecordingDisposableAiProvider(<String>[]);
+      final oldRuntime = _runtime(
+        index: oldIndex,
+        aiProvider: oldProvider,
+        ownsAiProvider: true,
+      );
       final replacement = _runtime();
       manager.install(oldRuntime);
 
@@ -76,13 +83,49 @@ void main() {
       manager.clear();
 
       expect(oldIndex.disposeCalls, 1);
+      expect(oldProvider.disposeCalls, 1);
+    });
+
+    test('owned provider is disposed once after search resources', () {
+      final events = <String>[];
+      final provider = _RecordingDisposableAiProvider(events);
+      final index = _RecordingSearchIndex(
+        onDispose: () => events.add('search'),
+      );
+      final runtime = _runtime(
+        index: index,
+        aiProvider: provider,
+        ownsAiProvider: true,
+      );
+
+      runtime.dispose();
+      runtime.dispose();
+
+      expect(events, ['search', 'provider']);
+      expect(provider.disposeCalls, 1);
+    });
+
+    test('borrowed provider is never disposed', () {
+      final provider = _RecordingDisposableAiProvider(<String>[]);
+      final manager = WorkspaceRuntimeManager();
+      final runtime = _runtime(aiProvider: provider, ownsAiProvider: false);
+      manager.install(runtime);
+
+      manager.install(_runtime());
+
+      expect(provider.disposeCalls, 0);
     });
 
     test('failed candidate installation preserves old runtime', () async {
       final manager = WorkspaceRuntimeManager();
       final oldRuntime = _runtime();
       final candidateIndex = _RecordingSearchIndex();
-      final candidate = _runtime(index: candidateIndex);
+      final candidateProvider = _RecordingDisposableAiProvider(<String>[]);
+      final candidate = _runtime(
+        index: candidateIndex,
+        aiProvider: candidateProvider,
+        ownsAiProvider: true,
+      );
       manager.install(oldRuntime);
       final generation = manager.generation;
 
@@ -97,6 +140,7 @@ void main() {
       expect(manager.current, same(oldRuntime));
       expect(manager.generation, generation);
       expect(candidateIndex.disposeCalls, 1);
+      expect(candidateProvider.disposeCalls, 1);
     });
 
     test('clear and dispose are idempotent and reject later use', () {
@@ -117,13 +161,18 @@ void main() {
   });
 }
 
-WorkspaceRuntime _runtime({_RecordingSearchIndex? index}) {
+WorkspaceRuntime _runtime({
+  _RecordingSearchIndex? index,
+  AiProvider? aiProvider,
+  bool ownsAiProvider = false,
+}) {
   final vault = MemoryVaultBackend(seedExampleData: false);
-  final aiProvider = MockAiProvider();
+  final provider = aiProvider ?? MockAiProvider();
   return WorkspaceRuntime(
     vault: vault,
-    aiProvider: aiProvider,
-    proposalService: ProposalService(vault: vault, aiProvider: aiProvider),
+    aiProvider: provider,
+    ownsAiProvider: ownsAiProvider,
+    proposalService: ProposalService(vault: vault, aiProvider: provider),
     searchCoordinator: WorkspaceSearchCoordinator(
       index ?? _RecordingSearchIndex(),
     ),
@@ -133,6 +182,9 @@ WorkspaceRuntime _runtime({_RecordingSearchIndex? index}) {
 }
 
 final class _RecordingSearchIndex implements SearchIndex {
+  _RecordingSearchIndex({this.onDispose});
+
+  final void Function()? onDispose;
   int disposeCalls = 0;
 
   @override
@@ -156,5 +208,36 @@ final class _RecordingSearchIndex implements SearchIndex {
   @override
   void dispose() {
     disposeCalls += 1;
+    onDispose?.call();
+  }
+}
+
+final class _RecordingDisposableAiProvider implements DisposableAiProvider {
+  _RecordingDisposableAiProvider(this.events);
+
+  final List<String> events;
+  int disposeCalls = 0;
+
+  @override
+  Future<String> createOutlineProposal({
+    required String noteTitle,
+    required String currentMarkdown,
+    required List<SourceItem> sources,
+  }) async => '';
+
+  @override
+  Future<List<double>> createEmbedding(String text) async => const [];
+
+  @override
+  Future<ImageExtraction> extractImageText({
+    required String filename,
+    required String mimeType,
+    required List<int> bytes,
+  }) async => const ImageExtraction(text: '', description: '');
+
+  @override
+  void dispose() {
+    disposeCalls += 1;
+    events.add('provider');
   }
 }

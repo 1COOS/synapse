@@ -8,11 +8,11 @@ import 'package:path/path.dart' as p;
 import 'package:synapse/domain/vault/vault_resource.dart';
 import 'package:synapse/application/search/search_index.dart';
 import 'package:synapse/infrastructure/ai/mock_ai_provider.dart';
+import 'package:synapse/infrastructure/bootstrap/workspace_dependencies_factory.dart';
 import 'package:synapse/infrastructure/config/synapse_settings.dart';
 import 'package:synapse/infrastructure/config/vault_location_store.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
 import 'package:synapse/presentation/workspace/editor/live_markdown_editor.dart';
-import 'package:synapse/presentation/workspace/controller/workspace_dependencies.dart';
 import 'package:synapse/presentation/workspace/state/workspace_mutation_barrier.dart';
 
 import '../../support/workspace_fakes.dart';
@@ -301,9 +301,9 @@ void main() {
       await secondVault.createNote(parentPath: '', title: 'Second');
       var failRuntimeConstruction = false;
       final settingsStore = FakeSettingsStore();
-      final dependencies = WorkspaceDependencies(
+      final dependencies = createWorkspaceDependencies(
         initialVault: firstVault,
-        injectedAiProvider: MockAiProvider(),
+        aiProvider: MockAiProvider(),
         settingsStore: settingsStore,
         supportsDirectoryVaultOverride: true,
         pickVaultLocation: () async =>
@@ -352,9 +352,9 @@ void main() {
         ),
       );
       final indexes = <_RecordingSearchIndex>[];
-      final dependencies = WorkspaceDependencies(
+      final dependencies = createWorkspaceDependencies(
         initialVault: firstVault,
-        injectedAiProvider: MockAiProvider(),
+        aiProvider: MockAiProvider(),
         settingsStore: settingsStore,
         supportsDirectoryVaultOverride: true,
         pickVaultLocation: () async =>
@@ -405,9 +405,9 @@ void main() {
         ),
       );
       final indexes = <_RecordingSearchIndex>[];
-      final dependencies = WorkspaceDependencies(
+      final dependencies = createWorkspaceDependencies(
         initialVault: firstVault,
-        injectedAiProvider: MockAiProvider(),
+        aiProvider: MockAiProvider(),
         settingsStore: settingsStore,
         supportsDirectoryVaultOverride: true,
         pickVaultLocation: () async =>

@@ -7,6 +7,7 @@ final class WorkspaceRuntime {
   WorkspaceRuntime({
     required this.vault,
     required this.aiProvider,
+    this.ownsAiProvider = false,
     required this.proposalService,
     required this.searchCoordinator,
     required this.rootPath,
@@ -15,6 +16,7 @@ final class WorkspaceRuntime {
 
   final VaultBackend vault;
   final AiProvider aiProvider;
+  final bool ownsAiProvider;
   final ProposalService proposalService;
   final WorkspaceSearchCoordinator searchCoordinator;
   final String? rootPath;
@@ -28,6 +30,13 @@ final class WorkspaceRuntime {
       return;
     }
     _isDisposed = true;
-    searchCoordinator.dispose();
+    try {
+      searchCoordinator.dispose();
+    } finally {
+      final provider = aiProvider;
+      if (ownsAiProvider && provider is DisposableAiProvider) {
+        provider.dispose();
+      }
+    }
   }
 }

@@ -10,8 +10,6 @@ import '../../application/proposals/proposal_service.dart';
 import '../../application/search/search_index.dart';
 import '../../domain/markdown/markdown_document.dart';
 import '../../domain/vault/vault_resource.dart';
-import '../../infrastructure/ai/ai_provider.dart';
-import '../../infrastructure/config/provider_config_store.dart';
 import '../../infrastructure/config/settings_store.dart';
 import '../../infrastructure/config/synapse_settings.dart';
 import '../../infrastructure/config/vault_location_store.dart';
@@ -240,33 +238,9 @@ enum _WorkspaceSection {
 enum _LeftPaneMode { resources, search }
 
 class SynapseWorkspace extends StatefulWidget {
-  const SynapseWorkspace({
-    super.key,
-    this.dependencies,
-    this.initialVault,
-    this.imageInput,
-    this.settingsStore,
-    this.providerConfigStore,
-    this.vaultLocationStore,
-    this.aiProvider,
-    this.directoryPicker,
-    this.vaultBackendFactory,
-    this.providerConfigTester,
-    this.workspaceCommitFailureForTesting,
-  });
+  const SynapseWorkspace({super.key, required this.dependencies});
 
-  final WorkspaceDependencies? dependencies;
-  final VaultBackend? initialVault;
-  final ImageInputService? imageInput;
-  final SettingsStore? settingsStore;
-  final ProviderConfigStore? providerConfigStore;
-  final VaultLocationStore? vaultLocationStore;
-  final AiProvider? aiProvider;
-  final DirectoryPicker? directoryPicker;
-  final VaultBackendFactory? vaultBackendFactory;
-  final ProviderConfigTester? providerConfigTester;
-  @visibleForTesting
-  final WorkspaceCommitPhase? workspaceCommitFailureForTesting;
+  final WorkspaceDependencies dependencies;
 
   @override
   State<SynapseWorkspace> createState() => _SynapseWorkspaceState();
@@ -317,19 +291,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   @override
   void initState() {
     super.initState();
-    _dependencies =
-        widget.dependencies ??
-        WorkspaceDependencies.legacy(
-          initialVault: widget.initialVault,
-          imageInput: widget.imageInput,
-          settingsStore: widget.settingsStore,
-          providerConfigStore: widget.providerConfigStore,
-          vaultLocationStore: widget.vaultLocationStore,
-          aiProvider: widget.aiProvider,
-          directoryPicker: widget.directoryPicker,
-          vaultBackendFactory: widget.vaultBackendFactory,
-          providerConfigTester: widget.providerConfigTester,
-        );
+    _dependencies = widget.dependencies;
     _runtimeManager = WorkspaceRuntimeManager();
     _resourceCoordinator = WorkspaceResourceCoordinator(_runtimeManager);
     _splitWorkspaceController = SplitWorkspaceController(
@@ -490,7 +452,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     _WorkspaceCommitSnapshot workspaceSnapshot =
         const _WorkspaceCommitSnapshot(),
   }) {
-    if (widget.workspaceCommitFailureForTesting ==
+    if (_dependencies.workspaceCommitFailureForTesting ==
         WorkspaceCommitPhase.prepare) {
       throw StateError('Forced workspace commit prepare failure.');
     }
@@ -523,7 +485,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
         state: this,
         preparedToken: _workspaceMutationToken,
         snapshot: workspaceSnapshot,
-        forcedFailure: widget.workspaceCommitFailureForTesting,
+        forcedFailure: _dependencies.workspaceCommitFailureForTesting,
       ),
     );
   }
@@ -945,7 +907,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     required VaultBackend vault,
     required String? rootPath,
     required String label,
-    AiProvider? aiProvider,
+    WorkspaceAiProvider? aiProvider,
   }) {
     final provider =
         aiProvider ??
@@ -1038,19 +1000,6 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     return _dependencies.restoreVaultAccess(location);
   }
 
-  void _useAiProvider(AiProvider provider) {
-    final current = _runtimeManager.current;
-    if (current == null) {
-      return;
-    }
-    _installRuntime(
-      vault: current.vault,
-      rootPath: current.rootPath,
-      label: current.label,
-      aiProvider: provider,
-    );
-  }
-
   Future<void> _initializeWorkspace() async {
     await _loadSettings();
     if (_hasVault) {
@@ -1065,27 +1014,51 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   }
 
   Future<void> _loadSettings() async {
+    final SynapseSettings settings;
     try {
       final store = await _getSettingsStore();
-      final settings = await store.load();
-      if (!mounted) {
-        return;
-      }
-      setState(() {
-        _settings = settings;
-        _workspacePreferences = settings.preferences;
-        _providerConfig = settings.providerConfig;
-        _splitWorkspaceController.updateDefaultMode(_preferredNoteMode);
-        _useAiProvider(_dependencies.createAiProvider(settings.providerConfig));
-        if (_message.isEmpty) {
-          _message = _modelConfigurationMessage();
-        }
-      });
+      settings = await store.load();
     } catch (error) {
       if (mounted) {
         setState(() => _message = '设置读取失败：$error');
       }
+      return;
     }
+    if (!mounted) {
+      return;
+    }
+    final current = _runtimeManager.current;
+    if (current == null) {
+      _applyLoadedSettings(settings);
+      return;
+    }
+    WorkspaceRuntime? candidate;
+    try {
+      candidate = _createSettingsRuntimeCandidate(current, settings);
+      if (!mounted) {
+        candidate.dispose();
+        return;
+      }
+      _runtimeManager.install(candidate);
+      candidate = null;
+      _workspaceMutationToken = Object();
+      _applyLoadedSettings(settings);
+    } catch (_) {
+      candidate?.dispose();
+    }
+  }
+
+  void _applyLoadedSettings(SynapseSettings settings) {
+    setState(() {
+      final shouldSetConfigurationMessage = _message.isEmpty;
+      _settings = settings;
+      _workspacePreferences = settings.preferences;
+      _providerConfig = settings.providerConfig;
+      _splitWorkspaceController.updateDefaultMode(_preferredNoteMode);
+      if (shouldSetConfigurationMessage) {
+        _message = _modelConfigurationMessage();
+      }
+    });
   }
 
   Future<void> _persistSettings(SynapseSettings settings) async {
@@ -1248,7 +1221,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     if (_dependencies.usesInjectedAiProvider) {
       return '';
     }
-    final store = _dependencies.resolvedSettingsStore;
+    final store = _dependencies.resolvedSettingsStore();
     if (store != null && !store.supportsPersistence) {
       return store.unavailableMessage;
     }

@@ -267,4 +267,55 @@ void main() {
       ),
     );
   });
+
+  test(
+    'disposes an owned HTTP client once and rejects later requests',
+    () async {
+      final client = _CloseTrackingClient();
+      final provider = OpenAICompatibleProvider(
+        config: config,
+        client: client,
+        ownsClient: true,
+      );
+
+      provider.dispose();
+      provider.dispose();
+
+      expect(client.closeCalls, 1);
+      await expectLater(
+        provider.testConnection(),
+        throwsA(
+          isA<StateError>().having(
+            (error) => error.message,
+            'message',
+            contains('disposed'),
+          ),
+        ),
+      );
+    },
+  );
+
+  test('does not close a borrowed HTTP client', () {
+    final client = _CloseTrackingClient();
+    final provider = OpenAICompatibleProvider(config: config, client: client);
+
+    provider.dispose();
+    provider.dispose();
+
+    expect(client.closeCalls, 0);
+  });
+}
+
+final class _CloseTrackingClient extends http.BaseClient {
+  int closeCalls = 0;
+
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest request) async {
+    return http.StreamedResponse(const Stream<List<int>>.empty(), 200);
+  }
+
+  @override
+  void close() {
+    closeCalls += 1;
+  }
 }

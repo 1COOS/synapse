@@ -4,9 +4,9 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:synapse/application/search/search_index.dart';
 import 'package:synapse/domain/vault/vault_resource.dart';
 import 'package:synapse/infrastructure/ai/ai_provider.dart';
+import 'package:synapse/infrastructure/bootstrap/workspace_dependencies_factory.dart';
 import 'package:synapse/infrastructure/config/synapse_settings.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
-import 'package:synapse/presentation/workspace/controller/workspace_dependencies.dart';
 
 import '../../support/workspace_fakes.dart';
 import '../../support/workspace_harness.dart';
@@ -288,6 +288,60 @@ void main() {
   });
 
   testWidgets(
+    'startup settings runtime failure keeps the installed runtime and UI state',
+    (tester) async {
+      final vault = MemoryVaultBackend(seedExampleData: false);
+      await vault.createNote(parentPath: '', title: 'Alpha');
+      final providers = <_TrackingAiProvider>[];
+      final indexes = <_ProviderSearchIndex>[];
+      var runtimeBuilds = 0;
+      final dependencies = createWorkspaceDependencies(
+        initialVault: vault,
+        settingsStore: FakeSettingsStore(initialSettings: _replacementSettings),
+        aiProviderFactory: (config) {
+          final provider = _TrackingAiProvider(config.normalizedBaseUrl);
+          providers.add(provider);
+          return provider;
+        },
+        searchIndexFactory: (provider, _) {
+          runtimeBuilds += 1;
+          if (runtimeBuilds == 2) {
+            throw StateError('startup runtime build failed');
+          }
+          final index = _ProviderSearchIndex(provider);
+          indexes.add(index);
+          return index;
+        },
+      );
+
+      await pumpWorkspace(tester, vault: null, dependencies: dependencies);
+
+      expect(runtimeBuilds, 2);
+      expect(indexes.single.disposeCalls, 0);
+      expect(providers.first.disposeCalls, 0);
+      expect(providers.last.disposeCalls, 1);
+      expect(
+        primaryButtonColor(tester, const Key('add-image-button')),
+        CupertinoColors.systemBlue,
+      );
+      expect(find.textContaining('startup runtime build failed'), findsNothing);
+      expect(
+        find.byKey(const Key('live-markdown-block-preview-0')),
+        findsOneWidget,
+      );
+
+      await _runSearch(tester);
+      expect(providers.first.embeddingCalls, 1);
+      expect(providers.last.embeddingCalls, 0);
+      await tester.tap(find.byKey(const Key('left-pane-mode-resources')));
+      await tester.pump();
+      await tester.tap(find.byKey(const Key('resource-row-Alpha.md')));
+      await tester.pump(const Duration(milliseconds: 250));
+      expect(find.text('Alpha'), findsWidgets);
+    },
+  );
+
+  testWidgets(
     'runtime build failure keeps old settings runtime and provider behavior',
     (tester) async {
       final vault = MemoryVaultBackend(seedExampleData: false);
@@ -296,7 +350,7 @@ void main() {
       final providers = <_TrackingAiProvider>[];
       final indexes = <_ProviderSearchIndex>[];
       var failRuntimeBuild = false;
-      final dependencies = WorkspaceDependencies(
+      final dependencies = createWorkspaceDependencies(
         initialVault: vault,
         settingsStore: settingsStore,
         aiProviderFactory: (config) {
@@ -328,6 +382,8 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(oldIndex.disposeCalls, 0);
+      expect(oldProvider.disposeCalls, 0);
+      expect(providers.last.disposeCalls, 1);
       expect(settingsStore.savedSettings, isEmpty);
       expect(settingsStore.currentSettings.providerConfig.baseUrl, 'old-url');
       expect(
@@ -355,7 +411,7 @@ void main() {
       );
       final providers = <_TrackingAiProvider>[];
       final indexes = <_ProviderSearchIndex>[];
-      final dependencies = WorkspaceDependencies(
+      final dependencies = createWorkspaceDependencies(
         initialVault: vault,
         settingsStore: settingsStore,
         aiProviderFactory: (config) {
@@ -382,6 +438,8 @@ void main() {
       expect(indexes, hasLength(greaterThan(1)));
       expect(oldIndex.disposeCalls, 0);
       expect(indexes.last.disposeCalls, 1);
+      expect(oldProvider.disposeCalls, 0);
+      expect(providers.last.disposeCalls, 1);
       expect(settingsStore.savedSettings, isEmpty);
       expect(settingsStore.currentSettings.providerConfig.baseUrl, 'old-url');
       expect(
@@ -407,6 +465,24 @@ const _oldSettings = SynapseSettings(
   ),
 );
 
+const _replacementSettings = SynapseSettings(
+  providerConfig: ProviderConfig(
+    baseUrl: 'new-url',
+    apiKey: 'new-key',
+    chatModel: 'new-chat',
+    visionModel: 'new-vision',
+    embeddingModel: 'new-embedding',
+  ),
+  preferences: WorkspacePreferences(
+    defaultNoteMode: WorkspaceDefaultNoteMode.reading,
+    semanticSearchEnabled: true,
+    pastedImageWidth: 640,
+    autoSaveDelayMillis: 1500,
+    accentColor: WorkspaceAccentColor.purple,
+    noteFontSize: 22,
+  ),
+);
+
 Future<void> _enterReplacementSettings(WidgetTester tester) async {
   await tester.tap(find.byKey(const Key('settings-button')));
   await tester.pumpAndSettle();
@@ -429,11 +505,12 @@ Future<void> _runSearch(WidgetTester tester) async {
   await tester.pumpAndSettle();
 }
 
-final class _TrackingAiProvider implements AiProvider {
+final class _TrackingAiProvider implements DisposableAiProvider {
   _TrackingAiProvider(this.id);
 
   final String id;
   int embeddingCalls = 0;
+  int disposeCalls = 0;
 
   @override
   Future<String> createOutlineProposal({
@@ -454,6 +531,11 @@ final class _TrackingAiProvider implements AiProvider {
     required String mimeType,
     required List<int> bytes,
   }) async => ImageExtraction(text: id, description: id);
+
+  @override
+  void dispose() {
+    disposeCalls += 1;
+  }
 }
 
 final class _ProviderSearchIndex implements SearchIndex {

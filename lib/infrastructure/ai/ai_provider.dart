@@ -16,6 +16,10 @@ abstract class AiProvider {
   Future<List<double>> createEmbedding(String text);
 }
 
+abstract interface class DisposableAiProvider implements AiProvider {
+  void dispose();
+}
+
 class ImageExtraction {
   const ImageExtraction({required this.text, required this.description});
 
