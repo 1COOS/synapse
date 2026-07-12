@@ -8,42 +8,53 @@ final class WorkspaceSearchCoordinator {
 
   SearchIndex _index;
   final Map<String, String> _fingerprints = <String, String>{};
+  Future<void> _tail = Future<void>.value();
   int _generation = 0;
   bool _isDisposed = false;
 
   Future<bool> indexVault({required VaultBackend vault}) {
     _ensureActive();
-    final generation = _generation;
-    final index = _index;
-    return _indexVault(vault: vault, generation: generation, index: index);
+    return _enqueue(() {
+      if (_isDisposed) {
+        return Future<bool>.value(false);
+      }
+      final generation = _generation;
+      final index = _index;
+      return _indexVault(vault: vault, generation: generation, index: index);
+    });
   }
 
   Future<List<SearchResult>?> searchVault({
     required String query,
     required VaultBackend vault,
     String? noteId,
-  }) async {
+  }) {
     _ensureActive();
-    final generation = _generation;
-    final index = _index;
-    final indexed = await _indexVault(
-      vault: vault,
-      generation: generation,
-      index: index,
-    );
-    if (!indexed) {
-      return null;
-    }
-
-    try {
-      final results = await index.search(query, noteId: noteId);
-      return _isCurrent(generation, index) ? results : null;
-    } catch (_) {
-      if (!_isCurrent(generation, index)) {
+    return _enqueue(() async {
+      if (_isDisposed) {
         return null;
       }
-      rethrow;
-    }
+      final generation = _generation;
+      final index = _index;
+      final indexed = await _indexVault(
+        vault: vault,
+        generation: generation,
+        index: index,
+      );
+      if (!indexed) {
+        return null;
+      }
+
+      try {
+        final results = await index.search(query, noteId: noteId);
+        return _isCurrent(generation, index) ? results : null;
+      } catch (_) {
+        if (!_isCurrent(generation, index)) {
+          return null;
+        }
+        rethrow;
+      }
+    });
   }
 
   void replaceIndex(SearchIndex replacement) {
@@ -73,17 +84,42 @@ final class WorkspaceSearchCoordinator {
     required int generation,
     required SearchIndex index,
   }) async {
+    for (var attempt = 0; attempt < 2; attempt += 1) {
+      final outcome = await _indexVaultOnce(
+        vault: vault,
+        generation: generation,
+        index: index,
+        restartOnInventoryRace: attempt == 0,
+      );
+      switch (outcome) {
+        case _IndexVaultOutcome.completed:
+          return true;
+        case _IndexVaultOutcome.invalidated:
+          return false;
+        case _IndexVaultOutcome.restart:
+          continue;
+      }
+    }
+    return true;
+  }
+
+  Future<_IndexVaultOutcome> _indexVaultOnce({
+    required VaultBackend vault,
+    required int generation,
+    required SearchIndex index,
+    required bool restartOnInventoryRace,
+  }) async {
     final List<VaultResourceNode> resources;
     try {
       resources = await vault.listResources();
     } catch (_) {
       if (!_isCurrent(generation, index)) {
-        return false;
+        return _IndexVaultOutcome.invalidated;
       }
       rethrow;
     }
     if (!_isCurrent(generation, index)) {
-      return false;
+      return _IndexVaultOutcome.invalidated;
     }
 
     final notes = _flattenNoteResources(resources).toList();
@@ -93,29 +129,29 @@ final class WorkspaceSearchCoordinator {
       indexedIds = await index.documentIds();
     } catch (_) {
       if (!_isCurrent(generation, index)) {
-        return false;
+        return _IndexVaultOutcome.invalidated;
       }
       rethrow;
     }
     if (!_isCurrent(generation, index)) {
-      return false;
+      return _IndexVaultOutcome.invalidated;
     }
     final staleIds = indexedIds.difference(liveIds).toList();
 
     for (final id in staleIds) {
       if (!_isCurrent(generation, index)) {
-        return false;
+        return _IndexVaultOutcome.invalidated;
       }
       try {
         await index.removeDocument(id);
       } catch (_) {
         if (!_isCurrent(generation, index)) {
-          return false;
+          return _IndexVaultOutcome.invalidated;
         }
         rethrow;
       }
       if (!_isCurrent(generation, index)) {
-        return false;
+        return _IndexVaultOutcome.invalidated;
       }
       _fingerprints.remove(id);
       indexedIds.remove(id);
@@ -123,19 +159,48 @@ final class WorkspaceSearchCoordinator {
 
     for (final note in notes) {
       if (!_isCurrent(generation, index)) {
-        return false;
+        return _IndexVaultOutcome.invalidated;
       }
       final VaultNoteContent loaded;
       try {
         loaded = await vault.readNote(note.id);
-      } catch (_) {
+      } catch (error, stackTrace) {
         if (!_isCurrent(generation, index)) {
-          return false;
+          return _IndexVaultOutcome.invalidated;
         }
-        rethrow;
+        final currentIds = await _currentVaultNoteIds(
+          vault: vault,
+          generation: generation,
+          index: index,
+        );
+        if (currentIds == null) {
+          return _IndexVaultOutcome.invalidated;
+        }
+        if (currentIds.contains(note.id)) {
+          Error.throwWithStackTrace(error, stackTrace);
+        }
+        if (indexedIds.contains(note.id)) {
+          try {
+            await index.removeDocument(note.id);
+          } catch (_) {
+            if (!_isCurrent(generation, index)) {
+              return _IndexVaultOutcome.invalidated;
+            }
+            rethrow;
+          }
+          if (!_isCurrent(generation, index)) {
+            return _IndexVaultOutcome.invalidated;
+          }
+        }
+        indexedIds.remove(note.id);
+        _fingerprints.remove(note.id);
+        if (restartOnInventoryRace) {
+          return _IndexVaultOutcome.restart;
+        }
+        continue;
       }
       if (!_isCurrent(generation, index)) {
-        return false;
+        return _IndexVaultOutcome.invalidated;
       }
 
       final fingerprint = _searchFingerprint(loaded);
@@ -152,17 +217,43 @@ final class WorkspaceSearchCoordinator {
         );
       } catch (_) {
         if (!_isCurrent(generation, index)) {
-          return false;
+          return _IndexVaultOutcome.invalidated;
         }
         rethrow;
       }
       if (!_isCurrent(generation, index)) {
-        return false;
+        return _IndexVaultOutcome.invalidated;
       }
       _fingerprints[loaded.id] = fingerprint;
       indexedIds.add(loaded.id);
     }
-    return true;
+    return _IndexVaultOutcome.completed;
+  }
+
+  Future<Set<String>?> _currentVaultNoteIds({
+    required VaultBackend vault,
+    required int generation,
+    required SearchIndex index,
+  }) async {
+    final List<VaultResourceNode> resources;
+    try {
+      resources = await vault.listResources();
+    } catch (_) {
+      if (!_isCurrent(generation, index)) {
+        return null;
+      }
+      rethrow;
+    }
+    if (!_isCurrent(generation, index)) {
+      return null;
+    }
+    return _flattenNoteResources(resources).map((note) => note.id).toSet();
+  }
+
+  Future<T> _enqueue<T>(Future<T> Function() operation) {
+    final result = _tail.then((_) => operation());
+    _tail = result.then<void>((_) {}, onError: (_, _) {});
+    return result;
   }
 
   bool _isCurrent(int generation, SearchIndex index) {
@@ -177,6 +268,8 @@ final class WorkspaceSearchCoordinator {
     }
   }
 }
+
+enum _IndexVaultOutcome { completed, restart, invalidated }
 
 String _searchFingerprint(VaultNoteContent note) {
   return '${note.updatedAt.microsecondsSinceEpoch}:'

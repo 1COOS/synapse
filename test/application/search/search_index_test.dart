@@ -2,6 +2,8 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:synapse/application/search/search_index.dart';
+import 'package:synapse/domain/vault/vault_resource.dart';
+import 'package:synapse/infrastructure/ai/ai_provider.dart';
 import 'package:synapse/infrastructure/ai/mock_ai_provider.dart';
 import 'package:synapse/infrastructure/cache/memory_search_cache.dart'
     show MemorySearchCache;
@@ -65,19 +67,76 @@ void main() {
           await expectLater(fixture.index.search('query'), throwsStateError);
         },
       );
+
+      test('$implementation supports full-text-only indexing', () async {
+        final fixture = await _createIndex(
+          implementation,
+          aiProvider: _ThrowingEmbeddingAiProvider(),
+          semanticSearchEnabled: false,
+        );
+        addTearDown(fixture.dispose);
+
+        await fixture.index.indexDocument(
+          id: 'doc-1',
+          noteId: 'note-1.md',
+          title: 'Alpha',
+          text: 'full text target',
+        );
+
+        final results = await fixture.index.search('target');
+
+        expect(results.single.id, 'doc-1');
+        expect(results.single.reasons, [SearchMatchReason.fullText]);
+      });
     }
   });
 }
 
-Future<_SearchIndexFixture> _createIndex(String implementation) async {
+Future<_SearchIndexFixture> _createIndex(
+  String implementation, {
+  AiProvider? aiProvider,
+  bool semanticSearchEnabled = true,
+}) async {
+  final provider = aiProvider ?? MockAiProvider();
   if (implementation == 'memory') {
-    return _SearchIndexFixture(MemorySearchCache(MockAiProvider()));
+    return _SearchIndexFixture(
+      MemorySearchCache(provider, semanticSearchEnabled: semanticSearchEnabled),
+    );
   }
   final root = await Directory.systemTemp.createTemp('synapse-search-index-');
   return _SearchIndexFixture(
-    SqliteSearchCache(rootPath: root.path, aiProvider: MockAiProvider()),
+    SqliteSearchCache(
+      rootPath: root.path,
+      aiProvider: provider,
+      semanticSearchEnabled: semanticSearchEnabled,
+    ),
     root: root,
   );
+}
+
+final class _ThrowingEmbeddingAiProvider implements AiProvider {
+  @override
+  Future<List<double>> createEmbedding(String text) {
+    throw StateError('Embedding must not be called.');
+  }
+
+  @override
+  Future<String> createOutlineProposal({
+    required String noteTitle,
+    required String currentMarkdown,
+    required List<SourceItem> sources,
+  }) {
+    throw UnimplementedError();
+  }
+
+  @override
+  Future<ImageExtraction> extractImageText({
+    required String filename,
+    required String mimeType,
+    required List<int> bytes,
+  }) {
+    throw UnimplementedError();
+  }
 }
 
 final class _SearchIndexFixture {

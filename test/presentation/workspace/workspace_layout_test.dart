@@ -1,6 +1,9 @@
+import 'dart:async';
+
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:synapse/domain/vault/vault_resource.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
 
 import '../../support/workspace_harness.dart';
@@ -187,6 +190,34 @@ void main() {
     },
   );
 
+  testWidgets('rapid search submissions keep the newest final results', (
+    tester,
+  ) async {
+    final vault = _GatedSearchReadVault();
+    addTearDown(vault.releaseRead);
+    final older = await vault.createNote(parentPath: '', title: 'Older');
+    await vault.updateMarkdown(noteId: older.id, markdown: '# Older\n111111');
+    final newer = await vault.createNote(parentPath: '', title: 'Newer');
+    await vault.updateMarkdown(noteId: newer.id, markdown: '# Newer\n999999');
+    await pumpWorkspace(tester, vault: vault);
+    await tester.tap(find.byKey(const Key('left-pane-mode-search')));
+    await tester.pump(const Duration(milliseconds: 250));
+    final searchField = find.byKey(const Key('workspace-search-field'));
+    await tester.enterText(searchField, '111111');
+    vault.gateNextRead();
+    await tester.tap(find.byKey(const Key('workspace-search-submit-button')));
+    await vault.readStarted.future;
+
+    await tester.enterText(searchField, '999999');
+    tester.widget<CupertinoTextField>(searchField).onSubmitted!('999999');
+    await tester.pump();
+    vault.releaseRead();
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('search-result-Newer.md')), findsOneWidget);
+    expect(find.byKey(const Key('search-result-Older.md')), findsNothing);
+  });
+
   testWidgets('uses Cupertino section navigation in narrow windows', (
     tester,
   ) async {
@@ -206,4 +237,34 @@ void main() {
     expect(find.byKey(const Key('source-pane')), findsOneWidget);
     expect(find.text('AI 建议'), findsOneWidget);
   });
+}
+
+final class _GatedSearchReadVault extends MemoryVaultBackend {
+  _GatedSearchReadVault() : super(seedExampleData: false);
+
+  Completer<void> readStarted = Completer<void>();
+  Completer<void> _readRelease = Completer<void>();
+  bool _gateRead = false;
+
+  void gateNextRead() {
+    readStarted = Completer<void>();
+    _readRelease = Completer<void>();
+    _gateRead = true;
+  }
+
+  void releaseRead() {
+    if (!_readRelease.isCompleted) {
+      _readRelease.complete();
+    }
+  }
+
+  @override
+  Future<VaultNoteContent> readNote(String noteId) async {
+    if (_gateRead) {
+      _gateRead = false;
+      readStarted.complete();
+      await _readRelease.future;
+    }
+    return super.readNote(noteId);
+  }
 }

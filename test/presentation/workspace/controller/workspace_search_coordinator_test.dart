@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:synapse/application/search/search_index.dart';
+import 'package:synapse/domain/vault/vault_resource.dart';
 import 'package:synapse/infrastructure/ai/mock_ai_provider.dart';
 import 'package:synapse/infrastructure/cache/sqlite_search_cache.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
@@ -10,6 +11,87 @@ import 'package:synapse/presentation/workspace/controller/workspace_search_coord
 
 void main() {
   group('WorkspaceSearchCoordinator', () {
+    test('serializes overlapping searches in invocation order', () async {
+      final vault = MemoryVaultBackend(seedExampleData: false);
+      await vault.createNote(parentPath: '', title: 'Alpha');
+      final index = _RecordingSearchIndex(blockSearch: true);
+      final coordinator = WorkspaceSearchCoordinator(index);
+      addTearDown(coordinator.dispose);
+
+      final older = coordinator.searchVault(query: 'older', vault: vault);
+      await index.searchStarted.future;
+      final newer = coordinator.searchVault(query: 'newer', vault: vault);
+      await Future<void>.delayed(Duration.zero);
+
+      expect(index.searchQueries, ['older']);
+
+      index.releaseSearch();
+      await older;
+      await newer;
+
+      expect(index.searchQueries, ['older', 'newer']);
+    });
+
+    test('queued search begins on the replacement index', () async {
+      final vault = MemoryVaultBackend(seedExampleData: false);
+      await vault.createNote(parentPath: '', title: 'Alpha');
+      final oldIndex = _RecordingSearchIndex(blockSearch: true);
+      final replacement = _RecordingSearchIndex();
+      final coordinator = WorkspaceSearchCoordinator(oldIndex);
+      addTearDown(coordinator.dispose);
+
+      final invalidated = coordinator.searchVault(query: 'old', vault: vault);
+      await oldIndex.searchStarted.future;
+      final queued = coordinator.searchVault(query: 'new', vault: vault);
+      await Future<void>.delayed(Duration.zero);
+      coordinator.replaceIndex(replacement);
+      oldIndex.releaseSearch();
+
+      expect(await invalidated, isNull);
+      expect(await queued, isNotNull);
+      expect(oldIndex.searchQueries, ['old']);
+      expect(replacement.searchQueries, ['new']);
+    });
+
+    test(
+      'restarts once when a note is renamed between list and read',
+      () async {
+        final vault = _RenameOnReadVault();
+        await vault.createNote(parentPath: '', title: 'Alpha');
+        final index = _RecordingSearchIndex();
+        final coordinator = WorkspaceSearchCoordinator(index);
+        addTearDown(coordinator.dispose);
+
+        await coordinator.indexVault(vault: vault);
+        vault.renameOnNextRead = true;
+
+        final results = await coordinator.searchVault(
+          query: 'Beta',
+          vault: vault,
+        );
+
+        expect(index.removedIds, ['Alpha.md']);
+        expect(index.indexedIds, ['Alpha.md', 'Beta.md']);
+        expect(results!.single.id, 'Beta.md');
+      },
+    );
+
+    test(
+      'rethrows read failures while the same note ID still exists',
+      () async {
+        final error = StateError('corrupt note');
+        final vault = _SameIdReadFailureVault(error);
+        await vault.createNote(parentPath: '', title: 'Alpha');
+        final coordinator = WorkspaceSearchCoordinator(_RecordingSearchIndex());
+        addTearDown(coordinator.dispose);
+
+        await expectLater(
+          coordinator.searchVault(query: 'Alpha', vault: vault),
+          throwsA(same(error)),
+        );
+      },
+    );
+
     test('refreshes Vault inventory before each search', () async {
       final vault = MemoryVaultBackend(seedExampleData: false);
       final index = _RecordingSearchIndex();
@@ -202,6 +284,32 @@ void main() {
       expect(() => coordinator.indexVault(vault: vault), throwsStateError);
     });
   });
+}
+
+final class _RenameOnReadVault extends MemoryVaultBackend {
+  _RenameOnReadVault() : super(seedExampleData: false);
+
+  bool renameOnNextRead = false;
+
+  @override
+  Future<VaultNoteContent> readNote(String noteId) async {
+    if (renameOnNextRead) {
+      renameOnNextRead = false;
+      await renameNote(noteId: noteId, title: 'Beta');
+    }
+    return super.readNote(noteId);
+  }
+}
+
+final class _SameIdReadFailureVault extends MemoryVaultBackend {
+  _SameIdReadFailureVault(this.error) : super(seedExampleData: false);
+
+  final Object error;
+
+  @override
+  Future<VaultNoteContent> readNote(String noteId) async {
+    throw error;
+  }
 }
 
 final class _RecordingSearchIndex implements SearchIndex {

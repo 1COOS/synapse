@@ -9,8 +9,11 @@ import '../../application/search/search_index.dart';
 import '../ai/ai_provider.dart';
 
 class SqliteSearchCache implements SearchIndex {
-  SqliteSearchCache({required String rootPath, required this.aiProvider})
-    : _db = _openDatabase(rootPath) {
+  SqliteSearchCache({
+    required String rootPath,
+    required this.aiProvider,
+    this.semanticSearchEnabled = true,
+  }) : _db = _openDatabase(rootPath) {
     _db.execute('''
       CREATE TABLE IF NOT EXISTS documents (
         id TEXT PRIMARY KEY,
@@ -24,6 +27,7 @@ class SqliteSearchCache implements SearchIndex {
   }
 
   final AiProvider aiProvider;
+  final bool semanticSearchEnabled;
   final Database _db;
   bool _isDisposed = false;
 
@@ -35,7 +39,9 @@ class SqliteSearchCache implements SearchIndex {
     required String text,
   }) async {
     _ensureActive();
-    final embedding = await aiProvider.createEmbedding('$title\n$text');
+    final embedding = semanticSearchEnabled
+        ? await aiProvider.createEmbedding('$title\n$text')
+        : const <double>[];
     _ensureActive();
     _db.execute(
       '''
@@ -85,7 +91,9 @@ class SqliteSearchCache implements SearchIndex {
             'SELECT id, note_id, title, body, embedding_json FROM documents WHERE note_id = ?',
             [noteId],
           );
-    final queryEmbedding = await aiProvider.createEmbedding(query);
+    final queryEmbedding = semanticSearchEnabled
+        ? await aiProvider.createEmbedding(query)
+        : null;
     _ensureActive();
     final results =
         rows
@@ -96,12 +104,15 @@ class SqliteSearchCache implements SearchIndex {
               final fullTextScore = haystack.contains(query)
                   ? 1.0
                   : _tokenOverlap(query, haystack);
-              final semanticScore = _cosine(
-                queryEmbedding,
-                (jsonDecode(row['embedding_json'] as String) as List<Object?>)
-                    .map((value) => (value as num).toDouble())
-                    .toList(),
-              );
+              final semanticScore = queryEmbedding == null
+                  ? 0.0
+                  : _cosine(
+                      queryEmbedding,
+                      (jsonDecode(row['embedding_json'] as String)
+                              as List<Object?>)
+                          .map((value) => (value as num).toDouble())
+                          .toList(),
+                    );
               final reasons = <SearchMatchReason>[
                 if (fullTextScore > 0) SearchMatchReason.fullText,
                 if (semanticScore > 0.32) SearchMatchReason.semantic,
