@@ -66,6 +66,15 @@ class SqliteSearchCache implements SearchIndex {
   }
 
   @override
+  Future<Set<String>> documentIds() async {
+    _ensureActive();
+    return _db
+        .select('SELECT id FROM documents')
+        .map((row) => row['id'] as String)
+        .toSet();
+  }
+
+  @override
   Future<List<SearchResult>> search(String query, {String? noteId}) async {
     _ensureActive();
     final rows = noteId == null

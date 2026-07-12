@@ -44,6 +44,12 @@ class MemorySearchCache implements SearchIndex {
   }
 
   @override
+  Future<Set<String>> documentIds() async {
+    _ensureActive();
+    return _documents.map((document) => document.id).toSet();
+  }
+
+  @override
   Future<List<SearchResult>> search(String query, {String? noteId}) async {
     _ensureActive();
     final queryEmbedding = semanticSearchEnabled

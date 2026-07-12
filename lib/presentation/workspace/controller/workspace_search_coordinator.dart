@@ -11,25 +11,16 @@ final class WorkspaceSearchCoordinator {
   int _generation = 0;
   bool _isDisposed = false;
 
-  Future<bool> indexVault({
-    required VaultBackend vault,
-    required List<VaultResourceNode> resources,
-  }) {
+  Future<bool> indexVault({required VaultBackend vault}) {
     _ensureActive();
     final generation = _generation;
     final index = _index;
-    return _indexVault(
-      vault: vault,
-      resources: resources,
-      generation: generation,
-      index: index,
-    );
+    return _indexVault(vault: vault, generation: generation, index: index);
   }
 
-  Future<List<SearchResult>?> search({
+  Future<List<SearchResult>?> searchVault({
     required String query,
     required VaultBackend vault,
-    required List<VaultResourceNode> resources,
     String? noteId,
   }) async {
     _ensureActive();
@@ -37,7 +28,6 @@ final class WorkspaceSearchCoordinator {
     final index = _index;
     final indexed = await _indexVault(
       vault: vault,
-      resources: resources,
       generation: generation,
       index: index,
     );
@@ -80,15 +70,37 @@ final class WorkspaceSearchCoordinator {
 
   Future<bool> _indexVault({
     required VaultBackend vault,
-    required List<VaultResourceNode> resources,
     required int generation,
     required SearchIndex index,
   }) async {
+    final List<VaultResourceNode> resources;
+    try {
+      resources = await vault.listResources();
+    } catch (_) {
+      if (!_isCurrent(generation, index)) {
+        return false;
+      }
+      rethrow;
+    }
+    if (!_isCurrent(generation, index)) {
+      return false;
+    }
+
     final notes = _flattenNoteResources(resources).toList();
     final liveIds = notes.map((note) => note.id).toSet();
-    final staleIds = _fingerprints.keys
-        .where((id) => !liveIds.contains(id))
-        .toList();
+    final Set<String> indexedIds;
+    try {
+      indexedIds = await index.documentIds();
+    } catch (_) {
+      if (!_isCurrent(generation, index)) {
+        return false;
+      }
+      rethrow;
+    }
+    if (!_isCurrent(generation, index)) {
+      return false;
+    }
+    final staleIds = indexedIds.difference(liveIds).toList();
 
     for (final id in staleIds) {
       if (!_isCurrent(generation, index)) {
@@ -106,6 +118,7 @@ final class WorkspaceSearchCoordinator {
         return false;
       }
       _fingerprints.remove(id);
+      indexedIds.remove(id);
     }
 
     for (final note in notes) {
@@ -126,7 +139,8 @@ final class WorkspaceSearchCoordinator {
       }
 
       final fingerprint = _searchFingerprint(loaded);
-      if (_fingerprints[loaded.id] == fingerprint) {
+      if (_fingerprints[loaded.id] == fingerprint &&
+          indexedIds.contains(loaded.id)) {
         continue;
       }
       try {
@@ -146,6 +160,7 @@ final class WorkspaceSearchCoordinator {
         return false;
       }
       _fingerprints[loaded.id] = fingerprint;
+      indexedIds.add(loaded.id);
     }
     return true;
   }

@@ -30,10 +30,12 @@ void main() {
           expect(indexed, hasLength(1));
           expect(indexed.single.id, 'doc-1');
           expect(indexed.single.reasons, contains(SearchMatchReason.semantic));
+          expect(await fixture.index.documentIds(), {'doc-1'});
 
           await fixture.index.removeDocument('doc-1');
 
           expect(await fixture.index.search('慈悲的实践'), isEmpty);
+          expect(await fixture.index.documentIds(), isEmpty);
         },
       );
 
@@ -59,6 +61,7 @@ void main() {
             fixture.index.removeDocument('doc-1'),
             throwsStateError,
           );
+          await expectLater(fixture.index.documentIds(), throwsStateError);
           await expectLater(fixture.index.search('query'), throwsStateError);
         },
       );

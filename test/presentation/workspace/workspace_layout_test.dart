@@ -122,6 +122,71 @@ void main() {
     expect(find.textContaining('独特问题线索'), findsOneWidget);
   });
 
+  testWidgets(
+    'search refreshes externally added notes without resource reload',
+    (tester) async {
+      final vault = MemoryVaultBackend(seedExampleData: false);
+      await vault.createNote(parentPath: '', title: 'Initial');
+      await pumpWorkspace(tester, vault: vault);
+      final external = await vault.createNote(
+        parentPath: '',
+        title: 'External',
+      );
+      await vault.updateMarkdown(
+        noteId: external.id,
+        markdown: '# External\n外部新增线索',
+      );
+
+      await tester.tap(find.byKey(const Key('left-pane-mode-search')));
+      await tester.pump(const Duration(milliseconds: 250));
+      await tester.enterText(
+        find.byKey(const Key('workspace-search-field')),
+        '外部新增线索',
+      );
+      await tester.tap(find.byKey(const Key('workspace-search-submit-button')));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const Key('search-result-External.md')),
+        findsOneWidget,
+      );
+      await tester.tap(find.byKey(const Key('left-pane-mode-resources')));
+      await tester.pump();
+      expect(find.byKey(const Key('resource-row-External.md')), findsNothing);
+    },
+  );
+
+  testWidgets(
+    'search removes externally deleted notes without resource reload',
+    (tester) async {
+      final vault = MemoryVaultBackend(seedExampleData: false);
+      final deleted = await vault.createNote(parentPath: '', title: 'Deleted');
+      await vault.updateMarkdown(
+        noteId: deleted.id,
+        markdown: '# Deleted\n外部删除线索',
+      );
+      await pumpWorkspace(tester, vault: vault);
+      await tester.tap(find.byKey(const Key('left-pane-mode-search')));
+      await tester.pump(const Duration(milliseconds: 250));
+      await tester.enterText(
+        find.byKey(const Key('workspace-search-field')),
+        '外部删除线索',
+      );
+      await tester.tap(find.byKey(const Key('workspace-search-submit-button')));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('search-result-Deleted.md')), findsOneWidget);
+      await vault.deleteNote(deleted.id);
+
+      await tester.tap(find.byKey(const Key('workspace-search-submit-button')));
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const Key('search-result-Deleted.md')), findsNothing);
+      await tester.tap(find.byKey(const Key('left-pane-mode-resources')));
+      await tester.pump();
+      expect(find.byKey(const Key('resource-row-Deleted.md')), findsOneWidget);
+    },
+  );
+
   testWidgets('uses Cupertino section navigation in narrow windows', (
     tester,
   ) async {

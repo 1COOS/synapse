@@ -3092,10 +3092,9 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       return;
     }
     await _runBusy(() async {
-      final results = await _workspaceSearchCoordinator.search(
+      final results = await _workspaceSearchCoordinator.searchVault(
         query: query,
         vault: _requireVault(),
-        resources: _resources,
       );
       if (results == null) {
         return;

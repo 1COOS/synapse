@@ -1,12 +1,84 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:synapse/application/search/search_index.dart';
+import 'package:synapse/infrastructure/ai/mock_ai_provider.dart';
+import 'package:synapse/infrastructure/cache/sqlite_search_cache.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
 import 'package:synapse/presentation/workspace/controller/workspace_search_coordinator.dart';
 
 void main() {
   group('WorkspaceSearchCoordinator', () {
+    test('refreshes Vault inventory before each search', () async {
+      final vault = MemoryVaultBackend(seedExampleData: false);
+      final index = _RecordingSearchIndex();
+      final coordinator = WorkspaceSearchCoordinator(index);
+      addTearDown(coordinator.dispose);
+
+      expect(
+        await coordinator.searchVault(query: 'external', vault: vault),
+        isEmpty,
+      );
+      await vault.createNote(parentPath: '', title: 'external');
+
+      await coordinator.searchVault(query: 'external', vault: vault);
+
+      expect(index.indexedIds, ['external.md']);
+    });
+
+    test('refresh removes externally deleted notes before reading', () async {
+      final vault = MemoryVaultBackend(seedExampleData: false);
+      final note = await vault.createNote(parentPath: '', title: 'Alpha');
+      final index = _RecordingSearchIndex();
+      final coordinator = WorkspaceSearchCoordinator(index);
+      addTearDown(coordinator.dispose);
+
+      await coordinator.searchVault(query: 'Alpha', vault: vault);
+      await vault.deleteNote(note.id);
+
+      await coordinator.searchVault(query: 'Alpha', vault: vault);
+
+      expect(index.removedIds, ['Alpha.md']);
+    });
+
+    test(
+      'removes persisted SQLite rows after restart reconciliation',
+      () async {
+        final root = await Directory.systemTemp.createTemp(
+          'synapse-search-restart-',
+        );
+        addTearDown(() async {
+          if (await root.exists()) {
+            await root.delete(recursive: true);
+          }
+        });
+        final vault = MemoryVaultBackend(seedExampleData: false);
+        final note = await vault.createNote(parentPath: '', title: 'Persisted');
+        final first = WorkspaceSearchCoordinator(
+          SqliteSearchCache(rootPath: root.path, aiProvider: MockAiProvider()),
+        );
+        await first.searchVault(query: 'Persisted', vault: vault);
+        first.dispose();
+        await vault.deleteNote(note.id);
+
+        final reopenedIndex = SqliteSearchCache(
+          rootPath: root.path,
+          aiProvider: MockAiProvider(),
+        );
+        final second = WorkspaceSearchCoordinator(reopenedIndex);
+        addTearDown(second.dispose);
+
+        final results = await second.searchVault(
+          query: 'Persisted',
+          vault: vault,
+        );
+
+        expect(results, isEmpty);
+        expect(await reopenedIndex.documentIds(), isEmpty);
+      },
+    );
+
     test('does not reindex an unchanged note', () async {
       final vault = MemoryVaultBackend(seedExampleData: false);
       await vault.createNote(parentPath: '', title: 'Alpha');
@@ -14,9 +86,8 @@ void main() {
       final coordinator = WorkspaceSearchCoordinator(index);
       addTearDown(coordinator.dispose);
 
-      final resources = await vault.listResources();
-      await coordinator.indexVault(vault: vault, resources: resources);
-      await coordinator.indexVault(vault: vault, resources: resources);
+      await coordinator.indexVault(vault: vault);
+      await coordinator.indexVault(vault: vault);
 
       expect(index.indexedIds, ['Alpha.md']);
     });
@@ -28,14 +99,12 @@ void main() {
       final coordinator = WorkspaceSearchCoordinator(index);
       addTearDown(coordinator.dispose);
 
-      var resources = await vault.listResources();
-      await coordinator.indexVault(vault: vault, resources: resources);
+      await coordinator.indexVault(vault: vault);
       await vault.updateMarkdown(
         noteId: note.id,
         markdown: '# Alpha\n\nchanged',
       );
-      resources = await vault.listResources();
-      await coordinator.indexVault(vault: vault, resources: resources);
+      await coordinator.indexVault(vault: vault);
 
       expect(index.indexedIds, ['Alpha.md', 'Alpha.md']);
       expect(index.indexedTexts.last, contains('changed'));
@@ -50,15 +119,9 @@ void main() {
         final coordinator = WorkspaceSearchCoordinator(index);
         addTearDown(coordinator.dispose);
 
-        await coordinator.indexVault(
-          vault: vault,
-          resources: await vault.listResources(),
-        );
+        await coordinator.indexVault(vault: vault);
         await vault.deleteNote(note.id);
-        await coordinator.indexVault(
-          vault: vault,
-          resources: await vault.listResources(),
-        );
+        await coordinator.indexVault(vault: vault);
 
         expect(index.removedIds, ['Alpha.md']);
       },
@@ -73,11 +136,9 @@ void main() {
         final replacement = _RecordingSearchIndex();
         final coordinator = WorkspaceSearchCoordinator(oldIndex);
         addTearDown(coordinator.dispose);
-        final resources = await vault.listResources();
-
-        await coordinator.indexVault(vault: vault, resources: resources);
+        await coordinator.indexVault(vault: vault);
         coordinator.replaceIndex(replacement);
-        await coordinator.indexVault(vault: vault, resources: resources);
+        await coordinator.indexVault(vault: vault);
 
         expect(oldIndex.disposeCalls, 1);
         expect(replacement.indexedIds, ['Alpha.md']);
@@ -94,11 +155,7 @@ void main() {
         final coordinator = WorkspaceSearchCoordinator(oldIndex);
         addTearDown(coordinator.dispose);
 
-        final search = coordinator.search(
-          query: 'Alpha',
-          vault: vault,
-          resources: await vault.listResources(),
-        );
+        final search = coordinator.searchVault(query: 'Alpha', vault: vault);
         await oldIndex.indexStarted.future;
         coordinator.replaceIndex(replacement);
         oldIndex.releaseIndexing();
@@ -119,11 +176,7 @@ void main() {
         final coordinator = WorkspaceSearchCoordinator(oldIndex);
         addTearDown(coordinator.dispose);
 
-        final search = coordinator.search(
-          query: 'Alpha',
-          vault: vault,
-          resources: await vault.listResources(),
-        );
+        final search = coordinator.searchVault(query: 'Alpha', vault: vault);
         await oldIndex.searchStarted.future;
         coordinator.replaceIndex(replacement);
         oldIndex.releaseSearch();
@@ -138,10 +191,7 @@ void main() {
       final index = _RecordingSearchIndex(blockIndexing: true);
       final coordinator = WorkspaceSearchCoordinator(index);
 
-      final indexing = coordinator.indexVault(
-        vault: vault,
-        resources: await vault.listResources(),
-      );
+      final indexing = coordinator.indexVault(vault: vault);
       await index.indexStarted.future;
       coordinator.dispose();
       coordinator.dispose();
@@ -149,10 +199,7 @@ void main() {
 
       expect(await indexing, isFalse);
       expect(index.disposeCalls, 1);
-      expect(
-        () => coordinator.indexVault(vault: vault, resources: const []),
-        throwsStateError,
-      );
+      expect(() => coordinator.indexVault(vault: vault), throwsStateError);
     });
   });
 }
@@ -171,6 +218,11 @@ final class _RecordingSearchIndex implements SearchIndex {
   final Completer<void> _indexRelease = Completer<void>();
   final Completer<void> _searchRelease = Completer<void>();
   int disposeCalls = 0;
+
+  @override
+  Future<Set<String>> documentIds() async {
+    return indexedIds.toSet()..removeAll(removedIds);
+  }
 
   @override
   Future<void> indexDocument({
@@ -203,15 +255,17 @@ final class _RecordingSearchIndex implements SearchIndex {
     if (blockSearch) {
       await _searchRelease.future;
     }
+    final activeIds = indexedIds.toSet()..removeAll(removedIds);
     return [
-      SearchResult(
-        id: 'doc',
-        noteId: 'Alpha.md',
-        title: 'Alpha',
-        text: 'Alpha',
-        score: 1,
-        reasons: const [SearchMatchReason.fullText],
-      ),
+      for (final id in activeIds)
+        SearchResult(
+          id: id,
+          noteId: id,
+          title: id,
+          text: id,
+          score: 1,
+          reasons: const [SearchMatchReason.fullText],
+        ),
     ];
   }
 

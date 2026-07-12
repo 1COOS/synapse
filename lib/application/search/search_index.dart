@@ -28,6 +28,8 @@ abstract interface class SearchIndex {
 
   Future<void> removeDocument(String id);
 
+  Future<Set<String>> documentIds();
+
   Future<List<SearchResult>> search(String query, {String? noteId});
 
   void dispose();
