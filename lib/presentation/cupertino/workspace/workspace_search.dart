@@ -1,6 +1,6 @@
 import 'package:flutter/cupertino.dart';
 
-import '../../../infrastructure/cache/memory_search_cache.dart';
+import '../../../application/search/search_index.dart';
 import 'workspace_theme.dart';
 
 class WorkspaceSearchField extends StatelessWidget {

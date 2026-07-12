@@ -5,10 +5,10 @@ import 'dart:math';
 import 'package:path/path.dart' as p;
 import 'package:sqlite3/sqlite3.dart';
 
+import '../../application/search/search_index.dart';
 import '../ai/ai_provider.dart';
-import 'memory_search_cache.dart';
 
-class SqliteSearchCache {
+class SqliteSearchCache implements SearchIndex {
   SqliteSearchCache({required String rootPath, required this.aiProvider})
     : _db = _openDatabase(rootPath) {
     _db.execute('''
@@ -25,14 +25,18 @@ class SqliteSearchCache {
 
   final AiProvider aiProvider;
   final Database _db;
+  bool _isDisposed = false;
 
+  @override
   Future<void> indexDocument({
     required String id,
     required String noteId,
     required String title,
     required String text,
   }) async {
+    _ensureActive();
     final embedding = await aiProvider.createEmbedding('$title\n$text');
+    _ensureActive();
     _db.execute(
       '''
       INSERT INTO documents (id, note_id, title, body, embedding_json, updated_at)
@@ -55,7 +59,15 @@ class SqliteSearchCache {
     );
   }
 
+  @override
+  Future<void> removeDocument(String id) async {
+    _ensureActive();
+    _db.execute('DELETE FROM documents WHERE id = ?', [id]);
+  }
+
+  @override
   Future<List<SearchResult>> search(String query, {String? noteId}) async {
+    _ensureActive();
     final rows = noteId == null
         ? _db.select(
             'SELECT id, note_id, title, body, embedding_json FROM documents',
@@ -65,6 +77,7 @@ class SqliteSearchCache {
             [noteId],
           );
     final queryEmbedding = await aiProvider.createEmbedding(query);
+    _ensureActive();
     final results =
         rows
             .map((row) {
@@ -99,7 +112,22 @@ class SqliteSearchCache {
     return results;
   }
 
-  void close() => _db.dispose();
+  @override
+  void dispose() {
+    if (_isDisposed) {
+      return;
+    }
+    _isDisposed = true;
+    _db.dispose();
+  }
+
+  void close() => dispose();
+
+  void _ensureActive() {
+    if (_isDisposed) {
+      throw StateError('SqliteSearchCache has been disposed.');
+    }
+  }
 }
 
 Database _openDatabase(String rootPath) {

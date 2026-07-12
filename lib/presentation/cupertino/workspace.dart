@@ -7,12 +7,14 @@ import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:path/path.dart' as p;
 
 import '../../application/proposals/proposal_service.dart';
+import '../../application/search/search_index.dart';
 import '../../domain/markdown/markdown_document.dart';
 import '../../domain/vault/vault_resource.dart';
 import '../../infrastructure/ai/ai_provider.dart';
 import '../../infrastructure/ai/missing_config_ai_provider.dart';
 import '../../infrastructure/ai/openai_compatible_provider.dart';
-import '../../infrastructure/cache/memory_search_cache.dart';
+import '../../infrastructure/cache/memory_search_cache.dart'
+    show MemorySearchCache;
 import '../../infrastructure/config/default_settings_store.dart';
 import '../../infrastructure/config/provider_config_store.dart';
 import '../../infrastructure/config/settings_store.dart';
@@ -29,6 +31,7 @@ import '../workspace/state/note_save_coordinator.dart';
 import '../workspace/state/note_session_registry.dart';
 import '../workspace/state/split_workspace_controller.dart';
 import '../workspace/state/workspace_mutation_barrier.dart';
+import '../workspace/controller/workspace_search_coordinator.dart';
 import '../workspace/editor/markdown_image_transform.dart';
 import '../workspace/editor/live_markdown_editor.dart';
 import '../workspace/editor/markdown_table_editor.dart';
@@ -91,7 +94,7 @@ final class _SourceMutationPayload {
 
 typedef _PreparedAiServices = ({
   ProposalService? proposalService,
-  MemorySearchCache searchCache,
+  SearchIndex searchIndex,
 });
 
 final class _SilentValueNotifier<T> extends ChangeNotifier
@@ -148,7 +151,6 @@ final class _WorkspaceCommitSnapshot {
     this.previewImageSrc = const _WorkspaceSnapshotField.unchanged(),
     this.aiServices = const _WorkspaceSnapshotField.unchanged(),
     this.collapsedFolderIds = const _WorkspaceSnapshotField.unchanged(),
-    this.searchIndexFingerprints = const _WorkspaceSnapshotField.unchanged(),
   });
 
   final _WorkspaceSnapshotField<List<VaultResourceNode>> resources;
@@ -159,7 +161,6 @@ final class _WorkspaceCommitSnapshot {
   final _WorkspaceSnapshotField<String?> previewImageSrc;
   final _WorkspaceSnapshotField<_PreparedAiServices> aiServices;
   final _WorkspaceSnapshotField<Set<String>> collapsedFolderIds;
-  final _WorkspaceSnapshotField<Map<String, String>> searchIndexFingerprints;
 }
 
 final class _PreparedWorkspaceSnapshotMutation
@@ -284,7 +285,7 @@ class SynapseWorkspace extends StatefulWidget {
 class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   VaultBackend? _vault;
   ProposalService? _proposalService;
-  late MemorySearchCache _searchCache;
+  late final WorkspaceSearchCoordinator _workspaceSearchCoordinator;
   late ImageInputService _imageInput;
   late AiProvider _aiProvider;
 
@@ -302,7 +303,6 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   VaultResourceNode? _selectedResource;
   List<SearchResult> _searchResults = const [];
   final Set<String> _collapsedFolderIds = <String>{};
-  final Map<String, String> _searchIndexFingerprints = <String, String>{};
   _WorkspaceSection _narrowSection = _WorkspaceSection.resources;
   _LeftPaneMode _leftPaneMode = _LeftPaneMode.resources;
   bool _leftPaneCollapsed = false;
@@ -378,7 +378,11 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     _imageInput = widget.imageInput ?? const PlatformImageInputService();
     _usesInjectedAiProvider = widget.aiProvider != null;
     _aiProvider = widget.aiProvider ?? const MissingConfigAiProvider();
-    _resetAiServices();
+    final initialAiServices = _prepareAiServices();
+    _proposalService = initialAiServices.proposalService;
+    _workspaceSearchCoordinator = WorkspaceSearchCoordinator(
+      initialAiServices.searchIndex,
+    );
     if (widget.initialVault != null) {
       _resetServices(widget.initialVault!);
       _vaultLabel = supportsDirectoryVault ? '测试仓库' : 'H5 预览库';
@@ -392,6 +396,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   @override
   void dispose() {
     _workspaceMutationToken = Object();
+    _workspaceSearchCoordinator.dispose();
     _noteSaveCoordinator.dispose();
     _noteMaterialsRegistry.dispose();
     _noteSessionRegistry.dispose();
@@ -466,18 +471,10 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       _setSelectedPreviewImageSrcSilently(field.value);
     }
     if (snapshot.aiServices case final field when field.isChanged) {
-      final services = field.value!;
-      _proposalService = services.proposalService;
-      _searchCache = services.searchCache;
+      _installPreparedAiServices(field.value!);
     }
     if (snapshot.collapsedFolderIds case final field when field.isChanged) {
       _collapsedFolderIds
-        ..clear()
-        ..addAll(field.value!);
-    }
-    if (snapshot.searchIndexFingerprints case final field
-        when field.isChanged) {
-      _searchIndexFingerprints
         ..clear()
         ..addAll(field.value!);
     }
@@ -775,7 +772,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
         : ProposalService(vault: vault, aiProvider: _aiProvider);
     return (
       proposalService: proposalService,
-      searchCache: MemorySearchCache(
+      searchIndex: MemorySearchCache(
         _aiProvider,
         semanticSearchEnabled: _semanticSearchEnabled,
       ),
@@ -784,8 +781,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
 
   void _installPreparedAiServices(_PreparedAiServices services) {
     _proposalService = services.proposalService;
-    _searchCache = services.searchCache;
-    _searchIndexFingerprints.clear();
+    _workspaceSearchCoordinator.replaceIndex(services.searchIndex);
   }
 
   VaultResourceNode? _preparedSelectedResourceAfterMutation({
@@ -1158,7 +1154,6 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     _resources = const [];
     _searchResults = const [];
     _resetSplitWorkspace();
-    _searchIndexFingerprints.clear();
     _leftPaneMode = _LeftPaneMode.resources;
     _leftPaneCollapsed = false;
     _rightPaneCollapsed = false;
@@ -1769,9 +1764,6 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
             aiServices: preparedAiServices == null
                 ? const _WorkspaceSnapshotField.unchanged()
                 : _WorkspaceSnapshotField.set(preparedAiServices),
-            searchIndexFingerprints: preparedAiServices == null
-                ? const _WorkspaceSnapshotField.unchanged()
-                : const _WorkspaceSnapshotField.set(<String, String>{}),
           ),
         );
       },
@@ -1968,9 +1960,6 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
                   <SearchResult>[],
                 ),
                 aiServices: _WorkspaceSnapshotField.set(preparedAiServices),
-                searchIndexFingerprints: const _WorkspaceSnapshotField.set(
-                  <String, String>{},
-                ),
               ),
             );
           }
@@ -2620,9 +2609,6 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
                       resource.isFolder ? '文件夹已删除' : '笔记已删除',
                     ),
                     aiServices: _WorkspaceSnapshotField.set(preparedAiServices),
-                    searchIndexFingerprints: const _WorkspaceSnapshotField.set(
-                      <String, String>{},
-                    ),
                   ),
                 );
               },
@@ -2716,9 +2702,6 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
                 aiServices: _WorkspaceSnapshotField.set(preparedAiServices),
                 collapsedFolderIds: _WorkspaceSnapshotField.set(
                   collapsedFolderIds,
-                ),
-                searchIndexFingerprints: const _WorkspaceSnapshotField.set(
-                  <String, String>{},
                 ),
               ),
             );
@@ -3109,8 +3092,14 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       return;
     }
     await _runBusy(() async {
-      await _indexVaultForSearch();
-      final results = await _searchCache.search(query);
+      final results = await _workspaceSearchCoordinator.search(
+        query: query,
+        vault: _requireVault(),
+        resources: _resources,
+      );
+      if (results == null) {
+        return;
+      }
       setState(() {
         _leftPaneMode = _LeftPaneMode.search;
         _searchResults = results;
@@ -3119,46 +3108,6 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
         }
       });
     });
-  }
-
-  Future<void> _indexVaultForSearch() async {
-    final vault = _requireVault();
-    final resources = await vault.listResources();
-    final notes = _flattenNoteResources(resources).toList();
-    final liveIds = notes.map((note) => note.id).toSet();
-    if (_searchIndexFingerprints.keys.any((id) => !liveIds.contains(id))) {
-      _resetAiServices();
-    }
-    for (final note in notes) {
-      final loaded = await vault.readNote(note.id);
-      final fingerprint = _searchFingerprint(loaded);
-      if (_searchIndexFingerprints[loaded.id] == fingerprint) {
-        continue;
-      }
-      await _searchCache.indexDocument(
-        id: loaded.id,
-        noteId: loaded.id,
-        title: loaded.title,
-        text: MarkdownDocument.parse(loaded.markdown).body,
-      );
-      _searchIndexFingerprints[loaded.id] = fingerprint;
-    }
-  }
-
-  Iterable<VaultResourceNode> _flattenNoteResources(
-    List<VaultResourceNode> nodes,
-  ) sync* {
-    for (final node in nodes) {
-      if (node.isNote) {
-        yield node;
-      }
-      yield* _flattenNoteResources(node.children);
-    }
-  }
-
-  String _searchFingerprint(VaultNoteContent note) {
-    return '${note.updatedAt.microsecondsSinceEpoch}:'
-        '${note.markdown.length}:${note.markdown.hashCode}';
   }
 
   Future<void> _openSearchResult(SearchResult result) async {
@@ -4720,6 +4669,17 @@ VaultResourceNode? _findResource(List<VaultResourceNode> nodes, String id) {
     }
   }
   return null;
+}
+
+Iterable<VaultResourceNode> _flattenNoteResources(
+  List<VaultResourceNode> nodes,
+) sync* {
+  for (final node in nodes) {
+    if (node.isNote) {
+      yield node;
+    }
+    yield* _flattenNoteResources(node.children);
+  }
 }
 
 String _visibleMarkdownBody(String markdown) {

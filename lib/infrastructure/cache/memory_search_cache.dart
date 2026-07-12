@@ -1,43 +1,30 @@
 import 'dart:math';
 
+import '../../application/search/search_index.dart';
 import '../ai/ai_provider.dart';
 
-enum SearchMatchReason { fullText, semantic }
+export '../../application/search/search_index.dart';
 
-class SearchResult {
-  const SearchResult({
-    required this.id,
-    required this.noteId,
-    required this.title,
-    required this.text,
-    required this.score,
-    required this.reasons,
-  });
-
-  final String id;
-  final String noteId;
-  final String title;
-  final String text;
-  final double score;
-  final List<SearchMatchReason> reasons;
-}
-
-class MemorySearchCache {
+class MemorySearchCache implements SearchIndex {
   MemorySearchCache(this.aiProvider, {this.semanticSearchEnabled = true});
 
   final AiProvider aiProvider;
   final bool semanticSearchEnabled;
   final _documents = <_IndexedDocument>[];
+  bool _isDisposed = false;
 
+  @override
   Future<void> indexDocument({
     required String id,
     required String noteId,
     required String title,
     required String text,
   }) async {
+    _ensureActive();
     final embedding = semanticSearchEnabled
         ? await aiProvider.createEmbedding('$title\n$text')
         : null;
+    _ensureActive();
     _documents.removeWhere((document) => document.id == id);
     _documents.add(
       _IndexedDocument(
@@ -50,10 +37,19 @@ class MemorySearchCache {
     );
   }
 
+  @override
+  Future<void> removeDocument(String id) async {
+    _ensureActive();
+    _documents.removeWhere((document) => document.id == id);
+  }
+
+  @override
   Future<List<SearchResult>> search(String query, {String? noteId}) async {
+    _ensureActive();
     final queryEmbedding = semanticSearchEnabled
         ? await aiProvider.createEmbedding(query)
         : null;
+    _ensureActive();
     final results =
         _documents
             .where((document) => noteId == null || document.noteId == noteId)
@@ -86,6 +82,21 @@ class MemorySearchCache {
             .toList()
           ..sort((a, b) => b.score.compareTo(a.score));
     return results;
+  }
+
+  @override
+  void dispose() {
+    if (_isDisposed) {
+      return;
+    }
+    _isDisposed = true;
+    _documents.clear();
+  }
+
+  void _ensureActive() {
+    if (_isDisposed) {
+      throw StateError('MemorySearchCache has been disposed.');
+    }
   }
 }
 
