@@ -193,6 +193,8 @@ void clearNoteIds(Set<String> removedIds, {String? fallbackNoteId});
 
 ### 6.4 `WorkspaceMutationBarrier` 与 `WorkspaceCommitBatch`
 
+以下内容是后续阶段 5 的目标设计。Foundation implementation baseline `3cc85d9` 仍使用现有 `onCommitted` 契约；生产代码将在阶段 5 按 TDD 迁移到 `WorkspaceCommitBatch` 的 prepare/apply/publish 模型。在阶段 5 完成前，不应把本节目标契约描述为已落地实现。
+
 所有 mutation 使用显式 plan 和 delta：
 
 ```dart
