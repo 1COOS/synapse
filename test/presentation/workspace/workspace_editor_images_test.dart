@@ -323,7 +323,7 @@ void main() {
 
     final noteEditor = activeLiveMarkdownTextField(tester);
     expect(imageInput.pasteCalls, 1);
-    expect(noteEditor.controller?.text, contains('普通剪贴板文本'));
+    expect(noteEditor.controller.text, contains('普通剪贴板文本'));
 
     await tester.pump(const Duration(milliseconds: 1000));
     await tester.pump();
@@ -772,12 +772,12 @@ void main() {
 
     final noteEditor = activeLiveMarkdownTextField(tester);
 
-    expect(noteEditor.controller?.text.trimLeft().startsWith('# 心经学习'), isTrue);
-    expect(noteEditor.controller?.text, isNot(contains('---')));
-    expect(noteEditor.controller?.text, isNot(contains('title:')));
-    expect(noteEditor.controller?.text, isNot(contains('createdAt:')));
-    expect(noteEditor.controller?.text, isNot(contains('updatedAt:')));
-    expect(noteEditor.controller?.text, isNot(contains('id:')));
+    expect(noteEditor.controller.text.trimLeft().startsWith('# 心经学习'), isTrue);
+    expect(noteEditor.controller.text, isNot(contains('---')));
+    expect(noteEditor.controller.text, isNot(contains('title:')));
+    expect(noteEditor.controller.text, isNot(contains('createdAt:')));
+    expect(noteEditor.controller.text, isNot(contains('updatedAt:')));
+    expect(noteEditor.controller.text, isNot(contains('id:')));
 
     await tester.enterText(
       find.byKey(const Key('note-editor')),

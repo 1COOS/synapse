@@ -3,6 +3,36 @@ import 'package:flutter/material.dart' show Tooltip;
 
 import 'workspace_theme.dart';
 
+class WorkspaceCupertinoField extends StatelessWidget {
+  const WorkspaceCupertinoField({
+    super.key,
+    required this.controller,
+    required this.placeholder,
+    this.obscureText = false,
+  });
+
+  final TextEditingController controller;
+  final String placeholder;
+  final bool obscureText;
+
+  @override
+  Widget build(BuildContext context) {
+    return CupertinoTextField(
+      controller: controller,
+      placeholder: placeholder,
+      obscureText: obscureText,
+      enableSuggestions: !obscureText,
+      autocorrect: false,
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
+      decoration: BoxDecoration(
+        color: workspaceSurfaceColor,
+        border: Border.all(color: workspaceLineColor),
+        borderRadius: workspaceBorderRadius,
+      ),
+    );
+  }
+}
+
 class PrimaryButton extends StatelessWidget {
   const PrimaryButton({
     super.key,

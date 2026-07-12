@@ -799,8 +799,8 @@ void main() {
     await tester.pump(const Duration(milliseconds: 250));
 
     final noteEditor = activeLiveMarkdownTextField(tester);
-    expect(noteEditor.controller?.text, contains('changed'));
-    expect(noteEditor.controller?.text, isNot(contains('# Second')));
+    expect(noteEditor.controller.text, contains('changed'));
+    expect(noteEditor.controller.text, isNot(contains('# Second')));
     expect(find.textContaining('save failed'), findsOneWidget);
   });
 
@@ -826,6 +826,6 @@ void main() {
     );
     await activateLiveMarkdownBlock(tester);
     final noteEditor = activeLiveMarkdownTextField(tester);
-    expect(noteEditor.controller?.text, contains('# Second'));
+    expect(noteEditor.controller.text, contains('# Second'));
   });
 }

@@ -75,14 +75,14 @@ void main() {
         .getTopLeft(find.byKey(const Key('live-markdown-block-preview-2')))
         .dy;
 
-    noteEditor.controller!.selection = TextSelection.collapsed(
-      offset: noteEditor.controller!.text.length,
+    noteEditor.controller.selection = TextSelection.collapsed(
+      offset: noteEditor.controller.text.length,
     );
     noteEditor.onTap?.call();
     await tester.pump();
 
     expect(find.byKey(const Key('live-markdown-block-editor-1')), findsNothing);
-    expect(noteEditor.controller!.text, 'Before table\n');
+    expect(noteEditor.controller.text, 'Before table\n');
     expect(
       tester
           .getTopLeft(find.byKey(const Key('live-markdown-block-preview-2')))

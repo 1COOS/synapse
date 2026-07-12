@@ -11,6 +11,8 @@ import 'package:synapse/infrastructure/input/image_input_service.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
 import 'package:synapse/infrastructure/vault/vault_backend.dart';
 import 'package:synapse/main.dart';
+import 'package:synapse/presentation/workspace/editor/live_markdown_editable_text.dart';
+import 'package:synapse/presentation/workspace/editor/live_markdown_editor.dart';
 
 import 'workspace_fakes.dart';
 
@@ -264,26 +266,23 @@ Finder activeLiveMarkdownEditableText({int? paneId}) {
   ).first;
 }
 
-dynamic activeLiveMarkdownTextField(WidgetTester tester, {int? paneId}) {
-  return tester.widget<Widget>(
-        inNotePane(find.byKey(const Key('note-editor')), paneId).first,
-      )
-      as dynamic;
+LiveMarkdownEditableText activeLiveMarkdownTextField(
+  WidgetTester tester, {
+  int? paneId,
+}) {
+  return tester.widget<LiveMarkdownEditableText>(
+    inNotePane(find.byKey(const Key('note-editor')), paneId).first,
+  );
 }
 
 TextEditingController liveMarkdownDocumentController(
   WidgetTester tester, {
   required int paneId,
 }) {
-  final editor = tester.widget<Widget>(
-    inNotePane(
-      find.byWidgetPredicate(
-        (widget) => widget.runtimeType.toString() == '_LiveMarkdownEditor',
-      ),
-      paneId,
-    ).first,
+  final editor = tester.widget<LiveMarkdownEditor>(
+    inNotePane(find.byType(LiveMarkdownEditor), paneId).first,
   );
-  return (editor as dynamic).controller as TextEditingController;
+  return editor.controller;
 }
 
 TextSpan activeLiveMarkdownTextSpan(WidgetTester tester) {

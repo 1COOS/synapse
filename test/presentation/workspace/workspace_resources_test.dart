@@ -433,7 +433,7 @@ void main() {
       expect((await vault.readNote(second.id)).title, 'Beta');
       await activateLiveMarkdownBlock(tester);
       final noteEditor = activeLiveMarkdownTextField(tester);
-      expect(noteEditor.controller?.text, contains('# Beta'));
+      expect(noteEditor.controller.text, contains('# Beta'));
       expect(find.text('Alpha'), findsNothing);
     },
   );
@@ -717,7 +717,7 @@ void main() {
       await switchToSourceMode(tester);
       await activateLiveMarkdownBlock(tester);
       final beforeDelete = activeLiveMarkdownTextField(tester);
-      expect(beforeDelete.controller?.text, contains('# 心经'));
+      expect(beforeDelete.controller.text, contains('# 心经'));
 
       await tester.tap(
         find.byKey(Key('resource-row-${folder.id}')),
@@ -734,7 +734,7 @@ void main() {
       expect((await vault.listResources()).single.title, '其他');
       await activateLiveMarkdownBlock(tester);
       final afterDelete = activeLiveMarkdownTextField(tester);
-      expect(afterDelete.controller?.text, contains('# 其他'));
+      expect(afterDelete.controller.text, contains('# 其他'));
       expect(find.text('读书'), findsNothing);
     },
   );

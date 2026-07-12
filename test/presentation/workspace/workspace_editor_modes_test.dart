@@ -205,7 +205,7 @@ void main() {
     final noteEditor = activeLiveMarkdownTextField(tester);
     final span = activeLiveMarkdownTextSpan(tester);
 
-    expect(span.toPlainText(), noteEditor.controller?.text);
+    expect(span.toPlainText(), noteEditor.controller.text);
     expect(span.toPlainText(), contains('**bold**'));
     expect(span.toPlainText(), contains('*italic*'));
     expect(span.toPlainText(), contains('~~gone~~'));

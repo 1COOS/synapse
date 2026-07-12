@@ -188,7 +188,7 @@ void main() {
 
     await switchToSourceMode(tester);
     await activateLiveMarkdownBlock(tester);
-    expect(activeLiveMarkdownTextField(tester).style?.fontSize, 28);
+    expect(activeLiveMarkdownTextField(tester).style.fontSize, 28);
 
     await tester.tap(find.byKey(const Key('live-markdown-block-preview-2')));
     await tester.pumpAndSettle();
