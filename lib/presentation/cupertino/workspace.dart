@@ -1294,12 +1294,14 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       return;
     }
     final session = result.session;
-    if (!_noteSessionRegistryOwnsSaveResult(result) ||
-        _paneEditorSaveResultIsRuntimeStale(result)) {
+    if (!_noteSessionRegistryOwnsSaveResult(result)) {
       return;
     }
+    final runtimeStale = _paneEditorSaveResultIsRuntimeStale(result);
     if (!result.succeeded) {
-      setState(() => _message = '笔记保存失败：${result.error}');
+      if (!runtimeStale) {
+        setState(() => _message = '笔记保存失败：${result.error}');
+      }
       return;
     }
     final savedNote = result.savedNote;
@@ -1339,7 +1341,10 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
               remappedNoteIds: delta.remappedNoteIds,
             );
           }
-          if (request.successMessage != null && !result.stillDirty) {
+          if (!runtimeStale &&
+              !_paneEditorSaveResultIsRuntimeStale(result) &&
+              request.successMessage != null &&
+              !result.stillDirty) {
             _message = request.successMessage!;
           }
         });
@@ -3664,9 +3669,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
                     },
                     pasteAvailability: () =>
                         _noteEditorPasteAvailability(editorContext),
-                    onPaste: () async {
-                      await _pasteIntoNoteEditor(editorContext);
-                    },
+                    onPaste: () => _pasteIntoNoteEditor(editorContext),
                     previewBuilder: (markdown, {onImageTap}) =>
                         _buildLivePreviewMarkdownBlock(
                           markdown,

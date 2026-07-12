@@ -267,6 +267,34 @@ class GatedFailingUpdateVaultBackend extends CountingUpdateVaultBackend {
   }
 }
 
+class GatedSuccessfulUpdateVaultBackend extends CountingUpdateVaultBackend {
+  GatedSuccessfulUpdateVaultBackend({super.seedExampleData});
+
+  bool gateUpdates = false;
+  final updateStarted = Completer<void>();
+  final _updateRelease = Completer<void>();
+
+  void releaseUpdate() {
+    if (!_updateRelease.isCompleted) {
+      _updateRelease.complete();
+    }
+  }
+
+  @override
+  Future<VaultNoteContent> updateMarkdown({
+    required String noteId,
+    required String markdown,
+  }) async {
+    if (gateUpdates) {
+      if (!updateStarted.isCompleted) {
+        updateStarted.complete();
+      }
+      await _updateRelease.future;
+    }
+    return super.updateMarkdown(noteId: noteId, markdown: markdown);
+  }
+}
+
 class GatedCloseVaultBackend extends MemoryVaultBackend {
   GatedCloseVaultBackend({
     required this.blockedNoteId,

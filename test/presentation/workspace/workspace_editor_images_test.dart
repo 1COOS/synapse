@@ -3,10 +3,12 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:synapse/domain/vault/vault_resource.dart';
 import 'package:synapse/infrastructure/config/synapse_settings.dart';
 import 'package:synapse/infrastructure/input/image_input_service.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
 import 'package:synapse/presentation/workspace/editor/live_markdown_editor.dart';
+import 'package:synapse/presentation/workspace/editor/pane_editor_context.dart';
 import 'package:synapse/presentation/workspace/editor/preview_image_block.dart';
 
 import '../../support/workspace_fakes.dart';
@@ -963,6 +965,114 @@ void main() {
     expect(find.textContaining('delayed save failed'), findsNothing);
     expect(find.textContaining('模型设置已保存'), findsOneWidget);
   });
+
+  testWidgets(
+    'stale successful title save still reconciles the owned session',
+    (tester) async {
+      final vault = GatedSuccessfulUpdateVaultBackend(seedExampleData: false);
+      addTearDown(vault.releaseUpdate);
+      final note = await vault.createNote(parentPath: '', title: 'Alpha');
+      final now = DateTime.now().toUtc();
+      await vault.saveProposal(
+        AiProposal(
+          id: 'runtime-title-proposal',
+          noteId: note.id,
+          sourceIds: const [],
+          title: 'Runtime title proposal',
+          proposedMarkdown: 'Keep this proposal',
+          status: ProposalStatus.pending,
+          createdAt: now,
+          updatedAt: now,
+        ),
+      );
+      final imageInput = FakeImageInputService(
+        pastedImage: const ImportedImage(
+          filename: 'runtime-success.png',
+          mimeType: 'image/png',
+          bytes: tinyPng,
+        ),
+      );
+      final settingsStore = FakeSettingsStore(
+        initialSettings: const SynapseSettings(
+          preferences: WorkspacePreferences(
+            defaultNoteMode: WorkspaceDefaultNoteMode.source,
+            semanticSearchEnabled: true,
+            pastedImageWidth: 480,
+            autoSaveDelayMillis: 10000,
+          ),
+        ),
+      );
+
+      await pumpWorkspace(
+        tester,
+        vault: vault,
+        imageInput: imageInput,
+        settingsStore: settingsStore,
+      );
+      await switchToSourceMode(tester);
+      await enterTextInLiveMarkdownBlock(tester, '# Remapped\nbody');
+      final editor = tester.widget<LiveMarkdownEditor>(
+        find.byType(LiveMarkdownEditor),
+      );
+      final openSettings = tester
+          .widget<CupertinoButton>(
+            find.descendant(
+              of: find.byKey(const Key('settings-button')),
+              matching: find.byType(CupertinoButton),
+            ),
+          )
+          .onPressed!;
+      vault.gateUpdates = true;
+
+      final paste = editor.onPaste();
+      await vault.updateStarted.future;
+      openSettings();
+      await tester.pump(const Duration(milliseconds: 250));
+      await tester.tap(find.byKey(const Key('settings-nav-models')));
+      await tester.pump();
+      await tester.enterText(
+        find.byKey(const Key('provider-base-url')),
+        'https://api.example.com/v1',
+      );
+      await tester.enterText(
+        find.byKey(const Key('provider-api-key')),
+        'secret-key',
+      );
+      await tester.enterText(
+        find.byKey(const Key('provider-chat-model')),
+        'chat-model',
+      );
+      await tester.enterText(
+        find.byKey(const Key('provider-vision-model')),
+        'vision-model',
+      );
+      await tester.tap(find.text('保存设置'));
+      await tester.pumpAndSettle();
+
+      vault.releaseUpdate();
+      expect(await paste, PaneEditorCommandOutcome.staleTarget);
+      await tester.pumpAndSettle();
+
+      expect(() => vault.readNote('Alpha.md'), throwsA(isA<StateError>()));
+      final saved = await vault.readNote('Remapped.md');
+      expect(saved.markdown, contains('runtime-success.png'));
+      expect(find.byKey(const Key('resource-row-Alpha.md')), findsNothing);
+      expect(find.byKey(const Key('resource-row-Remapped.md')), findsOneWidget);
+      expect(
+        find.descendant(
+          of: find.byKey(const Key('split-pane-title-pane-1')),
+          matching: find.text('Remapped'),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const Key('proposal-Remapped.md-runtime-title-proposal')),
+        findsOneWidget,
+      );
+      expect(find.textContaining('图片已粘贴到笔记'), findsNothing);
+      expect(find.textContaining('模型设置已保存'), findsOneWidget);
+    },
+  );
 
   testWidgets('reading mode hides image resize controls', (tester) async {
     final vault = CountingUpdateVaultBackend(seedExampleData: false);

@@ -10,6 +10,7 @@ import 'live_markdown_editor_controller.dart';
 import 'markdown_context_menu.dart';
 import 'markdown_image_transform.dart';
 import 'markdown_table_editor.dart';
+import 'pane_editor_context.dart';
 
 final _markdownImageTagPattern = RegExp(r'!\[[^\]]*\]\([^)]+\)');
 
@@ -49,7 +50,7 @@ class LiveMarkdownEditor extends StatefulWidget {
   final bool focused;
   final VoidCallback onFocusPane;
   final Future<NoteEditorPasteAvailability> Function() pasteAvailability;
-  final Future<void> Function() onPaste;
+  final Future<PaneEditorCommandOutcome> Function() onPaste;
   final Widget Function(String markdown, {VoidCallback? onImageTap})
   previewBuilder;
 
