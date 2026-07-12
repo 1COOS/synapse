@@ -674,9 +674,24 @@ final class NoteSaveCoordinator {
           session.setSavePhase(NoteSavePhase.failed, error: error);
         }
       } catch (error, stackTrace) {
-        result = _copyResult(result, error: error, stackTrace: stackTrace);
+        final callbackError = backendResult.succeeded
+            ? WorkspaceCommitInvariantError(
+                phase: WorkspaceCommitPhase.prepare,
+                cause: error,
+                causeStackTrace: stackTrace,
+              )
+            : null;
+        if (callbackError != null) {
+          result = _copyResult(result, fatalError: callbackError);
+          enterFatal(callbackError);
+        } else {
+          result = _copyResult(result, error: error, stackTrace: stackTrace);
+        }
         if (session.savePhase != NoteSavePhase.disposed) {
-          session.setSavePhase(NoteSavePhase.failed, error: error);
+          session.setSavePhase(
+            NoteSavePhase.failed,
+            error: callbackError ?? error,
+          );
         }
       }
     }

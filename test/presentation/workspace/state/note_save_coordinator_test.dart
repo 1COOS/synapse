@@ -420,6 +420,102 @@ void main() {
       },
     );
 
+    test(
+      'generic post-commit callback failure is fatal and settles queued saves',
+      () async {
+        final vault = _TrackingVault();
+        final callbackStarted = Completer<void>();
+        final releaseCallback = Completer<void>();
+        final callbackError = StateError('generic workspace commit failed');
+        final callbackStackTrace = StackTrace.fromString(
+          'generic workspace commit stack',
+        );
+        final harness = _Harness(
+          vault,
+          scheduleEdits: false,
+          afterCommit: (result, request) async {
+            if (!result.succeeded) {
+              return;
+            }
+            callbackStarted.complete();
+            await releaseCallback.future;
+            Error.throwWithStackTrace(callbackError, callbackStackTrace);
+          },
+        );
+        addTearDown(harness.dispose);
+        final session = await harness.createSession('Old Title');
+        vault.resetTracking();
+        session.controller.text = '# New Title\nfirst body';
+
+        final firstSave = harness.coordinator.save(session);
+        await callbackStarted.future;
+        session.controller.text = '# New Title\nqueued body';
+        final queuedSave = harness.coordinator.save(session);
+        releaseCallback.complete();
+
+        final firstResult = await firstSave;
+        final queuedResult = await queuedSave;
+
+        expect(firstResult.requiresReload, isTrue);
+        expect(firstResult.error, isNull);
+        expect(firstResult.fatalError!.phase, WorkspaceCommitPhase.prepare);
+        expect(firstResult.fatalError!.cause, same(callbackError));
+        expect(
+          firstResult.fatalError!.causeStackTrace,
+          same(callbackStackTrace),
+        );
+        expect(queuedResult.requiresReload, isTrue);
+        expect(queuedResult.fatalError, same(firstResult.fatalError));
+        expect(harness.coordinator.fatalError, same(firstResult.fatalError));
+        expect(harness.fatalErrors, [same(firstResult.fatalError)]);
+        expect(session.savePhase, NoteSavePhase.failed);
+        expect(vault.updateCalls, 1);
+        expect(vault.renameCalls, 1);
+
+        session.controller.text = '# New Title\nlater body';
+        final retry = await harness.coordinator.save(session);
+
+        expect(retry.requiresReload, isTrue);
+        expect(retry.fatalError, same(firstResult.fatalError));
+        final flush = await harness.coordinator.flush([session]);
+        expect(flush.succeeded, isFalse);
+        expect(flush.results.single.fatalError, same(firstResult.fatalError));
+        expect(vault.updateCalls, 1);
+        expect(vault.renameCalls, 1);
+      },
+    );
+
+    test('precommit failure callback error remains nonfatal', () async {
+      final vault = _TrackingVault();
+      final callbackError = StateError('failure report callback failed');
+      final callbackStackTrace = StackTrace.fromString(
+        'failure report callback stack',
+      );
+      final harness = _Harness(
+        vault,
+        scheduleEdits: false,
+        afterCommit: (result, request) {
+          Error.throwWithStackTrace(callbackError, callbackStackTrace);
+        },
+      );
+      addTearDown(harness.dispose);
+      final session = await harness.createSession('Alpha');
+      vault.resetTracking();
+      vault.failingNoteIds.add(session.noteId);
+      session.controller.text = '# Alpha\nchanged';
+
+      final result = await harness.coordinator.save(session);
+
+      expect(result.succeeded, isFalse);
+      expect(result.requiresReload, isFalse);
+      expect(result.fatalError, isNull);
+      expect(result.error, same(callbackError));
+      expect(result.stackTrace, same(callbackStackTrace));
+      expect(harness.coordinator.fatalError, isNull);
+      expect(harness.fatalErrors, isEmpty);
+      expect(vault.updateCalls, 1);
+    });
+
     test('external fatal entry cancels a scheduled autosave', () async {
       final vault = _TrackingVault();
       final timers = _ManualTimerFactory();
