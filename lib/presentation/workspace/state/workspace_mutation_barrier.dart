@@ -180,6 +180,7 @@ final class WorkspaceMutationBarrier {
               );
             } catch (error, stackTrace) {
               completer.completeError(error, stackTrace);
+              Error.throwWithStackTrace(error, stackTrace);
             }
           },
         ),
@@ -198,6 +199,9 @@ final class WorkspaceMutationBarrier {
     FutureOr<VaultMutationDelta<T>> Function() prepare,
     WorkspaceCommitBatch<T> Function(VaultMutationDelta<T> delta) prepareCommit,
   ) async {
+    if (_saveCoordinator.fatalError case final fatalError?) {
+      Error.throwWithStackTrace(fatalError, fatalError.causeStackTrace);
+    }
     late final VaultMutationDelta<T> delta;
     try {
       delta = await prepare();

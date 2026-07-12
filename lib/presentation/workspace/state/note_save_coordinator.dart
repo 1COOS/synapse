@@ -175,6 +175,32 @@ final class NoteSaveCoordinator {
         (flight) => flight.request.reason == NoteSaveReason.debounce,
       );
 
+  WorkspaceCommitInvariantError? get fatalError => _fatalError;
+
+  void enterFatal(WorkspaceCommitInvariantError error) {
+    if (_isDisposed || _fatalError != null) {
+      return;
+    }
+    _fatalError = error;
+    final timerSessions = _timers.keys.toList(growable: false);
+    for (final timer in _timers.values) {
+      timer.cancel();
+    }
+    _timers.clear();
+    for (final session in timerSessions) {
+      if (session.savePhase == NoteSavePhase.scheduled) {
+        session.setSavePhase(NoteSavePhase.failed, error: error);
+      }
+    }
+    final queuedEntries = _queued.entries.toList(growable: false);
+    _queued.clear();
+    for (final entry in queuedEntries) {
+      _complete(entry.value.completer, _fatalResult(entry.key, error));
+    }
+    _onFatalError?.call(error);
+    _onStateChanged();
+  }
+
   void resetAfterReload() {
     if (_isDisposed) {
       throw StateError('Note save coordinator disposed.');
@@ -208,7 +234,7 @@ final class NoteSaveCoordinator {
         return;
       }
       _timers.remove(session);
-      if (_isDisposed) {
+      if (_isDisposed || _fatalError != null) {
         return;
       }
       _onStateChanged();
@@ -474,6 +500,14 @@ final class NoteSaveCoordinator {
     final noteSnapshot = flight.noteSnapshot;
     final oldNoteId = noteSnapshot.id;
     final bodySnapshot = flight.bodySnapshot;
+    if (_fatalError case final fatalError?) {
+      return _fatalResult(
+        session,
+        fatalError,
+        oldNoteId: oldNoteId,
+        bodySnapshot: bodySnapshot,
+      );
+    }
     try {
       final markdown = _serializeVisibleBody(noteSnapshot, bodySnapshot);
       final vault = _vault();
@@ -481,14 +515,46 @@ final class NoteSaveCoordinator {
         noteId: oldNoteId,
         markdown: markdown,
       );
+      if (_fatalError case final fatalError?) {
+        return _fatalResult(
+          session,
+          fatalError,
+          oldNoteId: oldNoteId,
+          bodySnapshot: bodySnapshot,
+        );
+      }
       if (savedNote.title != noteSnapshot.title) {
         final renamed = await vault.renameNote(
           noteId: oldNoteId,
           title: savedNote.title,
         );
+        if (_fatalError case final fatalError?) {
+          return _fatalResult(
+            session,
+            fatalError,
+            oldNoteId: oldNoteId,
+            bodySnapshot: bodySnapshot,
+          );
+        }
         try {
           savedNote = await vault.readNote(renamed.id);
+          if (_fatalError case final fatalError?) {
+            return _fatalResult(
+              session,
+              fatalError,
+              oldNoteId: oldNoteId,
+              bodySnapshot: bodySnapshot,
+            );
+          }
         } catch (error, stackTrace) {
+          if (_fatalError case final fatalError?) {
+            return _fatalResult(
+              session,
+              fatalError,
+              oldNoteId: oldNoteId,
+              bodySnapshot: bodySnapshot,
+            );
+          }
           return _fatalResult(
             session,
             WorkspaceCommitInvariantError(
@@ -511,6 +577,14 @@ final class NoteSaveCoordinator {
         stillDirty: false,
       );
     } catch (error, stackTrace) {
+      if (_fatalError case final fatalError?) {
+        return _fatalResult(
+          session,
+          fatalError,
+          oldNoteId: oldNoteId,
+          bodySnapshot: bodySnapshot,
+        );
+      }
       return NoteSaveResult(
         session: session,
         oldNoteId: oldNoteId,
@@ -567,8 +641,16 @@ final class NoteSaveCoordinator {
       backendResult,
       stillDirty: session.controller.text != flight.bodySnapshot,
     );
+    if (_fatalError case final fatalError?) {
+      result = _fatalResult(
+        session,
+        fatalError,
+        oldNoteId: flight.noteSnapshot.id,
+        bodySnapshot: flight.bodySnapshot,
+      );
+    }
     if (result.fatalError case final fatalError?) {
-      _enterFatal(fatalError);
+      enterFatal(fatalError);
       session.setSavePhase(NoteSavePhase.failed, error: fatalError);
     } else if (!result.succeeded) {
       session.setSavePhase(NoteSavePhase.failed, error: result.error);
@@ -578,7 +660,7 @@ final class NoteSaveCoordinator {
         await _onResult(result, flight.request);
       } on WorkspaceCommitInvariantError catch (error) {
         result = _copyResult(result, fatalError: error);
-        _enterFatal(error);
+        enterFatal(error);
         if (session.savePhase != NoteSavePhase.disposed) {
           session.setSavePhase(NoteSavePhase.failed, error: error);
         }
@@ -587,6 +669,17 @@ final class NoteSaveCoordinator {
         if (session.savePhase != NoteSavePhase.disposed) {
           session.setSavePhase(NoteSavePhase.failed, error: error);
         }
+      }
+    }
+    if (_fatalError case final fatalError? when !result.requiresReload) {
+      result = _fatalResult(
+        session,
+        fatalError,
+        oldNoteId: flight.noteSnapshot.id,
+        bodySnapshot: flight.bodySnapshot,
+      );
+      if (session.savePhase != NoteSavePhase.disposed) {
+        session.setSavePhase(NoteSavePhase.failed, error: fatalError);
       }
     }
     if (session.savePhase != NoteSavePhase.disposed) {
@@ -709,23 +802,6 @@ final class NoteSaveCoordinator {
       stillDirty: session.isDirty,
       fatalError: error,
     );
-  }
-
-  void _enterFatal(WorkspaceCommitInvariantError error) {
-    if (_fatalError != null) {
-      return;
-    }
-    _fatalError = error;
-    for (final timer in _timers.values) {
-      timer.cancel();
-    }
-    _timers.clear();
-    final queuedEntries = _queued.entries.toList(growable: false);
-    _queued.clear();
-    for (final entry in queuedEntries) {
-      _complete(entry.value.completer, _fatalResult(entry.key, error));
-    }
-    _onFatalError?.call(error);
   }
 
   void _cancelQueued(NoteDocumentSession session, Object error) {

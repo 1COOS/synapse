@@ -357,6 +357,101 @@ void main() {
       },
     );
 
+    test('external fatal entry cancels a scheduled autosave', () async {
+      final vault = _TrackingVault();
+      final timers = _ManualTimerFactory();
+      final harness = _Harness(vault, timerFactory: timers.call);
+      addTearDown(harness.dispose);
+      final session = await harness.createSession('Alpha');
+      vault.resetTracking();
+      session.controller.text = '# Alpha\nscheduled edit';
+      final invariant = WorkspaceCommitInvariantError(
+        phase: WorkspaceCommitPhase.apply,
+        cause: StateError('structural commit failed'),
+        causeStackTrace: StackTrace.current,
+      );
+
+      harness.coordinator.enterFatal(invariant);
+      timers.fireAll();
+      await _drainEventQueue();
+
+      expect(vault.updateCalls, 0);
+      expect(timers.activeCount, 0);
+      expect(harness.fatalErrors, [same(invariant)]);
+      expect(session.isDirty, isTrue);
+    });
+
+    test(
+      'external fatal stops a gated save before rename readback and commit',
+      () async {
+        final vault = _PostWriteGatedVault();
+        var commitCalls = 0;
+        final harness = _Harness(
+          vault,
+          scheduleEdits: false,
+          afterCommit: (result, request) => commitCalls += 1,
+        );
+        addTearDown(harness.dispose);
+        final session = await harness.createSession('Old Title');
+        vault.resetTracking();
+        vault.gateNextUpdate();
+        session.controller.text = '# New Title\nbody';
+        final save = harness.coordinator.save(session);
+        await vault.backendWriteFinished.future;
+        final readsAtFatal = vault.readCalls;
+        final invariant = WorkspaceCommitInvariantError(
+          phase: WorkspaceCommitPhase.apply,
+          cause: StateError('structural commit failed'),
+          causeStackTrace: StackTrace.current,
+        );
+
+        harness.coordinator.enterFatal(invariant);
+        expect(
+          harness.coordinator.resetAfterReload,
+          throwsA(isA<StateError>()),
+        );
+        vault.releaseUpdate();
+        final result = await save;
+
+        expect(result.requiresReload, isTrue);
+        expect(result.fatalError, same(invariant));
+        expect(vault.updateCalls, 1);
+        expect(vault.renameCalls, 0);
+        expect(vault.readCalls, readsAtFatal);
+        expect(commitCalls, 0);
+        expect(session.noteId, 'Old Title.md');
+      },
+    );
+
+    test('reload reset succeeds after a fatal active flight settles', () async {
+      final vault = _PostWriteGatedVault();
+      final harness = _Harness(vault, scheduleEdits: false);
+      addTearDown(harness.dispose);
+      final session = await harness.createSession('Alpha');
+      vault.resetTracking();
+      vault.gateNextUpdate();
+      session.controller.text = '# Alpha\nfirst edit';
+      final save = harness.coordinator.save(session);
+      await vault.backendWriteFinished.future;
+      final invariant = WorkspaceCommitInvariantError(
+        phase: WorkspaceCommitPhase.apply,
+        cause: StateError('structural commit failed'),
+        causeStackTrace: StackTrace.current,
+      );
+      harness.coordinator.enterFatal(invariant);
+
+      expect(harness.coordinator.resetAfterReload, throwsA(isA<StateError>()));
+      vault.releaseUpdate();
+      expect((await save).requiresReload, isTrue);
+
+      expect(harness.coordinator.resetAfterReload, returnsNormally);
+      session.controller.text = '# Alpha\nafter reload';
+      final recovered = await harness.coordinator.save(session);
+
+      expect(recovered.succeeded, isTrue);
+      expect(vault.updateCalls, 2);
+    });
+
     test('reload reset clears the fatal save latch', () async {
       final vault = _TrackingVault();
       final invariant = WorkspaceCommitInvariantError(
@@ -671,7 +766,7 @@ final class _Harness {
   }
 }
 
-final class _TrackingVault extends MemoryVaultBackend {
+class _TrackingVault extends MemoryVaultBackend {
   _TrackingVault() : super(seedExampleData: false);
 
   final Set<String> failingNoteIds = <String>{};
@@ -775,6 +870,50 @@ final class _TrackingVault extends MemoryVaultBackend {
     if (failReads) {
       throw StateError('readback failed for $noteId');
     }
+    return super.readNote(noteId);
+  }
+}
+
+final class _PostWriteGatedVault extends _TrackingVault {
+  final Completer<void> backendWriteFinished = Completer<void>();
+  final Completer<void> _releaseUpdate = Completer<void>();
+  int readCalls = 0;
+  bool _gateUpdate = false;
+
+  void gateNextUpdate() => _gateUpdate = true;
+
+  void releaseUpdate() {
+    if (!_releaseUpdate.isCompleted) {
+      _releaseUpdate.complete();
+    }
+  }
+
+  @override
+  void resetTracking() {
+    super.resetTracking();
+    readCalls = 0;
+  }
+
+  @override
+  Future<VaultNoteContent> updateMarkdown({
+    required String noteId,
+    required String markdown,
+  }) async {
+    final saved = await super.updateMarkdown(
+      noteId: noteId,
+      markdown: markdown,
+    );
+    if (_gateUpdate && !backendWriteFinished.isCompleted) {
+      _gateUpdate = false;
+      backendWriteFinished.complete();
+      await _releaseUpdate.future;
+    }
+    return saved;
+  }
+
+  @override
+  Future<VaultNoteContent> readNote(String noteId) {
+    readCalls += 1;
     return super.readNote(noteId);
   }
 }

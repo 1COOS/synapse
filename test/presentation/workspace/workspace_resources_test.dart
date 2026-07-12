@@ -758,6 +758,7 @@ void main() {
     (tester) async {
       final vault = _CountingCopyVault();
       final note = await vault.createNote(parentPath: '', title: '心经');
+      final other = await vault.createNote(parentPath: '', title: '其他');
       final reportedErrors = <FlutterErrorDetails>[];
       final previousOnError = FlutterError.onError;
       FlutterError.onError = reportedErrors.add;
@@ -767,23 +768,55 @@ void main() {
         tester,
         vault: vault,
         workspaceCommitFailureForTesting: WorkspaceCommitPhase.apply,
+        settingsStore: FakeSettingsStore(
+          initialSettings: const SynapseSettings(
+            preferences: WorkspacePreferences(
+              defaultNoteMode: WorkspaceDefaultNoteMode.source,
+              semanticSearchEnabled: true,
+              pastedImageWidth: 480,
+              autoSaveDelayMillis: 10000,
+            ),
+          ),
+        ),
       );
+      await tester.tap(find.byKey(Key('resource-row-${note.id}')));
+      await tester.pump(const Duration(milliseconds: 250));
+      await tester.tap(find.byKey(const Key('split-pane-right-button')));
+      await tester.pump(const Duration(milliseconds: 250));
+      await tester.tap(find.byKey(Key('resource-row-${other.id}')));
+      await tester.pump(const Duration(milliseconds: 250));
+      await tester.tap(find.byKey(const Key('note-mode-source-pane-2')));
+      await tester.pump(const Duration(milliseconds: 250));
+      await enterTextInLiveMarkdownBlock(
+        tester,
+        '# 其他\npending autosave',
+        paneId: 2,
+      );
+      tester
+          .widget<GestureDetector>(find.byKey(const Key('split-pane-pane-1')))
+          .onTap!();
+      await tester.pump();
 
       Future<void> requestCopy() async {
         await tester.tap(
           find.byKey(Key('resource-row-${note.id}')),
           buttons: kSecondaryMouseButton,
         );
-        await tester.pumpAndSettle();
+        await tester.pump();
         await tester.tap(find.byKey(Key('note-menu-copy-${note.id}')));
-        await tester.pumpAndSettle();
+        await tester.pump(const Duration(milliseconds: 250));
       }
 
       await requestCopy();
+      FlutterError.onError = previousOnError;
 
       expect(vault.copyCalls, 1);
       expect(reportedErrors, hasLength(1));
       expect(find.text('工作区状态提交异常。后端操作可能已完成，请重新加载工作区后再继续。'), findsOneWidget);
+
+      await tester.pump(const Duration(milliseconds: 10000));
+      await tester.pump();
+      expect(vault.updateCalls, 0);
 
       await requestCopy();
 
@@ -1002,11 +1035,21 @@ final class _CountingCopyVault extends MemoryVaultBackend {
   _CountingCopyVault() : super(seedExampleData: false);
 
   int copyCalls = 0;
+  int updateCalls = 0;
 
   @override
   Future<VaultNote> copyNote({required String noteId}) {
     copyCalls += 1;
     return super.copyNote(noteId: noteId);
+  }
+
+  @override
+  Future<VaultNoteContent> updateMarkdown({
+    required String noteId,
+    required String markdown,
+  }) {
+    updateCalls += 1;
+    return super.updateMarkdown(noteId: noteId, markdown: markdown);
   }
 }
 

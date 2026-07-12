@@ -381,6 +381,13 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   static const _reloadRequiredMessage = '工作区状态提交异常。后端操作可能已完成，请重新加载工作区后再继续。';
 
   void _handleWorkspaceCommitInvariant(WorkspaceCommitInvariantError error) {
+    if (mounted) {
+      setState(() {
+        _reloadRequired = true;
+        _message = _reloadRequiredMessage;
+      });
+    }
+    _noteSaveCoordinator.enterFatal(error);
     FlutterError.reportError(
       FlutterErrorDetails(
         exception: error,
@@ -389,13 +396,6 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
         context: ErrorDescription('while committing workspace state'),
       ),
     );
-    if (!mounted) {
-      return;
-    }
-    setState(() {
-      _reloadRequired = true;
-      _message = _reloadRequiredMessage;
-    });
   }
 
   void _validatePreparedWorkspaceMutation(Object token) {
@@ -1160,8 +1160,8 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   }
 
   void _setVaultLocation(VaultLocation location) {
-    _resetServices(_createVaultBackend(location.rootPath));
     _noteSaveCoordinator.resetAfterReload();
+    _resetServices(_createVaultBackend(location.rootPath));
     _vaultRootPath = location.rootPath;
     _vaultLabel = _formatVaultLabel(location.rootPath);
     _selectedResource = null;

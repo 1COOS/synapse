@@ -620,6 +620,108 @@ void main() {
     );
 
     test(
+      'queued save commit invariant aborts a reserved discard before backend',
+      () async {
+        final vault = _DelayedUpdateVault();
+        final registry = NoteSessionRegistry(
+          visibleBody: (markdown) => markdown,
+          onEdited: (_) {},
+        );
+        final splits = SplitWorkspaceController(initialNoteId: 'A.md');
+        final materials = NoteMaterialsRegistry();
+        final invariantErrors = <WorkspaceCommitInvariantError>[];
+        late final WorkspaceMutationBarrier barrier;
+        final coordinator = NoteSaveCoordinator(
+          sessions: registry,
+          vault: () => vault,
+          debounceDuration: () => const Duration(seconds: 1),
+          serializeVisibleBody: (_, body) => body,
+          onResult: (result, _) async {
+            final saved = result.savedNote;
+            if (saved == null) {
+              return;
+            }
+            await barrier.commitPrepared<void>(
+              () => VaultMutationDelta<void>(
+                value: null,
+                remappedNoteIds: {result.oldNoteId: saved.id},
+                refreshedNotesByNewId: {saved.id: saved},
+              ),
+              prepareCommit: (_) =>
+                  throw StateError('queued save commit preparation failed'),
+              originatingSession: result.session,
+            );
+          },
+          onFatalError: invariantErrors.add,
+          onStateChanged: () {},
+        );
+        barrier = WorkspaceMutationBarrier(
+          sessions: registry,
+          saveCoordinator: coordinator,
+          splits: splits,
+          materials: materials,
+          onInvariantFailure: invariantErrors.add,
+        );
+        addTearDown(() {
+          coordinator.dispose();
+          materials.dispose();
+          registry.dispose();
+          splits.dispose();
+        });
+        final session = registry.upsert(_note('A.md', 'old'));
+        session.controller.text = 'dirty';
+        final save = coordinator.save(session);
+        await vault.updateStarted.future;
+
+        final blockerStarted = Completer<void>();
+        final releaseBlocker = Completer<void>();
+        final blocker = barrier.run<void>(
+          WorkspaceMutationPlan<void>(
+            affectedNoteIds: const {},
+            dirtyDisposition: DirtyDisposition.flush,
+            commitBackend: () => _backendCommit(() async {
+              blockerStarted.complete();
+              await releaseBlocker.future;
+              return const VaultMutationDelta<void>(value: null);
+            }),
+          ),
+        );
+        await blockerStarted.future;
+        var destructiveBackendCalls = 0;
+        final destructive = barrier.run<void>(
+          WorkspaceMutationPlan<void>(
+            affectedNoteIds: const {'A.md'},
+            dirtyDisposition: DirtyDisposition.discard,
+            commitBackend: () => _backendCommit(() async {
+              destructiveBackendCalls += 1;
+              return const VaultMutationDelta<void>(value: null);
+            }),
+          ),
+        );
+
+        vault.releaseUpdate.complete();
+        await _drainEventQueue();
+        releaseBlocker.complete();
+
+        await expectLater(
+          destructive.timeout(const Duration(seconds: 1)),
+          throwsA(
+            isA<WorkspaceCommitInvariantError>().having(
+              (error) => error.phase,
+              'phase',
+              WorkspaceCommitPhase.prepare,
+            ),
+          ),
+        );
+        expect(await blocker, isA<Committed<void>>());
+        final saveResult = await save;
+        expect(saveResult.requiresReload, isTrue);
+        expect(destructiveBackendCalls, 0);
+        expect(invariantErrors, isNotEmpty);
+      },
+    );
+
+    test(
       'remap listeners observe registry and split after one commit',
       () async {
         final harness = _BarrierHarness(initialNoteId: 'A.md');
