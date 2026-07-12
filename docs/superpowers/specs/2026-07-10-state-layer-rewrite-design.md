@@ -1,8 +1,19 @@
 # Synapse macOS 生产化与状态层重写设计
 
 **日期：** 2026-07-10
-**状态：** 已确认执行
+**状态：** Foundation checkpoint 已完成，按批准顺序继续执行
 **目标分支：** `codex/state-layer-rewrite`
+**Checkpoint HEAD：** `3cc85d9c9b3e54920a98b91e8d1fc69b76b08ac9`
+
+> 当前分支相对 `main` 已有 15 个提交。任务 1-5 的 session/save/split/mutation foundation 已完成；fresh baseline 为状态层 65 tests pass、workspace 140 tests pass，共 205 tests pass，`flutter analyze --no-pub` 无 issue，`git diff --check` clean。
+
+已完成 foundation 提交：
+
+- Vault flush/lifecycle：`fb322d2`、`6b9d0dc`；
+- session registry/transition：`8e87a98`、`ed756c4`；
+- save coordination：`61c3c4c`、`1a4b383`、`583f189`；
+- split controller：`6fd29a9`；
+- mutation serialization/quiescence：`dcc5e4d`、`814838e`、`23a6602`、`3cc85d9`。
 
 ## 1. 背景
 
@@ -81,8 +92,8 @@ Synapse 当前已经具备三栏工作台、分屏笔记、Markdown 实时编辑
 | debounce、串行保存、flush/quiesce | `NoteSaveCoordinator` | 每 session 至多一个 in-flight save |
 | split tree、pane focus、pane note、阅读/源码 mode、ratio | `SplitWorkspaceController` | 不依赖 Vault、AI 或 controller |
 | 跨资源 mutation 顺序和原子应用 | `WorkspaceMutationBarrier` | flush/discard → backend → delta commit |
-| resources、selection、search、settings、runtime、message、busy | `WorkspaceController` | Riverpod notifier 暴露不可变 `WorkspaceState` |
-| 每 note 的 source selection 与 proposals | `NoteMaterialsState` | 从 document session 分离 |
+| resources、selection、search、settings、runtime、message、busy | `WorkspaceController` | Riverpod `AsyncNotifier` 暴露不可变 `WorkspaceState` |
+| 每 note 的 source selection 与 proposals | `NoteMaterialsRegistry` | 从 document session 分离，按 note ID 唯一持有 |
 | 发起 pane 的图片/粘贴/宽度/拖动上下文 | `PaneEditorContext` | await 前捕获稳定 session |
 | live editor block/selection/menu/hover | editor Widget local state | 不迁入 Riverpod |
 
@@ -178,7 +189,7 @@ void clearNoteIds(Set<String> removedIds, {String? fallbackNoteId});
 
 它不读取 Vault、不持有 editor controller、不执行保存。
 
-### 6.4 `WorkspaceMutationBarrier`
+### 6.4 `WorkspaceMutationBarrier` 与 `WorkspaceCommitBatch`
 
 所有 mutation 使用显式 plan 和 delta：
 
@@ -205,10 +216,11 @@ Barrier 固定执行顺序：
 3. 执行 flush 或 discard/quiesce；
 4. flush 失败则 abort，backend mutation 不运行；
 5. 执行 backend mutation；
-6. 原子应用 registry remap/remove；
-7. 原子应用 split remap/clear；
-8. WorkspaceController 同步 resources、selection、materials、search；
-9. 释放锁。
+6. backend 成功后构造并预验证同步 `WorkspaceCommitBatch`；
+7. batch 静默应用 registry、split、materials 与 workspace snapshot；
+8. 最后统一发布通知并释放锁。
+
+`WorkspaceMutationBarrier` 不再接受异步 `onCommitted`。mutation 结果只区分 `Committed`、`AbortedByFlush` 与 `BackendFailed`；backend 已成功提交后，不得因为 UI/state callback 失败而返回可重试的 `MutationFailed`，避免重复执行不可逆 backend mutation。
 
 策略：
 
@@ -226,7 +238,9 @@ Barrier 固定执行顺序：
 ```dart
 final class PaneEditorContext {
   final String paneId;
-  final NoteDocumentSession session;
+  final int paneGeneration;
+  final Object sessionIdentity;
+  final int runtimeGeneration;
 
   Future<PaneEditResult> paste(TextSelection selection);
   Future<PaneEditResult> changeImageWidth(String src, int width);
@@ -239,25 +253,29 @@ final class PaneEditorContext {
 }
 ```
 
-所有异步操作使用构造时捕获的 `session.noteId`、`session.controller` 和 note sources。等待图片读取、Vault 写入或 clipboard 期间即使焦点切换，也不能改写另一个 pane。
+`PaneEditorContext` 是目标令牌，不直接持有可替换的 Vault/AI runtime。所有异步操作使用发起时捕获的 pane/session/runtime identity；等待图片读取、Vault 写入、proposal 或 clipboard 期间即使焦点切换，也不能改写另一个 pane。focus 变化不使 context 失效；pane 重绑、关闭、session 移除或 Vault 切换时返回 `staleTarget`，不产生跨笔记写入。
 
 ### 6.6 `WorkspaceController` 与 Riverpod
 
-`WorkspaceController extends Notifier<WorkspaceState>`。`WorkspaceState` 是不可变快照，至少包含：
+`WorkspaceController extends AsyncNotifier<WorkspaceState>`。`AsyncValue` 唯一负责初始化 loading 与 fatal initialization error；`WorkspaceState` 不重复 `initializing/error` 状态，只表达 `needsVault`、`ready`、`webPreview`、`unsupported` 等业务 phase。
 
-- 初始化/需要选择 Vault/ready/error phase；
+`WorkspaceState` 是不可变快照，至少包含：
+
+- 需要选择 Vault/ready/web preview/unsupported phase；
 - resources、selected resource ID、search results；
 - left mode、narrow section、左右栏折叠；
 - vault label/root；
 - settings、workspace preferences、provider config；
 - message、mutation busy、saving note IDs；
-- split revision、session revision、materials revision。
+- 不可变 split tree、materials snapshot 与导航状态。
 
-Registry、save coordinator、split controller 和 pane context factory 由 notifier 持有并在 `ref.onDispose` 中释放。UI 使用 `ref.watch(workspaceControllerProvider)` 渲染，使用 `ref.read(...notifier)` 发送 intent。`TextEditingController` 不复制到 immutable state；Widget 通过 controller 的稳定查询 API 获取 session。
+不使用 split/session/materials revision counters。Registry、save coordinator、split controller 和 pane context factory 由 notifier 持有并在 `ref.onDispose` 中释放。UI 使用 `ref.watch(workspaceControllerProvider)` 渲染，使用 `ref.read(...notifier)` 发送 intent。`TextEditingController` 不复制到 immutable state；Widget 通过 provider 查询稳定 session，并用 `ListenableBuilder` 监听编辑状态。
+
+为避免形成新的巨型 controller，运行期职责拆为 `WorkspaceRuntimeManager`、`WorkspaceSearchCoordinator` 与 `WorkspaceResourceCoordinator`。`WorkspaceController` 只负责 Riverpod 生命周期、公开 intent 与 state reduction，目标不超过约 1000 行。
 
 ### 6.7 Composition root
 
-新增 `WorkspaceDependencies` 与 bootstrap provider。具体 adapter 只在 `main.dart` 或 `lib/bootstrap/` 构造：
+新增 `WorkspaceDependencies`、`WorkspaceRuntime` 与 bootstrap provider。具体 adapter 只在 `main.dart` 或 `lib/bootstrap/` 构造：
 
 - `SettingsStore` factory；
 - `VaultBackend` factory；
@@ -272,6 +290,8 @@ Registry、save coordinator、split controller 和 pane context factory 由 noti
 
 测试通过 ProviderScope override 注入 fake dependencies，不再依赖 Widget 构造器中十余个可空参数。
 
+`SearchIndex` 统一 memory/sqlite 实现与 `dispose` 契约；搜索 fingerprint、索引重建和生命周期归 `WorkspaceSearchCoordinator`，不进入 Widget 或主 controller 的细节状态。
+
 ## 7. 关键流程
 
 ### 7.1 打开笔记
@@ -281,7 +301,7 @@ Registry、save coordinator、split controller 和 pane context factory 由 noti
 3. 从 Vault 读取 N 和 proposals。
 4. Registry `upsert(N)`；dirty session 不被远端快照覆盖。
 5. Split controller 把 P 指向 N，并设置首选阅读/源码 mode。
-6. Materials state 写入 N 的 proposal/source selection。
+6. Materials registry 写入 N 的 proposal/source selection。
 7. 发布一个 WorkspaceState 快照。
 
 ### 7.2 编辑与自动保存
@@ -363,7 +383,7 @@ Picker 不得在旧 session flush 之前释放旧 security scope。
 
 - Controller 将用户可恢复错误写入 `WorkspaceState.message`，保留当前可用 runtime。
 - 保存失败不覆盖 controller，不执行依赖该 flush 的 mutation。
-- mutation backend 失败不应用 delta。
+- mutation backend 失败不应用 delta；backend 已成功时结果必须为 committed，不得返回可重试失败。
 - 候选 Vault 失败不清空旧 workspace。
 - Keychain 失败不降级明文。
 - proposal/OCR 错误不得改变既有 Markdown。
@@ -377,7 +397,9 @@ Picker 不得在旧 session flush 之前释放旧 security scope。
 - coordinator debounce、串行保存、flushAll、失败保留 dirty；
 - split duplicate pane remap/remove/close；
 - mutation barrier 在 flush 失败时不调用 backend；
-- pane context 在切换焦点后仍写入原 session；
+- materials registry 的 reconcile、remove 与循环 remap 原子完成；
+- pane context 在切换焦点后仍写入原 session，在 pane/runtime 失效后返回 stale target；
+- commit batch 在 backend 成功后只发布 committed 结果；
 - WorkspaceController 的初始化、Vault 切换、resource mutation 和 settings runtime rebuild。
 
 ### 10.2 Widget characterization tests
@@ -401,14 +423,28 @@ Picker 不得在旧 session flush 之前释放旧 security scope。
 
 ## 11. 迁移顺序
 
-1. 先添加跨 pane characterization tests，确认现有缺陷以预期原因失败。
-2. 提取 session registry 和 save coordinator，让旧 workspace 方法先委托新组件。
-3. 提取 split controller，保持当前 Widget tree 和 key 不变。
-4. 引入 mutation barrier，迁移切 Vault、rename、move/copy、delete 和 close pane。
-5. 引入 pane-bound image/paste context，删除完成时读取 `_activeSession` 的逻辑。
-6. 引入 WorkspaceState/Notifier/providers 和真实 composition root。
-7. 将 resources、search、proposal、settings 和 UI navigation state 迁入 controller；删除 StatefulWidget 中对应字段。
-8. 拆出与状态层边界直接相关的 Widget 文件；live editor 内部算法保持不变。
-9. 完成 Keychain、Vault access lease、平台文档和 macOS 构建验证。
+Foundation 的 session/save/split/mutation 工作已完成。后续唯一执行顺序为：
+
+1. test split；
+2. UI leaf split；
+3. live editor split；
+4. `NoteMaterialsRegistry`；
+5. `PaneEditorContext` / `WorkspaceCommitBatch`；
+6. runtime/dependencies/search/resource collaborators；
+7. `AsyncNotifier<WorkspaceState>` controller 与 Consumer UI；
+8. Keychain fail-closed；
+9. tokenized Vault lease；
+10. backend split；
+11. final local gate。
+
+本轮不新增 GitHub Actions workflow；未 push 分支的生产门禁全部通过本地顺序验证完成。
+
+## 12. 长文件治理
+
+- `lib/presentation/cupertino/workspace.dart` 最终只保留 `SynapseWorkspace` 入口、Provider/Consumer 连接和少量 screen glue，目标 500-800 行。
+- `workspace_test.dart` 按 vault/save、split/layout、resources、editor、images/proposals、settings 等行为拆分，共用 fake 与 harness 进入 `test/support/`。
+- 新 production file 原则上不超过约 800 行；`WorkspaceController` 通过 runtime/search/resource collaborators 控制职责边界。
+- 当前较 cohesive 的 `note_save_coordinator.dart` 与 `markdown_live_blocks.dart` 本轮不为行数机械强拆。
+- 不使用 Dart `part`；拆分文件采用显式 import 与显式 API。
 
 每一步都按 TDD 执行并独立提交；规格合规审查通过后再做代码质量审查。
