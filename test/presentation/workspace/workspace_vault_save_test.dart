@@ -6,10 +6,13 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:synapse/domain/vault/vault_resource.dart';
+import 'package:synapse/application/search/search_index.dart';
+import 'package:synapse/infrastructure/ai/mock_ai_provider.dart';
 import 'package:synapse/infrastructure/config/synapse_settings.dart';
 import 'package:synapse/infrastructure/config/vault_location_store.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
 import 'package:synapse/presentation/workspace/editor/live_markdown_editor.dart';
+import 'package:synapse/presentation/workspace/controller/workspace_dependencies.dart';
 import 'package:synapse/presentation/workspace/state/workspace_mutation_barrier.dart';
 
 import '../../support/workspace_fakes.dart';
@@ -287,6 +290,50 @@ void main() {
     expect(locationStore.savedLocations.last.rootPath, secondPath);
     expect(find.text('Second'), findsWidgets);
   });
+
+  testWidgets(
+    'candidate runtime construction failure leaves the old vault usable',
+    (tester) async {
+      const secondPath = '/vault/second';
+      final firstVault = MemoryVaultBackend(seedExampleData: false);
+      await firstVault.createNote(parentPath: '', title: 'First');
+      final secondVault = MemoryVaultBackend(seedExampleData: false);
+      await secondVault.createNote(parentPath: '', title: 'Second');
+      var failRuntimeConstruction = false;
+      final dependencies = WorkspaceDependencies(
+        initialVault: firstVault,
+        injectedAiProvider: MockAiProvider(),
+        settingsStore: FakeSettingsStore(),
+        supportsDirectoryVaultOverride: true,
+        pickVaultLocation: () async =>
+            const VaultLocation(rootPath: secondPath),
+        vaultBackendFactory: (_) => secondVault,
+        searchIndexFactory: (_, _) {
+          if (failRuntimeConstruction) {
+            throw StateError('runtime construction failed');
+          }
+          return _EmptySearchIndex();
+        },
+      );
+
+      await pumpWorkspace(tester, vault: null, dependencies: dependencies);
+      expect(find.text('First'), findsWidgets);
+
+      failRuntimeConstruction = true;
+      await tester.tap(find.byKey(const Key('vault-location-button')));
+      await tester.pump(const Duration(milliseconds: 500));
+
+      expect(find.text('First'), findsWidgets);
+      expect(find.text('Second'), findsNothing);
+      expect(
+        find.textContaining('runtime construction failed'),
+        findsOneWidget,
+      );
+      await tester.tap(find.byKey(const Key('resource-row-First.md')));
+      await tester.pump(const Duration(milliseconds: 250));
+      expect(find.text('First'), findsWidgets);
+    },
+  );
 
   testWidgets('flushes every dirty pane before opening the vault picker', (
     tester,
@@ -936,4 +983,27 @@ final class _RenameReadbackFailureVault extends CountingUpdateVaultBackend {
     }
     return super.readNote(noteId);
   }
+}
+
+final class _EmptySearchIndex implements SearchIndex {
+  @override
+  Future<Set<String>> documentIds() async => <String>{};
+
+  @override
+  Future<void> indexDocument({
+    required String id,
+    required String noteId,
+    required String title,
+    required String text,
+  }) async {}
+
+  @override
+  Future<void> removeDocument(String id) async {}
+
+  @override
+  Future<List<SearchResult>> search(String query, {String? noteId}) async =>
+      const <SearchResult>[];
+
+  @override
+  void dispose() {}
 }

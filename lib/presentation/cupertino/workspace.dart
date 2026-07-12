@@ -11,27 +11,23 @@ import '../../application/search/search_index.dart';
 import '../../domain/markdown/markdown_document.dart';
 import '../../domain/vault/vault_resource.dart';
 import '../../infrastructure/ai/ai_provider.dart';
-import '../../infrastructure/ai/missing_config_ai_provider.dart';
-import '../../infrastructure/ai/openai_compatible_provider.dart';
-import '../../infrastructure/cache/memory_search_cache.dart'
-    show MemorySearchCache;
-import '../../infrastructure/config/default_settings_store.dart';
 import '../../infrastructure/config/provider_config_store.dart';
 import '../../infrastructure/config/settings_store.dart';
 import '../../infrastructure/config/synapse_settings.dart';
-import '../../infrastructure/config/vault_directory_access.dart';
 import '../../infrastructure/config/vault_location_store.dart';
 import '../../infrastructure/input/image_input_service.dart';
-import '../../infrastructure/vault/default_vault_backend.dart';
 import '../../infrastructure/vault/vault_backend.dart';
 import '../../infrastructure/vault/vault_post_commit_error.dart';
+import '../workspace/controller/workspace_dependencies.dart';
+import '../workspace/controller/workspace_resource_coordinator.dart';
+import '../workspace/controller/workspace_runtime.dart';
+import '../workspace/controller/workspace_runtime_manager.dart';
 import '../workspace/state/note_document_session.dart';
 import '../workspace/state/note_materials_registry.dart';
 import '../workspace/state/note_save_coordinator.dart';
 import '../workspace/state/note_session_registry.dart';
 import '../workspace/state/split_workspace_controller.dart';
 import '../workspace/state/workspace_mutation_barrier.dart';
-import '../workspace/controller/workspace_search_coordinator.dart';
 import '../workspace/editor/markdown_image_transform.dart';
 import '../workspace/editor/live_markdown_editor.dart';
 import '../workspace/editor/markdown_table_editor.dart';
@@ -50,9 +46,8 @@ import 'workspace/workspace_theme.dart';
 import 'workspace/workspace_titlebar.dart';
 
 export 'workspace/workspace_settings.dart' show ProviderConfigTester;
-
-typedef DirectoryPicker = Future<String?> Function();
-typedef VaultBackendFactory = VaultBackend Function(String rootPath);
+export '../workspace/controller/workspace_dependencies.dart'
+    show DirectoryPicker, VaultBackendFactory, WorkspaceDependencies;
 
 final class _PaneMutationTarget {
   const _PaneMutationTarget({
@@ -91,11 +86,6 @@ final class _SourceMutationPayload {
   final VaultNoteContent note;
   final SourceItem source;
 }
-
-typedef _PreparedAiServices = ({
-  ProposalService? proposalService,
-  SearchIndex searchIndex,
-});
 
 final class _SilentValueNotifier<T> extends ChangeNotifier
     implements ValueListenable<T> {
@@ -149,7 +139,6 @@ final class _WorkspaceCommitSnapshot {
     this.narrowSection = const _WorkspaceSnapshotField.unchanged(),
     this.message = const _WorkspaceSnapshotField.unchanged(),
     this.previewImageSrc = const _WorkspaceSnapshotField.unchanged(),
-    this.aiServices = const _WorkspaceSnapshotField.unchanged(),
     this.collapsedFolderIds = const _WorkspaceSnapshotField.unchanged(),
   });
 
@@ -159,7 +148,6 @@ final class _WorkspaceCommitSnapshot {
   final _WorkspaceSnapshotField<_WorkspaceSection> narrowSection;
   final _WorkspaceSnapshotField<String> message;
   final _WorkspaceSnapshotField<String?> previewImageSrc;
-  final _WorkspaceSnapshotField<_PreparedAiServices> aiServices;
   final _WorkspaceSnapshotField<Set<String>> collapsedFolderIds;
 }
 
@@ -254,6 +242,7 @@ enum _LeftPaneMode { resources, search }
 class SynapseWorkspace extends StatefulWidget {
   const SynapseWorkspace({
     super.key,
+    this.dependencies,
     this.initialVault,
     this.imageInput,
     this.settingsStore,
@@ -266,6 +255,7 @@ class SynapseWorkspace extends StatefulWidget {
     this.workspaceCommitFailureForTesting,
   });
 
+  final WorkspaceDependencies? dependencies;
   final VaultBackend? initialVault;
   final ImageInputService? imageInput;
   final SettingsStore? settingsStore;
@@ -283,11 +273,10 @@ class SynapseWorkspace extends StatefulWidget {
 }
 
 class _SynapseWorkspaceState extends State<SynapseWorkspace> {
-  VaultBackend? _vault;
-  ProposalService? _proposalService;
-  late final WorkspaceSearchCoordinator _workspaceSearchCoordinator;
+  late final WorkspaceDependencies _dependencies;
+  late final WorkspaceRuntimeManager _runtimeManager;
+  late final WorkspaceResourceCoordinator _resourceCoordinator;
   late ImageInputService _imageInput;
-  late AiProvider _aiProvider;
 
   final _emptyMarkdownController = TextEditingController();
   late final NoteSessionRegistry _noteSessionRegistry;
@@ -312,14 +301,9 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   String _message = '';
   Object _workspaceMutationToken = Object();
   final _selectedPreviewImageSrcNotifier = _SilentValueNotifier<String?>(null);
-  String _vaultLabel = supportsDirectoryVault ? '选择仓库' : 'H5 预览库';
-  String? _vaultRootPath;
-  SettingsStore? _settingsStore;
   SynapseSettings _settings = SynapseSettings.defaults;
   WorkspacePreferences _workspacePreferences = WorkspacePreferences.defaults;
   ProviderConfig? _providerConfig;
-  bool _usesInjectedAiProvider = false;
-  int _runtimeGeneration = 0;
   final Set<_PaneEditorSaveScope> _paneEditorSaveScopes = {};
   final Set<NoteDocumentSession> _paneEditorCommandLocks =
       Set<NoteDocumentSession>.identity();
@@ -332,6 +316,21 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   @override
   void initState() {
     super.initState();
+    _dependencies =
+        widget.dependencies ??
+        WorkspaceDependencies.legacy(
+          initialVault: widget.initialVault,
+          imageInput: widget.imageInput,
+          settingsStore: widget.settingsStore,
+          providerConfigStore: widget.providerConfigStore,
+          vaultLocationStore: widget.vaultLocationStore,
+          aiProvider: widget.aiProvider,
+          directoryPicker: widget.directoryPicker,
+          vaultBackendFactory: widget.vaultBackendFactory,
+          providerConfigTester: widget.providerConfigTester,
+        );
+    _runtimeManager = WorkspaceRuntimeManager();
+    _resourceCoordinator = WorkspaceResourceCoordinator(_runtimeManager);
     _splitWorkspaceController = SplitWorkspaceController(
       defaultMode: _preferredNoteMode,
     );
@@ -375,20 +374,19 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       }),
     );
     _resetSplitWorkspace(disposeSessions: false);
-    _imageInput = widget.imageInput ?? const PlatformImageInputService();
-    _usesInjectedAiProvider = widget.aiProvider != null;
-    _aiProvider = widget.aiProvider ?? const MissingConfigAiProvider();
-    final initialAiServices = _prepareAiServices();
-    _proposalService = initialAiServices.proposalService;
-    _workspaceSearchCoordinator = WorkspaceSearchCoordinator(
-      initialAiServices.searchIndex,
-    );
-    if (widget.initialVault != null) {
-      _resetServices(widget.initialVault!);
-      _vaultLabel = supportsDirectoryVault ? '测试仓库' : 'H5 预览库';
-    } else if (!supportsDirectoryVault) {
-      _resetServices(createDefaultVaultBackend());
-      _vaultLabel = 'H5 预览库';
+    _imageInput = _dependencies.imageInput;
+    if (_dependencies.initialVault case final vault?) {
+      _installRuntime(
+        vault: vault,
+        rootPath: null,
+        label: _dependencies.injectedVaultLabel,
+      );
+    } else if (!_dependencies.supportsDirectoryVault) {
+      _installRuntime(
+        vault: _dependencies.createDefaultVault(),
+        rootPath: null,
+        label: _dependencies.defaultVaultLabel,
+      );
     }
     _initializeWorkspace();
   }
@@ -396,7 +394,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   @override
   void dispose() {
     _workspaceMutationToken = Object();
-    _workspaceSearchCoordinator.dispose();
+    _runtimeManager.dispose();
     _noteSaveCoordinator.dispose();
     _noteMaterialsRegistry.dispose();
     _noteSessionRegistry.dispose();
@@ -470,9 +468,6 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     if (snapshot.previewImageSrc case final field when field.isChanged) {
       _setSelectedPreviewImageSrcSilently(field.value);
     }
-    if (snapshot.aiServices case final field when field.isChanged) {
-      _installPreparedAiServices(field.value!);
-    }
     if (snapshot.collapsedFolderIds case final field when field.isChanged) {
       _collapsedFolderIds
         ..clear()
@@ -545,24 +540,9 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     );
   }
 
-  void _resetServices(VaultBackend vault) {
-    if (!identical(_vault, vault)) {
-      _runtimeGeneration += 1;
-      _workspaceMutationToken = Object();
-    }
-    _vault = vault;
-    _resetAiServices();
-  }
-
   void _clearVaultLocationState() {
-    if (_vault != null) {
-      _runtimeGeneration += 1;
-      _workspaceMutationToken = Object();
-    }
-    _vault = null;
-    _proposalService = null;
-    _vaultRootPath = null;
-    _vaultLabel = supportsDirectoryVault ? '选择仓库' : 'H5 预览库';
+    _runtimeManager.clear();
+    _workspaceMutationToken = Object();
     _selectedResource = null;
     _resources = const [];
     _searchResults = const [];
@@ -572,7 +552,6 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     _leftPaneCollapsed = false;
     _rightPaneCollapsed = false;
     _narrowSection = _WorkspaceSection.resources;
-    _resetAiServices();
   }
 
   void _resetSplitWorkspace({bool disposeSessions = true}) {
@@ -761,29 +740,6 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     });
   }
 
-  void _resetAiServices() {
-    _installPreparedAiServices(_prepareAiServices());
-  }
-
-  _PreparedAiServices _prepareAiServices() {
-    final vault = _vault;
-    final proposalService = vault == null
-        ? null
-        : ProposalService(vault: vault, aiProvider: _aiProvider);
-    return (
-      proposalService: proposalService,
-      searchIndex: MemorySearchCache(
-        _aiProvider,
-        semanticSearchEnabled: _semanticSearchEnabled,
-      ),
-    );
-  }
-
-  void _installPreparedAiServices(_PreparedAiServices services) {
-    _proposalService = services.proposalService;
-    _workspaceSearchCoordinator.replaceIndex(services.searchIndex);
-  }
-
   VaultResourceNode? _preparedSelectedResourceAfterMutation({
     required List<VaultResourceNode> resources,
     required Map<String, String> remappedNoteIds,
@@ -822,7 +778,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
 
   bool get _semanticSearchEnabled {
     return _workspacePreferences.semanticSearchEnabled &&
-        (_usesInjectedAiProvider ||
+        (_dependencies.usesInjectedAiProvider ||
             (_providerConfig?.hasEmbeddingConfig ?? false));
   }
 
@@ -833,12 +789,17 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     return '未配置 Embedding，已使用全文搜索';
   }
 
-  bool get _hasVault => _vault != null;
+  bool get _hasVault => _runtimeManager.current != null;
+
+  String get _vaultLabel =>
+      _runtimeManager.current?.label ?? _dependencies.emptyVaultLabel;
+
+  String? get _vaultRootPath => _runtimeManager.current?.rootPath;
 
   bool get _autoSaving => _noteSaveCoordinator.isAutoSaving;
 
   bool get _usesNativeMacTitlebar {
-    return !kIsWeb && defaultTargetPlatform == TargetPlatform.macOS;
+    return _dependencies.usesNativeMacTitlebar;
   }
 
   SplitLeaf? get _focusedPane => _splitWorkspaceController.focusedPane;
@@ -868,7 +829,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       paneId: resolvedPane.paneId,
       splits: _splitWorkspaceController,
       sessions: _noteSessionRegistry,
-      runtimeGeneration: _runtimeGeneration,
+      runtimeGeneration: _runtimeManager.generation,
     );
   }
 
@@ -879,7 +840,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       context,
       splits: _splitWorkspaceController,
       sessions: _noteSessionRegistry,
-      runtimeGeneration: _runtimeGeneration,
+      runtimeGeneration: _runtimeManager.generation,
     );
   }
 
@@ -979,84 +940,70 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   }
 
   VaultBackend _requireVault() {
-    final vault = _vault;
-    if (vault == null) {
-      throw StateError('请先选择仓库位置');
-    }
-    return vault;
+    return _runtimeManager.current?.vault ?? (throw StateError('请先选择仓库位置'));
+  }
+
+  WorkspaceRuntime _requireRuntime() {
+    return _runtimeManager.current ?? (throw StateError('请先选择仓库位置'));
   }
 
   ProposalService _requireProposalService() {
-    final proposalService = _proposalService;
-    if (proposalService == null) {
-      throw StateError('请先选择仓库位置');
-    }
-    return proposalService;
+    return _requireRuntime().proposalService;
   }
 
-  VaultBackend _createVaultBackend(String rootPath) {
-    final factory = widget.vaultBackendFactory ?? createDefaultVaultBackend;
-    return factory(rootPath);
-  }
-
-  String _formatVaultLabel(String rootPath) {
-    final basename = p.basename(rootPath);
-    return basename.isEmpty ? rootPath : basename;
+  void _installRuntime({
+    required VaultBackend vault,
+    required String? rootPath,
+    required String label,
+    AiProvider? aiProvider,
+  }) {
+    final provider =
+        aiProvider ??
+        _dependencies.createAiProvider(_providerConfig ?? ProviderConfig.empty);
+    _runtimeManager.installCandidateSync(
+      () => _dependencies.createRuntime(
+        vault: vault,
+        aiProvider: provider,
+        semanticSearchEnabled: _semanticSearchEnabled,
+        rootPath: rootPath,
+        label: label,
+      ),
+    );
+    _workspaceMutationToken = Object();
   }
 
   Future<VaultLocation?> _pickVaultLocation() async {
-    final injectedPicker = widget.directoryPicker;
-    if (injectedPicker != null) {
-      final rootPath = await injectedPicker();
-      if (rootPath == null) {
-        return null;
-      }
-      return VaultLocation(rootPath: rootPath);
-    }
-    return VaultDirectoryAccess.pickDirectory();
+    return _dependencies.pickVaultLocation();
   }
 
   Future<VaultLocation> _restoreVaultAccess(VaultLocation location) {
-    return VaultDirectoryAccess.startAccessing(location);
+    return _dependencies.restoreVaultAccess(location);
   }
 
   void _useAiProvider(AiProvider provider) {
-    if (!identical(_aiProvider, provider)) {
-      _runtimeGeneration += 1;
+    final current = _runtimeManager.current;
+    if (current == null) {
+      return;
     }
-    _aiProvider = provider;
-    _resetAiServices();
+    _installRuntime(
+      vault: current.vault,
+      rootPath: current.rootPath,
+      label: current.label,
+      aiProvider: provider,
+    );
   }
 
   Future<void> _initializeWorkspace() async {
     await _loadSettings();
     if (_hasVault) {
       await _loadResources();
-    } else if (supportsDirectoryVault) {
+    } else if (_dependencies.supportsDirectoryVault) {
       await _loadSavedVaultLocation();
     }
   }
 
   Future<SettingsStore> _getSettingsStore() async {
-    final store =
-        _settingsStore ??
-        widget.settingsStore ??
-        _legacySettingsStore() ??
-        await createDefaultSettingsStore();
-    _settingsStore = store;
-    return store;
-  }
-
-  SettingsStore? _legacySettingsStore() {
-    final providerStore = widget.providerConfigStore;
-    final vaultStore = widget.vaultLocationStore;
-    if (providerStore == null && vaultStore == null) {
-      return null;
-    }
-    return _LegacySettingsStore(
-      providerConfigStore: providerStore,
-      vaultLocationStore: vaultStore,
-    );
+    return _dependencies.settingsStore();
   }
 
   Future<void> _loadSettings() async {
@@ -1071,15 +1018,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
         _workspacePreferences = settings.preferences;
         _providerConfig = settings.providerConfig;
         _splitWorkspaceController.updateDefaultMode(_preferredNoteMode);
-        if (!_usesInjectedAiProvider) {
-          _useAiProvider(
-            settings.providerConfig.isComplete
-                ? OpenAICompatibleProvider(config: settings.providerConfig)
-                : const MissingConfigAiProvider(),
-          );
-        } else {
-          _resetAiServices();
-        }
+        _useAiProvider(_dependencies.createAiProvider(settings.providerConfig));
         if (_message.isEmpty) {
           _message = _modelConfigurationMessage();
         }
@@ -1147,9 +1086,11 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   void _setVaultLocation(VaultLocation location) {
     _noteSaveCoordinator.resetAfterReload();
     _workspaceMutationBarrier.resetAfterReload();
-    _resetServices(_createVaultBackend(location.rootPath));
-    _vaultRootPath = location.rootPath;
-    _vaultLabel = _formatVaultLabel(location.rootPath);
+    _installRuntime(
+      vault: _dependencies.createVault(location.rootPath),
+      rootPath: location.rootPath,
+      label: _dependencies.formatVaultLabel(location.rootPath),
+    );
     _selectedResource = null;
     _resources = const [];
     _searchResults = const [];
@@ -1159,7 +1100,6 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     _rightPaneCollapsed = false;
     _narrowSection = _WorkspaceSection.resources;
     _reloadRequired = false;
-    _workspaceMutationToken = Object();
   }
 
   Future<void> _runBusy(
@@ -1252,14 +1192,15 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   }
 
   bool _hasUsableAiProvider() {
-    return _usesInjectedAiProvider || (_providerConfig?.isComplete ?? false);
+    return _dependencies.usesInjectedAiProvider ||
+        (_providerConfig?.isComplete ?? false);
   }
 
   String _modelConfigurationMessage() {
-    if (_usesInjectedAiProvider) {
+    if (_dependencies.usesInjectedAiProvider) {
       return '';
     }
-    final store = _settingsStore;
+    final store = _dependencies.resolvedSettingsStore;
     if (store != null && !store.supportsPersistence) {
       return store.unavailableMessage;
     }
@@ -1287,33 +1228,37 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   }
 
   Future<void> _loadResourcesFromCurrentVault({String? message}) async {
-    final vault = _requireVault();
-    final resources = await vault.listResources();
-    final firstNote = _firstNote(resources);
-    VaultNoteContent? active;
-    List<AiProposal> proposals = const [];
-    if (firstNote != null) {
-      active = await vault.readNote(firstNote.id);
-      proposals = await vault.listProposals(active.id);
+    final result = await _resourceCoordinator.loadWorkspace();
+    if (result is WorkspaceResourceStale) {
+      return;
     }
+    if (result case WorkspaceResourceMissing(:final resources)) {
+      setState(() {
+        _resources = resources;
+        _selectedResource = null;
+        _activeNote = null;
+        _replaceEditorMarkdown('');
+        _searchResults = const [];
+        if (message != null) {
+          _message = message;
+        }
+      });
+      return;
+    }
+    final snapshot = (result as WorkspaceResourceCurrent).snapshot;
     setState(() {
-      _resources = resources;
-      _selectedResource = firstNote;
-      _activeNote = active;
-      _replaceEditorMarkdown(active?.markdown ?? '');
-      if (active != null) {
-        _noteMaterialsRegistry.replaceProposals(active.id, proposals);
+      _resources = snapshot.resources;
+      _selectedResource = snapshot.selectedResource;
+      _activeNote = snapshot.note;
+      _replaceEditorMarkdown(snapshot.note?.markdown ?? '');
+      if (snapshot.note case final note?) {
+        _noteMaterialsRegistry.replaceProposals(note.id, snapshot.proposals);
       }
       _searchResults = const [];
       if (message != null) {
         _message = message;
       }
     });
-  }
-
-  Future<void> _refreshProposals(String noteId) async {
-    final proposals = await _requireVault().listProposals(noteId);
-    setState(() => _noteMaterialsRegistry.replaceProposals(noteId, proposals));
   }
 
   Future<void> _selectResource(VaultResourceNode resource) async {
@@ -1331,15 +1276,28 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       if (!await _flushPendingMarkdown()) {
         return;
       }
-      final loaded = await _requireVault().readNote(resource.id);
+      final result = await _resourceCoordinator.loadNote(resource.id);
+      if (result is WorkspaceResourceStale) {
+        return;
+      }
+      if (result case WorkspaceResourceMissing(:final resources)) {
+        setState(() {
+          _resources = resources;
+          _message = '资源已不存在：${resource.title}';
+        });
+        return;
+      }
+      final snapshot = (result as WorkspaceResourceCurrent).snapshot;
+      final loaded = snapshot.note!;
       setState(() {
-        _selectedResource = resource;
+        _resources = snapshot.resources;
+        _selectedResource = snapshot.selectedResource;
         _activeNote = loaded;
+        _noteMaterialsRegistry.replaceProposals(loaded.id, snapshot.proposals);
         _noteMaterialsRegistry.clearSelection(resource.id);
         _noteMode = _preferredNoteMode;
         _narrowSection = _WorkspaceSection.notes;
       });
-      await _refreshProposals(resource.id);
     });
   }
 
@@ -1527,7 +1485,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   }
 
   Future<void> _chooseVault() async {
-    if (!supportsDirectoryVault) {
+    if (!_dependencies.supportsDirectoryVault) {
       setState(() => _message = 'H5 预览使用浏览器沙盒库');
       return;
     }
@@ -1721,9 +1679,6 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
                 resources: resources,
                 remappedNoteIds: delta.remappedNoteIds,
               );
-        final preparedAiServices = resources == null
-            ? null
-            : _prepareAiServices();
         final clearFocusedPreview =
             _actualNoteIdRemaps(delta.remappedNoteIds).isNotEmpty &&
             identical(_activeSession, session);
@@ -1761,9 +1716,6 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
             previewImageSrc: clearFocusedPreview
                 ? const _WorkspaceSnapshotField.set(null)
                 : const _WorkspaceSnapshotField.unchanged(),
-            aiServices: preparedAiServices == null
-                ? const _WorkspaceSnapshotField.unchanged()
-                : _WorkspaceSnapshotField.set(preparedAiServices),
           ),
         );
       },
@@ -1796,7 +1748,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       if (identical(scope.session, result.session) &&
           scope.bodySnapshot == result.bodySnapshot) {
         foundMatch = true;
-        if (scope.runtimeGeneration == _runtimeGeneration) {
+        if (scope.runtimeGeneration == _runtimeManager.generation) {
           return false;
         }
       }
@@ -1948,7 +1900,6 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
               resources: resources,
               remappedNoteIds: delta.remappedNoteIds,
             );
-            final preparedAiServices = _prepareAiServices();
             return _prepareWorkspaceCommit(
               delta,
               workspaceSnapshot: _WorkspaceCommitSnapshot(
@@ -1959,7 +1910,6 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
                 searchResults: const _WorkspaceSnapshotField.set(
                   <SearchResult>[],
                 ),
-                aiServices: _WorkspaceSnapshotField.set(preparedAiServices),
               ),
             );
           }
@@ -2588,7 +2538,6 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
                           ? _WorkspaceSection.resources
                           : _WorkspaceSection.notes)
                     : _narrowSection;
-                final preparedAiServices = _prepareAiServices();
                 return _prepareWorkspaceCommit(
                   delta,
                   upsertedNotesById: upsertedNotes,
@@ -2608,7 +2557,6 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
                     message: _WorkspaceSnapshotField.set(
                       resource.isFolder ? '文件夹已删除' : '笔记已删除',
                     ),
-                    aiServices: _WorkspaceSnapshotField.set(preparedAiServices),
                   ),
                 );
               },
@@ -2684,7 +2632,6 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
               newFolderPath: delta.value.path,
             );
             final clearSearch = folder.path != delta.value.path;
-            final preparedAiServices = _prepareAiServices();
             final collapsedFolderIds = Set<String>.of(_collapsedFolderIds)
               ..remove(folder.id)
               ..remove(delta.value.id);
@@ -2699,7 +2646,6 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
                     ? const _WorkspaceSnapshotField.set(<SearchResult>[])
                     : const _WorkspaceSnapshotField.unchanged(),
                 message: const _WorkspaceSnapshotField.set('文件夹已重命名'),
-                aiServices: _WorkspaceSnapshotField.set(preparedAiServices),
                 collapsedFolderIds: _WorkspaceSnapshotField.set(
                   collapsedFolderIds,
                 ),
@@ -2763,7 +2709,6 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
             final nextSelectedResource = targetIsFocused
                 ? _findResource(resources, copiedNote.id)
                 : _selectedResource;
-            final preparedAiServices = _prepareAiServices();
             final collapsedFolderIds = Set<String>.of(_collapsedFolderIds)
               ..remove(_parentFolderPath(copiedNote.path));
             return _prepareWorkspaceCommit(
@@ -2789,7 +2734,6 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
                     ? const _WorkspaceSnapshotField.set(_WorkspaceSection.notes)
                     : const _WorkspaceSnapshotField.unchanged(),
                 message: const _WorkspaceSnapshotField.set('笔记已复制'),
-                aiServices: _WorkspaceSnapshotField.set(preparedAiServices),
                 collapsedFolderIds: _WorkspaceSnapshotField.set(
                   collapsedFolderIds,
                 ),
@@ -2863,7 +2807,6 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
               resources: resources,
               remappedNoteIds: delta.remappedNoteIds,
             );
-            final preparedAiServices = _prepareAiServices();
             final collapsedFolderIds = Set<String>.of(_collapsedFolderIds)
               ..remove(parentPath);
             return _prepareWorkspaceCommit(
@@ -2890,7 +2833,6 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
                     ? const _WorkspaceSnapshotField.set(_WorkspaceSection.notes)
                     : const _WorkspaceSnapshotField.unchanged(),
                 message: const _WorkspaceSnapshotField.set('笔记已移动'),
-                aiServices: _WorkspaceSnapshotField.set(preparedAiServices),
                 collapsedFolderIds: _WorkspaceSnapshotField.set(
                   collapsedFolderIds,
                 ),
@@ -3092,11 +3034,15 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       return;
     }
     await _runBusy(() async {
-      final results = await _workspaceSearchCoordinator.searchVault(
+      final capture = _runtimeManager.capture();
+      if (capture == null) {
+        return;
+      }
+      final results = await capture.runtime.searchCoordinator.searchVault(
         query: query,
-        vault: _requireVault(),
+        vault: capture.runtime.vault,
       );
-      if (results == null) {
+      if (results == null || !_runtimeManager.isCurrent(capture)) {
         return;
       }
       setState(() {
@@ -3110,34 +3056,43 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   }
 
   Future<void> _openSearchResult(SearchResult result) async {
-    var resource = _findResource(_resources, result.noteId);
-    if (resource == null) {
-      final resources = await _requireVault().listResources();
-      resource = _findResource(resources, result.noteId);
-      setState(() => _resources = resources);
-    }
-    if (resource == null) {
-      setState(() => _message = '搜索结果已失效：${result.title}');
+    if (_busy) {
       return;
     }
-    await _selectResource(resource);
-  }
-
-  Future<String> _testProviderConfig(ProviderConfig config) async {
-    if (!config.isComplete) {
-      throw StateError('请填写 Base URL、API Key、Chat Model 和 Vision Model。');
-    }
-    final response = await OpenAICompatibleProvider(
-      config: config,
-    ).testConnection();
-    final summary = response.replaceAll(RegExp(r'\s+'), ' ').trim();
-    if (summary.isEmpty) {
-      return '模型连接成功';
-    }
-    final shortSummary = summary.length > 40
-        ? '${summary.substring(0, 40)}...'
-        : summary;
-    return '模型连接成功：$shortSummary';
+    await _runBusy(() async {
+      if (!await _flushPendingMarkdown()) {
+        return;
+      }
+      final opened = await _resourceCoordinator.openSearchResult(
+        result,
+        resources: _resources,
+      );
+      if (opened is WorkspaceResourceStale) {
+        return;
+      }
+      if (opened case WorkspaceResourceMissing(:final resources)) {
+        setState(() {
+          _resources = resources;
+          _message = '搜索结果已失效：${result.title}';
+        });
+        return;
+      }
+      final snapshot = (opened as WorkspaceResourceCurrent).snapshot;
+      final note = snapshot.note;
+      if (snapshot.selectedResource == null || note == null) {
+        setState(() => _message = '搜索结果已失效：${result.title}');
+        return;
+      }
+      setState(() {
+        _resources = snapshot.resources;
+        _selectedResource = snapshot.selectedResource;
+        _activeNote = note;
+        _noteMaterialsRegistry.replaceProposals(note.id, snapshot.proposals);
+        _noteMaterialsRegistry.clearSelection(note.id);
+        _noteMode = _preferredNoteMode;
+        _narrowSection = _WorkspaceSection.notes;
+      });
+    });
   }
 
   Future<void> _openSettings() async {
@@ -3156,7 +3111,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
         currentVaultLabel: _vaultRootPath ?? _vaultLabel,
         canSave: store.supportsPersistence,
         unavailableMessage: store.unavailableMessage,
-        onTestConfig: widget.providerConfigTester ?? _testProviderConfig,
+        onTestConfig: _dependencies.testProviderConfig,
       ),
     );
     if (savedSettings == null) {
@@ -3168,15 +3123,9 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
         _settings = savedSettings;
         _workspacePreferences = savedSettings.preferences;
         _providerConfig = savedSettings.providerConfig;
-        if (!_usesInjectedAiProvider) {
-          _useAiProvider(
-            savedSettings.providerConfig.isComplete
-                ? OpenAICompatibleProvider(config: savedSettings.providerConfig)
-                : const MissingConfigAiProvider(),
-          );
-        } else {
-          _resetAiServices();
-        }
+        _useAiProvider(
+          _dependencies.createAiProvider(savedSettings.providerConfig),
+        );
         _message = _modelConfigurationMessage();
       });
     });
@@ -4735,51 +4684,4 @@ final class _PaneEditorSaveScope {
   final NoteDocumentSession session;
   final String bodySnapshot;
   final int runtimeGeneration;
-}
-
-class _LegacySettingsStore implements SettingsStore {
-  _LegacySettingsStore({
-    required this.providerConfigStore,
-    required this.vaultLocationStore,
-  });
-
-  final ProviderConfigStore? providerConfigStore;
-  final VaultLocationStore? vaultLocationStore;
-  WorkspacePreferences _preferences = WorkspacePreferences.defaults;
-
-  @override
-  bool get supportsPersistence =>
-      providerConfigStore?.supportsSecureApiKey ?? true;
-
-  @override
-  String get unavailableMessage =>
-      providerConfigStore?.unavailableMessage ?? '';
-
-  @override
-  Future<SynapseSettings> load() async {
-    return SynapseSettings(
-      providerConfig: await providerConfigStore?.load() ?? ProviderConfig.empty,
-      vaultLocation: await vaultLocationStore?.load(),
-      preferences: _preferences,
-    );
-  }
-
-  @override
-  Future<void> save(SynapseSettings settings) async {
-    _preferences = settings.preferences;
-    final providerStore = providerConfigStore;
-    if (providerStore != null) {
-      await providerStore.save(settings.providerConfig);
-    }
-    final vaultStore = vaultLocationStore;
-    final vaultLocation = settings.vaultLocation;
-    if (vaultStore != null && vaultLocation != null) {
-      await vaultStore.save(vaultLocation);
-    }
-  }
-
-  @override
-  Future<bool> vaultExists(VaultLocation location) async {
-    return await vaultLocationStore?.exists(location) ?? false;
-  }
 }

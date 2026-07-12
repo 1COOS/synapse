@@ -12,6 +12,7 @@ import 'package:synapse/infrastructure/input/image_input_service.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
 import 'package:synapse/infrastructure/vault/vault_backend.dart';
 import 'package:synapse/main.dart';
+import 'package:synapse/presentation/workspace/controller/workspace_dependencies.dart';
 import 'package:synapse/presentation/workspace/state/workspace_mutation_barrier.dart';
 import 'package:synapse/presentation/workspace/editor/live_markdown_editable_text.dart';
 import 'package:synapse/presentation/workspace/editor/live_markdown_editor.dart';
@@ -104,6 +105,7 @@ Future<TextEditingController> runQueuedLastReferenceCloseRace(
 Future<void> pumpWorkspace(
   WidgetTester tester, {
   required MemoryVaultBackend? vault,
+  WorkspaceDependencies? dependencies,
   ImageInputService? imageInput,
   AiProvider? aiProvider,
   ProviderConfigStore? configStore,
@@ -121,6 +123,7 @@ Future<void> pumpWorkspace(
   });
   await tester.pumpWidget(
     SynapseApp(
+      dependencies: dependencies,
       vault: vault,
       imageInput: imageInput,
       aiProvider: aiProvider,

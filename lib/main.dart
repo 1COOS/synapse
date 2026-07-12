@@ -17,6 +17,7 @@ void main() {
 class SynapseApp extends StatelessWidget {
   const SynapseApp({
     super.key,
+    this.dependencies,
     this.vault,
     this.imageInput,
     this.settingsStore,
@@ -29,6 +30,7 @@ class SynapseApp extends StatelessWidget {
     this.workspaceCommitFailureForTesting,
   });
 
+  final WorkspaceDependencies? dependencies;
   final VaultBackend? vault;
   final ImageInputService? imageInput;
   final SettingsStore? settingsStore;
@@ -53,6 +55,7 @@ class SynapseApp extends StatelessWidget {
           scaffoldBackgroundColor: Color(0xFFF5F5F7),
         ),
         home: SynapseWorkspace(
+          dependencies: dependencies,
           initialVault: vault,
           imageInput: imageInput,
           settingsStore: settingsStore,
