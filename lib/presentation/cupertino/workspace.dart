@@ -159,6 +159,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   ProviderConfig? _providerConfig;
   bool _usesInjectedAiProvider = false;
   int _runtimeGeneration = 0;
+  final Set<_PaneEditorSaveScope> _paneEditorSaveScopes = {};
 
   WorkspaceAppearance get _workspaceAppearance {
     return WorkspaceAppearance.fromPreferences(_workspacePreferences);
@@ -918,6 +919,24 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     }
   }
 
+  Future<PaneEditorCommandOutcome> _runPaneEditorCommand(
+    PaneEditorContext context,
+    Future<PaneEditorCommandOutcome> Function() action,
+  ) async {
+    if (_resolvePaneEditorContext(context) == null) {
+      return PaneEditorCommandOutcome.staleTarget;
+    }
+    try {
+      return await action();
+    } catch (error) {
+      if (!mounted || _resolvePaneEditorContext(context) == null) {
+        return PaneEditorCommandOutcome.staleTarget;
+      }
+      setState(() => _message = error.toString());
+      return PaneEditorCommandOutcome.unchanged;
+    }
+  }
+
   bool _hasUsableAiProvider() {
     return _usesInjectedAiProvider || (_providerConfig?.isComplete ?? false);
   }
@@ -1210,11 +1229,73 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     return result.succeeded;
   }
 
+  Future<PaneEditorCommandOutcome?> _flushPaneEditorSession(
+    PaneEditorContext context,
+    NoteDocumentSession session, {
+    String? successMessage,
+  }) async {
+    final saved = await _runPaneEditorSaveScope(
+      context,
+      session,
+      () => _flushSessionMarkdown(session, successMessage: successMessage),
+    );
+    if (_resolvePaneEditorContext(context) == null) {
+      return PaneEditorCommandOutcome.staleTarget;
+    }
+    return saved ? null : PaneEditorCommandOutcome.unchanged;
+  }
+
+  Future<PaneEditorCommandOutcome?> _savePaneEditorSession(
+    PaneEditorContext context,
+    NoteDocumentSession session, {
+    required bool automatic,
+    required bool rescheduleIfDirty,
+    String? successMessage,
+  }) async {
+    final saved = await _runPaneEditorSaveScope(
+      context,
+      session,
+      () => _saveSessionMarkdown(
+        session,
+        automatic: automatic,
+        rescheduleIfDirty: rescheduleIfDirty,
+        successMessage: successMessage,
+      ),
+    );
+    if (_resolvePaneEditorContext(context) == null) {
+      return PaneEditorCommandOutcome.staleTarget;
+    }
+    return saved ? null : PaneEditorCommandOutcome.unchanged;
+  }
+
+  Future<bool> _runPaneEditorSaveScope(
+    PaneEditorContext context,
+    NoteDocumentSession session,
+    Future<bool> Function() save,
+  ) async {
+    final scope = _PaneEditorSaveScope(
+      session: session,
+      bodySnapshot: session.controller.text,
+      runtimeGeneration: context.runtimeGeneration,
+    );
+    _paneEditorSaveScopes.add(scope);
+    try {
+      return await save();
+    } finally {
+      _paneEditorSaveScopes.remove(scope);
+    }
+  }
+
   Future<void> _applyNoteSaveResult(
     NoteSaveResult result,
     SaveRequest request,
   ) async {
     if (!mounted) {
+      return;
+    }
+    final session = result.session;
+    if (!_noteSessionRegistryOwnsSaveResult(result) ||
+        _paneEditorSaveResultIsRuntimeStale(result)) {
       return;
     }
     if (!result.succeeded) {
@@ -1223,13 +1304,6 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     }
     final savedNote = result.savedNote;
     if (savedNote == null) {
-      return;
-    }
-    final session = result.session;
-    final stillOpen =
-        identical(_noteSessionRegistry.sessionFor(result.oldNoteId), session) ||
-        identical(_noteSessionRegistry.sessionFor(savedNote.id), session);
-    if (!stillOpen) {
       return;
     }
     final mutationResult = await _workspaceMutationBarrier.commitPrepared<void>(
@@ -1277,6 +1351,29 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     )) {
       Error.throwWithStackTrace(error, stackTrace);
     }
+  }
+
+  bool _noteSessionRegistryOwnsSaveResult(NoteSaveResult result) {
+    final session = result.session;
+    return noteSessionRegistryOwnsSession(
+      sessions: _noteSessionRegistry,
+      sessionIdentity: session,
+      noteIds: <String>{
+        result.oldNoteId,
+        session.noteId,
+        if (result.savedNote case final savedNote?) savedNote.id,
+      },
+    );
+  }
+
+  bool _paneEditorSaveResultIsRuntimeStale(NoteSaveResult result) {
+    for (final scope in _paneEditorSaveScopes) {
+      if (identical(scope.session, result.session) &&
+          scope.bodySnapshot == result.bodySnapshot) {
+        return scope.runtimeGeneration != _runtimeGeneration;
+      }
+    }
+    return false;
   }
 
   Future<PaneEditorCommandOutcome> _pasteIntoNoteEditor(
@@ -1360,16 +1457,17 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       resolved.session,
       _blockInsertionForCurrentSelection(resolved.session, tag),
     );
-    final saved = await _flushSessionMarkdown(
+    final saveFailure = await _flushPaneEditorSession(
+      context,
       resolved.session,
       successMessage: '图片已粘贴到笔记：$filename',
     );
+    if (saveFailure != null || !mounted) {
+      return saveFailure ?? PaneEditorCommandOutcome.unchanged;
+    }
     resolved = _resolvePaneEditorContext(context);
     if (resolved == null) {
       return PaneEditorCommandOutcome.staleTarget;
-    }
-    if (!saved || !mounted) {
-      return PaneEditorCommandOutcome.unchanged;
     }
     setState(() {
       _noteMaterialsRegistry.setSourceSelected(
@@ -1466,29 +1564,32 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       setState(() => _message = '请先选择或创建笔记');
       return PaneEditorCommandOutcome.unchanged;
     }
-    var resolved = _resolvePaneEditorContext(context);
-    if (resolved == null) {
-      return PaneEditorCommandOutcome.staleTarget;
-    }
-    if (!await _flushSessionMarkdown(resolved.session)) {
-      return PaneEditorCommandOutcome.unchanged;
-    }
-    if (_resolvePaneEditorContext(context) == null) {
-      return PaneEditorCommandOutcome.staleTarget;
-    }
-    final image = await _imageInput.pickImage();
-    if (_resolvePaneEditorContext(context) == null) {
-      return PaneEditorCommandOutcome.staleTarget;
-    }
-    if (image == null) {
-      setState(() => _message = '未选择图片');
-      return PaneEditorCommandOutcome.unchanged;
-    }
-    return _saveImportedImage(
-      context,
-      image,
-      message: '图片已导入：${image.filename}',
-    );
+    return _runPaneEditorCommand(context, () async {
+      final resolved = _resolvePaneEditorContext(context);
+      if (resolved == null) {
+        return PaneEditorCommandOutcome.staleTarget;
+      }
+      final flushFailure = await _flushPaneEditorSession(
+        context,
+        resolved.session,
+      );
+      if (flushFailure != null) {
+        return flushFailure;
+      }
+      final image = await _imageInput.pickImage();
+      if (_resolvePaneEditorContext(context) == null) {
+        return PaneEditorCommandOutcome.staleTarget;
+      }
+      if (image == null) {
+        setState(() => _message = '未选择图片');
+        return PaneEditorCommandOutcome.unchanged;
+      }
+      return _saveImportedImage(
+        context,
+        image,
+        message: '图片已导入：${image.filename}',
+      );
+    });
   }
 
   Future<PaneEditorCommandOutcome> _pasteImageSource(
@@ -1506,8 +1607,12 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       if (resolved == null) {
         return PaneEditorCommandOutcome.staleTarget;
       }
-      if (!await _flushSessionMarkdown(resolved.session)) {
-        return PaneEditorCommandOutcome.unchanged;
+      final flushFailure = await _flushPaneEditorSession(
+        context,
+        resolved.session,
+      );
+      if (flushFailure != null) {
+        return flushFailure;
       }
       if (_resolvePaneEditorContext(context) == null) {
         return PaneEditorCommandOutcome.staleTarget;
@@ -1543,8 +1648,12 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       if (resolved == null) {
         return PaneEditorCommandOutcome.staleTarget;
       }
-      if (!await _flushSessionMarkdown(resolved.session)) {
-        return PaneEditorCommandOutcome.unchanged;
+      final flushFailure = await _flushPaneEditorSession(
+        context,
+        resolved.session,
+      );
+      if (flushFailure != null) {
+        return flushFailure;
       }
       resolved = _resolvePaneEditorContext(context);
       if (resolved == null) {
@@ -1670,8 +1779,12 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       if (resolved == null) {
         return PaneEditorCommandOutcome.staleTarget;
       }
-      if (!await _flushSessionMarkdown(resolved!.session)) {
-        return PaneEditorCommandOutcome.unchanged;
+      final flushFailure = await _flushPaneEditorSession(
+        context,
+        resolved!.session,
+      );
+      if (flushFailure != null) {
+        return flushFailure;
       }
       resolved = _resolvePaneEditorContext(context);
       if (resolved == null) {
@@ -1700,14 +1813,16 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     if (_resolvePaneEditorContext(context) == null) {
       return PaneEditorCommandOutcome.staleTarget;
     }
-    await Clipboard.setData(
-      ClipboardData(text: _normalizeLineBreaks(proposal.proposedMarkdown)),
-    );
-    if (_resolvePaneEditorContext(context) == null) {
-      return PaneEditorCommandOutcome.staleTarget;
-    }
-    setState(() => _message = '建议已复制到剪贴板');
-    return PaneEditorCommandOutcome.committed;
+    return _runPaneEditorCommand(context, () async {
+      await Clipboard.setData(
+        ClipboardData(text: _normalizeLineBreaks(proposal.proposedMarkdown)),
+      );
+      if (_resolvePaneEditorContext(context) == null) {
+        return PaneEditorCommandOutcome.staleTarget;
+      }
+      setState(() => _message = '建议已复制到剪贴板');
+      return PaneEditorCommandOutcome.committed;
+    });
   }
 
   String _normalizeLineBreaks(String value) {
@@ -2159,8 +2274,12 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       if (resolved == null) {
         return PaneEditorCommandOutcome.staleTarget;
       }
-      if (!await _flushSessionMarkdown(resolved.session)) {
-        return PaneEditorCommandOutcome.unchanged;
+      final flushFailure = await _flushPaneEditorSession(
+        context,
+        resolved.session,
+      );
+      if (flushFailure != null) {
+        return flushFailure;
       }
       resolved = _resolvePaneEditorContext(context);
       if (resolved == null) {
@@ -3324,17 +3443,20 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
         unawaited(
           _applyImageWidth(
             editorContext,
+            sourceId: source.id,
             src: src,
             width: clampImageWidth(value.round()),
           ),
         );
       },
-      onImageDropped: (draggedSrc, targetSrc, side) {
+      onImageDropped: (dragged, target, side) {
         unawaited(
           _applyImageDrop(
             editorContext,
-            draggedSrc: draggedSrc,
-            targetSrc: targetSrc,
+            draggedSourceId: dragged.sourceId,
+            draggedSrc: dragged.src,
+            targetSourceId: target.sourceId,
+            targetSrc: target.src,
             beforeTarget: side == ImageDropSide.before,
           ),
         );
@@ -3344,18 +3466,23 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
 
   Future<PaneEditorCommandOutcome> _applyImageDrop(
     PaneEditorContext context, {
+    required String draggedSourceId,
     required String draggedSrc,
+    required String targetSourceId,
     required String targetSrc,
     required bool beforeTarget,
   }) async {
-    if (normalizeImageSrc(draggedSrc) == normalizeImageSrc(targetSrc) ||
-        _imageSourceForMarkdownSrc(context, draggedSrc) == null ||
-        _imageSourceForMarkdownSrc(context, targetSrc) == null) {
+    if (draggedSourceId == targetSourceId ||
+        normalizeImageSrc(draggedSrc) == normalizeImageSrc(targetSrc)) {
       return PaneEditorCommandOutcome.unchanged;
     }
     var resolved = _resolvePaneEditorContext(context);
     if (resolved == null) {
       return PaneEditorCommandOutcome.staleTarget;
+    }
+    if (_sourceForId(resolved.session, draggedSourceId) == null ||
+        _sourceForId(resolved.session, targetSourceId) == null) {
+      return PaneEditorCommandOutcome.unchanged;
     }
     final controller = resolved.session.controller;
     final updated = moveImageTagInMarkdown(
@@ -3371,32 +3498,36 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     if (resolved == null) {
       return PaneEditorCommandOutcome.staleTarget;
     }
+    if (_sourceForId(resolved.session, draggedSourceId) == null ||
+        _sourceForId(resolved.session, targetSourceId) == null) {
+      return PaneEditorCommandOutcome.unchanged;
+    }
     setState(() {
       _setSelectedPreviewImageSrc(draggedSrc);
       _replaceSessionMarkdown(resolved!.session, updated);
     });
-    final saved = await _saveSessionMarkdown(
+    final saveFailure = await _savePaneEditorSession(
+      context,
       resolved.session,
       successMessage: '图片位置已更新',
       automatic: false,
       rescheduleIfDirty: false,
     );
-    if (_resolvePaneEditorContext(context) == null) {
-      return PaneEditorCommandOutcome.staleTarget;
-    }
-    return saved
-        ? PaneEditorCommandOutcome.committed
-        : PaneEditorCommandOutcome.unchanged;
+    return saveFailure ?? PaneEditorCommandOutcome.committed;
   }
 
   Future<PaneEditorCommandOutcome> _applyImageWidth(
     PaneEditorContext context, {
+    required String sourceId,
     required String src,
     required int width,
   }) async {
     var resolved = _resolvePaneEditorContext(context);
     if (resolved == null) {
       return PaneEditorCommandOutcome.staleTarget;
+    }
+    if (_sourceForId(resolved.session, sourceId) == null) {
+      return PaneEditorCommandOutcome.unchanged;
     }
     final controller = resolved.session.controller;
     final updated = replaceImageWidthInMarkdown(
@@ -3411,22 +3542,30 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     if (resolved == null) {
       return PaneEditorCommandOutcome.staleTarget;
     }
+    if (_sourceForId(resolved.session, sourceId) == null) {
+      return PaneEditorCommandOutcome.unchanged;
+    }
     setState(() {
       _setSelectedPreviewImageSrc(src);
       _replaceSessionMarkdown(resolved!.session, updated);
     });
-    final saved = await _saveSessionMarkdown(
+    final saveFailure = await _savePaneEditorSession(
+      context,
       resolved.session,
       successMessage: '图片宽度已更新',
       automatic: false,
       rescheduleIfDirty: false,
     );
-    if (_resolvePaneEditorContext(context) == null) {
-      return PaneEditorCommandOutcome.staleTarget;
+    return saveFailure ?? PaneEditorCommandOutcome.committed;
+  }
+
+  SourceItem? _sourceForId(NoteDocumentSession session, String sourceId) {
+    for (final source in session.note.sources) {
+      if (source.id == sourceId) {
+        return source;
+      }
     }
-    return saved
-        ? PaneEditorCommandOutcome.committed
-        : PaneEditorCommandOutcome.unchanged;
+    return null;
   }
 
   SourceItem? _imageSourceForMarkdownSrc(
@@ -3800,6 +3939,18 @@ int _clampTextOffset(int value, int length) {
     return length;
   }
   return value;
+}
+
+final class _PaneEditorSaveScope {
+  const _PaneEditorSaveScope({
+    required this.session,
+    required this.bodySnapshot,
+    required this.runtimeGeneration,
+  });
+
+  final NoteDocumentSession session;
+  final String bodySnapshot;
+  final int runtimeGeneration;
 }
 
 class _LegacySettingsStore implements SettingsStore {

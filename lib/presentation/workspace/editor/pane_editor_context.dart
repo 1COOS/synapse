@@ -76,3 +76,18 @@ ResolvedPaneEditorContext? resolvePaneEditorContext(
     session: session,
   );
 }
+
+bool noteSessionRegistryOwnsSession({
+  required NoteSessionRegistry sessions,
+  required Object sessionIdentity,
+  required Iterable<String> noteIds,
+}) {
+  final seen = <String>{};
+  for (final noteId in noteIds) {
+    if (seen.add(noteId) &&
+        identical(sessions.sessionFor(noteId), sessionIdentity)) {
+      return true;
+    }
+  }
+  return false;
+}

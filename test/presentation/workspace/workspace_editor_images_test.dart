@@ -7,6 +7,7 @@ import 'package:synapse/infrastructure/config/synapse_settings.dart';
 import 'package:synapse/infrastructure/input/image_input_service.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
 import 'package:synapse/presentation/workspace/editor/live_markdown_editor.dart';
+import 'package:synapse/presentation/workspace/editor/preview_image_block.dart';
 
 import '../../support/workspace_fakes.dart';
 import '../../support/workspace_harness.dart';
@@ -797,6 +798,170 @@ void main() {
     expect(vault.updateCalls, greaterThanOrEqualTo(1));
     expect(vault.lastSavedMarkdown, contains('width="640"'));
     expect((await vault.readNote(note.id)).markdown, contains('width="640"'));
+  });
+
+  testWidgets(
+    'same-session title remap preserves captured image width target',
+    (tester) async {
+      final vault = CountingUpdateVaultBackend(seedExampleData: false);
+      final note = await vault.createNote(parentPath: '', title: 'Alpha');
+      final source = await vault.addImageSource(
+        noteId: note.id,
+        filename: 'width.png',
+        mimeType: 'image/png',
+        bytes: tinyPng,
+      );
+      const originalSrc = 'Alpha.assets/attachments/width.png';
+      await vault.updateMarkdown(
+        noteId: note.id,
+        markdown: '# Alpha\n\n<img src="$originalSrc" width="320">',
+      );
+
+      await pumpWorkspace(tester, vault: vault);
+      await tester.pumpAndSettle();
+      final capturedImage = tester.widget<PreviewImageBlock>(
+        find.byKey(Key('preview-image-${source.id}')),
+      );
+
+      await activateLiveMarkdownBlock(tester);
+      final editorState = activeLiveMarkdownEditableTextState(tester);
+      editorState.updateEditingValue(
+        const TextEditingValue(
+          text: '# Remapped',
+          selection: TextSelection.collapsed(offset: 10),
+        ),
+      );
+      await tester.pump(const Duration(milliseconds: 1000));
+      await tester.pumpAndSettle();
+
+      capturedImage.onWidthChanged(480);
+      await tester.pumpAndSettle();
+
+      final remapped = await vault.readNote('Remapped.md');
+      expect(remapped.markdown, contains('src="$originalSrc" width="480"'));
+      expect(vault.updatedNoteIds.last, 'Remapped.md');
+    },
+  );
+
+  testWidgets('same-session title remap preserves captured image drop target', (
+    tester,
+  ) async {
+    final vault = CountingUpdateVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Alpha');
+    final first = await vault.addImageSource(
+      noteId: note.id,
+      filename: 'first.png',
+      mimeType: 'image/png',
+      bytes: tinyPng,
+    );
+    final second = await vault.addImageSource(
+      noteId: note.id,
+      filename: 'second.png',
+      mimeType: 'image/png',
+      bytes: tinyPng,
+    );
+    const firstSrc = 'Alpha.assets/attachments/first.png';
+    const secondSrc = 'Alpha.assets/attachments/second.png';
+    const firstTag = '<img src="$firstSrc" width="320">';
+    const secondTag = '<img src="$secondSrc" width="320">';
+    await vault.updateMarkdown(
+      noteId: note.id,
+      markdown: '# Alpha\n\n$firstTag\n\n$secondTag',
+    );
+
+    await pumpWorkspace(tester, vault: vault);
+    await tester.pumpAndSettle();
+    final capturedTarget = tester.widget<PreviewImageBlock>(
+      find.byKey(Key('preview-image-${second.id}')),
+    );
+
+    await activateLiveMarkdownBlock(tester);
+    final editorState = activeLiveMarkdownEditableTextState(tester);
+    editorState.updateEditingValue(
+      const TextEditingValue(
+        text: '# Remapped',
+        selection: TextSelection.collapsed(offset: 10),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 1000));
+    await tester.pumpAndSettle();
+
+    capturedTarget.onImageDropped(
+      PreviewImageDragData(sourceId: first.id, src: firstSrc),
+      PreviewImageDragData(sourceId: second.id, src: secondSrc),
+      ImageDropSide.after,
+    );
+    await tester.pumpAndSettle();
+
+    final remapped = await vault.readNote('Remapped.md');
+    expect(remapped.markdown, contains('$secondTag $firstTag'));
+    expect(vault.updatedNoteIds.last, 'Remapped.md');
+  });
+
+  testWidgets('stale delayed image save failure does not replace runtime UI', (
+    tester,
+  ) async {
+    final vault = GatedFailingUpdateVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Alpha');
+    final source = await vault.addImageSource(
+      noteId: note.id,
+      filename: 'save.png',
+      mimeType: 'image/png',
+      bytes: tinyPng,
+    );
+    await vault.updateMarkdown(
+      noteId: note.id,
+      markdown:
+          '# Alpha\n\n'
+          '<img src="Alpha.assets/attachments/save.png" width="320">',
+    );
+    vault.gateUpdates = true;
+    final settingsStore = FakeSettingsStore();
+
+    await pumpWorkspace(tester, vault: vault, settingsStore: settingsStore);
+    await tester.pumpAndSettle();
+    final image = tester.widget<PreviewImageBlock>(
+      find.byKey(Key('preview-image-${source.id}')),
+    );
+    final openSettings = tester
+        .widget<CupertinoButton>(
+          find.descendant(
+            of: find.byKey(const Key('settings-button')),
+            matching: find.byType(CupertinoButton),
+          ),
+        )
+        .onPressed!;
+
+    image.onWidthChanged(480);
+    await vault.updateStarted.future;
+    openSettings();
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('settings-nav-models')));
+    await tester.pump();
+    await tester.enterText(
+      find.byKey(const Key('provider-base-url')),
+      'https://api.example.com/v1',
+    );
+    await tester.enterText(
+      find.byKey(const Key('provider-api-key')),
+      'secret-key',
+    );
+    await tester.enterText(
+      find.byKey(const Key('provider-chat-model')),
+      'chat-model',
+    );
+    await tester.enterText(
+      find.byKey(const Key('provider-vision-model')),
+      'vision-model',
+    );
+    await tester.tap(find.text('保存设置'));
+    await tester.pumpAndSettle();
+
+    vault.releaseUpdate();
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('delayed save failed'), findsNothing);
+    expect(find.textContaining('模型设置已保存'), findsOneWidget);
   });
 
   testWidgets('reading mode hides image resize controls', (tester) async {

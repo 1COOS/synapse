@@ -9,6 +9,13 @@ enum ImageDropSide { before, after }
 
 enum ImagePreviewMode { reading, editing }
 
+final class PreviewImageDragData {
+  const PreviewImageDragData({required this.sourceId, required this.src});
+
+  final String sourceId;
+  final String src;
+}
+
 class PreviewImageBlock extends StatefulWidget {
   const PreviewImageBlock({
     super.key,
@@ -31,7 +38,11 @@ class PreviewImageBlock extends StatefulWidget {
   final Future<List<int>> imageBytes;
   final VoidCallback onTap;
   final ValueChanged<double> onWidthChanged;
-  final void Function(String draggedSrc, String targetSrc, ImageDropSide side)
+  final void Function(
+    PreviewImageDragData dragged,
+    PreviewImageDragData target,
+    ImageDropSide side,
+  )
   onImageDropped;
 
   @override
@@ -145,7 +156,7 @@ class _PreviewImageBlockState extends State<PreviewImageBlock> {
     });
   }
 
-  void _handleDragMove(DragTargetDetails<String> details) {
+  void _handleDragMove(DragTargetDetails<PreviewImageDragData> details) {
     if (!widget.editableControls) {
       return;
     }
@@ -156,20 +167,24 @@ class _PreviewImageBlockState extends State<PreviewImageBlock> {
     setState(() => _dropSide = next);
   }
 
-  void _handleDragLeave(String? data) {
+  void _handleDragLeave(PreviewImageDragData? data) {
     if (_dropSide == null) {
       return;
     }
     setState(() => _dropSide = null);
   }
 
-  void _handleImageDrop(DragTargetDetails<String> details) {
+  void _handleImageDrop(DragTargetDetails<PreviewImageDragData> details) {
     if (!widget.editableControls) {
       return;
     }
     final side = _dropSideForGlobalOffset(details.offset);
     setState(() => _dropSide = null);
-    widget.onImageDropped(details.data, widget.src, side);
+    widget.onImageDropped(
+      details.data,
+      PreviewImageDragData(sourceId: widget.source.id, src: widget.src),
+      side,
+    );
   }
 
   ImageDropSide _dropSideForGlobalOffset(Offset globalOffset) {
@@ -199,16 +214,19 @@ class _PreviewImageBlockState extends State<PreviewImageBlock> {
               clipBehavior: Clip.none,
               children: [
                 if (widget.editableControls)
-                  DragTarget<String>(
+                  DragTarget<PreviewImageDragData>(
                     onWillAcceptWithDetails: (details) =>
-                        details.data != widget.src,
+                        details.data.sourceId != widget.source.id,
                     onMove: _handleDragMove,
                     onLeave: _handleDragLeave,
                     onAcceptWithDetails: _handleImageDrop,
                     builder: (context, candidateData, rejectedData) {
                       final image = _buildImageBody();
-                      return Draggable<String>(
-                        data: widget.src,
+                      return Draggable<PreviewImageDragData>(
+                        data: PreviewImageDragData(
+                          sourceId: widget.source.id,
+                          src: widget.src,
+                        ),
                         dragAnchorStrategy: pointerDragAnchorStrategy,
                         feedback: _PreviewImageDragFeedback(
                           width: displayWidth,

@@ -236,6 +236,37 @@ class DelayedUpdateVaultBackend extends MemoryVaultBackend {
   }
 }
 
+class GatedFailingUpdateVaultBackend extends CountingUpdateVaultBackend {
+  GatedFailingUpdateVaultBackend({super.seedExampleData});
+
+  bool gateUpdates = false;
+  final updateStarted = Completer<void>();
+  final _updateRelease = Completer<void>();
+
+  void releaseUpdate() {
+    if (!_updateRelease.isCompleted) {
+      _updateRelease.complete();
+    }
+  }
+
+  @override
+  Future<VaultNoteContent> updateMarkdown({
+    required String noteId,
+    required String markdown,
+  }) async {
+    if (!gateUpdates) {
+      return super.updateMarkdown(noteId: noteId, markdown: markdown);
+    }
+    updatedNoteIds.add(noteId);
+    lastSavedMarkdown = markdown;
+    if (!updateStarted.isCompleted) {
+      updateStarted.complete();
+    }
+    await _updateRelease.future;
+    throw StateError('delayed save failed');
+  }
+}
+
 class GatedCloseVaultBackend extends MemoryVaultBackend {
   GatedCloseVaultBackend({
     required this.blockedNoteId,

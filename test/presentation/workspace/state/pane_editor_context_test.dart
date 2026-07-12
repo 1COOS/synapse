@@ -119,6 +119,22 @@ void main() {
       );
     });
 
+    test('save ownership rejects a removed and replaced session', () async {
+      final removed = sessions.upsert(await _note('A'));
+      sessions.remove(['A.md'], dispose: false);
+      final replacement = sessions.upsert(await _note('A'));
+
+      expect(replacement, isNot(same(removed)));
+      expect(
+        noteSessionRegistryOwnsSession(
+          sessions: sessions,
+          sessionIdentity: removed,
+          noteIds: const ['A.md', 'Renamed.md'],
+        ),
+        isFalse,
+      );
+    });
+
     test('session replacement stales the captured target', () async {
       sessions.upsert(await _note('A'));
       final context = capturePaneEditorContext(

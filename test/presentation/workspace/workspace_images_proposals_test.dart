@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart' show SelectableText;
 import 'package:flutter/services.dart';
@@ -89,6 +91,30 @@ void main() {
       expect(await vault.listSources(beta.id), isEmpty);
     },
   );
+
+  testWidgets('stale picker failure after pane rebind is contained', (
+    tester,
+  ) async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final alpha = await vault.createNote(parentPath: '', title: 'Alpha');
+    final beta = await vault.createNote(parentPath: '', title: 'Beta');
+    final imageInput = GatedImageInputService(
+      pickError: StateError('stale picker failed'),
+    );
+
+    await pumpWorkspace(tester, vault: vault, imageInput: imageInput);
+    await tester.tap(find.byKey(const Key('add-image-button')));
+    await imageInput.pickStarted.future;
+    await tester.tap(find.byKey(Key('resource-row-${beta.id}')));
+    await tester.pump(const Duration(milliseconds: 250));
+    imageInput.releasePick();
+    await tester.pumpAndSettle();
+
+    expect(tester.takeException(), isNull);
+    expect(find.textContaining('stale picker failed'), findsNothing);
+    expect(await vault.listSources(alpha.id), isEmpty);
+    expect(await vault.listSources(beta.id), isEmpty);
+  });
 
   testWidgets('delayed image import rejects a rebound pane target', (
     tester,
@@ -418,6 +444,57 @@ void main() {
     await tester.pump();
 
     expect(copiedText, '藏有二义\n├── 摄彼胜义故\n└── 依彼故');
+  });
+
+  testWidgets('stale clipboard failure after pane rebind is contained', (
+    tester,
+  ) async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final alpha = await vault.createNote(parentPath: '', title: 'Alpha');
+    final beta = await vault.createNote(parentPath: '', title: 'Beta');
+    final now = DateTime.now().toUtc();
+    await vault.saveProposal(
+      AiProposal(
+        id: 'clipboard-failure',
+        noteId: alpha.id,
+        sourceIds: const [],
+        title: '复制失败',
+        proposedMarkdown: 'alpha proposal',
+        status: ProposalStatus.pending,
+        createdAt: now,
+        updatedAt: now,
+      ),
+    );
+    final clipboardStarted = Completer<void>();
+    final clipboardRelease = Completer<void>();
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(SystemChannels.platform, (methodCall) async {
+          if (methodCall.method == 'Clipboard.setData') {
+            clipboardStarted.complete();
+            await clipboardRelease.future;
+            throw StateError('stale clipboard failed');
+          }
+          return null;
+        });
+    addTearDown(() {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(SystemChannels.platform, null);
+    });
+
+    await pumpWorkspace(tester, vault: vault);
+    await tester.tap(find.byKey(const Key('copy-proposal-button')));
+    await clipboardStarted.future;
+    await tester.tap(find.byKey(Key('resource-row-${beta.id}')));
+    await tester.pump(const Duration(milliseconds: 250));
+    clipboardRelease.complete();
+    await tester.pumpAndSettle();
+
+    expect(tester.takeException(), isNull);
+    expect(find.textContaining('stale clipboard failed'), findsNothing);
+    expect(
+      (await vault.readNote(beta.id)).markdown,
+      isNot(contains('proposal')),
+    );
   });
 
   testWidgets('shows contained image thumbnails and full image preview', (
