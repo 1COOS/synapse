@@ -255,6 +255,94 @@ void main() {
       },
     );
 
+    test(
+      'rejects a prepared mutation after an intervening material mutation',
+      () {
+        final registry = NoteMaterialsRegistry();
+        addTearDown(registry.dispose);
+        registry.replaceProposals('A.md', [_proposal(noteId: 'A.md')]);
+        final prepared = registry.prepareMutation(
+          remappedNoteIds: const {'A.md': 'B.md'},
+          removedNoteIds: const {},
+          refreshedNotesByNewId: {'B.md': _note('B.md')},
+        );
+
+        registry.setSourceSelected('A.md', 'current-source', true);
+
+        expect(prepared.applySilently, throwsStateError);
+        expect(prepared.publish, throwsStateError);
+        expect(registry.snapshotFor('A.md').selectedSourceIds, {
+          'current-source',
+        });
+        expect(registry.snapshotFor('B.md'), same(NoteMaterialsSnapshot.empty));
+      },
+    );
+
+    test('rejects a prepared mutation after clear and new material state', () {
+      final registry = NoteMaterialsRegistry();
+      addTearDown(registry.dispose);
+      registry.replaceProposals('A.md', [_proposal(noteId: 'A.md')]);
+      final prepared = registry.prepareMutation(
+        remappedNoteIds: const {'A.md': 'B.md'},
+        removedNoteIds: const {},
+        refreshedNotesByNewId: {'B.md': _note('B.md')},
+      );
+
+      registry
+        ..clear()
+        ..replaceProposals('C.md', [_proposal(noteId: 'C.md')]);
+
+      expect(prepared.applySilently, throwsStateError);
+      expect(registry.snapshotFor('A.md'), same(NoteMaterialsSnapshot.empty));
+      expect(registry.snapshotFor('B.md'), same(NoteMaterialsSnapshot.empty));
+      expect(registry.snapshotFor('C.md').proposals.single.noteId, 'C.md');
+    });
+
+    test(
+      'rejects publish when an applied mutation becomes stale before notifying',
+      () {
+        final registry = NoteMaterialsRegistry();
+        addTearDown(registry.dispose);
+        registry.replaceProposals('A.md', [_proposal(noteId: 'A.md')]);
+        final prepared = registry.prepareMutation(
+          remappedNoteIds: const {'A.md': 'B.md'},
+          removedNoteIds: const {},
+          refreshedNotesByNewId: {'B.md': _note('B.md')},
+        );
+        var notifications = 0;
+        registry.addListener(() => notifications += 1);
+
+        prepared.applySilently();
+        registry.setSourceSelected('B.md', 'current-source', true);
+
+        expect(prepared.publish, throwsStateError);
+        expect(notifications, 1);
+        expect(registry.snapshotFor('B.md').selectedSourceIds, {
+          'current-source',
+        });
+      },
+    );
+
+    test('rejects a prepared mutation after dispose without repopulating', () {
+      final registry = NoteMaterialsRegistry();
+      registry.replaceProposals('A.md', [_proposal(noteId: 'A.md')]);
+      final prepared = registry.prepareMutation(
+        remappedNoteIds: const {'A.md': 'B.md'},
+        removedNoteIds: const {},
+        refreshedNotesByNewId: {'B.md': _note('B.md')},
+      );
+      var notifications = 0;
+      registry.addListener(() => notifications += 1);
+
+      registry.dispose();
+
+      expect(prepared.applySilently, throwsStateError);
+      expect(prepared.publish, throwsStateError);
+      expect(registry.snapshots, isEmpty);
+      expect(registry.snapshotFor('B.md'), same(NoteMaterialsSnapshot.empty));
+      expect(notifications, 0);
+    });
+
     test('remove retainOnly clear and dispose release material snapshots', () {
       final registry = NoteMaterialsRegistry();
       registry

@@ -35,6 +35,7 @@ final class NoteMaterialsRegistry extends ChangeNotifier {
   final Map<String, NoteMaterialsSnapshot> _snapshots =
       <String, NoteMaterialsSnapshot>{};
   bool _isDisposed = false;
+  Object _stateToken = Object();
 
   NoteMaterialsSnapshot snapshotFor(String noteId) {
     return _snapshots[noteId] ?? NoteMaterialsSnapshot.empty;
@@ -196,6 +197,7 @@ final class NoteMaterialsRegistry extends ChangeNotifier {
       registry: this,
       nextSnapshots: Map<String, NoteMaterialsSnapshot>.unmodifiable(next),
       didChange: !_sameMaps(_snapshots, next),
+      preparedToken: _stateToken,
     );
   }
 
@@ -226,13 +228,27 @@ final class NoteMaterialsRegistry extends ChangeNotifier {
     remove(_snapshots.keys.toList(growable: false));
   }
 
-  void _applyPreparedMutation(PreparedNoteMaterialsMutation mutation) {
-    _snapshots
-      ..clear()
-      ..addAll(mutation._nextSnapshots);
+  Object _applyPreparedMutation(PreparedNoteMaterialsMutation mutation) {
+    _ensurePreparedMutationCurrent(mutation._preparedToken);
+    if (mutation._didChange) {
+      _snapshots
+        ..clear()
+        ..addAll(mutation._nextSnapshots);
+    }
+    final appliedToken = Object();
+    _stateToken = appliedToken;
+    return appliedToken;
   }
 
-  void _publishPreparedMutation() {
+  void _ensurePreparedMutationCurrent(Object token) {
+    _ensureActive();
+    if (!identical(_stateToken, token)) {
+      throw StateError('Prepared note materials mutation is stale.');
+    }
+  }
+
+  void _publishPreparedMutation(Object appliedToken) {
+    _ensurePreparedMutationCurrent(appliedToken);
     notifyListeners();
   }
 
@@ -246,6 +262,7 @@ final class NoteMaterialsRegistry extends ChangeNotifier {
     } else {
       _snapshots[noteId] = next;
     }
+    _stateToken = Object();
     notifyListeners();
   }
 
@@ -261,6 +278,7 @@ final class NoteMaterialsRegistry extends ChangeNotifier {
       return;
     }
     _isDisposed = true;
+    _stateToken = Object();
     _snapshots.clear();
     super.dispose();
   }
@@ -271,13 +289,17 @@ final class PreparedNoteMaterialsMutation {
     required NoteMaterialsRegistry registry,
     required Map<String, NoteMaterialsSnapshot> nextSnapshots,
     required bool didChange,
+    required Object preparedToken,
   }) : _registry = registry,
        _nextSnapshots = nextSnapshots,
-       _didChange = didChange;
+       _didChange = didChange,
+       _preparedToken = preparedToken;
 
   final NoteMaterialsRegistry _registry;
   final Map<String, NoteMaterialsSnapshot> _nextSnapshots;
   final bool _didChange;
+  final Object _preparedToken;
+  Object? _appliedToken;
   bool _isApplied = false;
   bool _isPublished = false;
 
@@ -285,9 +307,7 @@ final class PreparedNoteMaterialsMutation {
     if (_isApplied) {
       return;
     }
-    if (_didChange) {
-      _registry._applyPreparedMutation(this);
-    }
+    _appliedToken = _registry._applyPreparedMutation(this);
     _isApplied = true;
   }
 
@@ -296,9 +316,11 @@ final class PreparedNoteMaterialsMutation {
       return;
     }
     applySilently();
+    final appliedToken = _appliedToken!;
+    _registry._ensurePreparedMutationCurrent(appliedToken);
     _isPublished = true;
     if (_didChange) {
-      _registry._publishPreparedMutation();
+      _registry._publishPreparedMutation(appliedToken);
     }
   }
 }
