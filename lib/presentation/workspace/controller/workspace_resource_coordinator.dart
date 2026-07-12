@@ -19,7 +19,7 @@ final class WorkspaceResourceStale extends WorkspaceResourceResult {
 
 final class WorkspaceResourceMissing extends WorkspaceResourceResult {
   WorkspaceResourceMissing({required List<VaultResourceNode> resources})
-    : resources = List<VaultResourceNode>.unmodifiable(resources);
+    : resources = _freezeResources(resources);
 
   final List<VaultResourceNode> resources;
 }

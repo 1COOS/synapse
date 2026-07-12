@@ -984,13 +984,18 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       final snapshot = await _resourceCoordinator.loadDetachedRuntime(
         candidate,
       );
-      await _saveSettings(_settings.copyWith(vaultLocation: location));
+      final savedSettings = _settings.copyWith(vaultLocation: location);
+      await _persistSettings(savedSettings);
       _noteSaveCoordinator.resetAfterReload();
       _workspaceMutationBarrier.resetAfterReload();
       _runtimeManager.install(candidate);
       candidate = null;
       _workspaceMutationToken = Object();
-      _applyInstalledRuntimeSnapshot(snapshot, message: message);
+      _applyInstalledRuntimeSnapshot(
+        snapshot,
+        settings: savedSettings,
+        message: message,
+      );
     } catch (_) {
       candidate?.dispose();
       rethrow;
@@ -999,9 +1004,11 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
 
   void _applyInstalledRuntimeSnapshot(
     WorkspaceResourceSnapshot snapshot, {
+    required SynapseSettings settings,
     required String message,
   }) {
     setState(() {
+      _settings = settings;
       _resources = snapshot.resources;
       _selectedResource = snapshot.selectedResource;
       _searchResults = const [];
@@ -1081,10 +1088,26 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     }
   }
 
-  Future<void> _saveSettings(SynapseSettings settings) async {
+  Future<void> _persistSettings(SynapseSettings settings) async {
     final store = await _getSettingsStore();
     await store.save(settings);
-    _settings = settings;
+  }
+
+  WorkspaceRuntime _createSettingsRuntimeCandidate(
+    WorkspaceRuntime current,
+    SynapseSettings settings,
+  ) {
+    final semanticSearchEnabled =
+        settings.preferences.semanticSearchEnabled &&
+        (_dependencies.usesInjectedAiProvider ||
+            settings.providerConfig.hasEmbeddingConfig);
+    return _dependencies.createRuntime(
+      vault: current.vault,
+      aiProvider: _dependencies.createAiProvider(settings.providerConfig),
+      semanticSearchEnabled: semanticSearchEnabled,
+      rootPath: current.rootPath,
+      label: current.label,
+    );
   }
 
   Future<void> _loadSavedVaultLocation() async {
@@ -3147,16 +3170,29 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       return;
     }
     await _runBusy(() async {
-      await _saveSettings(savedSettings);
-      setState(() {
-        _settings = savedSettings;
-        _workspacePreferences = savedSettings.preferences;
-        _providerConfig = savedSettings.providerConfig;
-        _useAiProvider(
-          _dependencies.createAiProvider(savedSettings.providerConfig),
-        );
-        _message = _modelConfigurationMessage();
-      });
+      final current = _runtimeManager.current;
+      WorkspaceRuntime? candidate;
+      try {
+        if (current != null) {
+          candidate = _createSettingsRuntimeCandidate(current, savedSettings);
+        }
+        await _persistSettings(savedSettings);
+        if (candidate != null) {
+          _runtimeManager.install(candidate);
+          candidate = null;
+          _workspaceMutationToken = Object();
+        }
+        setState(() {
+          _settings = savedSettings;
+          _workspacePreferences = savedSettings.preferences;
+          _providerConfig = savedSettings.providerConfig;
+          _splitWorkspaceController.updateDefaultMode(_preferredNoteMode);
+          _message = _modelConfigurationMessage();
+        });
+      } catch (_) {
+        candidate?.dispose();
+        rethrow;
+      }
     });
   }
 

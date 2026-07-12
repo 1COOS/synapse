@@ -160,6 +160,36 @@ void main() {
       );
     });
 
+    test('missing results deeply clone and freeze nested resources', () {
+      final children = <VaultResourceNode>[
+        const VaultResourceNode(
+          id: 'Alpha.md',
+          title: 'Alpha',
+          path: 'Alpha.md',
+          type: VaultResourceType.note,
+        ),
+      ];
+      final resources = <VaultResourceNode>[
+        VaultResourceNode(
+          id: 'folder',
+          title: 'Folder',
+          path: 'folder',
+          type: VaultResourceType.folder,
+          children: children,
+        ),
+      ];
+
+      final result = WorkspaceResourceMissing(resources: resources);
+      resources.clear();
+      children.clear();
+
+      expect(result.resources.single.children.single.id, 'Alpha.md');
+      expect(
+        () => result.resources.single.children.clear(),
+        throwsUnsupportedError,
+      );
+    });
+
     test('selects and refreshes a note by id', () async {
       final vault = MemoryVaultBackend(seedExampleData: false);
       final first = await vault.createNote(parentPath: '', title: 'Alpha');

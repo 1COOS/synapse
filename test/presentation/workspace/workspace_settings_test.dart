@@ -1,9 +1,12 @@
 import 'package:flutter/cupertino.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:synapse/application/search/search_index.dart';
 import 'package:synapse/domain/vault/vault_resource.dart';
+import 'package:synapse/infrastructure/ai/ai_provider.dart';
 import 'package:synapse/infrastructure/config/synapse_settings.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
+import 'package:synapse/presentation/workspace/controller/workspace_dependencies.dart';
 
 import '../../support/workspace_fakes.dart';
 import '../../support/workspace_harness.dart';
@@ -283,4 +286,223 @@ void main() {
     expect(testedConfig!.embeddingModel, isEmpty);
     expect(find.text('连接成功：chat-model'), findsOneWidget);
   });
+
+  testWidgets(
+    'runtime build failure keeps old settings runtime and provider behavior',
+    (tester) async {
+      final vault = MemoryVaultBackend(seedExampleData: false);
+      await vault.createNote(parentPath: '', title: 'Alpha');
+      final settingsStore = FakeSettingsStore(initialSettings: _oldSettings);
+      final providers = <_TrackingAiProvider>[];
+      final indexes = <_ProviderSearchIndex>[];
+      var failRuntimeBuild = false;
+      final dependencies = WorkspaceDependencies(
+        initialVault: vault,
+        settingsStore: settingsStore,
+        aiProviderFactory: (config) {
+          final provider = _TrackingAiProvider(config.normalizedBaseUrl);
+          providers.add(provider);
+          return provider;
+        },
+        searchIndexFactory: (provider, _) {
+          if (failRuntimeBuild) {
+            throw StateError('settings runtime build failed');
+          }
+          final index = _ProviderSearchIndex(provider);
+          indexes.add(index);
+          return index;
+        },
+      );
+
+      await pumpWorkspace(tester, vault: null, dependencies: dependencies);
+      final oldProvider = providers.last;
+      final oldIndex = indexes.last;
+      expect(
+        primaryButtonColor(tester, const Key('add-image-button')),
+        CupertinoColors.systemBlue,
+      );
+
+      await _enterReplacementSettings(tester);
+      failRuntimeBuild = true;
+      await tester.tap(find.text('保存设置'));
+      await tester.pumpAndSettle();
+
+      expect(oldIndex.disposeCalls, 0);
+      expect(settingsStore.savedSettings, isEmpty);
+      expect(settingsStore.currentSettings.providerConfig.baseUrl, 'old-url');
+      expect(
+        primaryButtonColor(tester, const Key('add-image-button')),
+        CupertinoColors.systemBlue,
+      );
+      expect(
+        find.textContaining('settings runtime build failed'),
+        findsOneWidget,
+      );
+
+      await _runSearch(tester);
+      expect(oldProvider.embeddingCalls, 1);
+      expect(providers.last.embeddingCalls, 0);
+    },
+  );
+
+  testWidgets(
+    'settings save failure disposes candidate and keeps old settings runtime',
+    (tester) async {
+      final vault = MemoryVaultBackend(seedExampleData: false);
+      await vault.createNote(parentPath: '', title: 'Alpha');
+      final settingsStore = _FailingSettingsStore(
+        initialSettings: _oldSettings,
+      );
+      final providers = <_TrackingAiProvider>[];
+      final indexes = <_ProviderSearchIndex>[];
+      final dependencies = WorkspaceDependencies(
+        initialVault: vault,
+        settingsStore: settingsStore,
+        aiProviderFactory: (config) {
+          final provider = _TrackingAiProvider(config.normalizedBaseUrl);
+          providers.add(provider);
+          return provider;
+        },
+        searchIndexFactory: (provider, _) {
+          final index = _ProviderSearchIndex(provider);
+          indexes.add(index);
+          return index;
+        },
+      );
+
+      await pumpWorkspace(tester, vault: null, dependencies: dependencies);
+      final oldProvider = providers.last;
+      final oldIndex = indexes.last;
+      settingsStore.failSaves = true;
+
+      await _enterReplacementSettings(tester);
+      await tester.tap(find.text('保存设置'));
+      await tester.pumpAndSettle();
+
+      expect(indexes, hasLength(greaterThan(1)));
+      expect(oldIndex.disposeCalls, 0);
+      expect(indexes.last.disposeCalls, 1);
+      expect(settingsStore.savedSettings, isEmpty);
+      expect(settingsStore.currentSettings.providerConfig.baseUrl, 'old-url');
+      expect(
+        primaryButtonColor(tester, const Key('add-image-button')),
+        CupertinoColors.systemBlue,
+      );
+      expect(find.textContaining('settings save failed'), findsOneWidget);
+
+      await _runSearch(tester);
+      expect(oldProvider.embeddingCalls, 1);
+      expect(providers.last.embeddingCalls, 0);
+    },
+  );
+}
+
+const _oldSettings = SynapseSettings(
+  providerConfig: ProviderConfig(
+    baseUrl: 'old-url',
+    apiKey: 'old-key',
+    chatModel: 'old-chat',
+    visionModel: 'old-vision',
+    embeddingModel: 'old-embedding',
+  ),
+);
+
+Future<void> _enterReplacementSettings(WidgetTester tester) async {
+  await tester.tap(find.byKey(const Key('settings-button')));
+  await tester.pumpAndSettle();
+  await tester.tap(find.byKey(const Key('settings-nav-appearance')));
+  await tester.pumpAndSettle();
+  await tester.tap(find.byKey(const Key('settings-accent-purple')));
+  await tester.tap(find.byKey(const Key('settings-nav-models')));
+  await tester.pumpAndSettle();
+  await tester.enterText(find.byKey(const Key('provider-base-url')), 'new-url');
+}
+
+Future<void> _runSearch(WidgetTester tester) async {
+  await tester.tap(find.byKey(const Key('left-pane-mode-search')));
+  await tester.pump(const Duration(milliseconds: 250));
+  await tester.enterText(
+    find.byKey(const Key('workspace-search-field')),
+    'Alpha',
+  );
+  await tester.tap(find.byKey(const Key('workspace-search-submit-button')));
+  await tester.pumpAndSettle();
+}
+
+final class _TrackingAiProvider implements AiProvider {
+  _TrackingAiProvider(this.id);
+
+  final String id;
+  int embeddingCalls = 0;
+
+  @override
+  Future<String> createOutlineProposal({
+    required String noteTitle,
+    required String currentMarkdown,
+    required List<SourceItem> sources,
+  }) async => id;
+
+  @override
+  Future<List<double>> createEmbedding(String text) async {
+    embeddingCalls += 1;
+    return const [1];
+  }
+
+  @override
+  Future<ImageExtraction> extractImageText({
+    required String filename,
+    required String mimeType,
+    required List<int> bytes,
+  }) async => ImageExtraction(text: id, description: id);
+}
+
+final class _ProviderSearchIndex implements SearchIndex {
+  _ProviderSearchIndex(this.provider);
+
+  final AiProvider provider;
+  final _documentIds = <String>{};
+  int disposeCalls = 0;
+
+  @override
+  Future<Set<String>> documentIds() async => {..._documentIds};
+
+  @override
+  Future<void> indexDocument({
+    required String id,
+    required String noteId,
+    required String title,
+    required String text,
+  }) async {
+    _documentIds.add(id);
+  }
+
+  @override
+  Future<void> removeDocument(String id) async {
+    _documentIds.remove(id);
+  }
+
+  @override
+  Future<List<SearchResult>> search(String query, {String? noteId}) async {
+    await provider.createEmbedding(query);
+    return const [];
+  }
+
+  @override
+  void dispose() {
+    disposeCalls += 1;
+  }
+}
+
+final class _FailingSettingsStore extends FakeSettingsStore {
+  _FailingSettingsStore({required super.initialSettings});
+
+  bool failSaves = false;
+
+  @override
+  Future<void> save(SynapseSettings settings) async {
+    if (failSaves) {
+      throw StateError('settings save failed');
+    }
+    await super.save(settings);
+  }
 }
