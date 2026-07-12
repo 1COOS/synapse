@@ -162,6 +162,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   final Set<_PaneEditorSaveScope> _paneEditorSaveScopes = {};
   final Set<NoteDocumentSession> _paneEditorCommandLocks =
       Set<NoteDocumentSession>.identity();
+  final ValueNotifier<int> _paneEditorCommandLockRevision = ValueNotifier(0);
 
   WorkspaceAppearance get _workspaceAppearance {
     return WorkspaceAppearance.fromPreferences(_workspacePreferences);
@@ -235,6 +236,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     _editorPasteFocusNode.dispose();
     _sourcePaneFocusNode.dispose();
     _selectedPreviewImageSrcNotifier.dispose();
+    _paneEditorCommandLockRevision.dispose();
     super.dispose();
   }
 
@@ -575,6 +577,12 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     );
   }
 
+  bool _paneEditorContextIsLocked(PaneEditorContext context) {
+    final resolved = _resolvePaneEditorContext(context);
+    return resolved != null &&
+        _paneEditorCommandLocks.contains(resolved.session);
+  }
+
   Future<void> _recoverStaleBackendTarget(
     PaneEditorContext context, {
     bool refreshProposals = false,
@@ -908,6 +916,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       _message = '';
       _paneEditorCommandLocks.add(resolved.session);
     });
+    _paneEditorCommandLockRevision.value += 1;
     try {
       return await action();
     } catch (error) {
@@ -922,6 +931,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
           _paneEditorCommandLocks.remove(resolved.session);
           _busy = false;
         });
+        _paneEditorCommandLockRevision.value += 1;
       }
     }
   }
@@ -3435,44 +3445,55 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     final width = clampImageWidth(
       (config.width ?? defaultMarkdownImageWidth.toDouble()).round(),
     ).toDouble();
-    return PreviewImageBlock(
-      key: Key('preview-image-${source.id}'),
-      source: source,
-      src: src,
-      width: width,
-      editableControls: mode == ImagePreviewMode.editing,
-      selectedImageSrc: _selectedPreviewImageSrcNotifier,
-      imageBytes: _requireVault().readSourceAttachment(source),
-      onTap: () {
-        if (mode != ImagePreviewMode.editing ||
-            _resolvePaneEditorContext(editorContext) == null) {
-          return;
-        }
-        onImageTap?.call();
-        _setSelectedPreviewImageSrc(src);
-      },
-      onWidthChanged: (value) {
-        unawaited(
-          _applyImageWidth(
-            editorContext,
-            sourceId: source.id,
-            src: src,
-            width: clampImageWidth(value.round()),
-          ),
-        );
-      },
-      onImageDropped: (dragged, target, side) {
-        unawaited(
-          _applyImageDrop(
-            editorContext,
-            draggedSourceId: dragged.sourceId,
-            draggedSrc: dragged.src,
-            targetSourceId: target.sourceId,
-            targetSrc: target.src,
-            beforeTarget: side == ImageDropSide.before,
-          ),
-        );
-      },
+    return ValueListenableBuilder<int>(
+      valueListenable: _paneEditorCommandLockRevision,
+      builder: (context, revision, child) => PreviewImageBlock(
+        key: Key('preview-image-${source.id}'),
+        source: source,
+        src: src,
+        width: width,
+        editableControls:
+            mode == ImagePreviewMode.editing &&
+            !_paneEditorContextIsLocked(editorContext),
+        selectedImageSrc: _selectedPreviewImageSrcNotifier,
+        imageBytes: _requireVault().readSourceAttachment(source),
+        onTap: () {
+          if (mode != ImagePreviewMode.editing ||
+              _resolvePaneEditorContext(editorContext) == null) {
+            return;
+          }
+          onImageTap?.call();
+          _setSelectedPreviewImageSrc(src);
+        },
+        onWidthChanged: (value) {
+          if (_paneEditorContextIsLocked(editorContext)) {
+            return;
+          }
+          unawaited(
+            _applyImageWidth(
+              editorContext,
+              sourceId: source.id,
+              src: src,
+              width: clampImageWidth(value.round()),
+            ),
+          );
+        },
+        onImageDropped: (dragged, target, side) {
+          if (_paneEditorContextIsLocked(editorContext)) {
+            return;
+          }
+          unawaited(
+            _applyImageDrop(
+              editorContext,
+              draggedSourceId: dragged.sourceId,
+              draggedSrc: dragged.src,
+              targetSourceId: target.sourceId,
+              targetSrc: target.src,
+              beforeTarget: side == ImageDropSide.before,
+            ),
+          );
+        },
+      ),
     );
   }
 
@@ -3492,6 +3513,9 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     if (resolved == null) {
       return PaneEditorCommandOutcome.staleTarget;
     }
+    if (_paneEditorCommandLocks.contains(resolved.session)) {
+      return PaneEditorCommandOutcome.unchanged;
+    }
     if (_sourceForId(resolved.session, draggedSourceId) == null ||
         _sourceForId(resolved.session, targetSourceId) == null) {
       return PaneEditorCommandOutcome.unchanged;
@@ -3509,6 +3533,9 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     resolved = _resolvePaneEditorContext(context);
     if (resolved == null) {
       return PaneEditorCommandOutcome.staleTarget;
+    }
+    if (_paneEditorCommandLocks.contains(resolved.session)) {
+      return PaneEditorCommandOutcome.unchanged;
     }
     if (_sourceForId(resolved.session, draggedSourceId) == null ||
         _sourceForId(resolved.session, targetSourceId) == null) {
@@ -3538,6 +3565,9 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     if (resolved == null) {
       return PaneEditorCommandOutcome.staleTarget;
     }
+    if (_paneEditorCommandLocks.contains(resolved.session)) {
+      return PaneEditorCommandOutcome.unchanged;
+    }
     if (_sourceForId(resolved.session, sourceId) == null) {
       return PaneEditorCommandOutcome.unchanged;
     }
@@ -3553,6 +3583,9 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     resolved = _resolvePaneEditorContext(context);
     if (resolved == null) {
       return PaneEditorCommandOutcome.staleTarget;
+    }
+    if (_paneEditorCommandLocks.contains(resolved.session)) {
+      return PaneEditorCommandOutcome.unchanged;
     }
     if (_sourceForId(resolved.session, sourceId) == null) {
       return PaneEditorCommandOutcome.unchanged;

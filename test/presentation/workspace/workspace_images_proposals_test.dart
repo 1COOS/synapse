@@ -11,6 +11,7 @@ import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
 import 'package:synapse/presentation/cupertino/workspace/workspace_resources.dart';
 import 'package:synapse/presentation/cupertino/workspace/workspace_sources.dart';
 import 'package:synapse/presentation/workspace/editor/live_markdown_editor.dart';
+import 'package:synapse/presentation/workspace/editor/preview_image_block.dart';
 
 import '../../support/workspace_fakes.dart';
 import '../../support/workspace_harness.dart';
@@ -594,11 +595,38 @@ void main() {
       addTearDown(vault.releaseUpdate);
       final alpha = await vault.createNote(parentPath: '', title: 'Alpha');
       final beta = await vault.createNote(parentPath: '', title: 'Beta');
-      await vault.addImageSource(
+      final lockedSource = await vault.addImageSource(
         noteId: alpha.id,
         filename: 'locked-ocr.png',
         mimeType: 'image/png',
         bytes: tinyPng,
+      );
+      final secondAlphaSource = await vault.addImageSource(
+        noteId: alpha.id,
+        filename: 'locked-second.png',
+        mimeType: 'image/png',
+        bytes: tinyPng,
+      );
+      final betaSource = await vault.addImageSource(
+        noteId: beta.id,
+        filename: 'beta-control.png',
+        mimeType: 'image/png',
+        bytes: tinyPng,
+      );
+      const lockedSrc = 'Alpha.assets/attachments/locked-ocr.png';
+      const secondAlphaSrc = 'Alpha.assets/attachments/locked-second.png';
+      await vault.updateMarkdown(
+        noteId: alpha.id,
+        markdown:
+            '# Alpha\n\n'
+            '<img src="$lockedSrc" width="320">\n\n'
+            '<img src="$secondAlphaSrc" width="320">',
+      );
+      await vault.updateMarkdown(
+        noteId: beta.id,
+        markdown:
+            '# Beta\n\n'
+            '<img src="Beta.assets/attachments/beta-control.png" width="320">',
       );
       final aiProvider = GatedAiProvider(extractedText: 'Locked OCR');
 
@@ -632,6 +660,14 @@ void main() {
       await tester.pump(const Duration(milliseconds: 250));
       await enterTextInLiveMarkdownBlock(tester, '# Remapped\nbody', paneId: 1);
       final alphaController = liveMarkdownDocumentController(tester, paneId: 1);
+      final capturedLockedPreview = tester.widget<PreviewImageBlock>(
+        inNotePane(find.byKey(Key('preview-image-${lockedSource.id}')), 1),
+      );
+      final capturedSecondPreview = tester.widget<PreviewImageBlock>(
+        inNotePane(find.byKey(Key('preview-image-${secondAlphaSource.id}')), 1),
+      );
+      final markdownBeforeCommand = alphaController.text;
+      final updatesBeforeCommand = vault.updateCalls;
       vault.gateUpdates = true;
 
       await tester.tap(find.byKey(const Key('generate-proposal-button')));
@@ -647,6 +683,37 @@ void main() {
             .enabled,
         isFalse,
       );
+      expect(
+        tester
+            .widget<PreviewImageBlock>(
+              inNotePane(
+                find.byKey(Key('preview-image-${lockedSource.id}')),
+                1,
+              ),
+            )
+            .editableControls,
+        isFalse,
+      );
+      expect(
+        inNotePane(
+          find.byKey(Key('image-resize-handle-${lockedSource.id}')),
+          1,
+        ),
+        findsNothing,
+      );
+
+      capturedLockedPreview.onWidthChanged(480);
+      capturedSecondPreview.onImageDropped(
+        PreviewImageDragData(sourceId: lockedSource.id, src: lockedSrc),
+        PreviewImageDragData(
+          sourceId: secondAlphaSource.id,
+          src: secondAlphaSrc,
+        ),
+        ImageDropSide.after,
+      );
+      await tester.pump();
+      expect(alphaController.text, markdownBeforeCommand);
+      expect(vault.updateCalls, updatesBeforeCommand);
 
       vault.releaseUpdate();
       await aiProvider.extractionStarted.future;
@@ -674,6 +741,14 @@ void main() {
             .enabled,
         isTrue,
       );
+      expect(
+        tester
+            .widget<PreviewImageBlock>(
+              inNotePane(find.byKey(Key('preview-image-${betaSource.id}')), 2),
+            )
+            .editableControls,
+        isTrue,
+      );
 
       aiProvider.releaseExtraction();
       await tester.pumpAndSettle();
@@ -683,11 +758,26 @@ void main() {
         'Locked OCR',
       );
       expect(
-        (await vault.listSources('Remapped.md')).single.state,
+        (await vault.listSources(
+          'Remapped.md',
+        )).firstWhere((source) => source.id == lockedSource.id).state,
         SourceState.processed,
       );
       expect(await vault.listProposals(beta.id), isEmpty);
       expect((await vault.readNote(beta.id)).markdown, isNot(contains('OCR')));
+
+      tester
+          .widget<GestureDetector>(find.byKey(const Key('split-pane-pane-1')))
+          .onTap!();
+      await tester.pump();
+      final updatesBeforeUnlockedResize = vault.updateCalls;
+      capturedLockedPreview.onWidthChanged(480);
+      await tester.pumpAndSettle();
+      expect(vault.updateCalls, updatesBeforeUnlockedResize + 1);
+      expect(
+        (await vault.readNote('Remapped.md')).markdown,
+        contains('src="$lockedSrc" width="480"'),
+      );
     },
   );
 
