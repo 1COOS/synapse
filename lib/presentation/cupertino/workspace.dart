@@ -160,6 +160,8 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   bool _usesInjectedAiProvider = false;
   int _runtimeGeneration = 0;
   final Set<_PaneEditorSaveScope> _paneEditorSaveScopes = {};
+  final Set<NoteDocumentSession> _paneEditorCommandLocks =
+      Set<NoteDocumentSession>.identity();
 
   WorkspaceAppearance get _workspaceAppearance {
     return WorkspaceAppearance.fromPreferences(_workspacePreferences);
@@ -894,7 +896,8 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     PaneEditorContext context,
     Future<PaneEditorCommandOutcome> Function() action,
   ) async {
-    if (_resolvePaneEditorContext(context) == null) {
+    final resolved = _resolvePaneEditorContext(context);
+    if (resolved == null) {
       return PaneEditorCommandOutcome.staleTarget;
     }
     if (_busy) {
@@ -903,6 +906,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     setState(() {
       _busy = true;
       _message = '';
+      _paneEditorCommandLocks.add(resolved.session);
     });
     try {
       return await action();
@@ -914,7 +918,10 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       return PaneEditorCommandOutcome.unchanged;
     } finally {
       if (mounted) {
-        setState(() => _busy = false);
+        setState(() {
+          _paneEditorCommandLocks.remove(resolved.session);
+          _busy = false;
+        });
       }
     }
   }
@@ -3659,7 +3666,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
                   )
                 : LiveMarkdownEditor(
                     controller: resolvedSession.controller,
-                    enabled: true,
+                    enabled: !_paneEditorCommandLocks.contains(resolvedSession),
                     busy: _busy || _autoSaving,
                     focused: focused,
                     onFocusPane: () {

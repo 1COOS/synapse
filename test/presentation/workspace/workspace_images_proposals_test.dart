@@ -5,10 +5,12 @@ import 'package:flutter/material.dart' show SelectableText;
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:synapse/domain/vault/vault_resource.dart';
+import 'package:synapse/infrastructure/config/synapse_settings.dart';
 import 'package:synapse/infrastructure/input/image_input_service.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
 import 'package:synapse/presentation/cupertino/workspace/workspace_resources.dart';
 import 'package:synapse/presentation/cupertino/workspace/workspace_sources.dart';
+import 'package:synapse/presentation/workspace/editor/live_markdown_editor.dart';
 
 import '../../support/workspace_fakes.dart';
 import '../../support/workspace_harness.dart';
@@ -584,6 +586,110 @@ void main() {
       SourceState.processed,
     );
   });
+
+  testWidgets(
+    'gated OCR flushes a title remap and locks only its session editor',
+    (tester) async {
+      final vault = GatedSuccessfulUpdateVaultBackend(seedExampleData: false);
+      addTearDown(vault.releaseUpdate);
+      final alpha = await vault.createNote(parentPath: '', title: 'Alpha');
+      final beta = await vault.createNote(parentPath: '', title: 'Beta');
+      await vault.addImageSource(
+        noteId: alpha.id,
+        filename: 'locked-ocr.png',
+        mimeType: 'image/png',
+        bytes: tinyPng,
+      );
+      final aiProvider = GatedAiProvider(extractedText: 'Locked OCR');
+
+      await pumpWorkspace(
+        tester,
+        vault: vault,
+        aiProvider: aiProvider,
+        size: const Size(1600, 900),
+        settingsStore: FakeSettingsStore(
+          initialSettings: const SynapseSettings(
+            preferences: WorkspacePreferences(
+              defaultNoteMode: WorkspaceDefaultNoteMode.source,
+              semanticSearchEnabled: true,
+              pastedImageWidth: 480,
+              autoSaveDelayMillis: 10000,
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.byKey(const Key('split-pane-right-button')));
+      await tester.pump(const Duration(milliseconds: 250));
+      await tester.tap(find.byKey(Key('resource-row-${beta.id}')));
+      await tester.pump(const Duration(milliseconds: 250));
+      tester
+          .widget<GestureDetector>(find.byKey(const Key('split-pane-pane-1')))
+          .onTap!();
+      await tester.pump();
+      await tester.tap(find.bySemanticsLabel('locked-ocr.png'));
+      await tester.pump();
+      await tester.tap(find.byKey(const Key('note-mode-source-pane-1')));
+      await tester.pump(const Duration(milliseconds: 250));
+      await enterTextInLiveMarkdownBlock(tester, '# Remapped\nbody', paneId: 1);
+      final alphaController = liveMarkdownDocumentController(tester, paneId: 1);
+      vault.gateUpdates = true;
+
+      await tester.tap(find.byKey(const Key('generate-proposal-button')));
+      await vault.updateStarted.future;
+      await tester.pump();
+
+      expect(aiProvider.extractionStarted.isCompleted, isFalse);
+      expect(
+        tester
+            .widget<LiveMarkdownEditor>(
+              inNotePane(find.byType(LiveMarkdownEditor), 1),
+            )
+            .enabled,
+        isFalse,
+      );
+
+      vault.releaseUpdate();
+      await aiProvider.extractionStarted.future;
+      await tester.pump();
+      expect(find.byKey(const Key('resource-row-Remapped.md')), findsOneWidget);
+
+      await tester.enterText(
+        activeLiveMarkdownEditableText(paneId: 1),
+        '# During OCR',
+      );
+      await tester.pump(const Duration(milliseconds: 10000));
+      await tester.pump();
+      expect(alphaController.text, isNot(contains('During OCR')));
+      expect(() => vault.readNote('During OCR.md'), throwsA(isA<StateError>()));
+
+      tester
+          .widget<GestureDetector>(find.byKey(const Key('split-pane-pane-2')))
+          .onTap!();
+      await tester.pump();
+      expect(
+        tester
+            .widget<LiveMarkdownEditor>(
+              inNotePane(find.byType(LiveMarkdownEditor), 2),
+            )
+            .enabled,
+        isTrue,
+      );
+
+      aiProvider.releaseExtraction();
+      await tester.pumpAndSettle();
+
+      expect(
+        (await vault.listProposals('Remapped.md')).single.proposedMarkdown,
+        'Locked OCR',
+      );
+      expect(
+        (await vault.listSources('Remapped.md')).single.state,
+        SourceState.processed,
+      );
+      expect(await vault.listProposals(beta.id), isEmpty);
+      expect((await vault.readNote(beta.id)).markdown, isNot(contains('OCR')));
+    },
+  );
 
   testWidgets(
     'gated image OCR does not refresh a closed pane into another note',
