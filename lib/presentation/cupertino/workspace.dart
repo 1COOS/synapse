@@ -282,6 +282,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   Future<void> _settingsPersistenceTail = Future<void>.value();
   final _selectedPreviewImageSrcNotifier = _SilentValueNotifier<String?>(null);
   SynapseSettings _settings = SynapseSettings.defaults;
+  SynapseSettings? _loadedSettingsBaseline;
   WorkspacePreferences _workspacePreferences = WorkspacePreferences.defaults;
   ProviderConfig? _providerConfig;
   final Set<_PaneEditorSaveScope> _paneEditorSaveScopes = {};
@@ -962,7 +963,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
         candidate = null;
         return;
       }
-      final savedSettings = _settings.copyWith(vaultLocation: location);
+      final savedSettings = _settingsBaseline.copyWith(vaultLocation: location);
       await _persistSettings(savedSettings);
       if (!_canCommitStartup(startupToken)) {
         _disposeDetachedRuntime(candidate);
@@ -999,6 +1000,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   }) {
     setState(() {
       _settings = settings;
+      _loadedSettingsBaseline = settings;
       _resources = snapshot.resources;
       _selectedResource = snapshot.selectedResource;
       _searchResults = const [];
@@ -1032,6 +1034,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     final startupToken = Object();
     _startupOperationToken = startupToken;
     _startupSettingsLoadError = null;
+    _loadedSettingsBaseline = null;
     final settingsLoad = _readSettings();
     _startupSettingsLoadFuture = settingsLoad;
     final settingsCommit = _loadSettings(startupToken, settingsLoad);
@@ -1112,6 +1115,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     if (!_isStartupCurrent(startupToken)) {
       return;
     }
+    _loadedSettingsBaseline = settings;
     final current = _runtimeManager.current;
     if (current == null) {
       _applyLoadedSettings(settings);
@@ -1137,6 +1141,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     setState(() {
       final shouldSetConfigurationMessage = _message.isEmpty;
       _settings = settings;
+      _loadedSettingsBaseline = settings;
       _workspacePreferences = settings.preferences;
       _providerConfig = settings.providerConfig;
       _splitWorkspaceController.updateDefaultMode(_preferredNoteMode);
@@ -1180,7 +1185,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       if (!_isStartupCurrent(startupToken)) {
         return;
       }
-      var location = _settings.vaultLocation;
+      var location = _settingsBaseline.vaultLocation;
       if (location == null) {
         if (_isStartupCurrent(startupToken)) {
           setState(() => _message = '请选择仓库位置');
@@ -3293,10 +3298,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       return;
     }
     final store = await _getSettingsStore();
-    final initialSettings = _settings.copyWith(
-      providerConfig: _providerConfig ?? ProviderConfig.empty,
-      preferences: _workspacePreferences,
-    );
+    final initialSettings = _settingsBaseline;
     if (!mounted) {
       return;
     }
@@ -3330,6 +3332,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
         _startupSettingsLoadError = null;
         setState(() {
           _settings = savedSettings;
+          _loadedSettingsBaseline = savedSettings;
           _workspacePreferences = savedSettings.preferences;
           _providerConfig = savedSettings.providerConfig;
           _splitWorkspaceController.updateDefaultMode(_preferredNoteMode);
@@ -3341,6 +3344,8 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       }
     });
   }
+
+  SynapseSettings get _settingsBaseline => _loadedSettingsBaseline ?? _settings;
 
   @override
   Widget build(BuildContext context) {

@@ -345,6 +345,71 @@ void main() {
   );
 
   testWidgets(
+    'startup runtime failure preserves loaded settings for a later save',
+    (tester) async {
+      final persistedSettings = _replacementSettings.copyWith(
+        vaultLocation: const VaultLocation(rootPath: '/vault/persisted'),
+      );
+      final settingsStore = FakeSettingsStore(
+        initialSettings: persistedSettings,
+      );
+      final vault = MemoryVaultBackend(seedExampleData: false);
+      await vault.createNote(parentPath: '', title: 'Alpha');
+      final providers = <_TrackingAiProvider>[];
+      var runtimeBuilds = 0;
+      final dependencies = createWorkspaceDependencies(
+        initialVault: vault,
+        settingsStore: settingsStore,
+        aiProviderFactory: (config) {
+          final provider = _TrackingAiProvider(config.normalizedBaseUrl);
+          providers.add(provider);
+          return provider;
+        },
+        searchIndexFactory: (provider, _) {
+          runtimeBuilds += 1;
+          if (runtimeBuilds == 2) {
+            throw StateError('startup runtime build failed');
+          }
+          return _ProviderSearchIndex(provider);
+        },
+      );
+
+      await pumpWorkspace(tester, vault: null, dependencies: dependencies);
+
+      expect(runtimeBuilds, 2);
+      expect(providers.first.disposeCalls, 0);
+      expect(providers.last.disposeCalls, 1);
+      expect(
+        primaryButtonColor(tester, const Key('add-image-button')),
+        CupertinoColors.systemBlue,
+      );
+
+      await tester.tap(find.byKey(const Key('settings-button')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('settings-nav-appearance')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('settings-accent-green')));
+      await tester.tap(find.text('保存设置'));
+      await tester.pumpAndSettle();
+
+      final saved = settingsStore.savedSettings.single;
+      expect(saved.vaultLocation, persistedSettings.vaultLocation);
+      expect(saved.providerConfig.baseUrl, 'new-url');
+      expect(saved.providerConfig.apiKey, 'new-key');
+      expect(saved.providerConfig.chatModel, 'new-chat');
+      expect(saved.providerConfig.visionModel, 'new-vision');
+      expect(saved.providerConfig.embeddingModel, 'new-embedding');
+      expect(
+        saved.preferences,
+        persistedSettings.preferences.copyWith(
+          accentColor: WorkspaceAccentColor.green,
+        ),
+      );
+      expect(runtimeBuilds, 3);
+    },
+  );
+
+  testWidgets(
     'delayed startup settings cannot overwrite a user settings save',
     (tester) async {
       final vault = MemoryVaultBackend(seedExampleData: false);
