@@ -63,6 +63,7 @@ final class WorkspaceDependencies {
     required this.injectedVaultLabel,
     required this.defaultVaultLabel,
     required this.workspaceCommitFailureForTesting,
+    required this.cleanupErrorReporter,
   });
 
   final VaultBackend? initialVault;
@@ -84,4 +85,5 @@ final class WorkspaceDependencies {
   final String injectedVaultLabel;
   final String defaultVaultLabel;
   final WorkspaceCommitPhase? workspaceCommitFailureForTesting;
+  final WorkspaceRuntimeCleanupErrorReporter cleanupErrorReporter;
 }

@@ -275,6 +275,8 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   bool _reloadRequired = false;
   String _message = '';
   Object _workspaceMutationToken = Object();
+  Object? _startupOperationToken;
+  Future<void> _settingsPersistenceTail = Future<void>.value();
   final _selectedPreviewImageSrcNotifier = _SilentValueNotifier<String?>(null);
   SynapseSettings _settings = SynapseSettings.defaults;
   WorkspacePreferences _workspacePreferences = WorkspacePreferences.defaults;
@@ -292,7 +294,9 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   void initState() {
     super.initState();
     _dependencies = widget.dependencies;
-    _runtimeManager = WorkspaceRuntimeManager();
+    _runtimeManager = WorkspaceRuntimeManager(
+      cleanupErrorReporter: _dependencies.cleanupErrorReporter,
+    );
     _resourceCoordinator = WorkspaceResourceCoordinator(_runtimeManager);
     _splitWorkspaceController = SplitWorkspaceController(
       defaultMode: _preferredNoteMode,
@@ -939,15 +943,29 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   Future<void> _activateVaultLocation(
     VaultLocation location, {
     required String message,
+    Object? startupToken,
   }) async {
     WorkspaceRuntime? candidate;
     try {
+      if (!_canCommitStartup(startupToken)) {
+        return;
+      }
       candidate = _createDetachedRuntime(location);
       final snapshot = await _resourceCoordinator.loadDetachedRuntime(
         candidate,
       );
+      if (!_canCommitStartup(startupToken)) {
+        _disposeDetachedRuntime(candidate);
+        candidate = null;
+        return;
+      }
       final savedSettings = _settings.copyWith(vaultLocation: location);
       await _persistSettings(savedSettings);
+      if (!_canCommitStartup(startupToken)) {
+        _disposeDetachedRuntime(candidate);
+        candidate = null;
+        return;
+      }
       _noteSaveCoordinator.resetAfterReload();
       _workspaceMutationBarrier.resetAfterReload();
       _runtimeManager.install(candidate);
@@ -959,9 +977,16 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
         message: message,
       );
     } catch (_) {
-      candidate?.dispose();
+      _disposeDetachedRuntime(candidate);
+      if (!_canCommitStartup(startupToken)) {
+        return;
+      }
       rethrow;
     }
+  }
+
+  void _disposeDetachedRuntime(WorkspaceRuntime? runtime) {
+    runtime?.dispose(reportCleanupError: _dependencies.cleanupErrorReporter);
   }
 
   void _applyInstalledRuntimeSnapshot(
@@ -1001,30 +1026,53 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   }
 
   Future<void> _initializeWorkspace() async {
-    await _loadSettings();
-    if (_hasVault) {
-      await _loadResources();
-    } else if (_dependencies.supportsDirectoryVault) {
-      await _loadSavedVaultLocation();
+    final startupToken = Object();
+    _startupOperationToken = startupToken;
+    try {
+      await _loadSettings(startupToken);
+      if (!_isStartupCurrent(startupToken)) {
+        return;
+      }
+      if (_hasVault) {
+        await _loadResources(startupToken);
+      } else if (_dependencies.supportsDirectoryVault) {
+        await _loadSavedVaultLocation(startupToken);
+      }
+    } finally {
+      if (identical(_startupOperationToken, startupToken)) {
+        _startupOperationToken = null;
+      }
     }
+  }
+
+  bool _isStartupCurrent(Object token) {
+    return mounted && identical(_startupOperationToken, token);
+  }
+
+  bool _canCommitStartup(Object? token) {
+    return token == null || _isStartupCurrent(token);
+  }
+
+  void _invalidateStartupOperation() {
+    _startupOperationToken = null;
   }
 
   Future<SettingsStore> _getSettingsStore() async {
     return _dependencies.settingsStore();
   }
 
-  Future<void> _loadSettings() async {
+  Future<void> _loadSettings(Object startupToken) async {
     final SynapseSettings settings;
     try {
       final store = await _getSettingsStore();
       settings = await store.load();
     } catch (error) {
-      if (mounted) {
+      if (_isStartupCurrent(startupToken)) {
         setState(() => _message = '设置读取失败：$error');
       }
       return;
     }
-    if (!mounted) {
+    if (!_isStartupCurrent(startupToken)) {
       return;
     }
     final current = _runtimeManager.current;
@@ -1035,8 +1083,8 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     WorkspaceRuntime? candidate;
     try {
       candidate = _createSettingsRuntimeCandidate(current, settings);
-      if (!mounted) {
-        candidate.dispose();
+      if (!_isStartupCurrent(startupToken)) {
+        _disposeDetachedRuntime(candidate);
         return;
       }
       _runtimeManager.install(candidate);
@@ -1044,7 +1092,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       _workspaceMutationToken = Object();
       _applyLoadedSettings(settings);
     } catch (_) {
-      candidate?.dispose();
+      _disposeDetachedRuntime(candidate);
     }
   }
 
@@ -1061,9 +1109,15 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     });
   }
 
-  Future<void> _persistSettings(SynapseSettings settings) async {
-    final store = await _getSettingsStore();
-    await store.save(settings);
+  Future<void> _persistSettings(SynapseSettings settings) {
+    final operation = _settingsPersistenceTail.catchError((Object _) {}).then((
+      _,
+    ) async {
+      final store = await _getSettingsStore();
+      await store.save(settings);
+    });
+    _settingsPersistenceTail = operation.catchError((Object _) {});
+    return operation;
   }
 
   WorkspaceRuntime _createSettingsRuntimeCandidate(
@@ -1083,22 +1137,30 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     );
   }
 
-  Future<void> _loadSavedVaultLocation() async {
+  Future<void> _loadSavedVaultLocation(Object startupToken) async {
     try {
       final store = await _getSettingsStore();
-      var location = _settings.vaultLocation;
-      if (!mounted) {
+      if (!_isStartupCurrent(startupToken)) {
         return;
       }
+      var location = _settings.vaultLocation;
       if (location == null) {
-        setState(() => _message = '请选择仓库位置');
+        if (_isStartupCurrent(startupToken)) {
+          setState(() => _message = '请选择仓库位置');
+        }
         return;
       }
       final restoredLocation = await _restoreVaultAccess(location);
+      if (!_isStartupCurrent(startupToken)) {
+        return;
+      }
       if (!await store.vaultExists(restoredLocation)) {
-        if (mounted) {
+        if (_isStartupCurrent(startupToken)) {
           setState(() => _message = '仓库位置不可用：${restoredLocation.rootPath}');
         }
+        return;
+      }
+      if (!_isStartupCurrent(startupToken)) {
         return;
       }
       setState(() {
@@ -1106,18 +1168,22 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
         _message = '';
       });
       try {
-        await _activateVaultLocation(restoredLocation, message: '仓库已打开');
+        await _activateVaultLocation(
+          restoredLocation,
+          message: '仓库已打开',
+          startupToken: startupToken,
+        );
       } catch (error) {
-        if (mounted) {
+        if (_isStartupCurrent(startupToken)) {
           setState(() => _message = '仓库位置读取失败：$error');
         }
       } finally {
-        if (mounted) {
+        if (_isStartupCurrent(startupToken)) {
           setState(() => _busy = false);
         }
       }
     } catch (error) {
-      if (mounted) {
+      if (_isStartupCurrent(startupToken)) {
         setState(() => _message = '仓库位置读取失败：$error');
       }
     }
@@ -1242,14 +1308,35 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     return false;
   }
 
-  Future<void> _loadResources() async {
-    await _runBusy(() async {
-      await _loadResourcesFromCurrentVault();
+  Future<void> _loadResources(Object startupToken) async {
+    if (!_isStartupCurrent(startupToken)) {
+      return;
+    }
+    setState(() {
+      _busy = true;
+      _message = '';
     });
+    try {
+      await _loadResourcesFromCurrentVault(startupToken: startupToken);
+    } catch (error) {
+      if (_isStartupCurrent(startupToken)) {
+        setState(() => _message = error.toString());
+      }
+    } finally {
+      if (_isStartupCurrent(startupToken)) {
+        setState(() => _busy = false);
+      }
+    }
   }
 
-  Future<void> _loadResourcesFromCurrentVault({String? message}) async {
+  Future<void> _loadResourcesFromCurrentVault({
+    String? message,
+    Object? startupToken,
+  }) async {
     final result = await _resourceCoordinator.loadWorkspace();
+    if (!_canCommitStartup(startupToken)) {
+      return;
+    }
     if (result is WorkspaceResourceStale) {
       return;
     }
@@ -1514,6 +1601,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   }
 
   Future<void> _chooseVault() async {
+    _invalidateStartupOperation();
     if (!_dependencies.supportsDirectoryVault) {
       setState(() => _message = 'H5 预览使用浏览器沙盒库');
       return;
@@ -3121,6 +3209,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   }
 
   Future<void> _openSettings() async {
+    _invalidateStartupOperation();
     final store = await _getSettingsStore();
     final initialSettings = _settings.copyWith(
       providerConfig: _providerConfig ?? ProviderConfig.empty,
@@ -3163,7 +3252,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
           _message = _modelConfigurationMessage();
         });
       } catch (_) {
-        candidate?.dispose();
+        _disposeDetachedRuntime(candidate);
         rethrow;
       }
     });

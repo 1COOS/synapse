@@ -13,6 +13,11 @@ final class WorkspaceRuntimeCapture {
 }
 
 final class WorkspaceRuntimeManager {
+  WorkspaceRuntimeManager({
+    WorkspaceRuntimeCleanupErrorReporter? cleanupErrorReporter,
+  }) : _cleanupErrorReporter = cleanupErrorReporter;
+
+  final WorkspaceRuntimeCleanupErrorReporter? _cleanupErrorReporter;
   WorkspaceRuntime? _current;
   int _generation = 0;
   bool _isDisposed = false;
@@ -56,7 +61,7 @@ final class WorkspaceRuntimeManager {
     final previous = _current;
     _current = runtime;
     _generation += 1;
-    previous?.dispose();
+    _disposeRuntime(previous);
   }
 
   Future<void> installCandidate(
@@ -71,7 +76,7 @@ final class WorkspaceRuntimeManager {
       install(candidate);
     } catch (_) {
       if (candidate != null && !identical(candidate, _current)) {
-        candidate.dispose();
+        _disposeRuntime(candidate);
       }
       rethrow;
     }
@@ -89,7 +94,7 @@ final class WorkspaceRuntimeManager {
       install(candidate);
     } catch (_) {
       if (candidate != null && !identical(candidate, _current)) {
-        candidate.dispose();
+        _disposeRuntime(candidate);
       }
       rethrow;
     }
@@ -103,7 +108,7 @@ final class WorkspaceRuntimeManager {
     }
     _current = null;
     _generation += 1;
-    previous.dispose();
+    _disposeRuntime(previous);
   }
 
   void dispose() {
@@ -114,7 +119,11 @@ final class WorkspaceRuntimeManager {
     _current = null;
     _generation += 1;
     _isDisposed = true;
-    previous?.dispose();
+    _disposeRuntime(previous);
+  }
+
+  void _disposeRuntime(WorkspaceRuntime? runtime) {
+    runtime?.dispose(reportCleanupError: _cleanupErrorReporter);
   }
 
   void _ensureActive() {

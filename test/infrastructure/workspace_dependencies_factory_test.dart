@@ -70,6 +70,36 @@ void main() {
     expect(provider.disposeCalls, 1);
   });
 
+  test('construction cleanup failure does not mask the original error', () {
+    final cleanupErrors = <Object>[];
+    final provider = _RecordingDisposableAiProvider(throwOnDispose: true);
+    final dependencies = createWorkspaceDependencies(
+      aiProviderFactory: (_) => provider,
+      searchIndexFactory: (_, _) => throw StateError('index failed'),
+      cleanupErrorReporter: (error, _) => cleanupErrors.add(error),
+    );
+    final created = dependencies.createAiProvider(config);
+
+    expect(
+      () => dependencies.createRuntime(
+        vault: MemoryVaultBackend(seedExampleData: false),
+        aiProvider: created,
+        semanticSearchEnabled: true,
+        rootPath: null,
+        label: 'Test Vault',
+      ),
+      throwsA(
+        isA<StateError>().having(
+          (error) => error.message,
+          'message',
+          'index failed',
+        ),
+      ),
+    );
+    expect(provider.disposeCalls, 1);
+    expect(cleanupErrors, hasLength(1));
+  });
+
   test('presentation dependency bundle has no concrete adapter selection', () {
     final source = File(
       'lib/presentation/workspace/controller/workspace_dependencies.dart',
@@ -91,6 +121,9 @@ void main() {
 }
 
 final class _RecordingDisposableAiProvider implements DisposableAiProvider {
+  _RecordingDisposableAiProvider({this.throwOnDispose = false});
+
+  final bool throwOnDispose;
   int disposeCalls = 0;
 
   @override
@@ -113,6 +146,9 @@ final class _RecordingDisposableAiProvider implements DisposableAiProvider {
   @override
   void dispose() {
     disposeCalls += 1;
+    if (throwOnDispose) {
+      throw StateError('provider dispose failed');
+    }
   }
 }
 

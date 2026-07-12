@@ -86,6 +86,34 @@ void main() {
       expect(oldProvider.disposeCalls, 1);
     });
 
+    test('old cleanup failures are reported without poisoning replacement', () {
+      final cleanupErrors = <Object>[];
+      final manager = WorkspaceRuntimeManager(
+        cleanupErrorReporter: (error, _) => cleanupErrors.add(error),
+      );
+      final oldIndex = _RecordingSearchIndex(throwOnDispose: true);
+      final oldProvider = _RecordingDisposableAiProvider(
+        <String>[],
+        throwOnDispose: true,
+      );
+      final oldRuntime = _runtime(
+        index: oldIndex,
+        aiProvider: oldProvider,
+        ownsAiProvider: true,
+      );
+      final replacement = _runtime();
+      manager.install(oldRuntime);
+
+      manager.install(replacement);
+
+      expect(manager.current, same(replacement));
+      expect(manager.generation, 2);
+      expect(replacement.isDisposed, isFalse);
+      expect(oldIndex.disposeCalls, 1);
+      expect(oldProvider.disposeCalls, 1);
+      expect(cleanupErrors, hasLength(2));
+    });
+
     test('owned provider is disposed once after search resources', () {
       final events = <String>[];
       final provider = _RecordingDisposableAiProvider(events);
@@ -117,10 +145,16 @@ void main() {
     });
 
     test('failed candidate installation preserves old runtime', () async {
-      final manager = WorkspaceRuntimeManager();
+      final cleanupErrors = <Object>[];
+      final manager = WorkspaceRuntimeManager(
+        cleanupErrorReporter: (error, _) => cleanupErrors.add(error),
+      );
       final oldRuntime = _runtime();
-      final candidateIndex = _RecordingSearchIndex();
-      final candidateProvider = _RecordingDisposableAiProvider(<String>[]);
+      final candidateIndex = _RecordingSearchIndex(throwOnDispose: true);
+      final candidateProvider = _RecordingDisposableAiProvider(
+        <String>[],
+        throwOnDispose: true,
+      );
       final candidate = _runtime(
         index: candidateIndex,
         aiProvider: candidateProvider,
@@ -134,13 +168,20 @@ void main() {
           () async => candidate,
           validate: (_) => throw StateError('candidate failed'),
         ),
-        throwsStateError,
+        throwsA(
+          isA<StateError>().having(
+            (error) => error.message,
+            'message',
+            'candidate failed',
+          ),
+        ),
       );
 
       expect(manager.current, same(oldRuntime));
       expect(manager.generation, generation);
       expect(candidateIndex.disposeCalls, 1);
       expect(candidateProvider.disposeCalls, 1);
+      expect(cleanupErrors, hasLength(2));
     });
 
     test('clear and dispose are idempotent and reject later use', () {
@@ -157,6 +198,29 @@ void main() {
       expect(() => manager.current, throwsStateError);
       expect(() => manager.capture(), throwsStateError);
       expect(() => manager.install(_runtime()), throwsStateError);
+    });
+
+    test('clear and manager dispose report cleanup failures', () {
+      final cleanupErrors = <Object>[];
+      WorkspaceRuntimeManager manager() => WorkspaceRuntimeManager(
+        cleanupErrorReporter: (error, _) => cleanupErrors.add(error),
+      );
+      WorkspaceRuntime throwingRuntime() => _runtime(
+        index: _RecordingSearchIndex(throwOnDispose: true),
+        aiProvider: _RecordingDisposableAiProvider(
+          <String>[],
+          throwOnDispose: true,
+        ),
+        ownsAiProvider: true,
+      );
+      final cleared = manager()..install(throwingRuntime());
+      final disposed = manager()..install(throwingRuntime());
+
+      cleared.clear();
+      disposed.dispose();
+
+      expect(cleared.current, isNull);
+      expect(cleanupErrors, hasLength(4));
     });
   });
 }
@@ -182,9 +246,10 @@ WorkspaceRuntime _runtime({
 }
 
 final class _RecordingSearchIndex implements SearchIndex {
-  _RecordingSearchIndex({this.onDispose});
+  _RecordingSearchIndex({this.onDispose, this.throwOnDispose = false});
 
   final void Function()? onDispose;
+  final bool throwOnDispose;
   int disposeCalls = 0;
 
   @override
@@ -209,13 +274,17 @@ final class _RecordingSearchIndex implements SearchIndex {
   void dispose() {
     disposeCalls += 1;
     onDispose?.call();
+    if (throwOnDispose) {
+      throw StateError('search dispose failed');
+    }
   }
 }
 
 final class _RecordingDisposableAiProvider implements DisposableAiProvider {
-  _RecordingDisposableAiProvider(this.events);
+  _RecordingDisposableAiProvider(this.events, {this.throwOnDispose = false});
 
   final List<String> events;
+  final bool throwOnDispose;
   int disposeCalls = 0;
 
   @override
@@ -239,5 +308,8 @@ final class _RecordingDisposableAiProvider implements DisposableAiProvider {
   void dispose() {
     disposeCalls += 1;
     events.add('provider');
+    if (throwOnDispose) {
+      throw StateError('provider dispose failed');
+    }
   }
 }

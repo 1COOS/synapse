@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/cupertino.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -342,6 +344,51 @@ void main() {
   );
 
   testWidgets(
+    'delayed startup settings cannot overwrite a user settings save',
+    (tester) async {
+      final vault = MemoryVaultBackend(seedExampleData: false);
+      await vault.createNote(parentPath: '', title: 'Alpha');
+      final settingsStore = _GatedLoadSettingsStore(
+        startupSettings: _oldSettings,
+      );
+      final providers = <_TrackingAiProvider>[];
+      final dependencies = createWorkspaceDependencies(
+        initialVault: vault,
+        settingsStore: settingsStore,
+        aiProviderFactory: (config) {
+          final provider = _TrackingAiProvider(config.normalizedBaseUrl);
+          providers.add(provider);
+          return provider;
+        },
+        searchIndexFactory: (provider, _) => _ProviderSearchIndex(provider),
+      );
+
+      await pumpWorkspace(tester, vault: null, dependencies: dependencies);
+      await settingsStore.loadStarted.future;
+
+      await _enterReplacementSettings(tester);
+      await tester.tap(find.text('保存设置'));
+      await tester.pumpAndSettle();
+      expect(settingsStore.currentSettings.providerConfig.baseUrl, 'new-url');
+
+      settingsStore.releaseLoad();
+      await tester.pumpAndSettle();
+
+      expect(settingsStore.currentSettings.providerConfig.baseUrl, 'new-url');
+      expect(
+        primaryButtonColor(tester, const Key('add-image-button')),
+        CupertinoColors.systemPurple,
+      );
+      await _runSearch(tester);
+      final userProvider = providers.singleWhere(
+        (provider) => provider.id == 'new-url',
+      );
+      expect(userProvider.embeddingCalls, 1);
+      expect(providers.where((provider) => provider.id == 'old-url'), isEmpty);
+    },
+  );
+
+  testWidgets(
     'runtime build failure keeps old settings runtime and provider behavior',
     (tester) async {
       final vault = MemoryVaultBackend(seedExampleData: false);
@@ -586,5 +633,28 @@ final class _FailingSettingsStore extends FakeSettingsStore {
       throw StateError('settings save failed');
     }
     await super.save(settings);
+  }
+}
+
+final class _GatedLoadSettingsStore extends FakeSettingsStore {
+  _GatedLoadSettingsStore({required this.startupSettings});
+
+  final SynapseSettings startupSettings;
+  final loadStarted = Completer<void>();
+  final _loadRelease = Completer<void>();
+
+  void releaseLoad() {
+    if (!_loadRelease.isCompleted) {
+      _loadRelease.complete();
+    }
+  }
+
+  @override
+  Future<SynapseSettings> load() async {
+    if (!loadStarted.isCompleted) {
+      loadStarted.complete();
+    }
+    await _loadRelease.future;
+    return startupSettings;
   }
 }

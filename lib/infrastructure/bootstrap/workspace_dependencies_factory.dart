@@ -42,6 +42,7 @@ WorkspaceDependencies createWorkspaceDependencies({
   String? injectedVaultLabel,
   String? defaultVaultLabel,
   WorkspaceCommitPhase? workspaceCommitFailureForTesting,
+  WorkspaceRuntimeCleanupErrorReporter? cleanupErrorReporter,
 }) {
   SettingsStore? resolvedSettingsStore =
       settingsStore ??
@@ -53,6 +54,7 @@ WorkspaceDependencies createWorkspaceDependencies({
       supportsDirectoryVaultOverride ?? platform_vault.supportsDirectoryVault;
   final createSearchIndex = searchIndexFactory ?? _createSearchIndex;
   final createPlatformAiProvider = aiProviderFactory ?? _createAiProvider;
+  final reportCleanupError = cleanupErrorReporter ?? _reportCleanupError;
 
   return WorkspaceDependencies(
     initialVault: initialVault,
@@ -97,8 +99,8 @@ WorkspaceDependencies createWorkspaceDependencies({
               label: label,
             );
           } catch (_) {
-            searchCoordinator?.dispose();
-            aiProvider.disposeIfOwned();
+            _attemptCleanup(searchCoordinator?.dispose, reportCleanupError);
+            _attemptCleanup(aiProvider.disposeIfOwned, reportCleanupError);
             rethrow;
           }
         },
@@ -130,6 +132,36 @@ WorkspaceDependencies createWorkspaceDependencies({
         injectedVaultLabel ?? (supportsDirectoryVault ? '测试仓库' : 'H5 预览库'),
     defaultVaultLabel: defaultVaultLabel ?? 'H5 预览库',
     workspaceCommitFailureForTesting: workspaceCommitFailureForTesting,
+    cleanupErrorReporter: reportCleanupError,
+  );
+}
+
+void _attemptCleanup(
+  void Function()? cleanup,
+  WorkspaceRuntimeCleanupErrorReporter reportCleanupError,
+) {
+  if (cleanup == null) {
+    return;
+  }
+  try {
+    cleanup();
+  } catch (error, stackTrace) {
+    try {
+      reportCleanupError(error, stackTrace);
+    } catch (_) {
+      // Cleanup reporting must not replace the operation's original error.
+    }
+  }
+}
+
+void _reportCleanupError(Object error, StackTrace stackTrace) {
+  FlutterError.reportError(
+    FlutterErrorDetails(
+      exception: error,
+      stack: stackTrace,
+      library: 'synapse workspace runtime',
+      context: ErrorDescription('while disposing workspace runtime resources'),
+    ),
   );
 }
 

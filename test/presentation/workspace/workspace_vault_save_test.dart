@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/cupertino.dart';
@@ -207,6 +208,80 @@ void main() {
     );
     expect(find.text('Bookmarked'), findsWidgets);
   });
+
+  testWidgets(
+    'delayed startup Vault validation cannot replace a user-selected Vault',
+    (tester) async {
+      const oldPath = '/vault/startup-old';
+      const newPath = '/vault/user-new';
+      final oldVault = _GatedListVault();
+      await oldVault.createNote(parentPath: '', title: 'Old');
+      final newVault = MemoryVaultBackend(seedExampleData: false);
+      await newVault.createNote(parentPath: '', title: 'New');
+      final settingsStore = FakeSettingsStore(
+        initialSettings: const SynapseSettings(
+          vaultLocation: VaultLocation(rootPath: oldPath),
+        ),
+      );
+      final restoreStarted = Completer<void>();
+      final restoreRelease = Completer<void>();
+      final pickerStarted = Completer<void>();
+      final indexes = <_RecordingSearchIndex>[];
+      final dependencies = createWorkspaceDependencies(
+        settingsStore: settingsStore,
+        aiProvider: MockAiProvider(),
+        supportsDirectoryVaultOverride: true,
+        restoreVaultAccess: (location) async {
+          restoreStarted.complete();
+          await restoreRelease.future;
+          return location;
+        },
+        pickVaultLocation: () async {
+          pickerStarted.complete();
+          return const VaultLocation(rootPath: newPath);
+        },
+        vaultBackendFactory: (rootPath) {
+          return rootPath == oldPath ? oldVault : newVault;
+        },
+        searchIndexFactory: (_, _) {
+          final index = _RecordingSearchIndex();
+          indexes.add(index);
+          return index;
+        },
+      );
+
+      await pumpWorkspace(tester, vault: null, dependencies: dependencies);
+      await restoreStarted.future;
+      final chooseVault = tester
+          .widget<CupertinoButton>(
+            find.byKey(const Key('choose-vault-empty-button')),
+          )
+          .onPressed!;
+
+      restoreRelease.complete();
+      await tester.pump();
+      await oldVault.listStarted.future;
+      chooseVault();
+      await tester.pump();
+      await pickerStarted.future;
+      await tester.pumpAndSettle();
+
+      expect(find.text('New'), findsWidgets);
+      expect(settingsStore.currentSettings.vaultLocation?.rootPath, newPath);
+      expect(indexes, hasLength(2));
+      expect(indexes[0].disposeCalls, 0);
+      expect(indexes[1].disposeCalls, 0);
+
+      oldVault.releaseList();
+      await tester.pumpAndSettle();
+
+      expect(find.text('New'), findsWidgets);
+      expect(find.text('Old'), findsNothing);
+      expect(settingsStore.currentSettings.vaultLocation?.rootPath, newPath);
+      expect(indexes[0].disposeCalls, 1);
+      expect(indexes[1].disposeCalls, 0);
+    },
+  );
 
   testWidgets('prompts for a new vault when the saved path is unavailable', (
     tester,
@@ -1124,6 +1199,28 @@ final class _UnreadableListVault extends MemoryVaultBackend {
   @override
   Future<List<VaultResourceNode>> listResources() async {
     throw StateError('candidate unreadable');
+  }
+}
+
+final class _GatedListVault extends MemoryVaultBackend {
+  _GatedListVault() : super(seedExampleData: false);
+
+  final listStarted = Completer<void>();
+  final _listRelease = Completer<void>();
+
+  void releaseList() {
+    if (!_listRelease.isCompleted) {
+      _listRelease.complete();
+    }
+  }
+
+  @override
+  Future<List<VaultResourceNode>> listResources() async {
+    if (!listStarted.isCompleted) {
+      listStarted.complete();
+    }
+    await _listRelease.future;
+    return super.listResources();
   }
 }
 
