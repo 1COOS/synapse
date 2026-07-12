@@ -844,6 +844,8 @@ void main() {
             }),
           ),
         );
+        var blockerSettled = false;
+        unawaited(blocker.whenComplete(() => blockerSettled = true));
         await blockerStarted.future;
         var destructiveBackendCalls = 0;
         final destructive = barrier.run<void>(
@@ -866,16 +868,21 @@ void main() {
         );
 
         coordinator.enterFatal(invariant);
+        barrier.enterFatal(invariant);
+
+        final saveResult = await save.timeout(const Duration(seconds: 1));
+        expect(saveResult.requiresReload, isTrue);
+        expect(saveResult.fatalError, same(invariant));
+        expect(barrier.pendingSaveCommitCountForTesting, 0);
+        expect(blockerSettled, isFalse);
+
         releaseBlocker.complete();
 
         expect(await blocker, isA<Committed<void>>());
         await expectLater(destructive, throwsA(same(invariant)));
-        final saveResult = await save.timeout(const Duration(seconds: 1));
-        expect(saveResult.requiresReload, isTrue);
-        expect(saveResult.fatalError, same(invariant));
         expect(destructiveBackendCalls, 0);
-        expect(barrier.pendingSaveCommitCountForTesting, 0);
         expect(coordinator.resetAfterReload, returnsNormally);
+        expect(barrier.resetAfterReload, returnsNormally);
       },
     );
 

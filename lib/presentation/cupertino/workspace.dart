@@ -415,6 +415,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       });
     }
     _noteSaveCoordinator.enterFatal(error);
+    _workspaceMutationBarrier.enterFatal(error);
     FlutterError.reportError(
       FlutterErrorDetails(
         exception: error,
@@ -1149,6 +1150,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
 
   void _setVaultLocation(VaultLocation location) {
     _noteSaveCoordinator.resetAfterReload();
+    _workspaceMutationBarrier.resetAfterReload();
     _resetServices(_createVaultBackend(location.rootPath));
     _vaultRootPath = location.rootPath;
     _vaultLabel = _formatVaultLabel(location.rootPath);
@@ -2296,13 +2298,32 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       }
       final vault = _requireVault();
       final proposalService = _requireProposalService();
+      final mutationBarrier = _workspaceMutationBarrier;
+      final preparedSession = current.session;
       final prepared = await proposalService.prepareOutlineProposal(
         noteId: current.noteId,
         sourceIds: sourceIds,
       );
       current = _resolvePaneEditorContext(context);
       if (current == null) {
-        await proposalService.commitPreparedOutlineProposal(prepared);
+        final sessionIsStillOwned = identical(
+          _noteSessionRegistry.sessionFor(preparedSession.noteId),
+          preparedSession,
+        );
+        await mutationBarrier.run<void>(
+          WorkspaceMutationPlan<void>(
+            affectedNoteIds: sessionIsStillOwned
+                ? <String>{preparedSession.noteId}
+                : const <String>{},
+            dirtyDisposition: DirtyDisposition.flush,
+            commitBackend: () async {
+              await proposalService.commitPreparedOutlineProposal(prepared);
+              return WorkspaceBackendCommit<void>.completed(
+                const VaultMutationDelta<void>(value: null),
+              );
+            },
+          ),
+        );
         return PaneEditorCommandOutcome.staleTarget;
       }
       final targetSession = current.session;
@@ -3541,14 +3562,16 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
               key: const Key('new-folder-button'),
               label: '新建文件夹',
               icon: CupertinoIcons.folder_badge_plus,
-              onPressed: _busy || !_hasVault ? null : () => _createFolder(),
+              onPressed: _busy || _reloadRequired || !_hasVault
+                  ? null
+                  : () => _createFolder(),
             ),
             const SizedBox(width: 6),
             IconAction(
               key: const Key('new-note-button'),
               label: '新建笔记',
               icon: CupertinoIcons.square_pencil,
-              onPressed: _busy || !_hasVault
+              onPressed: _busy || _reloadRequired || !_hasVault
                   ? null
                   : () => _createNote(parentPath: _newNoteParentPath()),
             ),

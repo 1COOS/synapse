@@ -88,9 +88,30 @@ final class WorkspaceMutationBarrier {
   final Map<NoteDocumentSession, int> _reservedSessions =
       Map<NoteDocumentSession, int>.identity();
   final List<_PendingSaveCommit> _pendingSaveCommits = <_PendingSaveCommit>[];
+  WorkspaceCommitInvariantError? _fatalError;
+
+  WorkspaceCommitInvariantError? get fatalError => _fatalError;
 
   @visibleForTesting
   int get pendingSaveCommitCountForTesting => _pendingSaveCommits.length;
+
+  void enterFatal(WorkspaceCommitInvariantError error) {
+    final fatalError = _fatalError ??= error;
+    final pending = List<_PendingSaveCommit>.of(_pendingSaveCommits);
+    _pendingSaveCommits.clear();
+    for (final commit in pending) {
+      commit.abort(fatalError);
+    }
+  }
+
+  void resetAfterReload() {
+    if (_pendingSaveCommits.isNotEmpty) {
+      throw StateError(
+        'Cannot reset the workspace mutation barrier while save commits are pending.',
+      );
+    }
+    _fatalError = null;
+  }
 
   Future<WorkspaceMutationResult<T>> run<T>(WorkspaceMutationPlan<T> plan) {
     final reservedSessions = _sessions
@@ -173,6 +194,7 @@ final class WorkspaceMutationBarrier {
     prepareCommit,
     NoteDocumentSession? originatingSession,
   }) {
+    _throwIfFatal();
     if (originatingSession != null &&
         _activeSessions.contains(originatingSession)) {
       return _prepareCommittedDelta(
@@ -264,6 +286,7 @@ final class WorkspaceMutationBarrier {
       cause: cause,
       causeStackTrace: causeStackTrace,
     );
+    enterFatal(error);
     try {
       _onInvariantFailure?.call(error);
     } catch (_) {}
@@ -273,7 +296,8 @@ final class WorkspaceMutationBarrier {
   void _throwIfFatal([
     Iterable<NoteDocumentSession> pendingSessions = const [],
   ]) {
-    if (_saveCoordinator.fatalError case final fatalError?) {
+    final fatalError = _fatalError ?? _saveCoordinator.fatalError;
+    if (fatalError != null) {
       _abortPendingSaveCommits(fatalError, pendingSessions);
       Error.throwWithStackTrace(fatalError, fatalError.causeStackTrace);
     }

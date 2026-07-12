@@ -8,6 +8,7 @@ import 'package:synapse/domain/vault/vault_resource.dart';
 import 'package:synapse/infrastructure/config/synapse_settings.dart';
 import 'package:synapse/infrastructure/input/image_input_service.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
+import 'package:synapse/infrastructure/vault/vault_post_commit_error.dart';
 import 'package:synapse/presentation/cupertino/workspace/workspace_resources.dart';
 import 'package:synapse/presentation/cupertino/workspace/workspace_controls.dart';
 import 'package:synapse/presentation/cupertino/workspace/workspace_sources.dart';
@@ -1115,6 +1116,86 @@ void main() {
     expect(await firstVault.listProposals(alpha.id), isEmpty);
     expect(await secondVault.listProposals(second.id), isEmpty);
   });
+
+  testWidgets(
+    'stale OCR post-commit failure requires reload without replacing new Vault UI',
+    (tester) async {
+      final firstVault = _StaleProposalPostCommitFailureVault();
+      final alpha = await firstVault.createNote(parentPath: '', title: 'Alpha');
+      await firstVault.addImageSource(
+        noteId: alpha.id,
+        filename: 'post-commit-runtime-ocr.png',
+        mimeType: 'image/png',
+        bytes: tinyPng,
+      );
+      final secondVault = MemoryVaultBackend(seedExampleData: false);
+      final second = await secondVault.createNote(
+        parentPath: '',
+        title: 'Second Vault',
+      );
+      final aiProvider = GatedAiProvider(extractedText: '旧仓库 OCR');
+      final reportedErrors = <FlutterErrorDetails>[];
+      final previousOnError = FlutterError.onError;
+      FlutterError.onError = reportedErrors.add;
+      addTearDown(() => FlutterError.onError = previousOnError);
+
+      await pumpWorkspace(
+        tester,
+        vault: firstVault,
+        aiProvider: aiProvider,
+        settingsStore: FakeSettingsStore(),
+        directoryPicker: () async => '/vault/second',
+        vaultBackendFactory: (_) => secondVault,
+        size: const Size(1600, 900),
+      );
+      await tester.tap(find.bySemanticsLabel('post-commit-runtime-ocr.png'));
+      await tester.pump();
+      final generate = tester
+          .widget<CupertinoButton>(
+            find.descendant(
+              of: find.byKey(const Key('generate-proposal-button')),
+              matching: find.byType(CupertinoButton),
+            ),
+          )
+          .onPressed!;
+      final switchVault = tester
+          .widget<CupertinoButton>(
+            find.descendant(
+              of: find.byKey(const Key('vault-location-button')),
+              matching: find.byType(CupertinoButton),
+            ),
+          )
+          .onPressed!;
+
+      generate();
+      await aiProvider.extractionStarted.future;
+      switchVault();
+      await tester.pump(const Duration(milliseconds: 500));
+      aiProvider.releaseExtraction();
+      await tester.pumpAndSettle();
+      FlutterError.onError = previousOnError;
+
+      expect(firstVault.updateSourceCalls, 1);
+      expect(firstVault.saveProposalCalls, 1);
+      expect(reportedErrors, hasLength(1));
+      expect(find.textContaining('后端操作可能已完成，请重新加载工作区'), findsOneWidget);
+      expect(
+        find.descendant(
+          of: find.byKey(const Key('split-pane-title-pane-1')),
+          matching: find.text('Second Vault'),
+        ),
+        findsOneWidget,
+      );
+      expect(find.text('旧仓库 OCR'), findsNothing);
+      expect(await secondVault.listProposals(second.id), isEmpty);
+      expect(
+        tester
+            .widget<IconAction>(find.byKey(const Key('new-note-button')))
+            .onPressed,
+        isNull,
+      );
+    },
+  );
 }
 
 final class _ImageImportHydrationFailureVault extends MemoryVaultBackend {
@@ -1182,6 +1263,29 @@ final class _ProposalHydrationFailureVault extends MemoryVaultBackend {
       throw StateError('post-proposal listProposals failed');
     }
     return super.listProposals(noteId);
+  }
+}
+
+final class _StaleProposalPostCommitFailureVault extends MemoryVaultBackend {
+  _StaleProposalPostCommitFailureVault() : super(seedExampleData: false);
+
+  int updateSourceCalls = 0;
+  int saveProposalCalls = 0;
+
+  @override
+  Future<SourceItem> updateSource(SourceItem source) async {
+    updateSourceCalls += 1;
+    return super.updateSource(source);
+  }
+
+  @override
+  Future<AiProposal> saveProposal(AiProposal proposal) async {
+    saveProposalCalls += 1;
+    final cause = StateError('proposal write failed after source commit');
+    throw VaultPostCommitError(
+      cause: cause,
+      causeStackTrace: StackTrace.current,
+    );
   }
 }
 
