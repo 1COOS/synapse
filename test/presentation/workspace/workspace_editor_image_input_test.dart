@@ -1,11 +1,15 @@
+import 'dart:async';
+
 import 'package:flutter/cupertino.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:synapse/domain/vault/vault_resource.dart';
 import 'package:synapse/infrastructure/config/synapse_settings.dart';
 import 'package:synapse/infrastructure/input/image_input_service.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
 import 'package:synapse/presentation/workspace/editor/live_markdown_editor.dart';
+import 'package:synapse/presentation/workspace/editor/pane_editor_context.dart';
 
 import '../../support/workspace_fakes.dart';
 import '../../support/workspace_harness.dart';
@@ -248,7 +252,6 @@ void main() {
         bytes: tinyPng,
       ),
     );
-
     await pumpWorkspace(tester, vault: vault, imageInput: imageInput);
     await switchToSourceMode(tester);
     await enterTextInLiveMarkdownBlock(tester, '# 心经学习\n正文');
@@ -295,7 +298,7 @@ void main() {
     final editor = tester.widget<LiveMarkdownEditor>(
       inNotePane(find.byType(LiveMarkdownEditor), 1).first,
     );
-    final paste = editor.onPaste();
+    final paste = editor.onPaste(editor.controller.value);
     await imageInput.pasteStarted.future;
 
     tester
@@ -316,6 +319,176 @@ void main() {
       (await vault.readNote(beta.id)).markdown,
       isNot(contains('alpha-paste.png')),
     );
+  });
+
+  testWidgets('delayed image paste keeps its original block selection', (
+    tester,
+  ) async {
+    final vault = CountingUpdateVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Alpha');
+    await vault.updateMarkdown(noteId: note.id, markdown: 'Block A\n\nBlock B');
+    final imageInput = GatedImageInputService(
+      pastedImage: const ImportedImage(
+        filename: 'block-a.png',
+        mimeType: 'image/png',
+        bytes: tinyPng,
+      ),
+    );
+
+    await pumpWorkspace(tester, vault: vault, imageInput: imageInput);
+    await switchToSourceMode(tester);
+    await activateLiveMarkdownBlock(tester, blockIndex: 0);
+    await setActiveLiveMarkdownSelection(
+      tester,
+      const TextSelection.collapsed(offset: 7),
+    );
+    final editor = tester.widget<LiveMarkdownEditor>(
+      find.byType(LiveMarkdownEditor),
+    );
+
+    final paste = editor.onPaste(editor.controller.value);
+    await imageInput.pasteStarted.future;
+    editor.controller.selection = TextSelection.collapsed(
+      offset: editor.controller.text.length,
+    );
+    imageInput.releasePaste();
+    expect(await paste, PaneEditorCommandOutcome.committed);
+    await tester.pumpAndSettle();
+
+    final saved = (await vault.readNote(note.id)).markdown;
+    const imageTag =
+        '<img src="Alpha.assets/attachments/block-a.png" width="480">';
+    expect(saved, contains(imageTag));
+    expect(saved.indexOf(imageTag), lessThan(saved.indexOf('Block B')));
+  });
+
+  testWidgets('delayed text paste keeps its original block selection', (
+    tester,
+  ) async {
+    final vault = CountingUpdateVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Alpha');
+    await vault.updateMarkdown(noteId: note.id, markdown: 'Block A\n\nBlock B');
+    final clipboardStarted = Completer<void>();
+    final clipboardRelease = Completer<void>();
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(SystemChannels.platform, (call) async {
+          if (call.method == 'Clipboard.getData') {
+            clipboardStarted.complete();
+            await clipboardRelease.future;
+            return <String, Object?>{'text': ' pasted'};
+          }
+          return null;
+        });
+    addTearDown(() {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(SystemChannels.platform, null);
+    });
+
+    await pumpWorkspace(
+      tester,
+      vault: vault,
+      imageInput: FakeImageInputService(),
+    );
+    await switchToSourceMode(tester);
+    await activateLiveMarkdownBlock(tester, blockIndex: 0);
+    await setActiveLiveMarkdownSelection(
+      tester,
+      const TextSelection.collapsed(offset: 7),
+    );
+    final editor = tester.widget<LiveMarkdownEditor>(
+      find.byType(LiveMarkdownEditor),
+    );
+
+    final paste = editor.onPaste(editor.controller.value);
+    await clipboardStarted.future;
+    editor.controller.selection = TextSelection.collapsed(
+      offset: editor.controller.text.length,
+    );
+    clipboardRelease.complete();
+    expect(await paste, PaneEditorCommandOutcome.committed);
+    await tester.pump();
+
+    expect(editor.controller.text, 'Block A pasted\n\nBlock B');
+  });
+
+  testWidgets('delayed paste is stale when the session text changes', (
+    tester,
+  ) async {
+    final vault = CountingUpdateVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Alpha');
+    await vault.updateMarkdown(noteId: note.id, markdown: 'Block A');
+    final imageInput = GatedImageInputService(
+      pastedImage: const ImportedImage(
+        filename: 'stale-text.png',
+        mimeType: 'image/png',
+        bytes: tinyPng,
+      ),
+    );
+
+    await pumpWorkspace(tester, vault: vault, imageInput: imageInput);
+    await switchToSourceMode(tester);
+    await activateLiveMarkdownBlock(tester);
+    final editor = tester.widget<LiveMarkdownEditor>(
+      find.byType(LiveMarkdownEditor),
+    );
+
+    final paste = editor.onPaste(editor.controller.value);
+    await imageInput.pasteStarted.future;
+    editor.controller.value = const TextEditingValue(
+      text: 'Changed',
+      selection: TextSelection.collapsed(offset: 7),
+    );
+    imageInput.releasePaste();
+
+    expect(await paste, PaneEditorCommandOutcome.staleTarget);
+    await tester.pump();
+    expect(editor.controller.text, 'Changed');
+    expect(await vault.listSources(note.id), isEmpty);
+  });
+
+  testWidgets('post-commit paste target change requires workspace reload', (
+    tester,
+  ) async {
+    final vault = _GatedCommittedImageSourceVaultBackend(
+      seedExampleData: false,
+    );
+    addTearDown(vault.releaseSource);
+    final note = await vault.createNote(parentPath: '', title: 'Alpha');
+    await vault.updateMarkdown(noteId: note.id, markdown: 'Block A');
+    final imageInput = FakeImageInputService(
+      pastedImage: const ImportedImage(
+        filename: 'committed-source.png',
+        mimeType: 'image/png',
+        bytes: tinyPng,
+      ),
+    );
+    final reportedErrors = <FlutterErrorDetails>[];
+    final previousOnError = FlutterError.onError;
+    FlutterError.onError = reportedErrors.add;
+    addTearDown(() => FlutterError.onError = previousOnError);
+
+    await pumpWorkspace(tester, vault: vault, imageInput: imageInput);
+    await switchToSourceMode(tester);
+    await activateLiveMarkdownBlock(tester);
+    final editor = tester.widget<LiveMarkdownEditor>(
+      find.byType(LiveMarkdownEditor),
+    );
+
+    final paste = editor.onPaste(editor.controller.value);
+    await vault.sourceCommitted.future;
+    editor.controller.value = const TextEditingValue(
+      text: 'Changed',
+      selection: TextSelection.collapsed(offset: 7),
+    );
+    vault.releaseSource();
+
+    expect(await paste, PaneEditorCommandOutcome.unchanged);
+    await tester.pumpAndSettle();
+    FlutterError.onError = previousOnError;
+    expect(reportedErrors, hasLength(1));
+    expect(find.textContaining('后端操作可能已完成，请重新加载工作区'), findsOneWidget);
+    expect(await vault.listSources(note.id), hasLength(1));
+    expect((await vault.readNote(note.id)).markdown, isNot(contains('<img')));
   });
 
   testWidgets('delayed pane paste rejects a closed pane target', (
@@ -349,7 +522,7 @@ void main() {
         )
         .onPressed!;
 
-    final paste = editor.onPaste();
+    final paste = editor.onPaste(editor.controller.value);
     await imageInput.pasteStarted.future;
     closePane();
     await tester.pump(const Duration(milliseconds: 250));
@@ -391,7 +564,7 @@ void main() {
           )
           .onPressed!;
 
-      final paste = editor.onPaste();
+      final paste = editor.onPaste(editor.controller.value);
       await imageInput.pasteStarted.future;
       closePane();
       await tester.pump(const Duration(milliseconds: 250));
@@ -442,7 +615,7 @@ void main() {
         )
         .onPressed!;
 
-    final paste = editor.onPaste();
+    final paste = editor.onPaste(editor.controller.value);
     await imageInput.pasteStarted.future;
     openSettings();
     await tester.pump(const Duration(milliseconds: 250));
@@ -637,4 +810,38 @@ void main() {
     expect(imageInput.pasteCalls, 0);
     expect(find.textContaining('请先选择或创建笔记'), findsOneWidget);
   });
+}
+
+class _GatedCommittedImageSourceVaultBackend
+    extends CountingUpdateVaultBackend {
+  _GatedCommittedImageSourceVaultBackend({super.seedExampleData});
+
+  final sourceCommitted = Completer<void>();
+  final _sourceRelease = Completer<void>();
+
+  void releaseSource() {
+    if (!_sourceRelease.isCompleted) {
+      _sourceRelease.complete();
+    }
+  }
+
+  @override
+  Future<SourceItem> addImageSource({
+    required String noteId,
+    required String filename,
+    required String mimeType,
+    required List<int> bytes,
+  }) async {
+    final source = await super.addImageSource(
+      noteId: noteId,
+      filename: filename,
+      mimeType: mimeType,
+      bytes: bytes,
+    );
+    if (!sourceCommitted.isCompleted) {
+      sourceCommitted.complete();
+    }
+    await _sourceRelease.future;
+    return source;
+  }
 }

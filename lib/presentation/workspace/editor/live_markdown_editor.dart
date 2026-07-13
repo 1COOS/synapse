@@ -50,7 +50,8 @@ class LiveMarkdownEditor extends StatefulWidget {
   final bool focused;
   final VoidCallback onFocusPane;
   final Future<NoteEditorPasteAvailability> Function() pasteAvailability;
-  final Future<PaneEditorCommandOutcome> Function() onPaste;
+  final Future<PaneEditorCommandOutcome> Function(TextEditingValue target)
+  onPaste;
   final Widget Function(String markdown, {VoidCallback? onImageTap})
   previewBuilder;
 
@@ -373,7 +374,8 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
     }
     dismissAllMacContextMenus();
     _editorController.syncDocumentSelectionFromBlock(menuTarget: menuTarget);
-    await widget.onPaste();
+    final target = widget.controller.value;
+    await widget.onPaste(target);
     if (mounted) {
       _syncBlockController();
     }

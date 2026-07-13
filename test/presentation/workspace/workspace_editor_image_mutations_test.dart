@@ -217,7 +217,7 @@ void main() {
           .onPressed!;
       vault.gateUpdates = true;
 
-      final paste = editor.onPaste();
+      final paste = editor.onPaste(editor.controller.value);
       await vault.updateStarted.future;
       openSettings();
       await tester.pump(const Duration(milliseconds: 250));

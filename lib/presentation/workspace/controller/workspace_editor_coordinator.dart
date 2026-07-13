@@ -156,34 +156,36 @@ final class WorkspaceEditorCoordinator {
 
   Future<PaneEditorCommandOutcome> pasteIntoNote(
     PaneEditorContext context,
+    TextEditingValue target,
   ) async {
-    if (_resolve(context) == null) {
+    if (_resolvePasteTarget(context, target) == null) {
       return PaneEditorCommandOutcome.staleTarget;
     }
     final image = await _imageInput.pasteImage();
-    if (_resolve(context) == null) {
+    if (_resolvePasteTarget(context, target) == null) {
       return PaneEditorCommandOutcome.staleTarget;
     }
     if (image != null) {
-      return _insertPastedImage(context: context, image: image);
+      return _insertPastedImage(context: context, image: image, target: target);
     }
     final text = (await Clipboard.getData(Clipboard.kTextPlain))?.text;
-    final resolved = _resolve(context);
+    final resolved = _resolvePasteTarget(context, target);
     if (resolved == null) {
       return PaneEditorCommandOutcome.staleTarget;
     }
     if (text == null || text.isEmpty) {
       return PaneEditorCommandOutcome.unchanged;
     }
-    _replaceEditorSelection(resolved.session, text);
+    _replaceEditorSelection(resolved.session, text, target: target);
     return PaneEditorCommandOutcome.committed;
   }
 
   Future<PaneEditorCommandOutcome> _insertPastedImage({
     required PaneEditorContext context,
     required ImportedImage image,
+    required TextEditingValue target,
   }) async {
-    final resolved = _resolve(context);
+    final resolved = _resolvePasteTarget(context, target);
     if (resolved == null) {
       return PaneEditorCommandOutcome.staleTarget;
     }
@@ -195,7 +197,7 @@ final class WorkspaceEditorCoordinator {
         affectedNoteIds: {targetSession.noteId},
         dirtyDisposition: DirtyDisposition.discard,
         commitBackend: () async {
-          _requireCurrentMutationTarget(context, targetSession);
+          _requireCurrentPasteMutationTarget(context, targetSession, target);
           final oldNoteId = targetSession.noteId;
           final source = await vault.addImageSource(
             noteId: oldNoteId,
@@ -203,15 +205,19 @@ final class WorkspaceEditorCoordinator {
             mimeType: image.mimeType,
             bytes: image.bytes,
           );
-          final value = targetSession.controller.value;
-          final selection = _normalizedSelection(value);
+          _requireUnchangedPasteTextAfterBackend(
+            targetSession,
+            target,
+            noteIds: {oldNoteId},
+          );
+          final selection = _normalizedSelection(target);
           final replacement = blockImageInsertion(
-            text: value.text,
+            text: target.text,
             start: selection.start,
             end: selection.end,
             tag: _imageMarkdownTag(targetSession.note, source),
           );
-          final updatedBody = value.text.replaceRange(
+          final updatedBody = target.text.replaceRange(
             selection.start,
             selection.end,
             replacement,
@@ -225,12 +231,22 @@ final class WorkspaceEditorCoordinator {
               ),
             ),
           );
+          _requireUnchangedPasteTextAfterBackend(
+            targetSession,
+            target,
+            noteIds: {oldNoteId, saved.id},
+          );
           var committedNoteId = oldNoteId;
           if (saved.title != targetSession.note.title) {
             final renamed = await runVaultPostCommit(
               () => vault.renameNote(noteId: oldNoteId, title: saved.title),
             );
             committedNoteId = renamed.id;
+            _requireUnchangedPasteTextAfterBackend(
+              targetSession,
+              target,
+              noteIds: {oldNoteId, committedNoteId},
+            );
           }
           return WorkspaceBackendCommit(
             postCommitHydrate: () async {
@@ -255,6 +271,10 @@ final class WorkspaceEditorCoordinator {
             },
           );
           final resources = delta.resources ?? const <VaultResourceNode>[];
+          if (sessionStillOwned &&
+              targetSession.controller.text != target.text) {
+            throw const _PasteTargetChangedAfterBackend();
+          }
           if (!sessionStillOwned || _resolve(context) == null) {
             return _commits.prepare(
               delta,
@@ -572,13 +592,13 @@ final class WorkspaceEditorCoordinator {
 
   void _replaceEditorSelection(
     NoteDocumentSession session,
-    String replacement,
-  ) {
+    String replacement, {
+    required TextEditingValue target,
+  }) {
     final controller = session.controller;
-    final value = controller.value;
-    final selection = _normalizedSelection(value);
-    controller.value = value.copyWith(
-      text: value.text.replaceRange(
+    final selection = _normalizedSelection(target);
+    controller.value = target.copyWith(
+      text: target.text.replaceRange(
         selection.start,
         selection.end,
         replacement,
@@ -616,6 +636,17 @@ final class WorkspaceEditorCoordinator {
     );
   }
 
+  ResolvedPaneEditorContext? _resolvePasteTarget(
+    PaneEditorContext context,
+    TextEditingValue target,
+  ) {
+    final resolved = _resolve(context);
+    if (resolved == null || resolved.session.controller.text != target.text) {
+      return null;
+    }
+    return resolved;
+  }
+
   void _requireCurrentMutationTarget(
     PaneEditorContext context,
     NoteDocumentSession targetSession,
@@ -624,6 +655,37 @@ final class WorkspaceEditorCoordinator {
     if (resolved == null || !identical(resolved.session, targetSession)) {
       throw const _StalePaneEditorMutationTarget();
     }
+  }
+
+  void _requireCurrentPasteMutationTarget(
+    PaneEditorContext context,
+    NoteDocumentSession targetSession,
+    TextEditingValue target,
+  ) {
+    final resolved = _resolvePasteTarget(context, target);
+    if (resolved == null || !identical(resolved.session, targetSession)) {
+      throw const _StalePaneEditorMutationTarget();
+    }
+  }
+
+  void _requireUnchangedPasteTextAfterBackend(
+    NoteDocumentSession targetSession,
+    TextEditingValue target, {
+    required Set<String> noteIds,
+  }) {
+    final sessionStillOwned = noteSessionRegistryOwnsSession(
+      sessions: _sessions,
+      sessionIdentity: targetSession,
+      noteIds: noteIds,
+    );
+    if (!sessionStillOwned || targetSession.controller.text == target.text) {
+      return;
+    }
+    final cause = const _PasteTargetChangedAfterBackend();
+    throw VaultPostCommitError(
+      cause: cause,
+      causeStackTrace: StackTrace.current,
+    );
   }
 
   PaneEditorCommandOutcome _editorResult<T>(
@@ -648,6 +710,10 @@ final class WorkspaceEditorCoordinator {
 
 final class _StalePaneEditorMutationTarget implements Exception {
   const _StalePaneEditorMutationTarget();
+}
+
+final class _PasteTargetChangedAfterBackend implements Exception {
+  const _PasteTargetChangedAfterBackend();
 }
 
 final class _SourceHydration {

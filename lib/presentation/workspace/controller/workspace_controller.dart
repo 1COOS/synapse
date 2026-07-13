@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../application/search/search_index.dart';
@@ -606,13 +607,14 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
 
   Future<editor_context.PaneEditorCommandOutcome> pasteIntoNote(
     editor_context.PaneEditorContext? context,
+    TextEditingValue? target,
   ) {
-    if (context == null) {
+    if (context == null || target == null) {
       _setMessage('请先选择或创建笔记');
       return Future.value(editor_context.PaneEditorCommandOutcome.unchanged);
     }
     return _editorOperations.runOperation(
-      () => _editor.pasteIntoNote(context),
+      () => _editor.pasteIntoNote(context, target),
       context: context,
     );
   }

@@ -91,7 +91,8 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
 
   Future<PaneEditorCommandOutcome> _pasteIntoNoteEditor(
     PaneEditorContext? editorContext,
-  ) => _controller.pasteIntoNote(editorContext);
+    TextEditingValue? target,
+  ) => _controller.pasteIntoNote(editorContext, target);
 
   Future<NoteEditorPasteAvailability> _noteEditorPasteAvailability(
     PaneEditorContext? editorContext,
@@ -324,9 +325,19 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
       child: CallbackShortcuts(
         bindings: <ShortcutActivator, VoidCallback>{
           const SingleActivator(LogicalKeyboardKey.keyV, meta: true): () =>
-              unawaited(_pasteIntoNoteEditor(editorContext)),
+              unawaited(
+                _pasteIntoNoteEditor(
+                  editorContext,
+                  resolvedSession?.controller.value,
+                ),
+              ),
           const SingleActivator(LogicalKeyboardKey.keyV, control: true): () =>
-              unawaited(_pasteIntoNoteEditor(editorContext)),
+              unawaited(
+                _pasteIntoNoteEditor(
+                  editorContext,
+                  resolvedSession?.controller.value,
+                ),
+              ),
         },
         child: GestureDetector(
           key: focused
@@ -386,7 +397,8 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
                     },
                     pasteAvailability: () =>
                         _noteEditorPasteAvailability(editorContext),
-                    onPaste: () => _pasteIntoNoteEditor(editorContext),
+                    onPaste: (target) =>
+                        _pasteIntoNoteEditor(editorContext, target),
                     previewBuilder: (markdown, {onImageTap}) =>
                         _markdownRenderer.buildLivePreviewBlock(
                           markdown,
@@ -408,7 +420,7 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
     if (editorContext != null || !_isPasteImageShortcutKeyUp(event)) {
       return KeyEventResult.ignored;
     }
-    unawaited(_pasteIntoNoteEditor(null));
+    unawaited(_pasteIntoNoteEditor(null, null));
     return KeyEventResult.handled;
   }
 
