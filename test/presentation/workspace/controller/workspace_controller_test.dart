@@ -376,6 +376,79 @@ void main() {
       expect(opened.activeOperation, isNull);
     });
 
+    test(
+      'Vault switch invalidates editor context and waits for an entered old mutation',
+      () async {
+        final oldVault = _GatedAddImageVaultBackend();
+        final newVault = MemoryVaultBackend(seedExampleData: false);
+        await oldVault.createNote(parentPath: '', title: 'Old');
+        await newVault.createNote(parentPath: '', title: 'New');
+        final container = ProviderContainer(
+          overrides: [
+            workspaceDependenciesProvider.overrideWithValue(
+              createWorkspaceDependencies(
+                initialVault: oldVault,
+                imageInput: FakeImageInputService(
+                  pickedImage: const ImportedImage(
+                    filename: 'old.png',
+                    mimeType: 'image/png',
+                    bytes: tinyPng,
+                  ),
+                ),
+                settingsStore: FakeSettingsStore(),
+                supportsDirectoryVaultOverride: true,
+                pickVaultLocation: () async =>
+                    const VaultLocation(rootPath: '/new-vault'),
+                vaultBackendFactory: (_) => newVault,
+              ),
+            ),
+          ],
+        );
+        addTearDown(container.dispose);
+        addTearDown(oldVault.releaseAddImage);
+        final initial = await container.read(
+          workspaceControllerProvider.future,
+        );
+        final controller = container.read(workspaceControllerProvider.notifier);
+        final context = controller.capturePaneEditorContext(
+          initial.focusedPaneId,
+        )!;
+
+        final importing = controller.importImage(context);
+        await oldVault.addImageStarted.future;
+        final queuedImporting = controller.importImage(context);
+        await Future<void>.delayed(Duration.zero);
+
+        var switchCompleted = false;
+        final switching = controller.chooseVault();
+        unawaited(switching.then((_) => switchCompleted = true));
+        await Future<void>.delayed(Duration.zero);
+        final contextCurrentAfterConfirmation = controller
+            .isPaneEditorContextCurrent(context);
+        final completedBeforeRelease = switchCompleted;
+
+        oldVault.releaseAddImage();
+        final importOutcome = await importing;
+        final queuedImportOutcome = await queuedImporting;
+        final switchOutcome = await switching;
+        expect(importOutcome, PaneEditorCommandOutcome.staleTarget);
+        expect(queuedImportOutcome, PaneEditorCommandOutcome.staleTarget);
+        expect(switchOutcome, WorkspaceActionResult.committed);
+        expect(contextCurrentAfterConfirmation, isFalse);
+        expect(completedBeforeRelease, isFalse);
+
+        final switched = container
+            .read(workspaceControllerProvider)
+            .requireValue;
+        expect(switched.vaultRoot, '/new-vault');
+        expect(switched.selectedResourceId, 'New.md');
+        expect(switched.sessionNoteIds, {'New.md'});
+        expect(oldVault.addImageCalls, 1);
+        expect((await oldVault.readNote('Old.md')).sources, hasLength(1));
+        expect((await newVault.readNote('New.md')).sources, isEmpty);
+      },
+    );
+
     test('enforces one active workspace operation globally', () async {
       final picker = Completer<VaultLocation?>();
       final settingsStore = FakeSettingsStore();
@@ -459,6 +532,73 @@ void main() {
         expect(updated.preferences.noteFontSize, 18);
         expect(controller.sessionFor('Settings.md'), same(session));
         expect(settingsStore.savedSettings, [updatedSettings]);
+      },
+    );
+
+    test(
+      'settings runtime replacement waits for an entered editor mutation',
+      () async {
+        final vault = _GatedAddImageVaultBackend();
+        await vault.createNote(parentPath: '', title: 'Settings');
+        final settingsStore = FakeSettingsStore();
+        final container = ProviderContainer(
+          overrides: [
+            workspaceDependenciesProvider.overrideWithValue(
+              createWorkspaceDependencies(
+                initialVault: vault,
+                imageInput: FakeImageInputService(
+                  pickedImage: const ImportedImage(
+                    filename: 'settings.png',
+                    mimeType: 'image/png',
+                    bytes: tinyPng,
+                  ),
+                ),
+                settingsStore: settingsStore,
+              ),
+            ),
+          ],
+        );
+        addTearDown(container.dispose);
+        addTearDown(vault.releaseAddImage);
+        final initial = await container.read(
+          workspaceControllerProvider.future,
+        );
+        final controller = container.read(workspaceControllerProvider.notifier);
+        final session = controller.sessionFor('Settings.md')!;
+        final context = controller.capturePaneEditorContext(
+          initial.focusedPaneId,
+        )!;
+        final nextSettings = initial.settings.copyWith(
+          preferences: initial.preferences.copyWith(noteFontSize: 18),
+        );
+
+        final importing = controller.importImage(context);
+        await vault.addImageStarted.future;
+
+        var settingsCompleted = false;
+        final updating = controller.updateSettings(nextSettings);
+        unawaited(updating.then((_) => settingsCompleted = true));
+        await Future<void>.delayed(Duration.zero);
+        final contextCurrentAfterCommit = controller.isPaneEditorContextCurrent(
+          context,
+        );
+        final completedBeforeRelease = settingsCompleted;
+
+        vault.releaseAddImage();
+        final importOutcome = await importing;
+        final settingsOutcome = await updating;
+        expect(importOutcome, PaneEditorCommandOutcome.staleTarget);
+        expect(settingsOutcome, WorkspaceActionResult.committed);
+        expect(contextCurrentAfterCommit, isFalse);
+        expect(completedBeforeRelease, isFalse);
+
+        final updated = container
+            .read(workspaceControllerProvider)
+            .requireValue;
+        expect(updated.settings, nextSettings);
+        expect(controller.sessionFor('Settings.md'), same(session));
+        expect(session.note.sources, hasLength(1));
+        expect(settingsStore.savedSettings, [nextSettings]);
       },
     );
 
@@ -1181,6 +1321,40 @@ final class _HydrationRecordingDelayedDeleteVault
   Future<List<VaultResourceNode>> listResources() {
     listResourcesCalls += 1;
     return super.listResources();
+  }
+}
+
+final class _GatedAddImageVaultBackend extends MemoryVaultBackend {
+  _GatedAddImageVaultBackend() : super(seedExampleData: false);
+
+  final Completer<void> addImageStarted = Completer<void>();
+  final Completer<void> _releaseAddImage = Completer<void>();
+  int addImageCalls = 0;
+
+  void releaseAddImage() {
+    if (!_releaseAddImage.isCompleted) {
+      _releaseAddImage.complete();
+    }
+  }
+
+  @override
+  Future<SourceItem> addImageSource({
+    required String noteId,
+    required String filename,
+    required String mimeType,
+    required List<int> bytes,
+  }) async {
+    addImageCalls += 1;
+    if (!addImageStarted.isCompleted) {
+      addImageStarted.complete();
+    }
+    await _releaseAddImage.future;
+    return super.addImageSource(
+      noteId: noteId,
+      filename: filename,
+      mimeType: mimeType,
+      bytes: bytes,
+    );
   }
 }
 

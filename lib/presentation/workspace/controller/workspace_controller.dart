@@ -39,13 +39,11 @@ final workspaceControllerProvider =
       WorkspaceController.new,
     );
 
-final workspaceSessionProvider = Provider.family<NoteDocumentSession?, String>((
-  ref,
-  noteId,
-) {
-  ref.watch(workspaceControllerProvider);
-  return ref.read(workspaceControllerProvider.notifier).sessionFor(noteId);
-});
+final workspaceSessionProvider = Provider.autoDispose
+    .family<NoteDocumentSession?, String>((ref, noteId) {
+      ref.watch(workspaceControllerProvider);
+      return ref.read(workspaceControllerProvider.notifier).sessionFor(noteId);
+    });
 
 final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
   static const reloadRequiredMessage = '工作区状态提交异常。后端操作可能已完成，请重新加载工作区后再继续。';

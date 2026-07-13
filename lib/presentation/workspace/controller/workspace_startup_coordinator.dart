@@ -176,8 +176,11 @@ final class WorkspaceStartupCoordinator {
     if (loaded == null) {
       return null;
     }
-    _loadedSettingsBaseline ??= loaded;
-    return settingsForEditing;
+    if (_startupSettingsError == null) {
+      _loadedSettingsBaseline ??= loaded;
+      return settingsForEditing;
+    }
+    return _settings;
   }
 
   Future<WorkspaceSettingsDialogModel?> settingsDialogModel() async {
@@ -231,6 +234,7 @@ final class WorkspaceStartupCoordinator {
       if (location == null) {
         return WorkspaceActionResult.cancelled;
       }
+      await _invalidateEditorContextsAndWaitForMutations();
       final baseline = await _awaitStartupSettings();
       if (baseline == null) {
         return WorkspaceActionResult.aborted;
@@ -251,6 +255,7 @@ final class WorkspaceStartupCoordinator {
       );
       final snapshot = await resources.loadDetachedRuntime(candidate);
       await _persistSettings(nextSettings);
+      _startupSettingsError = null;
       saves.resetAfterReload();
       mutations.resetAfterReload();
       runtimes.install(candidate);
@@ -287,6 +292,7 @@ final class WorkspaceStartupCoordinator {
     _startupToken = null;
     WorkspaceRuntime? candidate;
     try {
+      await _invalidateEditorContextsAndWaitForMutations();
       final current = runtimes.current;
       if (current != null) {
         candidate = _createRuntime(
@@ -303,6 +309,7 @@ final class WorkspaceStartupCoordinator {
       }
       _settings = settings;
       _loadedSettingsBaseline = settings;
+      _startupSettingsError = null;
       splits.updateDefaultMode(preferredNoteMode);
       final currentState = readState();
       publishState(
@@ -336,16 +343,14 @@ final class WorkspaceStartupCoordinator {
   Future<SynapseSettings?> _awaitStartupSettings() async {
     final future = _startupSettingsFuture;
     if (future == null) {
-      return _startupSettingsError == null
-          ? _loadedSettingsBaseline ?? _settings
-          : null;
+      return _loadedSettingsBaseline ?? _settings;
     }
     try {
       return await future;
     } catch (error) {
       _startupSettingsError = error;
       setMessage('设置读取失败：$error');
-      return null;
+      return _loadedSettingsBaseline ?? _settings;
     }
   }
 
@@ -488,6 +493,11 @@ final class WorkspaceStartupCoordinator {
     });
     _settingsPersistenceTail = operation.catchError((Object _) {});
     return operation;
+  }
+
+  Future<void> _invalidateEditorContextsAndWaitForMutations() async {
+    runtimes.invalidateContextGeneration();
+    await mutations.waitForIdle();
   }
 
   bool _semanticSearchEnabledFor(SynapseSettings settings) {

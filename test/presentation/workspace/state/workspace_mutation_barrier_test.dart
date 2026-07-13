@@ -42,6 +42,57 @@ void main() {
       expect(backendFailed, isNot(isA<Committed<void>>()));
     });
 
+    test('waitForIdle drains mutations enqueued while waiting', () async {
+      final harness = _Stage6BarrierHarness();
+      addTearDown(harness.dispose);
+      final firstStarted = Completer<void>();
+      final releaseFirst = Completer<void>();
+      final secondStarted = Completer<void>();
+      final releaseSecond = Completer<void>();
+
+      final first = harness.barrier.run<void>(
+        WorkspaceMutationPlan<void>(
+          affectedNoteIds: const {},
+          dirtyDisposition: DirtyDisposition.flush,
+          commitBackend: () async {
+            firstStarted.complete();
+            await releaseFirst.future;
+            return WorkspaceBackendCommit.completed(
+              const VaultMutationDelta<void>(value: null),
+            );
+          },
+        ),
+      );
+      await firstStarted.future;
+
+      var idleCompleted = false;
+      final idle = harness.barrier.waitForIdle().then((_) {
+        idleCompleted = true;
+      });
+      final second = harness.barrier.run<void>(
+        WorkspaceMutationPlan<void>(
+          affectedNoteIds: const {},
+          dirtyDisposition: DirtyDisposition.flush,
+          commitBackend: () async {
+            secondStarted.complete();
+            await releaseSecond.future;
+            return WorkspaceBackendCommit.completed(
+              const VaultMutationDelta<void>(value: null),
+            );
+          },
+        ),
+      );
+
+      releaseFirst.complete();
+      await secondStarted.future;
+      await Future<void>.delayed(Duration.zero);
+      expect(idleCompleted, isFalse);
+
+      releaseSecond.complete();
+      await Future.wait([first, second, idle]);
+      expect(idleCompleted, isTrue);
+    });
+
     test(
       'combined batch listeners observe every installed component',
       () async {

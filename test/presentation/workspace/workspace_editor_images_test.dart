@@ -1253,7 +1253,7 @@ void main() {
         'vision-model',
       );
       await tester.tap(find.text('保存设置'));
-      await tester.pumpAndSettle();
+      await tester.pump();
 
       vault.releaseUpdate();
       expect(await paste, PaneEditorCommandOutcome.staleTarget);

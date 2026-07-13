@@ -525,6 +525,97 @@ void main() {
   );
 
   testWidgets(
+    'settings load failure opens a safe recovery dialog and saves a new baseline',
+    (tester) async {
+      final settingsStore = _FailingLoadSettingsStore(
+        initialSettings: _oldSettings,
+      );
+      final vault = MemoryVaultBackend(seedExampleData: false);
+      await vault.createNote(parentPath: '', title: 'Alpha');
+
+      await pumpWorkspace(tester, vault: vault, settingsStore: settingsStore);
+
+      expect(find.textContaining('设置读取失败'), findsOneWidget);
+      expect(find.textContaining('settings load failed'), findsOneWidget);
+
+      await tester.tap(find.byKey(const Key('settings-button')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('settings-nav-models')));
+      await tester.pumpAndSettle();
+
+      expect(
+        tester
+            .widget<CupertinoTextField>(
+              find.descendant(
+                of: find.byKey(const Key('provider-base-url')),
+                matching: find.byType(CupertinoTextField),
+              ),
+            )
+            .controller
+            ?.text,
+        isEmpty,
+      );
+      expect(
+        tester
+            .widget<CupertinoTextField>(
+              find.descendant(
+                of: find.byKey(const Key('provider-api-key')),
+                matching: find.byType(CupertinoTextField),
+              ),
+            )
+            .controller
+            ?.text,
+        isEmpty,
+      );
+
+      await tester.enterText(
+        find.byKey(const Key('provider-base-url')),
+        'recovered-url',
+      );
+      await tester.enterText(
+        find.byKey(const Key('provider-api-key')),
+        'recovered-key',
+      );
+      await tester.enterText(
+        find.byKey(const Key('provider-chat-model')),
+        'recovered-chat',
+      );
+      await tester.enterText(
+        find.byKey(const Key('provider-vision-model')),
+        'recovered-vision',
+      );
+      await tester.tap(find.text('保存设置'));
+      await tester.pumpAndSettle();
+
+      final saved = settingsStore.savedSettings.single;
+      expect(saved.providerConfig.baseUrl, 'recovered-url');
+      expect(saved.providerConfig.apiKey, 'recovered-key');
+      expect(saved.providerConfig.chatModel, 'recovered-chat');
+      expect(saved.providerConfig.visionModel, 'recovered-vision');
+      expect(saved.providerConfig.embeddingModel, isEmpty);
+      expect(saved.preferences, WorkspacePreferences.defaults);
+      expect(find.textContaining('设置读取失败'), findsNothing);
+
+      await tester.tap(find.byKey(const Key('settings-button')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('settings-nav-models')));
+      await tester.pumpAndSettle();
+      expect(
+        tester
+            .widget<CupertinoTextField>(
+              find.descendant(
+                of: find.byKey(const Key('provider-base-url')),
+                matching: find.byType(CupertinoTextField),
+              ),
+            )
+            .controller
+            ?.text,
+        'recovered-url',
+      );
+    },
+  );
+
+  testWidgets(
     'canceling settings after initialization preserves the loaded workspace',
     (tester) async {
       final vault = MemoryVaultBackend(seedExampleData: false);
@@ -808,6 +899,15 @@ final class _FailingSettingsStore extends FakeSettingsStore {
       throw StateError('settings save failed');
     }
     await super.save(settings);
+  }
+}
+
+final class _FailingLoadSettingsStore extends FakeSettingsStore {
+  _FailingLoadSettingsStore({required super.initialSettings});
+
+  @override
+  Future<SynapseSettings> load() async {
+    throw StateError('settings load failed');
   }
 }
 

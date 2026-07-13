@@ -117,6 +117,18 @@ final class WorkspaceMutationBarrier {
     _fatalError = null;
   }
 
+  Future<void> waitForIdle() async {
+    _throwIfUnavailable();
+    while (true) {
+      final observedTail = _tail;
+      await observedTail;
+      _throwIfUnavailable();
+      if (identical(observedTail, _tail)) {
+        return;
+      }
+    }
+  }
+
   Future<WorkspaceMutationResult<T>> run<T>(WorkspaceMutationPlan<T> plan) {
     _throwIfUnavailable();
     final reservedSessions = _sessions

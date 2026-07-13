@@ -13,6 +13,40 @@ import '../../support/workspace_fakes.dart';
 
 void main() {
   test(
+    'workspaceSessionProvider disposes an unlistened historical note id',
+    () async {
+      final observer = _DisposeObserver();
+      final vault = MemoryVaultBackend(seedExampleData: false);
+      await vault.createNote(parentPath: '', title: 'Current');
+      final container = ProviderContainer(
+        observers: [observer],
+        overrides: [
+          workspaceDependenciesProvider.overrideWithValue(
+            createWorkspaceDependencies(
+              initialVault: vault,
+              settingsStore: FakeSettingsStore(),
+            ),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+      await container.read(workspaceControllerProvider.future);
+      final provider = workspaceSessionProvider('Historical.md');
+      final subscription = container.listen(
+        provider,
+        (_, _) {},
+        fireImmediately: true,
+      );
+
+      expect(subscription.read(), isNull);
+      subscription.close();
+      await container.pump();
+
+      expect(observer.disposedProviders, contains(same(provider)));
+    },
+  );
+
+  test(
     'workspaceSessionProvider replaces a disposed same-id session after Vault switch',
     () async {
       final firstVault = MemoryVaultBackend(seedExampleData: false);
@@ -147,4 +181,13 @@ void main() {
 Future<void> _useDesktopSurface(WidgetTester tester) async {
   await tester.binding.setSurfaceSize(const Size(1280, 820));
   addTearDown(() => tester.binding.setSurfaceSize(null));
+}
+
+final class _DisposeObserver extends ProviderObserver {
+  final disposedProviders = <Object>[];
+
+  @override
+  void didDisposeProvider(ProviderObserverContext context) {
+    disposedProviders.add(context.provider);
+  }
 }

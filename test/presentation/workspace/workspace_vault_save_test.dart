@@ -395,30 +395,40 @@ void main() {
     },
   );
 
-  testWidgets('settings load failure prevents an early Vault location save', (
-    tester,
-  ) async {
-    var pickerCalls = 0;
-    final settingsStore = _FailingBaselineSettingsStore();
-    final dependencies = createWorkspaceDependencies(
-      settingsStore: settingsStore,
-      aiProvider: MockAiProvider(),
-      supportsDirectoryVaultOverride: true,
-      pickVaultLocation: () async {
-        pickerCalls += 1;
-        return const VaultLocation(rootPath: '/vault/not-saved');
-      },
-    );
+  testWidgets(
+    'settings load failure saves a selected Vault from safe defaults',
+    (tester) async {
+      var pickerCalls = 0;
+      final settingsStore = _FailingBaselineSettingsStore();
+      final dependencies = createWorkspaceDependencies(
+        settingsStore: settingsStore,
+        aiProvider: MockAiProvider(),
+        supportsDirectoryVaultOverride: true,
+        pickVaultLocation: () async {
+          pickerCalls += 1;
+          return const VaultLocation(rootPath: '/vault/not-saved');
+        },
+        vaultBackendFactory: (_) => MemoryVaultBackend(seedExampleData: false),
+      );
 
-    await pumpWorkspace(tester, vault: null, dependencies: dependencies);
-    await tester.tap(find.byKey(const Key('choose-vault-empty-button')));
-    await tester.pumpAndSettle();
+      await pumpWorkspace(tester, vault: null, dependencies: dependencies);
+      expect(find.textContaining('设置读取失败'), findsOneWidget);
+      expect(find.textContaining('baseline load failed'), findsOneWidget);
 
-    expect(pickerCalls, 1);
-    expect(settingsStore.savedSettings, isEmpty);
-    expect(find.textContaining('设置读取失败'), findsOneWidget);
-    expect(find.textContaining('baseline load failed'), findsOneWidget);
-  });
+      await tester.tap(find.byKey(const Key('choose-vault-empty-button')));
+      await tester.pumpAndSettle();
+
+      expect(pickerCalls, 1);
+      expect(settingsStore.savedSettings, hasLength(1));
+      expect(
+        settingsStore.savedSettings.single,
+        SynapseSettings.defaults.copyWith(
+          vaultLocation: const VaultLocation(rootPath: '/vault/not-saved'),
+        ),
+      );
+      expect(find.textContaining('设置读取失败'), findsNothing);
+    },
+  );
 
   testWidgets(
     'Vault switch after startup runtime failure uses the loaded settings',

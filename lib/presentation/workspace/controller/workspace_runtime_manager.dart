@@ -51,6 +51,12 @@ final class WorkspaceRuntimeManager {
         identical(capture.runtime, _current);
   }
 
+  void invalidateContextGeneration() {
+    _ensureActive();
+    _candidateIntent += 1;
+    _generation += 1;
+  }
+
   void install(WorkspaceRuntime runtime) {
     _ensureActive();
     _candidateIntent += 1;

@@ -91,6 +91,7 @@ final class WorkspaceEditorCoordinator {
         affectedNoteIds: {targetSession.noteId},
         dirtyDisposition: DirtyDisposition.flush,
         commitBackend: () async {
+          _requireCurrentMutationTarget(context, targetSession);
           final noteId = targetSession.noteId;
           final source = await vault.addImageSource(
             noteId: noteId,
@@ -194,6 +195,7 @@ final class WorkspaceEditorCoordinator {
         affectedNoteIds: {targetSession.noteId},
         dirtyDisposition: DirtyDisposition.discard,
         commitBackend: () async {
+          _requireCurrentMutationTarget(context, targetSession);
           final oldNoteId = targetSession.noteId;
           final source = await vault.addImageSource(
             noteId: oldNoteId,
@@ -324,6 +326,9 @@ final class WorkspaceEditorCoordinator {
     );
     resolved = _resolve(context);
     if (resolved == null) {
+      if (context.runtimeGeneration != _runtimes.generation) {
+        return PaneEditorCommandOutcome.staleTarget;
+      }
       final sessionIsStillOwned = identical(
         _sessions.sessionFor(preparedSession.noteId),
         preparedSession,
@@ -352,11 +357,7 @@ final class WorkspaceEditorCoordinator {
         affectedNoteIds: {targetSession.noteId},
         dirtyDisposition: DirtyDisposition.flush,
         commitBackend: () async {
-          final commitTarget = _resolve(context);
-          if (commitTarget == null ||
-              !identical(commitTarget.session, targetSession)) {
-            throw StateError('Proposal target became stale before commit.');
-          }
+          _requireCurrentMutationTarget(context, targetSession);
           final noteId = targetSession.noteId;
           await runtime.proposalService.commitPreparedOutlineProposal(prepared);
           return WorkspaceBackendCommit(
@@ -411,6 +412,7 @@ final class WorkspaceEditorCoordinator {
         affectedNoteIds: {targetSession.noteId},
         dirtyDisposition: DirtyDisposition.flush,
         commitBackend: () async {
+          _requireCurrentMutationTarget(context, targetSession);
           final noteId = targetSession.noteId;
           await vault.deleteProposal(proposal.id);
           return WorkspaceBackendCommit(
@@ -479,6 +481,7 @@ final class WorkspaceEditorCoordinator {
         affectedNoteIds: {targetSession.noteId},
         dirtyDisposition: DirtyDisposition.flush,
         commitBackend: () async {
+          _requireCurrentMutationTarget(context, targetSession);
           final currentSource = targetSession.note.sources
               .where((candidate) => candidate.id == source.id)
               .firstOrNull;
@@ -613,6 +616,16 @@ final class WorkspaceEditorCoordinator {
     );
   }
 
+  void _requireCurrentMutationTarget(
+    PaneEditorContext context,
+    NoteDocumentSession targetSession,
+  ) {
+    final resolved = _resolve(context);
+    if (resolved == null || !identical(resolved.session, targetSession)) {
+      throw const _StalePaneEditorMutationTarget();
+    }
+  }
+
   PaneEditorCommandOutcome _editorResult<T>(
     WorkspaceMutationResult<T> result,
     PaneEditorContext context,
@@ -624,10 +637,17 @@ final class WorkspaceEditorCoordinator {
             : PaneEditorCommandOutcome.committed;
       case AbortedByFlush<T>():
         return PaneEditorCommandOutcome.unchanged;
+      case BackendFailed<T>(:final error)
+          when error is _StalePaneEditorMutationTarget:
+        return PaneEditorCommandOutcome.staleTarget;
       case BackendFailed<T>(:final error, :final stackTrace):
         Error.throwWithStackTrace(error, stackTrace);
     }
   }
+}
+
+final class _StalePaneEditorMutationTarget implements Exception {
+  const _StalePaneEditorMutationTarget();
 }
 
 final class _SourceHydration {

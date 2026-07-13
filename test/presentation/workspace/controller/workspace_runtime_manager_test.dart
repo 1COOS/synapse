@@ -56,6 +56,38 @@ void main() {
       expect(manager.isCurrent(capture), isFalse);
     });
 
+    test(
+      'context invalidation preserves current runtime and cancels older candidates',
+      () async {
+        final manager = WorkspaceRuntimeManager();
+        final currentIndex = _RecordingSearchIndex();
+        final current = _runtime(index: currentIndex);
+        final candidateIndex = _RecordingSearchIndex();
+        final candidate = _runtime(index: candidateIndex);
+        final validation = Completer<void>();
+        manager.install(current);
+        final capture = manager.capture()!;
+
+        final installing = manager.installCandidate(
+          () => candidate,
+          validate: (_) => validation.future,
+        );
+        await Future<void>.delayed(Duration.zero);
+
+        manager.invalidateContextGeneration();
+        validation.complete();
+        await installing;
+
+        expect(manager.current, same(current));
+        expect(manager.generation, 2);
+        expect(manager.isCurrent(capture), isFalse);
+        expect(current.isDisposed, isFalse);
+        expect(currentIndex.disposeCalls, 0);
+        expect(candidate.isDisposed, isTrue);
+        expect(candidateIndex.disposeCalls, 1);
+      },
+    );
+
     test('focus-like reads do not change generation', () {
       final manager = WorkspaceRuntimeManager();
       manager.install(_runtime());

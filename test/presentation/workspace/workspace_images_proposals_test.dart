@@ -1049,10 +1049,7 @@ void main() {
     aiProvider.releaseExtraction();
     await tester.pumpAndSettle();
 
-    expect(
-      (await firstVault.listProposals(alpha.id)).single.proposedMarkdown,
-      '旧仓库 OCR',
-    );
+    expect(await firstVault.listProposals(alpha.id), isEmpty);
     expect(await secondVault.listProposals(second.id), isEmpty);
     expect(find.text('旧仓库 OCR'), findsNothing);
   });
@@ -1118,7 +1115,7 @@ void main() {
   });
 
   testWidgets(
-    'stale OCR post-commit failure requires reload without replacing new Vault UI',
+    'stale OCR does not start post-commit after a Vault replacement',
     (tester) async {
       final firstVault = _StaleProposalPostCommitFailureVault();
       final alpha = await firstVault.createNote(parentPath: '', title: 'Alpha');
@@ -1175,10 +1172,10 @@ void main() {
       await tester.pumpAndSettle();
       FlutterError.onError = previousOnError;
 
-      expect(firstVault.updateSourceCalls, 1);
-      expect(firstVault.saveProposalCalls, 1);
-      expect(reportedErrors, hasLength(1));
-      expect(find.textContaining('后端操作可能已完成，请重新加载工作区'), findsOneWidget);
+      expect(firstVault.updateSourceCalls, 0);
+      expect(firstVault.saveProposalCalls, 0);
+      expect(reportedErrors, isEmpty);
+      expect(find.textContaining('后端操作可能已完成，请重新加载工作区'), findsNothing);
       expect(
         find.descendant(
           of: find.byKey(const Key('split-pane-title-pane-1')),
@@ -1192,7 +1189,7 @@ void main() {
         tester
             .widget<IconAction>(find.byKey(const Key('new-note-button')))
             .onPressed,
-        isNull,
+        isNotNull,
       );
     },
   );
