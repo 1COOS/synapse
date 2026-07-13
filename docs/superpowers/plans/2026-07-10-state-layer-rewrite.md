@@ -13,7 +13,7 @@
 
 **阶段 6 checkpoint：** commits `67152b5..66c5eb9`；全量 `471 tests pass`，`flutter analyze --no-pub` 0 issues，worktree clean。
 
-**阶段 7 checkpoint：** implementation commits `dad7164..312646a`；controller `65 tests pass`、workspace `396 tests pass`、全量 `498 tests pass`，`flutter analyze --no-pub` 0 issues。`workspace.dart` 780 行，`WorkspaceController` 987 行；新增 production files 均低于约 800 行 review threshold。
+**阶段 7 checkpoint：** implementation commits `dad7164..f474890`；controller/provider `72 tests pass`、workspace `402 tests pass`、全量 `504 tests pass`，`flutter analyze --no-pub` 0 issues。`workspace.dart` 756 行，`WorkspaceController` 1004 行；新增 production files 均低于约 800 行 review threshold。
 
 **目标：** 在已完成的 session/save/split/mutation foundation 上，拆分长文件、收敛状态所有权、绑定异步编辑目标，并完成 macOS 生产安全与本地发布门禁。
 
@@ -143,7 +143,7 @@ Commit：`fix: bind pane async mutations to stable context`。
 
 ### 阶段 7：AsyncNotifier WorkspaceController 与 Consumer UI
 
-**状态：已完成。** 实现提交 `dad7164`、`00484ea`、`e164a30`、`c381a71`、`21263d0`、`312646a`；完成后全量基线为 498 tests pass，analyze 0 issues。
+**状态：已完成。** 实现提交范围 `dad7164..f474890`；完成后全量基线为 504 tests pass，analyze 0 issues。
 
 - `WorkspaceState` 保存不可变 split tree、resources、selection、search results、materials snapshot、navigation、settings、saving IDs、active operation 与 message。
 - pane 通过 provider 查询稳定 session，并使用 `ListenableBuilder` 监听编辑状态。
@@ -151,7 +151,7 @@ Commit：`fix: bind pane async mutations to stable context`。
 - controller 只负责 Riverpod 生命周期、公开 intent 与 state reduction。
 - runtime/search/resource collaborators 已拆出后，controller 仍超过约 1000 行则继续拆分。
 - startup/runtime/settings 生命周期由 `WorkspaceStartupCoordinator` 持有；editor command lock 与 save-flight ownership 由 `WorkspaceEditorOperationCoordinator` 持有。
-- `workspace.dart` 最终 780 行，`WorkspaceController` 最终 987 行；Consumer pane、Markdown renderer、chrome 与 source pane 均为显式 import 文件，不使用 Dart `part`。
+- `workspace.dart` 最终 756 行，`WorkspaceController` 最终 1004 行；Consumer pane、Markdown renderer、chrome 与 source pane 均为显式 import 文件，不使用 Dart `part`。
 - Commit：`refactor: complete Riverpod workspace controller`。
 
 ### 阶段 8：Keychain fail-closed
