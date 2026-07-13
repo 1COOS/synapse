@@ -67,7 +67,7 @@ Foundation 验证证据：
 - `workspace.dart` 目标 500-800 行。
 - workspace tests 按行为拆分，新测试文件原则上不超过约 900 行。
 - 新 production file 通常以约 800 行作为 review threshold。
-- `WorkspaceController` 是显式例外，上限目标约 1000 行，前提是 runtime/search/resource collaborators 已拆出；超过约 1000 行必须继续拆分。
+- `WorkspaceController` 是显式例外，约 1000 行是持续保留的 review threshold，不是机械硬上限。当前 1018 行在 runtime/search/resource/startup/editor 等 collaborators 已拆分且 review PASS 后接受；后续新增职责或持续增长必须继续按所有权拆分。
 - cohesive 的 `note_save_coordinator.dart` 与 `markdown_live_blocks.dart` 本轮不为行数机械强拆。
 
 ## 执行记录与剩余 Gate
@@ -169,7 +169,7 @@ Commit：`fix: bind pane async mutations to stable context`。
 - pane 通过 provider 查询稳定 session，并使用 `ListenableBuilder` 监听编辑状态。
 - `SynapseWorkspace` 移除具体 infrastructure import 和构造器测试依赖参数；测试使用 Provider override。
 - controller 只负责 Riverpod 生命周期、公开 intent 与 state reduction。
-- runtime/search/resource collaborators 已拆出；当前 Controller 1018 行，接近并略高于约 1000 行 review threshold，新增职责优先进入现有 collaborators。
+- runtime/search/resource/startup/editor collaborators 已拆出；当前 Controller 1018 行经 review 接受，但约 1000 行 review threshold 继续有效，后续新增职责或持续增长必须继续拆分。
 - startup/runtime/settings 生命周期由 `WorkspaceStartupCoordinator` 持有；editor command lock 与 save-flight ownership 由 `WorkspaceEditorOperationCoordinator` 持有。
 - 阶段 7 checkpoint 中 `workspace.dart` 为 756 行、`WorkspaceController` 为 1004 行；当前 Controller 为 1018 行。Consumer pane、Markdown renderer、chrome 与 source pane 均为显式 import 文件，不使用 Dart `part`。
 - Commit：`refactor: complete Riverpod workspace controller`。
