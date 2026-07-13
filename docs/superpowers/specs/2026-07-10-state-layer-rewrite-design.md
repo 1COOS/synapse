@@ -19,7 +19,7 @@
 
 **测试长文件 follow-up：** commit `30f5fe9`；9 个超长文件拆成 25 个，保留 248 tests 等价覆盖，最大文件 869 行。
 
-**当前 checkpoint：** 代码基线 `30f5fe9` 相对 `main` 为 81 commits；文档 checkpoint `0fce068` 后当前为 82 commits。`flutter test --no-pub` 587/587，`flutter analyze --no-pub` 无 issue。`workspace.dart` 756 行，`WorkspaceController` 1018 行，File facade 228 行，Memory facade 184 行。以上测试与行数为代码阶段基线，不代表最终本地 macOS gate 已执行。
+**代码基线与文档 checkpoints：** 代码基线 `30f5fe9` 相对 `main` 为 81 commits；文档 checkpoints 为 `0fce068`、`ae61ca5`。`flutter test --no-pub` 587/587，`flutter analyze --no-pub` 无 issue。`workspace.dart` 756 行，`WorkspaceController` 1018 行，File facade 228 行，Memory facade 184 行。以上测试与行数为代码阶段基线，不代表最终本地 macOS gate 已执行。
 
 > Foundation baseline 捕获时，分支相对 `main` 有 15 个实现提交，任务 1-5 的 session/save/split/mutation foundation 已完成。该 baseline 的 fresh evidence 为状态层 65 tests pass、workspace 140 tests pass，共 205 tests pass，`flutter analyze --no-pub` 无 issue，`git diff --check` clean。提交数量仅描述 baseline 捕获时点，不作为后续分支总提交数。
 

@@ -23,7 +23,7 @@
 
 **Test threshold follow-up：** commit `30f5fe9`；9 个超长文件拆为 25 个，保留 248 tests 等价覆盖，最大文件 869 行。
 
-**当前 checkpoint：** 代码基线 `30f5fe9` 相对 `main` 为 81 commits；文档 checkpoint `0fce068` 后当前为 82 commits。`flutter test --no-pub` 587/587，`flutter analyze --no-pub` 无 issue；`workspace.dart` 756 行，`WorkspaceController` 1018 行，File facade 228 行，Memory facade 184 行。代码阶段规格与质量审查均 PASS；最终本地 macOS gate 尚未执行。
+**代码基线与文档 checkpoints：** 代码基线 `30f5fe9` 相对 `main` 为 81 commits；文档 checkpoints 为 `0fce068`、`ae61ca5`。`flutter test --no-pub` 587/587，`flutter analyze --no-pub` 无 issue；`workspace.dart` 756 行，`WorkspaceController` 1018 行，File facade 228 行，Memory facade 184 行。代码阶段规格与质量审查均 PASS；最终本地 macOS gate 尚未执行。
 
 **目标：** 在已完成的 session/save/split/mutation foundation 上，拆分长文件、收敛状态所有权、绑定异步编辑目标，并完成 macOS 生产安全与本地发布门禁。
 
