@@ -351,6 +351,9 @@ final class PreparedNoteMaterialsMutation {
   bool _isPublished = false;
   bool _isPreflighted = false;
 
+  Map<String, NoteMaterialsSnapshot> get nextSnapshots =>
+      Map<String, NoteMaterialsSnapshot>.unmodifiable(_nextSnapshots);
+
   void validateCurrent() {
     _registry._ensurePreparedMutationCurrent(
       _isApplied ? _appliedToken! : _preparedToken,

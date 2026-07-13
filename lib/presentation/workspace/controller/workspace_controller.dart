@@ -14,10 +14,12 @@ import '../state/note_session_registry.dart';
 import '../state/split_workspace_controller.dart';
 import '../state/workspace_mutation_barrier.dart';
 import 'workspace_dependencies.dart';
+import 'workspace_document_coordinator.dart';
 import 'workspace_resource_coordinator.dart';
 import 'workspace_runtime.dart';
 import 'workspace_runtime_manager.dart';
 import 'workspace_state.dart';
+import 'workspace_state_commit_coordinator.dart';
 
 export 'workspace_state.dart';
 
@@ -51,6 +53,8 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
   late final SplitWorkspaceController _splits;
   late final NoteSaveCoordinator _saves;
   late final WorkspaceMutationBarrier _mutations;
+  late final WorkspaceStateCommitCoordinator _stateCommits;
+  late final WorkspaceDocumentCoordinator _documents;
   bool _isDisposed = false;
   bool _reloadRequired = false;
   SynapseSettings _settings = SynapseSettings.defaults;
@@ -85,6 +89,22 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
       splits: _splits,
       materials: _materials,
       onInvariantFailure: _enterReloadRequired,
+    );
+    _stateCommits = WorkspaceStateCommitCoordinator(
+      sessions: _sessions,
+      splits: _splits,
+      materials: _materials,
+      readState: _requireState,
+      publishState: _publish,
+      forcedFailure: _dependencies.workspaceCommitFailureForTesting,
+    );
+    _documents = WorkspaceDocumentCoordinator(
+      runtimes: _runtimeManager,
+      mutations: _mutations,
+      commits: _stateCommits,
+      sessions: _sessions,
+      splits: _splits,
+      readState: _requireState,
     );
     ref.onDispose(_dispose);
 
@@ -295,6 +315,70 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
         opened,
         missingMessage: '搜索结果已失效：${result.title}',
       );
+    } catch (error) {
+      _setMessage(error.toString());
+      return WorkspaceActionResult.failed;
+    } finally {
+      _endOperation(WorkspaceOperation.resourceMutation);
+    }
+  }
+
+  Future<WorkspaceActionResult> createFolder({
+    required String parentPath,
+    required String title,
+  }) {
+    return _runDocumentOperation(
+      () => _documents.createFolder(parentPath: parentPath, title: title),
+    );
+  }
+
+  Future<WorkspaceActionResult> createNote({
+    required String parentPath,
+    required String title,
+  }) {
+    return _runDocumentOperation(
+      () => _documents.createNote(parentPath: parentPath, title: title),
+    );
+  }
+
+  Future<WorkspaceActionResult> renameFolder({
+    required VaultResourceNode folder,
+    required String newName,
+  }) {
+    return _runDocumentOperation(
+      () => _documents.renameFolder(folder: folder, newName: newName),
+    );
+  }
+
+  Future<WorkspaceActionResult> deleteResource(VaultResourceNode resource) {
+    return _runDocumentOperation(() => _documents.deleteResource(resource));
+  }
+
+  Future<WorkspaceActionResult> copyNote(VaultResourceNode note) {
+    return _runDocumentOperation(() => _documents.copyNote(note));
+  }
+
+  Future<WorkspaceActionResult> moveNote({
+    required VaultResourceNode note,
+    required String parentPath,
+  }) {
+    return _runDocumentOperation(
+      () => _documents.moveNote(note: note, parentPath: parentPath),
+    );
+  }
+
+  Future<WorkspaceActionResult> closeFocusedPane() {
+    return _runDocumentOperation(_documents.closeFocusedPane);
+  }
+
+  Future<WorkspaceActionResult> _runDocumentOperation(
+    Future<WorkspaceActionResult> Function() operation,
+  ) async {
+    if (!_beginOperation(WorkspaceOperation.resourceMutation)) {
+      return WorkspaceActionResult.busy;
+    }
+    try {
+      return await operation();
     } catch (error) {
       _setMessage(error.toString());
       return WorkspaceActionResult.failed;
@@ -660,6 +744,7 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
 
   void _publish(WorkspaceState next) {
     if (!_isDisposed) {
+      _stateCommits.invalidate();
       state = AsyncData(next);
     }
   }

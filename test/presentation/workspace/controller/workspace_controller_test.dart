@@ -471,6 +471,216 @@ void main() {
       expect(opened.selectedResourceId, beta.id);
       expect(opened.narrowSection, WorkspaceSection.notes);
     });
+
+    test('commits create note resources session and split together', () async {
+      final vault = MemoryVaultBackend();
+      final container = ProviderContainer(
+        overrides: [
+          workspaceDependenciesProvider.overrideWithValue(
+            createWorkspaceDependencies(
+              initialVault: vault,
+              settingsStore: FakeSettingsStore(),
+            ),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+      await container.read(workspaceControllerProvider.future);
+      final controller = container.read(workspaceControllerProvider.notifier);
+
+      expect(
+        await controller.createNote(parentPath: '', title: 'Created'),
+        WorkspaceActionResult.committed,
+      );
+      final created = container.read(workspaceControllerProvider).requireValue;
+
+      expect(created.selectedResourceId, 'Created.md');
+      expect(_findResource(created.resources, 'Created.md'), isNotNull);
+      expect(created.sessionNoteIds, contains('Created.md'));
+      expect((created.splitRoot as SplitLeaf).noteId, 'Created.md');
+      expect(controller.sessionFor('Created.md'), isNotNull);
+    });
+
+    test('atomically remaps open state when a folder is renamed', () async {
+      final vault = MemoryVaultBackend();
+      await vault.createFolder(parentPath: '', title: 'Old');
+      await vault.createNote(parentPath: 'Old', title: 'Open');
+      final container = ProviderContainer(
+        overrides: [
+          workspaceDependenciesProvider.overrideWithValue(
+            createWorkspaceDependencies(
+              initialVault: vault,
+              settingsStore: FakeSettingsStore(),
+            ),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+      final initial = await container.read(workspaceControllerProvider.future);
+      final controller = container.read(workspaceControllerProvider.notifier);
+      final session = controller.sessionFor('Old/Open.md');
+      final folder = _findResource(initial.resources, 'Old')!;
+
+      expect(
+        await controller.renameFolder(folder: folder, newName: 'New'),
+        WorkspaceActionResult.committed,
+      );
+      final renamed = container.read(workspaceControllerProvider).requireValue;
+
+      expect(renamed.selectedResourceId, 'New/Open.md');
+      expect(_findResource(renamed.resources, 'Old'), isNull);
+      expect(_findResource(renamed.resources, 'New/Open.md'), isNotNull);
+      expect(renamed.sessionNoteIds, {'New/Open.md'});
+      expect(controller.sessionFor('New/Open.md'), same(session));
+      expect((renamed.splitRoot as SplitLeaf).noteId, 'New/Open.md');
+    });
+
+    test(
+      'removes deleted notes from state and chooses a stable fallback',
+      () async {
+        final vault = MemoryVaultBackend();
+        await vault.createNote(parentPath: '', title: 'Alpha');
+        await vault.createNote(parentPath: '', title: 'Beta');
+        final container = ProviderContainer(
+          overrides: [
+            workspaceDependenciesProvider.overrideWithValue(
+              createWorkspaceDependencies(
+                initialVault: vault,
+                settingsStore: FakeSettingsStore(),
+              ),
+            ),
+          ],
+        );
+        addTearDown(container.dispose);
+        final initial = await container.read(
+          workspaceControllerProvider.future,
+        );
+        final controller = container.read(workspaceControllerProvider.notifier);
+        final alpha = _findResource(initial.resources, 'Alpha.md')!;
+
+        expect(
+          await controller.deleteResource(alpha),
+          WorkspaceActionResult.committed,
+        );
+        final deleted = container
+            .read(workspaceControllerProvider)
+            .requireValue;
+
+        expect(_findResource(deleted.resources, 'Alpha.md'), isNull);
+        expect(deleted.selectedResourceId, 'Beta.md');
+        expect(deleted.sessionNoteIds, {'Beta.md'});
+        expect(controller.sessionFor('Alpha.md'), isNull);
+        expect((deleted.splitRoot as SplitLeaf).noteId, 'Beta.md');
+      },
+    );
+
+    test(
+      'moves a note while preserving its document session identity',
+      () async {
+        final vault = MemoryVaultBackend();
+        await vault.createFolder(parentPath: '', title: 'Target');
+        await vault.createNote(parentPath: '', title: 'Move');
+        final container = ProviderContainer(
+          overrides: [
+            workspaceDependenciesProvider.overrideWithValue(
+              createWorkspaceDependencies(
+                initialVault: vault,
+                settingsStore: FakeSettingsStore(),
+              ),
+            ),
+          ],
+        );
+        addTearDown(container.dispose);
+        final initial = await container.read(
+          workspaceControllerProvider.future,
+        );
+        final controller = container.read(workspaceControllerProvider.notifier);
+        final note = _findResource(initial.resources, 'Move.md')!;
+        await controller.selectResource(note);
+        final session = controller.sessionFor('Move.md');
+
+        expect(
+          await controller.moveNote(note: note, parentPath: 'Target'),
+          WorkspaceActionResult.committed,
+        );
+        final moved = container.read(workspaceControllerProvider).requireValue;
+
+        expect(moved.selectedResourceId, 'Target/Move.md');
+        expect(controller.sessionFor('Target/Move.md'), same(session));
+        expect(controller.sessionFor('Move.md'), isNull);
+        expect((moved.splitRoot as SplitLeaf).noteId, 'Target/Move.md');
+      },
+    );
+
+    test('copies a note into a new session and opens it', () async {
+      final vault = MemoryVaultBackend();
+      await vault.createNote(parentPath: '', title: 'Copy');
+      final container = ProviderContainer(
+        overrides: [
+          workspaceDependenciesProvider.overrideWithValue(
+            createWorkspaceDependencies(
+              initialVault: vault,
+              settingsStore: FakeSettingsStore(),
+            ),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+      final initial = await container.read(workspaceControllerProvider.future);
+      final controller = container.read(workspaceControllerProvider.notifier);
+      final note = _findResource(initial.resources, 'Copy.md')!;
+      await controller.selectResource(note);
+      final originalSession = controller.sessionFor('Copy.md');
+
+      expect(await controller.copyNote(note), WorkspaceActionResult.committed);
+      final copied = container.read(workspaceControllerProvider).requireValue;
+
+      expect(copied.selectedResourceId, isNot('Copy.md'));
+      expect(controller.sessionFor('Copy.md'), same(originalSession));
+      expect(controller.sessionFor(copied.selectedResourceId!), isNotNull);
+      expect((copied.splitRoot as SplitLeaf).noteId, copied.selectedResourceId);
+    });
+
+    test(
+      'closes a duplicate pane without disposing the shared session',
+      () async {
+        final vault = MemoryVaultBackend();
+        await vault.createNote(parentPath: '', title: 'Shared');
+        final container = ProviderContainer(
+          overrides: [
+            workspaceDependenciesProvider.overrideWithValue(
+              createWorkspaceDependencies(
+                initialVault: vault,
+                settingsStore: FakeSettingsStore(),
+              ),
+            ),
+          ],
+        );
+        addTearDown(container.dispose);
+        final initial = await container.read(
+          workspaceControllerProvider.future,
+        );
+        final controller = container.read(workspaceControllerProvider.notifier);
+        final session = controller.sessionFor(initial.selectedResourceId!);
+        controller.splitFocused(SplitDirection.right);
+
+        expect(
+          await controller.closeFocusedPane(),
+          WorkspaceActionResult.committed,
+        );
+        final closed = container.read(workspaceControllerProvider).requireValue;
+
+        expect(closed.splitRoot, isA<SplitLeaf>());
+        expect(
+          (closed.splitRoot as SplitLeaf).noteId,
+          initial.selectedResourceId,
+        );
+        expect(
+          controller.sessionFor(initial.selectedResourceId!),
+          same(session),
+        );
+      },
+    );
   });
 }
 

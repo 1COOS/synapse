@@ -621,6 +621,8 @@ final class PreparedNoteSessionMutation {
   bool _isPublished = false;
   bool _isPreflighted = false;
 
+  Set<String> get nextNoteIds => Set<String>.unmodifiable(_nextSessions.keys);
+
   void validateCurrent() {
     _registry._ensurePreparedMutationCurrent(
       _isApplied ? _appliedToken! : _preparedToken,

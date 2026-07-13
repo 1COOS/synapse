@@ -479,6 +479,10 @@ final class PreparedSplitWorkspaceMutation {
   bool _isPublished = false;
   bool _isPreflighted = false;
 
+  SplitNode get nextRoot => _nextRoot;
+
+  String get nextFocusedPaneId => _nextFocusedPaneId;
+
   void validateCurrent() {
     _controller._ensurePreparedMutationCurrent(
       _isApplied ? _appliedToken! : _preparedToken,
