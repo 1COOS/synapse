@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:synapse/application/search/search_index.dart';
@@ -15,6 +16,7 @@ import 'package:synapse/presentation/workspace/controller/workspace_controller.d
 import 'package:synapse/presentation/workspace/editor/pane_editor_context.dart';
 import 'package:synapse/presentation/workspace/state/note_document_session.dart';
 import 'package:synapse/presentation/workspace/state/split_workspace_controller.dart';
+import 'package:synapse/presentation/workspace/state/workspace_commit_error.dart';
 
 import '../../../support/workspace_fakes.dart';
 
@@ -461,7 +463,7 @@ void main() {
         );
         final oldVault = MemoryVaultBackend(seedExampleData: false);
         await oldVault.createNote(parentPath: '', title: 'Old');
-        final newVault = MemoryVaultBackend(seedExampleData: false);
+        final newVault = _RecordingPostCommitVault();
         await newVault.createNote(parentPath: '', title: 'New');
         final access = FakeVaultAccessGateway(
           onRestore: (_) async => oldLease,
@@ -479,6 +481,13 @@ void main() {
                 ),
                 supportsDirectoryVaultOverride: true,
                 vaultAccessGateway: access,
+                imageInput: FakeImageInputService(
+                  pickedImage: const ImportedImage(
+                    filename: 'blocked.png',
+                    mimeType: 'image/png',
+                    bytes: tinyPng,
+                  ),
+                ),
                 vaultBackendFactory: (rootPath) =>
                     rootPath == oldLocation.rootPath ? oldVault : newVault,
                 runtimeSnapshotPublishHookForTesting: () => publishHook(),
@@ -499,15 +508,51 @@ void main() {
         addTearDown(container.dispose);
         await container.read(workspaceControllerProvider.future);
         await ready.future;
+        final previousOnError = FlutterError.onError;
+        FlutterError.onError = (_) => throw StateError('reporting failed');
+        addTearDown(() => FlutterError.onError = previousOnError);
         publishHook = () => throw StateError('snapshot publish failed');
 
-        final result = await container
-            .read(workspaceControllerProvider.notifier)
-            .chooseVault();
+        final controller = container.read(workspaceControllerProvider.notifier);
+        final result = await controller.chooseVault();
+        final failedState = container
+            .read(workspaceControllerProvider)
+            .requireValue;
 
         expect(result, WorkspaceActionResult.committed);
+        expect(failedState.reloadRequired, isTrue);
+        expect(failedState.message, WorkspaceController.reloadRequiredMessage);
         expect(access.releaseAttempts, [oldLease]);
         expect(access.releaseAttempts, isNot(contains(newLease)));
+
+        newVault.resetOperationCounts();
+        final session = controller.sessionFor('New.md')!;
+        final context = controller.capturePaneEditorContext(
+          failedState.focusedPaneId,
+        )!;
+        session.controller.text = '# New\nblocked save';
+        final saveResult = await controller.saveEditorSession(
+          context,
+          session,
+          automatic: false,
+          rescheduleIfDirty: false,
+        );
+        final importResult = await controller.importImage(context);
+        final createResult = await controller.createNote(
+          parentPath: '',
+          title: 'Blocked',
+        );
+        final pickCallsBeforeRetry = access.pickedLeases.length;
+        final retryResult = await controller.chooseVault();
+
+        expect(saveResult, PaneEditorCommandOutcome.unchanged);
+        expect(importResult, PaneEditorCommandOutcome.unchanged);
+        expect(createResult, isNot(WorkspaceActionResult.committed));
+        expect(retryResult, WorkspaceActionResult.aborted);
+        expect(access.pickedLeases, hasLength(pickCallsBeforeRetry));
+        expect(newVault.createNoteCalls, 0);
+        expect(newVault.updateMarkdownCalls, 0);
+        expect(newVault.addImageCalls, 0);
 
         container.dispose();
         await Future<void>.delayed(Duration.zero);
@@ -531,6 +576,10 @@ void main() {
         );
         final access = FakeVaultAccessGateway(onRestore: (_) async => lease);
         final publishAttempted = Completer<void>();
+        final reportedErrors = <FlutterErrorDetails>[];
+        final previousOnError = FlutterError.onError;
+        FlutterError.onError = reportedErrors.add;
+        addTearDown(() => FlutterError.onError = previousOnError);
         final container = ProviderContainer(
           overrides: [
             workspaceDependenciesProvider.overrideWithValue(
@@ -557,7 +606,28 @@ void main() {
         await publishAttempted.future;
         await Future<void>.delayed(Duration.zero);
 
+        final failedState = container
+            .read(workspaceControllerProvider)
+            .requireValue;
+        expect(failedState.reloadRequired, isTrue);
+        expect(failedState.message, WorkspaceController.reloadRequiredMessage);
+        expect(reportedErrors, hasLength(1));
+        expect(
+          reportedErrors.single.exception,
+          isA<WorkspaceCommitInvariantError>().having(
+            (error) => error.phase,
+            'phase',
+            WorkspaceCommitPhase.publish,
+          ),
+        );
         expect(access.releaseAttempts, isEmpty);
+
+        final pickCallsBeforeRetry = access.pickedLeases.length;
+        final retryResult = await container
+            .read(workspaceControllerProvider.notifier)
+            .chooseVault();
+        expect(retryResult, WorkspaceActionResult.aborted);
+        expect(access.pickedLeases, hasLength(pickCallsBeforeRetry));
 
         container.dispose();
         await Future<void>.delayed(Duration.zero);
@@ -1681,6 +1751,54 @@ final class _GatedAddImageVaultBackend extends MemoryVaultBackend {
       addImageStarted.complete();
     }
     await _releaseAddImage.future;
+    return super.addImageSource(
+      noteId: noteId,
+      filename: filename,
+      mimeType: mimeType,
+      bytes: bytes,
+    );
+  }
+}
+
+final class _RecordingPostCommitVault extends MemoryVaultBackend {
+  _RecordingPostCommitVault() : super(seedExampleData: false);
+
+  int createNoteCalls = 0;
+  int updateMarkdownCalls = 0;
+  int addImageCalls = 0;
+
+  void resetOperationCounts() {
+    createNoteCalls = 0;
+    updateMarkdownCalls = 0;
+    addImageCalls = 0;
+  }
+
+  @override
+  Future<VaultNote> createNote({
+    required String parentPath,
+    required String title,
+  }) {
+    createNoteCalls += 1;
+    return super.createNote(parentPath: parentPath, title: title);
+  }
+
+  @override
+  Future<VaultNoteContent> updateMarkdown({
+    required String noteId,
+    required String markdown,
+  }) {
+    updateMarkdownCalls += 1;
+    return super.updateMarkdown(noteId: noteId, markdown: markdown);
+  }
+
+  @override
+  Future<SourceItem> addImageSource({
+    required String noteId,
+    required String filename,
+    required String mimeType,
+    required List<int> bytes,
+  }) {
+    addImageCalls += 1;
     return super.addImageSource(
       noteId: noteId,
       filename: filename,

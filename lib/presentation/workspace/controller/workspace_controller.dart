@@ -153,6 +153,15 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
       publishState: _publish,
       setMessage: _setMessage,
       replaceRuntimeSnapshot: _replaceRuntimeSnapshot,
+      postCommitFailure: (error, stackTrace) {
+        _enterReloadRequired(
+          WorkspaceCommitInvariantError(
+            phase: WorkspaceCommitPhase.publish,
+            cause: error,
+            causeStackTrace: stackTrace,
+          ),
+        );
+      },
       beginOperation: _beginOperation,
       replaceOperation: _replaceOperation,
       endOperation: _endOperation,
@@ -729,7 +738,12 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
     }
   }
 
-  Future<WorkspaceActionResult> chooseVault() => _startup.chooseVault();
+  Future<WorkspaceActionResult> chooseVault() {
+    if (_reloadRequired) {
+      return Future.value(WorkspaceActionResult.aborted);
+    }
+    return _startup.chooseVault();
+  }
 
   Future<WorkspaceActionResult> updateSettings(SynapseSettings settings) =>
       _startup.updateSettings(settings);

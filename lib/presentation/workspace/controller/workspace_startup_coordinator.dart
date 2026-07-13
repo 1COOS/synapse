@@ -20,6 +20,8 @@ typedef RuntimeSnapshotInstaller =
       WorkspaceResourceSnapshot snapshot, {
       required String message,
     });
+typedef WorkspacePostCommitFailureHandler =
+    void Function(Object error, StackTrace stackTrace);
 
 final class WorkspaceStartupCoordinator {
   WorkspaceStartupCoordinator({
@@ -33,6 +35,7 @@ final class WorkspaceStartupCoordinator {
     required this.publishState,
     required this.setMessage,
     required this.replaceRuntimeSnapshot,
+    required this.postCommitFailure,
     required this.beginOperation,
     required this.replaceOperation,
     required this.endOperation,
@@ -49,6 +52,7 @@ final class WorkspaceStartupCoordinator {
   final void Function(WorkspaceState state) publishState;
   final void Function(String message) setMessage;
   final RuntimeSnapshotInstaller replaceRuntimeSnapshot;
+  final WorkspacePostCommitFailureHandler postCommitFailure;
   final bool Function(WorkspaceOperation operation) beginOperation;
   final void Function(WorkspaceOperation operation) replaceOperation;
   final void Function(WorkspaceOperation operation) endOperation;
@@ -301,12 +305,10 @@ final class WorkspaceStartupCoordinator {
       _loadedSettingsBaseline = nextSettings;
       replaceRuntimeSnapshot(snapshot, message: '仓库已打开');
       return WorkspaceActionResult.committed;
-    } catch (error) {
+    } catch (error, stackTrace) {
       if (runtimeCommitted) {
         postCommitFailed = true;
-        if (!isDisposed()) {
-          setMessage('仓库已切换，但界面状态刷新失败，请重新加载：$error');
-        }
+        _reportPostCommitFailure(error, stackTrace);
         return WorkspaceActionResult.committed;
       }
       setMessage('仓库位置读取失败：$error');
@@ -522,16 +524,14 @@ final class WorkspaceStartupCoordinator {
         snapshot,
         message: _startupMessage(recoveryMessage, fallback: '仓库已打开'),
       );
-    } catch (error) {
-      await Future<void>.delayed(Duration.zero);
-      candidate?.dispose(reportCleanupError: dependencies.cleanupErrorReporter);
+    } catch (error, stackTrace) {
       if (runtimeCommitted) {
         postCommitFailed = true;
-        if (!isDisposed()) {
-          setMessage('仓库已恢复，但界面状态刷新失败，请重新加载：$error');
-        }
+        _reportPostCommitFailure(error, stackTrace);
         return;
       }
+      await Future<void>.delayed(Duration.zero);
+      candidate?.dispose(reportCleanupError: dependencies.cleanupErrorReporter);
       if (_isStartupCurrent(startupToken)) {
         if (!settingsLoaded) {
           _startupSettingsError = error;
@@ -596,6 +596,18 @@ final class WorkspaceStartupCoordinator {
       }
       if (reportMessage && !isDisposed()) {
         setMessage('仓库已打开；旧仓库访问清理失败：$error');
+      }
+    }
+  }
+
+  void _reportPostCommitFailure(Object error, StackTrace stackTrace) {
+    try {
+      postCommitFailure(error, stackTrace);
+    } catch (reportError, reportStackTrace) {
+      try {
+        dependencies.cleanupErrorReporter(reportError, reportStackTrace);
+      } catch (_) {
+        // Reporting failure cannot change committed runtime or lease ownership.
       }
     }
   }
