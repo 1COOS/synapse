@@ -146,17 +146,21 @@ final class NoteDocumentSession extends ChangeNotifier {
 `NoteSessionRegistry` 提供：
 
 ```dart
-NoteDocumentSession upsert(VaultNoteContent note);
+NoteDocumentSession upsert(
+  VaultNoteContent note, {
+  bool preserveDirtyBody = true,
+});
 NoteDocumentSession? sessionFor(String noteId);
 Iterable<NoteDocumentSession> sessionsForIds(Iterable<String> noteIds);
 Iterable<NoteDocumentSession> sessionsUnderPath(String folderPath);
 void remapNoteIds(
   Map<String, String> idMap, {
   required Map<String, VaultNoteContent> refreshedNotesByNewId,
+  bool preserveDirtyBody = true,
+  VoidCallback? afterCommitBeforeNotify,
 });
-void remove(Iterable<String> noteIds);
-void retainOnly(Set<String> openNoteIds);
-Future<void> disposeAll();
+void clear({bool dispose = true});
+void dispose();
 ```
 
 Remap 只能改变 registry key 和 note snapshot，不能替换 dirty session 的 controller。一个 note 出现在多个 pane 时仍只有一个 session。
@@ -167,17 +171,33 @@ Coordinator 负责 timer 和持久化串行性，不让 Widget 自己管理 `Tim
 
 ```dart
 void schedule(NoteDocumentSession session);
-void cancelPending(NoteDocumentSession session);
+void cancel(NoteDocumentSession session);
 Future<NoteSaveResult> save(
   NoteDocumentSession session, {
-  required NoteSaveReason reason,
+  NoteSaveReason reason = NoteSaveReason.explicit,
   bool rescheduleIfStillDirty = false,
+  String? successMessage,
 });
-Future<FlushReport> flush(Iterable<NoteDocumentSession> sessions);
-Future<FlushReport> flushAll();
-Future<void> quiesce(
+Future<FlushReport> flush(
+  Iterable<NoteDocumentSession> sessions, {
+  NoteSaveReason reason = NoteSaveReason.explicit,
+  String? successMessage,
+});
+Future<FlushReport> flushAll({
+  NoteSaveReason reason = NoteSaveReason.explicit,
+  String? successMessage,
+});
+Future<FlushReport> quiesce(
   Iterable<NoteDocumentSession> sessions, {
   required DirtyDisposition disposition,
+  NoteSaveReason reason = NoteSaveReason.mutationBarrier,
+  String? successMessage,
+});
+Future<NoteSaveQuiescenceLease> acquireQuiescence(
+  Iterable<NoteDocumentSession> sessions, {
+  required DirtyDisposition disposition,
+  NoteSaveReason reason = NoteSaveReason.mutationBarrier,
+  String? successMessage,
 });
 ```
 
@@ -204,22 +224,40 @@ void setPaneNote(String paneId, String? noteId);
 void setPaneMode(String paneId, NoteMode mode);
 void resizeBranch(String branchId, double delta, double extent);
 void remapNoteIds(Map<String, String> idMap);
-void clearNoteIds(Set<String> removedIds, {String? fallbackNoteId});
+Set<String> clearNoteIds(
+  Set<String> removedIds, {
+  String? fallbackNoteId,
+});
 ```
 
 它不读取 Vault、不持有 editor controller、不执行保存。
 
 ### 6.4 `WorkspaceMutationBarrier` 与 `WorkspaceCommitBatch`
 
-以下 `WorkspaceCommitBatch` prepare/apply/publish 模型已经在阶段 5 按 TDD 落地，替代 Foundation baseline `3cc85d9` 时期的 `onCommitted` 契约。
+当前 `commitBackend`、post-commit hydrate 与 `WorkspaceCommitBatch` validate/apply/publish 模型已经在阶段 5 按 TDD 落地。
 
 所有 mutation 使用显式 plan 和 delta：
 
 ```dart
+final class WorkspaceBackendCommit<T> {
+  const WorkspaceBackendCommit({required this.postCommitHydrate});
+
+  final Future<VaultMutationDelta<T>> Function() postCommitHydrate;
+}
+
 final class WorkspaceMutationPlan<T> {
+  const WorkspaceMutationPlan({
+    required this.affectedNoteIds,
+    required this.dirtyDisposition,
+    required this.commitBackend,
+    this.prepareCommit,
+  });
+
   final Set<String> affectedNoteIds;
   final DirtyDisposition dirtyDisposition;
-  final Future<VaultMutationDelta<T>> Function() execute;
+  final Future<WorkspaceBackendCommit<T>> Function() commitBackend;
+  final WorkspaceCommitBatch<T> Function(VaultMutationDelta<T> delta)?
+      prepareCommit;
 }
 
 final class VaultMutationDelta<T> {
@@ -237,19 +275,20 @@ Barrier 固定执行顺序：
 2. 固化 affected session 集合；
 3. 执行 flush 或 discard/quiesce；
 4. flush 失败则 abort，backend mutation 不运行；
-5. 执行 backend mutation；
-6. backend 成功后调用纯计算、无副作用的 `WorkspaceCommitBatch.prepare(delta)`；
-7. `prepare` 基于提交前快照构造并验证完整的 registry、split、materials 与 workspace replacement；
-8. `apply` 只执行已准备 immutable state/reference 的 non-throwing assignment；
-9. 全部 assignment 完成后统一 publish，再释放锁。
+5. 调用 `commitBackend()`；成功后得到 `WorkspaceBackendCommit<T>`，表示 backend 已提交；
+6. 调用 `postCommitHydrate()` 读取提交后的 `VaultMutationDelta<T>`；
+7. 调用 plan 的可选 `prepareCommit(delta)`，未提供时使用默认 batch builder；
+8. `WorkspaceCommitBatch.validateCurrent()` 验证 registry、split、materials 与 workspace replacement 仍基于当前快照；
+9. `applySilently()` 应用已准备 replacement，再由 `publish()` 统一通知；
+10. 释放 quiescence lease 和 mutation 串行锁。
 
-`WorkspaceMutationBarrier` 不接受 commit callback。`prepare` 不允许 I/O、await、状态写入或 callback；`apply` 不允许 I/O、await、callback 或可能抛错的增量 mutation。所有可失败的 invariant 检查必须在 `prepare` 完成，`apply` 只能替换已准备好的 immutable state/reference。
+`prepareCommit` 只构造 `WorkspaceCommitBatch`，不执行 backend I/O；batch 中的 prepared sessions/splits/materials/workspace mutation 先验证与 preflight，再以 silent apply 替换状态，最后 publish。`WorkspaceMutationBarrier` 负责把阶段错误归类为 `hydrate`、`prepare`、`apply` 或 `publish`。
 
-mutation 结果只区分 `Committed`、`AbortedByFlush` 与 `BackendFailed`。`BackendFailed` 仅表示 backend operation 本身失败且未提交。backend 已成功后：
+mutation 结果只区分 `Committed`、`AbortedByFlush` 与 `BackendFailed`。`BackendFailed` 仅表示 `commitBackend` 在 backend 尚未成功提交时失败。backend 已成功后：
 
-- `prepare` 发现 invariant violation 时抛出专用 `WorkspaceCommitInvariantError`；controller 进入 `reloadRequired`/fatal recovery 状态，明确禁止重试 backend operation；
-- publish listener 抛错时通过 `FlutterError.reportError` 或等价 reporting 上报，不改变 `Committed` 结果；
-- 不得把 commit preparation、assignment 或 listener notification 问题映射为可重试 `MutationFailed`，避免重复执行不可逆 backend mutation。
+- `postCommitHydrate`、`prepareCommit`/`validateCurrent`、`applySilently` 或 `publish` 任一失败，都抛出带对应 phase 的 `WorkspaceCommitInvariantError`；
+- barrier 进入 fatal，controller 进入 `reloadRequired`/fatal recovery，明确禁止重试 backend operation；
+- post-backend failure 不得映射为 `BackendFailed` 或其他可重试结果，避免重复执行不可逆 backend mutation。
 
 策略：
 
@@ -262,27 +301,38 @@ mutation 结果只区分 `Committed`、`AbortedByFlush` 与 `BackendFailed`。`B
 
 ### 6.5 `PaneEditorContext`
 
-每个 note pane 构建时创建绑定上下文：
+`PaneEditorContext` 是纯 identity token：
 
 ```dart
 final class PaneEditorContext {
+  const PaneEditorContext({
+    required this.paneId,
+    required this.paneGeneration,
+    required this.sessionIdentity,
+    required this.runtimeGeneration,
+  });
+
   final String paneId;
   final int paneGeneration;
   final Object sessionIdentity;
   final int runtimeGeneration;
-
-  Future<PaneEditResult> paste(TextSelection selection);
-  Future<PaneEditResult> changeImageWidth(String src, int width);
-  Future<PaneEditResult> moveImage(
-    String draggedSrc,
-    String targetSrc, {
-    required bool before,
-  });
-  SourceItem? resolveImageSource(String markdownSrc);
 }
+
+PaneEditorContext capturePaneEditorContext({
+  required String paneId,
+  required SplitWorkspaceController splits,
+  required NoteSessionRegistry sessions,
+  required int runtimeGeneration,
+});
+ResolvedPaneEditorContext? resolvePaneEditorContext(
+  PaneEditorContext context, {
+  required SplitWorkspaceController splits,
+  required NoteSessionRegistry sessions,
+  required int runtimeGeneration,
+});
 ```
 
-`PaneEditorContext` 是目标令牌，不直接持有可替换的 Vault/AI runtime。所有异步操作使用发起时捕获的 pane/session/runtime identity；等待图片读取、Vault 写入、proposal 或 clipboard 期间即使焦点切换，也不能改写另一个 pane。focus 变化不使 context 失效；pane 重绑、关闭、session 移除或 Vault 切换时返回 `staleTarget`，不产生跨笔记写入。
+`PaneEditorContext` 不包含 paste、image width、move image 或 source resolution 方法，也不直接持有可替换的 Vault/AI runtime。命令由 coordinator/controller 接收 context，并在执行前后通过 capture/resolve 校验 pane/session/runtime identity；等待图片读取、Vault 写入、proposal 或 clipboard 期间即使焦点切换，也不能改写另一个 pane。focus 变化不使 context 失效；pane 重绑、关闭、session 移除或 Vault 切换时返回 `staleTarget`，不产生跨笔记写入。
 
 ### 6.6 `WorkspaceController` 与 Riverpod
 
@@ -413,7 +463,7 @@ Picker 不得在旧 session flush 之前释放旧 security scope。
 - Controller 将用户可恢复错误发布到 `WorkspaceState.message`，`WorkspaceRuntimeManager` 保留当前 active runtime。
 - 保存失败不覆盖 controller，不执行依赖该 flush 的 mutation。
 - mutation backend 失败不应用 delta；backend 已成功后 invariant failure 进入 reload-required/fatal recovery，禁止重试 backend operation。
-- publish listener error 只上报，不改变 committed result。
+- backend 成功后的 hydrate/prepare/apply/publish error 统一进入 `WorkspaceCommitInvariantError` 与 `reloadRequired`/fatal recovery，不返回可重试结果。
 - 候选 Vault 失败不清空旧 workspace。
 - Keychain 失败不降级明文。
 - proposal/OCR 错误不得改变既有 Markdown。
@@ -430,7 +480,7 @@ Picker 不得在旧 session flush 之前释放旧 security scope。
 - materials registry 的 reconcile、remove 与循环 remap 原子完成；
 - pane context 在切换焦点后仍写入原 session，在 pane/runtime 失效后返回 stale target；
 - commit batch prepare invariant failure 不产生部分 in-memory commit，抛 `WorkspaceCommitInvariantError` 且不返回 retryable `BackendFailed`；
-- commit batch publish listener error 通过 reporting 上报且结果仍为 `Committed`；
+- commit batch hydrate/prepare/apply/publish failure 均进入对应 phase 的 `WorkspaceCommitInvariantError`，并触发 `reloadRequired`/fatal recovery；
 - WorkspaceController 的 observable snapshot/intent reduction，以及 StartupCoordinator/RuntimeManager 的初始化、Vault 切换、settings、lease 和 runtime rebuild。
 
 ### 10.2 Widget characterization tests
