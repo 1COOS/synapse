@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../application/search/search_index.dart';
 import '../../../domain/markdown/markdown_document.dart';
 import '../../../domain/vault/vault_resource.dart';
 import '../../../infrastructure/config/synapse_settings.dart';
@@ -14,6 +15,7 @@ import '../state/split_workspace_controller.dart';
 import '../state/workspace_mutation_barrier.dart';
 import 'workspace_dependencies.dart';
 import 'workspace_resource_coordinator.dart';
+import 'workspace_runtime.dart';
 import 'workspace_runtime_manager.dart';
 import 'workspace_state.dart';
 
@@ -52,6 +54,7 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
   bool _isDisposed = false;
   bool _reloadRequired = false;
   SynapseSettings _settings = SynapseSettings.defaults;
+  Future<void> _settingsPersistenceTail = Future<void>.value();
 
   @override
   Future<WorkspaceState> build() async {
@@ -143,8 +146,307 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
 
   void focusPane(String paneId) {
     if (_splits.focus(paneId)) {
-      _publishCollaboratorSnapshot();
+      final pane = _splits.pane(paneId)!;
+      final current = _requireState();
+      _publish(
+        current.copyWith(
+          selectedResourceId: pane.noteId,
+          splitRoot: _splits.root,
+          focusedPaneId: _splits.focusedPaneId,
+          selectedPreviewImageSrc: null,
+        ),
+      );
     }
+  }
+
+  void setLeftMode(WorkspaceLeftMode mode) {
+    _publish(_requireState().copyWith(leftMode: mode));
+  }
+
+  void setNarrowSection(WorkspaceSection section) {
+    _publish(_requireState().copyWith(narrowSection: section));
+  }
+
+  void setLeftPaneCollapsed(bool collapsed) {
+    _publish(_requireState().copyWith(leftPaneCollapsed: collapsed));
+  }
+
+  void setRightPaneCollapsed(bool collapsed) {
+    _publish(_requireState().copyWith(rightPaneCollapsed: collapsed));
+  }
+
+  void toggleFolderCollapsed(String folderId) {
+    final current = _requireState();
+    final collapsed = Set<String>.of(current.collapsedFolderIds);
+    if (!collapsed.add(folderId)) {
+      collapsed.remove(folderId);
+    }
+    _publish(current.copyWith(collapsedFolderIds: collapsed));
+  }
+
+  String splitFocused(SplitDirection direction) {
+    final paneId = _splits.splitFocused(direction);
+    final pane = _splits.pane(paneId)!;
+    _publish(
+      _requireState().copyWith(
+        selectedResourceId: pane.noteId,
+        splitRoot: _splits.root,
+        focusedPaneId: paneId,
+      ),
+    );
+    return paneId;
+  }
+
+  void resizeSplit(String branchId, double delta, double extent) {
+    _splits.resizeBranch(branchId, delta, extent);
+    _publish(
+      _requireState().copyWith(
+        splitRoot: _splits.root,
+        focusedPaneId: _splits.focusedPaneId,
+      ),
+    );
+  }
+
+  Future<WorkspaceActionResult> selectResource(
+    VaultResourceNode resource,
+  ) async {
+    if (resource.isFolder) {
+      final current = _requireState();
+      _publish(
+        current.copyWith(
+          selectedResourceId: resource.id,
+          narrowSection: WorkspaceSection.resources,
+        ),
+      );
+      return WorkspaceActionResult.committed;
+    }
+    if (!_beginOperation(WorkspaceOperation.resourceMutation)) {
+      return WorkspaceActionResult.busy;
+    }
+    try {
+      if (!await _flushFocusedSession()) {
+        return WorkspaceActionResult.aborted;
+      }
+      final result = await _resourceCoordinator.loadNote(resource.id);
+      return _applyResourceResult(
+        result,
+        missingMessage: '资源已不存在：${resource.title}',
+      );
+    } catch (error) {
+      _setMessage(error.toString());
+      return WorkspaceActionResult.failed;
+    } finally {
+      _endOperation(WorkspaceOperation.resourceMutation);
+    }
+  }
+
+  Future<WorkspaceActionResult> search(String query) async {
+    final normalized = query.trim();
+    if (normalized.isEmpty || _runtimeManager.current == null) {
+      return WorkspaceActionResult.cancelled;
+    }
+    if (!_beginOperation(WorkspaceOperation.search)) {
+      return WorkspaceActionResult.busy;
+    }
+    try {
+      final capture = _runtimeManager.capture();
+      if (capture == null) {
+        return WorkspaceActionResult.cancelled;
+      }
+      final results = await capture.runtime.searchCoordinator.searchVault(
+        query: normalized,
+        vault: capture.runtime.vault,
+      );
+      if (results == null || !_runtimeManager.isCurrent(capture)) {
+        return WorkspaceActionResult.aborted;
+      }
+      final current = _requireState();
+      _publish(
+        current.copyWith(
+          leftMode: WorkspaceLeftMode.search,
+          searchResults: results,
+          message: _semanticSearchEnabled
+              ? current.message
+              : _semanticSearchFallbackMessage,
+        ),
+      );
+      return WorkspaceActionResult.committed;
+    } catch (error) {
+      _setMessage(error.toString());
+      return WorkspaceActionResult.failed;
+    } finally {
+      _endOperation(WorkspaceOperation.search);
+    }
+  }
+
+  Future<WorkspaceActionResult> openSearchResult(SearchResult result) async {
+    if (!_beginOperation(WorkspaceOperation.resourceMutation)) {
+      return WorkspaceActionResult.busy;
+    }
+    try {
+      if (!await _flushFocusedSession()) {
+        return WorkspaceActionResult.aborted;
+      }
+      final opened = await _resourceCoordinator.openSearchResult(
+        result,
+        resources: _requireState().resources,
+      );
+      return _applyResourceResult(
+        opened,
+        missingMessage: '搜索结果已失效：${result.title}',
+      );
+    } catch (error) {
+      _setMessage(error.toString());
+      return WorkspaceActionResult.failed;
+    } finally {
+      _endOperation(WorkspaceOperation.resourceMutation);
+    }
+  }
+
+  Future<WorkspaceActionResult> chooseVault() async {
+    if (!_beginOperation(WorkspaceOperation.vaultSwitch)) {
+      return WorkspaceActionResult.busy;
+    }
+    WorkspaceRuntime? candidate;
+    try {
+      final flush = await _saves.flushAll();
+      if (!flush.succeeded) {
+        _setMessage('自动保存失败，已取消切换仓库');
+        return WorkspaceActionResult.aborted;
+      }
+      final location = await _dependencies.pickVaultLocation();
+      if (location == null) {
+        return WorkspaceActionResult.cancelled;
+      }
+      final nextSettings = _settings.copyWith(vaultLocation: location);
+      candidate = _createRuntime(
+        vault: _dependencies.createVault(location.rootPath),
+        rootPath: location.rootPath,
+        label: _dependencies.formatVaultLabel(location.rootPath),
+        settings: nextSettings,
+      );
+      final snapshot = await _resourceCoordinator.loadDetachedRuntime(
+        candidate,
+      );
+      await _persistSettings(nextSettings);
+      _saves.resetAfterReload();
+      _mutations.resetAfterReload();
+      _runtimeManager.install(candidate);
+      candidate = null;
+      _settings = nextSettings;
+      _replaceRuntimeSnapshot(snapshot, message: '仓库已打开');
+      return WorkspaceActionResult.committed;
+    } catch (error) {
+      candidate?.dispose(
+        reportCleanupError: _dependencies.cleanupErrorReporter,
+      );
+      _setMessage('仓库位置读取失败：$error');
+      return WorkspaceActionResult.failed;
+    } finally {
+      _endOperation(WorkspaceOperation.vaultSwitch);
+    }
+  }
+
+  Future<WorkspaceActionResult> updateSettings(SynapseSettings settings) async {
+    if (!_beginOperation(WorkspaceOperation.settings)) {
+      return WorkspaceActionResult.busy;
+    }
+    WorkspaceRuntime? candidate;
+    try {
+      final current = _runtimeManager.current;
+      if (current != null) {
+        candidate = _createRuntime(
+          vault: current.vault,
+          rootPath: current.rootPath,
+          label: current.label,
+          settings: settings,
+        );
+      }
+      await _persistSettings(settings);
+      if (candidate != null) {
+        _runtimeManager.install(candidate);
+        candidate = null;
+      }
+      _settings = settings;
+      _splits.updateDefaultMode(_preferredNoteMode);
+      final currentState = _requireState();
+      _publish(
+        currentState.copyWith(
+          settings: settings,
+          splitRoot: _splits.root,
+          focusedPaneId: _splits.focusedPaneId,
+          message: _modelConfigurationMessage(),
+        ),
+      );
+      return WorkspaceActionResult.committed;
+    } catch (error) {
+      candidate?.dispose(
+        reportCleanupError: _dependencies.cleanupErrorReporter,
+      );
+      _setMessage('设置保存失败：$error');
+      return WorkspaceActionResult.failed;
+    } finally {
+      _endOperation(WorkspaceOperation.settings);
+    }
+  }
+
+  Future<bool> _flushFocusedSession() async {
+    final noteId = _splits.focusedPane?.noteId;
+    if (noteId == null) {
+      return true;
+    }
+    final session = _sessions.sessionFor(noteId);
+    if (session == null) {
+      return true;
+    }
+    final report = await _saves.flush([session]);
+    if (!report.succeeded) {
+      final error = report.results.isEmpty
+          ? '未知错误'
+          : report.results.first.error;
+      _setMessage('保存失败：$error');
+    }
+    return report.succeeded;
+  }
+
+  WorkspaceActionResult _applyResourceResult(
+    WorkspaceResourceResult result, {
+    required String missingMessage,
+  }) {
+    if (result is WorkspaceResourceStale) {
+      return WorkspaceActionResult.aborted;
+    }
+    if (result case WorkspaceResourceMissing(:final resources)) {
+      _publish(
+        _requireState().copyWith(resources: resources, message: missingMessage),
+      );
+      return WorkspaceActionResult.failed;
+    }
+    final snapshot = (result as WorkspaceResourceCurrent).snapshot;
+    final note = snapshot.note;
+    if (note == null || snapshot.selectedResource == null) {
+      _setMessage(missingMessage);
+      return WorkspaceActionResult.failed;
+    }
+    _sessions.upsert(note);
+    _materials.replaceProposals(note.id, snapshot.proposals);
+    _materials.clearSelection(note.id);
+    _splits.setPaneNote(_splits.focusedPaneId, note.id);
+    _splits.setPaneMode(_splits.focusedPaneId, _preferredNoteMode);
+    final current = _requireState();
+    _publish(
+      current.copyWith(
+        resources: snapshot.resources,
+        selectedResourceId: snapshot.selectedResource!.id,
+        materials: _materials.snapshots,
+        splitRoot: _splits.root,
+        focusedPaneId: _splits.focusedPaneId,
+        sessionNoteIds: _sessions.noteIds,
+        narrowSection: WorkspaceSection.notes,
+        selectedPreviewImageSrc: null,
+      ),
+    );
+    return WorkspaceActionResult.committed;
   }
 
   WorkspaceState _snapshot({
@@ -251,22 +553,148 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
     required String? rootPath,
     required String label,
   }) {
-    final aiProvider = _dependencies.createAiProvider(_settings.providerConfig);
-    _runtimeManager.installCandidateSync(
-      () => _dependencies.createRuntime(
+    _runtimeManager.install(
+      _createRuntime(
         vault: vault,
-        aiProvider: aiProvider,
-        semanticSearchEnabled: _semanticSearchEnabledFor(_settings),
         rootPath: rootPath,
         label: label,
+        settings: _settings,
       ),
     );
+  }
+
+  WorkspaceRuntime _createRuntime({
+    required VaultBackend vault,
+    required String? rootPath,
+    required String label,
+    required SynapseSettings settings,
+  }) {
+    return _dependencies.createRuntime(
+      vault: vault,
+      aiProvider: _dependencies.createAiProvider(settings.providerConfig),
+      semanticSearchEnabled: _semanticSearchEnabledFor(settings),
+      rootPath: rootPath,
+      label: label,
+    );
+  }
+
+  Future<void> _persistSettings(SynapseSettings settings) {
+    final operation = _settingsPersistenceTail.catchError((Object _) {}).then((
+      _,
+    ) async {
+      final store = await _dependencies.settingsStore();
+      await store.save(settings);
+    });
+    _settingsPersistenceTail = operation.catchError((Object _) {});
+    return operation;
+  }
+
+  void _replaceRuntimeSnapshot(
+    WorkspaceResourceSnapshot snapshot, {
+    required String message,
+  }) {
+    _sessions.clear();
+    _materials.clear();
+    _splits.reset(defaultMode: _preferredNoteMode);
+    if (snapshot.note case final note?) {
+      _sessions.upsert(note);
+      _materials.replaceProposals(note.id, snapshot.proposals);
+      _splits.setPaneNote(_splits.focusedPaneId, note.id);
+    }
+    final current = _requireState();
+    final runtime = _runtimeManager.requireCurrent();
+    _publish(
+      WorkspaceState(
+        phase: _dependencies.supportsDirectoryVault
+            ? WorkspacePhase.ready
+            : WorkspacePhase.webPreview,
+        resources: snapshot.resources,
+        selectedResourceId: snapshot.selectedResource?.id,
+        searchResults: const [],
+        materials: _materials.snapshots,
+        splitRoot: _splits.root,
+        focusedPaneId: _splits.focusedPaneId,
+        sessionNoteIds: _sessions.noteIds,
+        leftMode: WorkspaceLeftMode.resources,
+        narrowSection: snapshot.note == null
+            ? WorkspaceSection.resources
+            : WorkspaceSection.notes,
+        settings: _settings,
+        vaultLabel: runtime.label,
+        vaultRoot: runtime.rootPath,
+        activeOperation: current.activeOperation,
+        message: message,
+      ),
+    );
+  }
+
+  bool _beginOperation(WorkspaceOperation operation) {
+    final current = _requireState();
+    if (current.activeOperation != null) {
+      return false;
+    }
+    _publish(current.copyWith(activeOperation: operation, message: ''));
+    return true;
+  }
+
+  void _endOperation(WorkspaceOperation operation) {
+    if (_isDisposed) {
+      return;
+    }
+    final current = state.value;
+    if (current?.activeOperation == operation) {
+      _publish(current!.copyWith(activeOperation: null));
+    }
+  }
+
+  WorkspaceState _requireState() {
+    return state.value ?? (throw StateError('Workspace is not initialized.'));
+  }
+
+  void _setMessage(String message) {
+    if (_isDisposed || state.value == null) {
+      return;
+    }
+    _publish(_requireState().copyWith(message: message));
+  }
+
+  void _publish(WorkspaceState next) {
+    if (!_isDisposed) {
+      state = AsyncData(next);
+    }
+  }
+
+  String _modelConfigurationMessage() {
+    if (_dependencies.usesInjectedAiProvider) {
+      return '';
+    }
+    final store = _dependencies.resolvedSettingsStore();
+    if (store != null && !store.supportsPersistence) {
+      return store.unavailableMessage;
+    }
+    final config = _settings.providerConfig;
+    if (config.isComplete) {
+      if (config.hasEmbeddingConfig) {
+        return '模型设置已保存';
+      }
+      return '模型设置已保存；未配置 Embedding，语义搜索关闭';
+    }
+    return '请先在设置中配置模型';
   }
 
   bool _semanticSearchEnabledFor(SynapseSettings settings) {
     return settings.preferences.semanticSearchEnabled &&
         (_dependencies.usesInjectedAiProvider ||
             settings.providerConfig.hasEmbeddingConfig);
+  }
+
+  bool get _semanticSearchEnabled => _semanticSearchEnabledFor(_settings);
+
+  String get _semanticSearchFallbackMessage {
+    if (!_settings.preferences.semanticSearchEnabled) {
+      return '语义搜索已关闭，仅使用全文搜索';
+    }
+    return '未配置 Embedding，仅使用全文搜索';
   }
 
   NoteMode get _preferredNoteMode =>

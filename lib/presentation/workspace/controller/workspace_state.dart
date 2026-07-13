@@ -22,6 +22,8 @@ enum WorkspaceOperation {
   editorCommand,
 }
 
+enum WorkspaceActionResult { committed, cancelled, busy, aborted, failed }
+
 @immutable
 final class WorkspaceState {
   WorkspaceState({
@@ -46,7 +48,9 @@ final class WorkspaceState {
     this.reloadRequired = false,
     Set<String> collapsedFolderIds = const {},
     this.selectedPreviewImageSrc,
-  }) : resources = List<VaultResourceNode>.unmodifiable(resources),
+  }) : resources = List<VaultResourceNode>.unmodifiable(
+         resources.map(_freezeResource),
+       ),
        searchResults = List<SearchResult>.unmodifiable(
          searchResults.map(_freezeSearchResult),
        ),
@@ -177,4 +181,16 @@ VaultResourceNode? _findResource(
     }
   }
   return null;
+}
+
+VaultResourceNode _freezeResource(VaultResourceNode resource) {
+  return VaultResourceNode(
+    id: resource.id,
+    title: resource.title,
+    path: resource.path,
+    type: resource.type,
+    children: List<VaultResourceNode>.unmodifiable(
+      resource.children.map(_freezeResource),
+    ),
+  );
 }
