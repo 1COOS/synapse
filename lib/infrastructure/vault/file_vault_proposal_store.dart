@@ -1,0 +1,139 @@
+import 'dart:convert';
+
+import 'package:uuid/uuid.dart';
+
+import '../../domain/vault/vault_resource.dart';
+import 'file_vault_operations.dart';
+import 'file_vault_paths.dart';
+import 'vault_post_commit_error.dart';
+
+final class FileVaultProposalStore {
+  const FileVaultProposalStore({
+    required this.paths,
+    required this.operations,
+    required this.listNoteIds,
+  });
+
+  final FileVaultPaths paths;
+  final FileVaultOperations operations;
+  final Future<List<String>> Function() listNoteIds;
+
+  Future<AiProposal> saveProposal(AiProposal proposal) async {
+    final proposals = await listProposals(proposal.noteId);
+    return runVaultPostCommit(() async {
+      await writeProposals(proposal.noteId, [
+        ...proposals.where((item) => item.id != proposal.id),
+        proposal,
+      ]);
+      return proposal;
+    });
+  }
+
+  Future<List<AiProposal>> listProposals(String noteId) async {
+    final proposals =
+        (await readProposalsFile(
+            noteId,
+          )).where((proposal) => proposal.noteId == noteId).toList()
+          ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+    return proposals;
+  }
+
+  Future<AiProposal> getProposal(String proposalId) async {
+    final match = await _findProposal(proposalId);
+    if (match == null) {
+      throw StateError('Proposal not found: $proposalId');
+    }
+    return match.$2;
+  }
+
+  Future<AiProposal> updateProposal(AiProposal proposal) async {
+    final proposals = await listProposals(proposal.noteId);
+    return runVaultPostCommit(() async {
+      await writeProposals(proposal.noteId, [
+        ...proposals.where((item) => item.id != proposal.id),
+        proposal,
+      ]);
+      return proposal;
+    });
+  }
+
+  Future<void> deleteProposal(String proposalId) async {
+    final match = await _findProposal(proposalId);
+    if (match == null) {
+      throw StateError('Proposal not found: $proposalId');
+    }
+    final (noteId, proposal) = match;
+    final proposals = await listProposals(noteId);
+    final updated = proposals.where((item) => item.id != proposal.id).toList();
+    await runVaultPostCommit(() => writeProposals(noteId, updated));
+  }
+
+  Future<List<AiProposal>> readProposalsFile(String noteId) async {
+    final file = paths.proposalsFile(noteId);
+    if (!await file.exists()) {
+      return const [];
+    }
+    return (jsonDecode(await file.readAsString()) as List<Object?>)
+        .map(
+          (item) => AiProposal.fromJson((item as Map).cast<String, Object?>()),
+        )
+        .toList();
+  }
+
+  Future<void> writeProposals(String noteId, List<AiProposal> proposals) async {
+    final file = paths.proposalsFile(noteId);
+    await file.parent.create(recursive: true);
+    await operations.writeFileString(
+      file,
+      const JsonEncoder.withIndent(
+        '  ',
+      ).convert(proposals.map((proposal) => proposal.toJson()).toList()),
+    );
+  }
+
+  Future<void> rewriteMoved(String noteId) async {
+    final proposals = await readProposalsFile(noteId);
+    if (proposals.isNotEmpty || await paths.proposalsFile(noteId).exists()) {
+      await writeProposals(noteId, [
+        for (final proposal in proposals) proposal.copyWith(noteId: noteId),
+      ]);
+    }
+  }
+
+  Future<void> rewriteCopied(
+    String noteId,
+    Map<String, String> sourceIdMap,
+  ) async {
+    final now = DateTime.now().toUtc();
+    final proposals = await readProposalsFile(noteId);
+    if (proposals.isNotEmpty || await paths.proposalsFile(noteId).exists()) {
+      await writeProposals(noteId, [
+        for (final proposal in proposals)
+          AiProposal(
+            id: const Uuid().v4(),
+            noteId: noteId,
+            sourceIds: [
+              for (final sourceId in proposal.sourceIds)
+                sourceIdMap[sourceId] ?? sourceId,
+            ],
+            title: proposal.title,
+            proposedMarkdown: proposal.proposedMarkdown,
+            status: proposal.status,
+            createdAt: now,
+            updatedAt: now,
+          ),
+      ]);
+    }
+  }
+
+  Future<(String, AiProposal)?> _findProposal(String proposalId) async {
+    for (final noteId in await listNoteIds()) {
+      for (final proposal in await listProposals(noteId)) {
+        if (proposal.id == proposalId) {
+          return (noteId, proposal);
+        }
+      }
+    }
+    return null;
+  }
+}
