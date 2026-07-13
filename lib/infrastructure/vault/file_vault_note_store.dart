@@ -18,7 +18,6 @@ final class FileVaultNoteStore {
     required this.sources,
     required this.proposals,
     required this.readNoteCallback,
-    required this.deleteNoteCallback,
     required this.listResourcesCallback,
     required this.listSources,
   });
@@ -28,7 +27,6 @@ final class FileVaultNoteStore {
   final FileVaultSourceStore sources;
   final FileVaultProposalStore proposals;
   final Future<VaultNoteContent> Function(String noteId) readNoteCallback;
-  final Future<void> Function(String noteId) deleteNoteCallback;
   final Future<List<VaultResourceNode>> Function() listResourcesCallback;
   final Future<List<SourceItem>> Function(String noteId) listSources;
 
@@ -204,9 +202,6 @@ final class FileVaultNoteStore {
     final directory = paths.directoryForFolder(relative);
     if (!await directory.exists()) {
       throw StateError('Folder not found: $folderPath');
-    }
-    for (final noteId in await noteIdsInsideFolder(relative)) {
-      await deleteNoteCallback(noteId);
     }
     await runVaultPostCommit(
       () => operations.deleteDirectory(directory, recursive: true),

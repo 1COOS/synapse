@@ -40,7 +40,6 @@ class FileVaultBackend implements VaultBackend {
       sources: _sources,
       proposals: _proposals,
       readNoteCallback: (noteId) => readNote(noteId),
-      deleteNoteCallback: (noteId) => deleteNote(noteId),
       listResourcesCallback: () => listResources(),
       listSources: (noteId) => listSources(noteId),
     );

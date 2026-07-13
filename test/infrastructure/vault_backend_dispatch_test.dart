@@ -139,27 +139,6 @@ void main() {
 
       expect(moved.id, isNotEmpty);
     });
-
-    test('deleteFolder dispatches deleteNote for every note', () async {
-      final backend = _DispatchTrackingFileVaultBackend(root.path);
-      final folder = await backend.createFolder(parentPath: '', title: '课程');
-      final nested = await backend.createFolder(
-        parentPath: folder.path,
-        title: '章节',
-      );
-      final first = await backend.createNote(
-        parentPath: folder.path,
-        title: '一',
-      );
-      final second = await backend.createNote(
-        parentPath: nested.path,
-        title: '二',
-      );
-
-      await backend.deleteFolder(folder.path);
-
-      expect(backend.deletedNoteIds, unorderedEquals([first.id, second.id]));
-    });
   });
 
   group('MemoryVaultBackend dispatch compatibility', () {
@@ -210,7 +189,6 @@ final class _DispatchTrackingFileVaultBackend extends FileVaultBackend {
   int listSourcesCalls = 0;
   int listProposalsCalls = 0;
   int listResourcesCalls = 0;
-  final deletedNoteIds = <String>[];
 
   @override
   Future<VaultNoteContent> readNote(String noteId) {
@@ -234,12 +212,6 @@ final class _DispatchTrackingFileVaultBackend extends FileVaultBackend {
   Future<List<VaultResourceNode>> listResources() {
     listResourcesCalls += 1;
     return super.listResources();
-  }
-
-  @override
-  Future<void> deleteNote(String noteId) {
-    deletedNoteIds.add(noteId);
-    return super.deleteNote(noteId);
   }
 }
 
