@@ -6,7 +6,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../application/search/search_index.dart';
 import '../../domain/markdown/markdown_document.dart';
 import '../../domain/vault/vault_resource.dart';
-import '../../infrastructure/config/synapse_settings.dart';
 import '../workspace/controller/workspace_controller.dart';
 import '../workspace/editor/pane_editor_context.dart';
 import '../workspace/state/note_document_session.dart';
@@ -357,7 +356,7 @@ class _SynapseWorkspaceState extends ConsumerState<SynapseWorkspace> {
         return;
       }
     }
-    final saved = await showCupertinoDialog<SynapseSettings>(
+    final saved = await showCupertinoDialog<WorkspaceSettingsValue>(
       context: context,
       builder: (context) => WorkspaceSettingsSheet(
         initialSettings: initialSettings,

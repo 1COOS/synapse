@@ -6,6 +6,7 @@ import 'workspace_controls.dart';
 import 'workspace_theme.dart';
 
 typedef ProviderConfigTester = Future<String> Function(ProviderConfig config);
+typedef WorkspaceSettingsValue = SynapseSettings;
 
 enum _SettingsSection {
   general('通用', CupertinoIcons.slider_horizontal_3),

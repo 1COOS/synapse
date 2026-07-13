@@ -1,11 +1,15 @@
 # Synapse macOS 生产化与状态层重写设计
 
 **日期：** 2026-07-10
-**状态：** Foundation checkpoint 已完成，按批准顺序继续执行
+**状态：** 状态层阶段 1-7 已完成，下一阶段为 Keychain fail-closed
 **目标分支：** `codex/state-layer-rewrite`
 **Foundation implementation baseline：** `3cc85d9c9b3e54920a98b91e8d1fc69b76b08ac9`
 **Initial documentation checkpoint：** `92d5576`
 **Review clarification commit：** `d4c5310`
+
+**阶段 6 checkpoint：** commits `67152b5..66c5eb9`；全量 471 tests pass，analyze 0 issues，worktree clean。
+
+**阶段 7 checkpoint：** implementation commits `dad7164..312646a`；controller 65 tests pass、workspace 396 tests pass、全量 498 tests pass，analyze 0 issues。`workspace.dart` 780 行，`WorkspaceController` 987 行。
 
 > Foundation baseline 捕获时，分支相对 `main` 有 15 个实现提交，任务 1-5 的 session/save/split/mutation foundation 已完成。该 baseline 的 fresh evidence 为状态层 65 tests pass、workspace 140 tests pass，共 205 tests pass，`flutter analyze --no-pub` 无 issue，`git diff --check` clean。提交数量仅描述 baseline 捕获时点，不作为后续分支总提交数。
 
@@ -98,6 +102,8 @@ Synapse 当前已经具备三栏工作台、分屏笔记、Markdown 实时编辑
 | 每 note 的 source selection 与 proposals | `NoteMaterialsRegistry` | 从 document session 分离，按 note ID 唯一持有 |
 | 发起 pane 的图片/粘贴/宽度/拖动上下文 | `PaneEditorContext` | await 前捕获稳定 session |
 | live editor block/selection/menu/hover | editor Widget local state | 不迁入 Riverpod |
+
+阶段 7 落地后，workspace snapshot 的 runtime/settings 启动协调由 `WorkspaceStartupCoordinator` 承担，editor command lock 与 save-flight ownership 由 `WorkspaceEditorOperationCoordinator` 承担。它们不成为第二个 observable state source；所有 UI 可观察状态仍只通过 `WorkspaceController` 发布的 `AsyncValue<WorkspaceState>` 暴露。
 
 ## 6. 目标组件
 
@@ -436,15 +442,15 @@ Picker 不得在旧 session flush 之前释放旧 security scope。
 
 ## 11. 迁移顺序
 
-Foundation 的 session/save/split/mutation 工作已完成。后续唯一执行顺序为：
+Foundation 的 session/save/split/mutation 工作及后续阶段 1-7 已完成。剩余工作继续按以下唯一顺序推进：
 
-1. test split；
-2. UI leaf split；
-3. live editor split；
-4. `NoteMaterialsRegistry`；
-5. `PaneEditorContext` / `WorkspaceCommitBatch`；
-6. runtime/dependencies/search/resource collaborators；
-7. `AsyncNotifier<WorkspaceState>` controller 与 Consumer UI；
+1. test split（已完成）；
+2. UI leaf split（已完成）；
+3. live editor split（已完成）；
+4. `NoteMaterialsRegistry`（已完成）；
+5. `PaneEditorContext` / `WorkspaceCommitBatch`（已完成）；
+6. runtime/dependencies/search/resource collaborators（已完成，`67152b5..66c5eb9`）；
+7. `AsyncNotifier<WorkspaceState>` controller 与 Consumer UI（已完成，`dad7164..312646a`）；
 8. Keychain fail-closed；
 9. tokenized Vault lease；
 10. backend split；
