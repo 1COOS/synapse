@@ -45,6 +45,10 @@ void main() {
           jsonDecode(await file.readAsString()) as Map<String, Object?>;
       expect(json, isNot(containsPair('apiKey', anything)));
       expect(secureStore.values['synapse.provider.apiKey'], 'secret-key');
+      expect(secureStore.events, [
+        'write:synapse.provider.apiKey:secret-key',
+        'read:synapse.provider.apiKey',
+      ]);
 
       final loaded = await store.load();
       expect(loaded, isNotNull);
@@ -53,6 +57,90 @@ void main() {
       expect(loaded.isComplete, isTrue);
     },
   );
+
+  test(
+    'migrates legacy plaintext with secure write read verify then delete',
+    () async {
+      await _writeProviderConfigJson(root);
+      final fallbackFile = await _writeLegacyApiKey(root, 'legacy-key');
+      final store = FileProviderConfigStore(
+        configDirectory: root,
+        secureStore: secureStore,
+      );
+
+      final loaded = await store.load();
+
+      expect(loaded, isNotNull);
+      expect(loaded!.apiKey, 'legacy-key');
+      expect(secureStore.events, [
+        'write:synapse.provider.apiKey:legacy-key',
+        'read:synapse.provider.apiKey',
+      ]);
+      expect(await fallbackFile.exists(), isFalse);
+    },
+  );
+
+  for (final failureCase in <({String name, _FakeSecureValueStore store})>[
+    (
+      name: 'entitlement -34018',
+      store: _FakeSecureValueStore(
+        writeFailure: PlatformException(
+          code: '-34018',
+          message: "A required entitlement isn't present.",
+        ),
+      ),
+    ),
+    (
+      name: 'secure write error',
+      store: _FakeSecureValueStore(
+        writeFailure: StateError('secure write failed'),
+      ),
+    ),
+    (
+      name: 'verify mismatch',
+      store: _FakeSecureValueStore(readResults: ['different-key']),
+    ),
+    (
+      name: 'verify error',
+      store: _FakeSecureValueStore(
+        readFailure: StateError('secure verify failed'),
+      ),
+    ),
+  ]) {
+    test(
+      'deletes legacy plaintext and returns an empty key on ${failureCase.name}',
+      () async {
+        await _writeProviderConfigJson(root);
+        final fallbackFile = await _writeLegacyApiKey(root, 'legacy-key');
+        final store = FileProviderConfigStore(
+          configDirectory: root,
+          secureStore: failureCase.store,
+        );
+
+        final loaded = await store.load();
+
+        expect(loaded, isNotNull);
+        expect(loaded!.apiKey, isEmpty);
+        expect(await fallbackFile.exists(), isFalse);
+      },
+    );
+  }
+
+  test('deletes corrupt legacy plaintext and returns an empty key', () async {
+    await _writeProviderConfigJson(root);
+    final fallbackFile = File(p.join(root.path, 'provider_api_key.local.json'));
+    await fallbackFile.writeAsString('{not-json');
+    final store = FileProviderConfigStore(
+      configDirectory: root,
+      secureStore: secureStore,
+    );
+
+    final loaded = await store.load();
+
+    expect(loaded, isNotNull);
+    expect(loaded!.apiKey, isEmpty);
+    expect(await fallbackFile.exists(), isFalse);
+  });
 
   test('clears secure api key when a blank key is saved', () async {
     final store = FileProviderConfigStore(
@@ -84,70 +172,101 @@ void main() {
   });
 
   test(
-    'falls back to a local key file when macOS keychain is unavailable',
+    'does not commit provider json or create fallback when verification fails',
     () async {
+      final configFile = File(p.join(root.path, 'provider_config.json'));
+      const originalJson = '{"baseUrl":"old-url"}';
+      await configFile.writeAsString(originalJson);
       final store = FileProviderConfigStore(
         configDirectory: root,
-        secureStore: _FakeSecureValueStore(
-          readFailure: PlatformException(
-            code: '-34018',
-            message: "A required entitlement isn't present.",
-          ),
-          writeFailure: PlatformException(
-            code: '-34018',
-            message: "A required entitlement isn't present.",
-          ),
-        ),
+        secureStore: _FakeSecureValueStore(readResults: ['different-key']),
       );
 
-      await store.save(
-        const ProviderConfig(
-          baseUrl: 'https://api.example.com/v1',
-          apiKey: 'secret-key',
-          chatModel: 'chat-model',
-          visionModel: 'vision-model',
-          embeddingModel: '',
-        ),
+      await expectLater(
+        store.save(_providerConfigWithApiKey('new-key')),
+        throwsA(isA<StateError>()),
       );
 
-      final fallbackFile = File(
-        p.join(root.path, 'provider_api_key.local.json'),
+      expect(await configFile.readAsString(), originalJson);
+      expect(
+        await File(p.join(root.path, 'provider_api_key.local.json')).exists(),
+        isFalse,
       );
-      expect(await fallbackFile.exists(), isTrue);
-      final fallbackJson =
-          jsonDecode(await fallbackFile.readAsString()) as Map<String, Object?>;
-      expect(fallbackJson['apiKey'], 'secret-key');
-
-      final loaded = await store.load();
-      expect(loaded, isNotNull);
-      expect(loaded!.apiKey, 'secret-key');
     },
+  );
+
+  test('blank key deletes any legacy plaintext fallback', () async {
+    secureStore.values['synapse.provider.apiKey'] = 'old-key';
+    final fallbackFile = await _writeLegacyApiKey(root, 'legacy-key');
+    final store = FileProviderConfigStore(
+      configDirectory: root,
+      secureStore: secureStore,
+    );
+
+    await store.save(_providerConfigWithApiKey(''));
+
+    expect(secureStore.values, isNot(contains('synapse.provider.apiKey')));
+    expect(await fallbackFile.exists(), isFalse);
+  });
+}
+
+ProviderConfig _providerConfigWithApiKey(String apiKey) {
+  return ProviderConfig(
+    baseUrl: 'https://api.example.com/v1',
+    apiKey: apiKey,
+    chatModel: 'chat-model',
+    visionModel: 'vision-model',
+    embeddingModel: '',
   );
 }
 
+Future<void> _writeProviderConfigJson(Directory root) async {
+  await File(p.join(root.path, 'provider_config.json')).writeAsString(
+    jsonEncode(_providerConfigWithApiKey('').toJson(includeApiKey: false)),
+  );
+}
+
+Future<File> _writeLegacyApiKey(Directory root, String apiKey) async {
+  final file = File(p.join(root.path, 'provider_api_key.local.json'));
+  await file.writeAsString(jsonEncode({'apiKey': apiKey}));
+  return file;
+}
+
 class _FakeSecureValueStore implements SecureValueStore {
-  _FakeSecureValueStore({this.readFailure, this.writeFailure});
+  _FakeSecureValueStore({
+    this.readFailure,
+    this.writeFailure,
+    List<String?> readResults = const [],
+  }) : _readResults = [...readResults];
 
   final Object? readFailure;
   final Object? writeFailure;
+  final List<String?> _readResults;
   final values = <String, String>{};
+  final events = <String>[];
 
   @override
   Future<void> delete({required String key}) async {
+    events.add('delete:$key');
     values.remove(key);
   }
 
   @override
   Future<String?> read({required String key}) async {
+    events.add('read:$key');
     final failure = readFailure;
     if (failure != null) {
       throw failure;
+    }
+    if (_readResults.isNotEmpty) {
+      return _readResults.removeAt(0);
     }
     return values[key];
   }
 
   @override
   Future<void> write({required String key, required String value}) async {
+    events.add('write:$key:$value');
     final failure = writeFailure;
     if (failure != null) {
       throw failure;

@@ -1,25 +1,27 @@
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 
 import '../../domain/vault/vault_resource.dart';
-import 'file_provider_config_store.dart';
 import 'provider_config_store.dart';
+import 'secure_api_key_store.dart';
 import 'settings_store.dart';
 import 'synapse_settings.dart';
 import 'vault_location_store.dart';
 
-class FileSettingsStore implements SettingsStore {
+class FileSettingsStore extends SettingsStore {
   FileSettingsStore({
     required Directory configDirectory,
     required SecureValueStore secureStore,
   }) : _configDirectory = configDirectory,
-       _secureStore = secureStore;
+       _apiKeys = SecureApiKeyStore(
+         configDirectory: configDirectory,
+         secureStore: secureStore,
+       );
 
   final Directory _configDirectory;
-  final SecureValueStore _secureStore;
+  final SecureApiKeyStore _apiKeys;
 
   File get _settingsFile =>
       File(p.join(_configDirectory.path, 'settings.json'));
@@ -32,10 +34,6 @@ class FileSettingsStore implements SettingsStore {
     return File(p.join(_configDirectory.path, 'vault_location.json'));
   }
 
-  File get _apiKeyFallbackFile {
-    return File(p.join(_configDirectory.path, 'provider_api_key.local.json'));
-  }
-
   @override
   bool get supportsPersistence => true;
 
@@ -44,27 +42,32 @@ class FileSettingsStore implements SettingsStore {
 
   @override
   Future<SynapseSettings> load() async {
+    return (await loadResult()).settings;
+  }
+
+  @override
+  Future<SettingsLoadResult> loadResult() async {
     if (await _settingsFile.exists()) {
       return _readSettingsFile();
     }
     final migrated = await _loadLegacySettings();
     if (migrated != null) {
-      await save(migrated);
+      await save(migrated.settings);
       await _deleteIfExists(_legacyProviderFile);
       await _deleteIfExists(_legacyVaultFile);
       return migrated;
     }
-    return SynapseSettings.defaults;
+    return const SettingsLoadResult(settings: SynapseSettings.defaults);
   }
 
   @override
   Future<void> save(SynapseSettings settings) async {
     await _configDirectory.create(recursive: true);
     final normalized = _normalizeSettings(settings);
+    await _apiKeys.save(normalized.providerConfig.apiKey);
     await _settingsFile.writeAsString(
       const JsonEncoder.withIndent('  ').convert(normalized.toJson()),
     );
-    await _writeApiKey(normalized.providerConfig.apiKey);
   }
 
   @override
@@ -72,33 +75,39 @@ class FileSettingsStore implements SettingsStore {
     return Directory(_normalizeRootPath(location.rootPath)).exists();
   }
 
-  Future<SynapseSettings> _readSettingsFile() async {
+  Future<SettingsLoadResult> _readSettingsFile() async {
     final raw =
         jsonDecode(await _settingsFile.readAsString()) as Map<String, Object?>;
-    final apiKey = await _readApiKey();
+    final apiKey = await _apiKeys.load();
     final settings = SynapseSettings.fromJson({
       ...raw,
       'providerConfig': {
         ...(raw['providerConfig'] as Map? ?? const <String, Object?>{}),
-        'apiKey': apiKey,
+        'apiKey': apiKey.apiKey,
       },
     });
-    return _normalizeSettings(settings);
+    return SettingsLoadResult(
+      settings: _normalizeSettings(settings),
+      recoveryMessage: apiKey.recoveryMessage,
+    );
   }
 
-  Future<SynapseSettings?> _loadLegacySettings() async {
+  Future<SettingsLoadResult?> _loadLegacySettings() async {
     ProviderConfig providerConfig = ProviderConfig.empty;
     VaultLocation? vaultLocation;
     var foundLegacy = false;
+    var recoveryMessage = '';
 
     if (await _legacyProviderFile.exists()) {
       final raw =
           jsonDecode(await _legacyProviderFile.readAsString())
               as Map<String, Object?>;
+      final apiKey = await _apiKeys.load();
       providerConfig = ProviderConfig.fromJson({
         ...raw,
-        'apiKey': await _readApiKey(),
+        'apiKey': apiKey.apiKey,
       });
+      recoveryMessage = apiKey.recoveryMessage;
       foundLegacy = true;
     }
     if (await _legacyVaultFile.exists()) {
@@ -111,10 +120,13 @@ class FileSettingsStore implements SettingsStore {
     if (!foundLegacy) {
       return null;
     }
-    return SynapseSettings(
-      providerConfig: providerConfig,
-      vaultLocation: vaultLocation,
-      preferences: WorkspacePreferences.defaults,
+    return SettingsLoadResult(
+      settings: SynapseSettings(
+        providerConfig: providerConfig,
+        vaultLocation: vaultLocation,
+        preferences: WorkspacePreferences.defaults,
+      ),
+      recoveryMessage: recoveryMessage,
     );
   }
 
@@ -136,88 +148,9 @@ class FileSettingsStore implements SettingsStore {
     return p.normalize(p.absolute(rootPath));
   }
 
-  Future<String> _readApiKey() async {
-    var apiKey = '';
-    try {
-      apiKey =
-          await _secureStore.read(
-            key: FileProviderConfigStore.apiKeyStorageKey,
-          ) ??
-          '';
-    } on PlatformException catch (error) {
-      if (!_isEntitlementError(error)) {
-        throw StateError(_secureStorageErrorMessage('读取', error));
-      }
-    }
-    if (apiKey.isEmpty) {
-      apiKey = await _readFallbackApiKey() ?? '';
-    }
-    return apiKey;
-  }
-
-  Future<void> _writeApiKey(String apiKey) async {
-    try {
-      if (apiKey.trim().isEmpty) {
-        await _secureStore.delete(
-          key: FileProviderConfigStore.apiKeyStorageKey,
-        );
-        await _deleteIfExists(_apiKeyFallbackFile);
-        return;
-      }
-      await _secureStore.write(
-        key: FileProviderConfigStore.apiKeyStorageKey,
-        value: apiKey.trim(),
-      );
-      await _deleteIfExists(_apiKeyFallbackFile);
-    } on PlatformException catch (error) {
-      if (!_isEntitlementError(error)) {
-        throw StateError(_secureStorageErrorMessage('写入', error));
-      }
-      await _writeFallbackApiKey(apiKey.trim());
-    }
-  }
-
-  Future<String?> _readFallbackApiKey() async {
-    if (!await _apiKeyFallbackFile.exists()) {
-      return null;
-    }
-    final raw =
-        jsonDecode(await _apiKeyFallbackFile.readAsString())
-            as Map<String, Object?>;
-    return raw['apiKey']?.toString();
-  }
-
-  Future<void> _writeFallbackApiKey(String apiKey) async {
-    await _configDirectory.create(recursive: true);
-    await _apiKeyFallbackFile.writeAsString(
-      const JsonEncoder.withIndent('  ').convert({
-        'apiKey': apiKey,
-        'warning':
-            'Local fallback used because macOS Keychain is unavailable in an unsigned development build.',
-      }),
-    );
-  }
-
   Future<void> _deleteIfExists(File file) async {
     if (await file.exists()) {
       await file.delete();
     }
-  }
-
-  bool _isEntitlementError(PlatformException error) {
-    return error.code == '-34018' ||
-        (error.message?.toLowerCase().contains('entitlement') ?? false);
-  }
-
-  String _secureStorageErrorMessage(String action, PlatformException error) {
-    final raw = [
-      error.code,
-      if (error.message != null) error.message,
-    ].join('，');
-    if (_isEntitlementError(error)) {
-      return 'API Key $action系统安全存储失败：macOS 需要启用 Keychain Sharing 权限。'
-          '请重新构建并启动应用后再试。原始错误：$raw';
-    }
-    return 'API Key $action系统安全存储失败：$raw';
   }
 }

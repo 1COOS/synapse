@@ -17,6 +17,13 @@ void main() {
         expect(result.exitCode, 0, reason: result.stderr.toString());
         expect(
           result.stdout.toString(),
+          matches(RegExp(r'"keychain-access-groups" => \[\s*\]')),
+          reason:
+              '${file.path} must enable Keychain Sharing for '
+              'flutter_secure_storage.',
+        );
+        expect(
+          result.stdout.toString(),
           contains(
             '"com.apple.security.files.user-selected.read-write" => true',
           ),

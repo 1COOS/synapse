@@ -111,12 +111,14 @@ class FakeVaultLocationStore implements VaultLocationStore {
   }
 }
 
-class FakeSettingsStore implements SettingsStore {
+class FakeSettingsStore extends SettingsStore {
   FakeSettingsStore({
     SynapseSettings initialSettings = SynapseSettings.defaults,
+    this.recoveryMessage = '',
   }) : currentSettings = initialSettings;
 
   SynapseSettings currentSettings;
+  final String recoveryMessage;
   final savedSettings = <SynapseSettings>[];
 
   @override
@@ -128,6 +130,14 @@ class FakeSettingsStore implements SettingsStore {
   @override
   Future<SynapseSettings> load() async {
     return currentSettings;
+  }
+
+  @override
+  Future<SettingsLoadResult> loadResult() async {
+    return SettingsLoadResult(
+      settings: await load(),
+      recoveryMessage: recoveryMessage,
+    );
   }
 
   @override

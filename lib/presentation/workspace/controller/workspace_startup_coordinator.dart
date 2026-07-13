@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import '../../../domain/vault/vault_resource.dart';
+import '../../../infrastructure/config/settings_store.dart';
 import '../../../infrastructure/config/synapse_settings.dart';
 import '../../../infrastructure/config/vault_location_store.dart';
 import '../../../infrastructure/vault/vault_backend.dart';
@@ -57,7 +58,7 @@ final class WorkspaceStartupCoordinator {
   SynapseSettings? _loadedSettingsBaseline;
   Future<void> _settingsPersistenceTail = Future<void>.value();
   Object? _startupToken;
-  Future<SynapseSettings>? _startupSettingsFuture;
+  Future<SettingsLoadResult>? _startupSettingsFuture;
   Object? _startupSettingsError;
 
   SynapseSettings get settings => _settings;
@@ -103,13 +104,13 @@ final class WorkspaceStartupCoordinator {
     return '请先在设置中配置模型';
   }
 
-  Future<SynapseSettings> beginSettingsLoad() {
+  Future<SettingsLoadResult> beginSettingsLoad() {
     final load = _loadSettings();
     _startupSettingsFuture = load;
     return load;
   }
 
-  void startDirectoryStartup(Future<SynapseSettings> settingsLoad) {
+  void startDirectoryStartup(Future<SettingsLoadResult> settingsLoad) {
     final startupToken = Object();
     _startupToken = startupToken;
     unawaited(_continueDirectoryStartup(startupToken, settingsLoad));
@@ -134,11 +135,13 @@ final class WorkspaceStartupCoordinator {
   }
 
   Future<String> applyStartupSettings(
-    Future<SynapseSettings> settingsLoad,
+    Future<SettingsLoadResult> settingsLoad,
   ) async {
     var message = '';
     try {
-      final loadedSettings = await settingsLoad;
+      final loadResult = await settingsLoad;
+      final loadedSettings = loadResult.settings;
+      message = loadResult.recoveryMessage;
       _loadedSettingsBaseline = loadedSettings;
       _startupSettingsError = null;
       final current = runtimes.current;
@@ -336,8 +339,8 @@ final class WorkspaceStartupCoordinator {
     _startupToken = null;
   }
 
-  Future<SynapseSettings> _loadSettings() async {
-    return (await dependencies.settingsStore()).load();
+  Future<SettingsLoadResult> _loadSettings() async {
+    return (await dependencies.settingsStore()).loadResult();
   }
 
   Future<SynapseSettings?> _awaitStartupSettings() async {
@@ -346,7 +349,7 @@ final class WorkspaceStartupCoordinator {
       return _loadedSettingsBaseline ?? _settings;
     }
     try {
-      return await future;
+      return (await future).settings;
     } catch (error) {
       _startupSettingsError = error;
       setMessage('设置读取失败：$error');
@@ -365,12 +368,14 @@ final class WorkspaceStartupCoordinator {
 
   Future<void> _continueDirectoryStartup(
     Object startupToken,
-    Future<SynapseSettings> settingsLoad,
+    Future<SettingsLoadResult> settingsLoad,
   ) async {
     WorkspaceRuntime? candidate;
     var settingsLoaded = false;
     try {
-      final settings = await settingsLoad;
+      final loadResult = await settingsLoad;
+      final settings = loadResult.settings;
+      final recoveryMessage = loadResult.recoveryMessage;
       settingsLoaded = true;
       if (!_isStartupCurrent(startupToken)) {
         return;
@@ -385,7 +390,10 @@ final class WorkspaceStartupCoordinator {
       final location = settings.vaultLocation;
       if (location == null) {
         publishState(
-          readState().copyWith(settings: settings, message: '请选择仓库位置'),
+          readState().copyWith(
+            settings: settings,
+            message: _startupMessage(recoveryMessage, fallback: '请选择仓库位置'),
+          ),
         );
         return;
       }
@@ -399,7 +407,10 @@ final class WorkspaceStartupCoordinator {
           publishState(
             readState().copyWith(
               settings: settings,
-              message: '仓库位置不可用：${restored.rootPath}',
+              message: _startupMessage(
+                recoveryMessage,
+                fallback: '仓库位置不可用：${restored.rootPath}',
+              ),
             ),
           );
         }
@@ -432,7 +443,10 @@ final class WorkspaceStartupCoordinator {
       candidate = null;
       _settings = restoredSettings;
       _loadedSettingsBaseline = restoredSettings;
-      replaceRuntimeSnapshot(snapshot, message: '仓库已打开');
+      replaceRuntimeSnapshot(
+        snapshot,
+        message: _startupMessage(recoveryMessage, fallback: '仓库已打开'),
+      );
     } catch (error) {
       await Future<void>.delayed(Duration.zero);
       candidate?.dispose(reportCleanupError: dependencies.cleanupErrorReporter);
@@ -504,5 +518,15 @@ final class WorkspaceStartupCoordinator {
     return settings.preferences.semanticSearchEnabled &&
         (dependencies.usesInjectedAiProvider ||
             settings.providerConfig.hasEmbeddingConfig);
+  }
+
+  String _startupMessage(String recoveryMessage, {required String fallback}) {
+    if (recoveryMessage.isEmpty) {
+      return fallback;
+    }
+    if (fallback == '仓库已打开') {
+      return recoveryMessage;
+    }
+    return '$recoveryMessage；$fallback';
   }
 }

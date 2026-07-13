@@ -1,19 +1,32 @@
 import 'synapse_settings.dart';
 import 'vault_location_store.dart';
 
+final class SettingsLoadResult {
+  const SettingsLoadResult({required this.settings, this.recoveryMessage = ''});
+
+  final SynapseSettings settings;
+  final String recoveryMessage;
+}
+
 abstract class SettingsStore {
+  const SettingsStore();
+
   bool get supportsPersistence;
 
   String get unavailableMessage;
 
   Future<SynapseSettings> load();
 
+  Future<SettingsLoadResult> loadResult() async {
+    return SettingsLoadResult(settings: await load());
+  }
+
   Future<void> save(SynapseSettings settings);
 
   Future<bool> vaultExists(VaultLocation location);
 }
 
-class UnsupportedSettingsStore implements SettingsStore {
+class UnsupportedSettingsStore extends SettingsStore {
   const UnsupportedSettingsStore();
 
   @override

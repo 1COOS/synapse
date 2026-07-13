@@ -657,6 +657,63 @@ void main() {
   );
 
   testWidgets(
+    'api key migration warning keeps settings available with an empty key',
+    (tester) async {
+      const settings = SynapseSettings(
+        providerConfig: ProviderConfig(
+          baseUrl: 'https://api.example.com/v1',
+          apiKey: '',
+          chatModel: 'chat-model',
+          visionModel: 'vision-model',
+          embeddingModel: '',
+        ),
+      );
+      final vault = MemoryVaultBackend(seedExampleData: false);
+      await vault.createNote(parentPath: '', title: 'Alpha');
+
+      await pumpWorkspace(
+        tester,
+        vault: vault,
+        settingsStore: FakeSettingsStore(
+          initialSettings: settings,
+          recoveryMessage: '旧 API Key 已删除，请重新输入',
+        ),
+      );
+
+      expect(find.text('旧 API Key 已删除，请重新输入'), findsOneWidget);
+      await tester.tap(find.byKey(const Key('settings-button')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('settings-nav-models')));
+      await tester.pumpAndSettle();
+
+      expect(
+        tester
+            .widget<CupertinoTextField>(
+              find.descendant(
+                of: find.byKey(const Key('provider-base-url')),
+                matching: find.byType(CupertinoTextField),
+              ),
+            )
+            .controller
+            ?.text,
+        settings.providerConfig.baseUrl,
+      );
+      expect(
+        tester
+            .widget<CupertinoTextField>(
+              find.descendant(
+                of: find.byKey(const Key('provider-api-key')),
+                matching: find.byType(CupertinoTextField),
+              ),
+            )
+            .controller
+            ?.text,
+        isEmpty,
+      );
+    },
+  );
+
+  testWidgets(
     'canceling settings after initialization preserves the loaded workspace',
     (tester) async {
       final vault = MemoryVaultBackend(seedExampleData: false);

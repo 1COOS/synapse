@@ -214,7 +214,7 @@ SettingsStore? _legacySettingsStore({
   );
 }
 
-final class _LegacySettingsStore implements SettingsStore {
+final class _LegacySettingsStore extends SettingsStore {
   _LegacySettingsStore({
     required this.providerConfigStore,
     required this.vaultLocationStore,

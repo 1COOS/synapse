@@ -88,6 +88,53 @@ void main() {
     });
 
     test(
+      'publishes api key migration recovery as normal workspace state',
+      () async {
+        const settings = SynapseSettings(
+          providerConfig: ProviderConfig(
+            baseUrl: 'https://api.example.com/v1',
+            apiKey: '',
+            chatModel: 'chat-model',
+            visionModel: 'vision-model',
+            embeddingModel: '',
+          ),
+        );
+        final container = ProviderContainer(
+          overrides: [
+            workspaceDependenciesProvider.overrideWithValue(
+              createWorkspaceDependencies(
+                initialVault: MemoryVaultBackend(),
+                settingsStore: FakeSettingsStore(
+                  initialSettings: settings,
+                  recoveryMessage: '旧 API Key 已删除，请重新输入',
+                ),
+              ),
+            ),
+          ],
+        );
+        addTearDown(container.dispose);
+
+        final workspace = await container.read(
+          workspaceControllerProvider.future,
+        );
+        final asyncWorkspace = container.read(workspaceControllerProvider);
+        final model = await container
+            .read(workspaceControllerProvider.notifier)
+            .settingsDialogModel();
+
+        expect(asyncWorkspace, isA<AsyncData<WorkspaceState>>());
+        expect(workspace.message, '旧 API Key 已删除，请重新输入');
+        expect(
+          workspace.settings.providerConfig.baseUrl,
+          settings.providerConfig.baseUrl,
+        );
+        expect(workspace.settings.providerConfig.apiKey, isEmpty);
+        expect(model, isNotNull);
+        expect(model!.initialSettings.providerConfig.apiKey, isEmpty);
+      },
+    );
+
+    test(
       'uses Provider overrides as the only dependency injection path',
       () async {
         final vault = MemoryVaultBackend();
@@ -1257,7 +1304,7 @@ VaultResourceNode? _findResource(List<VaultResourceNode> resources, String id) {
   return null;
 }
 
-final class _GatedSettingsStore implements SettingsStore {
+final class _GatedSettingsStore extends SettingsStore {
   final Completer<SynapseSettings> _loadCompleter =
       Completer<SynapseSettings>();
 
@@ -1281,7 +1328,7 @@ final class _GatedSettingsStore implements SettingsStore {
   Future<bool> vaultExists(location) async => true;
 }
 
-final class _UnavailableSettingsStore implements SettingsStore {
+final class _UnavailableSettingsStore extends SettingsStore {
   _UnavailableSettingsStore(this.settings);
 
   final SynapseSettings settings;
