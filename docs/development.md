@@ -1,24 +1,26 @@
 # Synapse 开发文档
 
-## 1. 环境要求
+## 1. 环境与平台
 
 当前项目基于 Flutter + Dart：
 
-- Flutter：建议使用本机已安装的稳定版本。
-- Dart SDK：`pubspec.yaml` 当前约束为 `^3.11.5`。
-- macOS：用于开发和验证 macOS 桌面端。
-- Windows：用于验证 Windows 桌面端构建。
-- Chrome：用于 Web/H5 预览。
+- Flutter：使用本机稳定版本；
+- Dart SDK：以 `pubspec.yaml` 约束为准；
+- macOS + Xcode：唯一生产开发、原生测试、签名和构建环境；
+- Chrome：Web/H5 内存预览；
+- Windows：工程资产存在，但不在当前 production gate 和发布承诺内。
 
-安装依赖：
+首次安装依赖：
 
 ```bash
 flutter pub get
 ```
 
+执行 production gate 时使用已有 lockfile，并为 Flutter 命令加 `--no-pub`，避免验证过程隐式改动依赖解析结果。
+
 ## 2. 常用命令
 
-### 2.1 运行桌面端
+### 2.1 运行 macOS
 
 ```bash
 flutter run -d macos
@@ -30,35 +32,39 @@ flutter run -d macos
 flutter run -d chrome --web-hostname 127.0.0.1 --web-port 5173
 ```
 
-### 2.3 运行测试
+Web/H5 使用 `MemoryVaultBackend`，刷新后数据重置，不保存 API Key，也不属于生产端。
+
+### 2.3 测试与分析
 
 ```bash
-flutter test
+flutter test --no-pub
+flutter analyze --no-pub
 ```
 
-### 2.4 静态分析
+Flutter tests 必须顺序运行：一次只运行一个 `flutter test` 命令，等待其完全结束后再启动下一项验证，避免 Flutter tool、native assets 或构建目录锁冲突。最终 gate 使用一条全量 `flutter test --no-pub`，不要并行拆跑测试目录来替代全量证据。
+
+### 2.4 构建
 
 ```bash
-flutter analyze
+flutter build macos --debug --no-pub
+flutter build macos --release --no-pub
 ```
 
-### 2.5 macOS 构建
+Windows 构建不是当前发布门禁。本轮不新增 GitHub Actions，生产验证以本地顺序 gate 为准。
 
-```bash
-flutter build macos
-```
+## 3. 平台矩阵
 
-### 2.6 Windows 构建
+| 平台 | Vault backend | 数据持久化 | 当前定位 |
+| --- | --- | --- | --- |
+| macOS | `FileVaultBackend` | 本机 Markdown Vault | 唯一生产目标 |
+| Web/H5 | `MemoryVaultBackend` | 内存 | UI/流程预览 |
+| Windows | 工程资产保留 | 未纳入本轮验证 | 不在当前 production gate |
 
-Windows 构建需要在 Windows 环境中运行：
+macOS 必须验证 File Vault、Keychain、security-scoped bookmark/lease、Debug/Release build 和最终签名 entitlement。Web 只验证页面与主流程，不承担本机文件、密钥或发布能力。
 
-```bash
-flutter build windows
-```
+## 4. 本地数据与 Vault
 
-## 3. 本地数据目录
-
-桌面端首次启动必须在左栏底部选择一个本机目录作为 Vault。应用会把选择结果保存到应用支持目录下的 `synapse/settings.json`，macOS 下同时保存 security-scoped bookmark，后续启动会先恢复目录访问再打开该目录；如果目录被移动、删除或外置盘未挂载，应用会停在选择仓库状态并提示重选，不会自动创建或回退到其他目录。
+macOS 首次启动必须在左栏底部选择本机目录作为 Vault。应用把 Vault 位置和 bookmark 保存在应用支持目录的配置中；恢复时先取得 security-scoped access lease，再验证目录和创建 runtime。路径失效、外置盘未挂载或 bookmark 无法恢复时，应用停在选择仓库状态并提示重选，不自动创建替代目录，也不回退到当前工作目录。
 
 ```text
 <vault-root>/
@@ -71,96 +77,130 @@ flutter build windows
   .synapse-cache/
 ```
 
-用户可以在应用左栏底部重新选择 Vault 目录；左栏折叠后仍保留仓库图标入口。`vault/`、`.synapse-cache` 和任何个人 Vault 内容都属于本地数据，不应提交到 Git。
+用户内容以 `.md`、附件和现有 sidecar 数据为准。`.synapse-cache/`、SQLite 和向量索引是可删除缓存。个人 Vault、应用支持目录内容、bookmark、Keychain 数据和任何真实 key 都不得提交到 Git。
 
-## 4. 平台差异
+## 5. 状态层开发约定
 
-| 平台 | Vault backend | 数据持久化 | 用途 |
-| --- | --- | --- | --- |
-| macOS | `FileVaultBackend` | 本机文件系统 | 首版生产目标 |
-| Windows | `FileVaultBackend` | 本机文件系统 | 首版生产目标 |
-| Web/H5 | `MemoryVaultBackend` | 内存 | 开发预览 |
+### 5.1 唯一状态所有者
 
-Web/H5 刷新后会重置数据。不要把它当作生产端。
+`WorkspaceController extends AsyncNotifier<WorkspaceState>` 是 workspace snapshot 的唯一写入者。`AsyncValue` 只负责初始化 loading/fatal error；`WorkspaceState.phase` 表达 `needsVault`、`ready`、`webPreview`、`unsupported` 等业务阶段。
 
-## 5. 测试地图
+Widget 使用 Provider 渲染并发送 intent，不得重新引入本地业务状态副本、revision counter 或 UI/controller 双写。
 
-| 测试文件 | 覆盖内容 |
+### 5.2 Session 与 mutation
+
+- `NoteSessionRegistry` 唯一持有 note session；同 note 多 pane 共享 controller；
+- `NoteSaveCoordinator` 负责 debounce、串行 save、flush 和 quiesce；
+- `SplitWorkspaceController` 负责 pane topology、focus、mode 和 note binding；
+- `WorkspaceMutationBarrier` 固定执行 flush/discard → backend → commit batch；
+- backend 已成功后的 commit invariant failure 进入 `reloadRequired`，不能重试 backend operation；
+- 异步图片、粘贴、拖动和 proposal 操作必须使用 await 前捕获的 `PaneEditorContext`，不能在完成时重新读取焦点。
+
+### 5.3 Markdown 编辑器
+
+- Markdown marker 是存储格式，活动 block 中保持可见；
+- block 失焦后由渲染视图隐藏 marker；
+- formatting command 同时更新 Markdown source 和 styled display；
+- active editor `TextSpan.toPlainText()` 必须与 backing controller text 完全一致；
+- focus、click、selection 和 context menu 不得修改正文或插入空行。
+
+## 6. AI、OCR 与数据边界
+
+- 图片素材 proposal 使用 `visionModel`，纯文本 proposal 使用 `chatModel`；
+- 纯图片 proposal 直接显示忠实 OCR 转写，不做第二次总结或大纲生成；
+- OCR 不添加解释、标题、前缀、图片描述或摘要，并尽量保留原布局和换行；
+- proposal 先供用户查看、选择和复制，再由用户决定是否写入 Markdown；
+- Web/H5 不保存 key，也不直连真实模型。
+
+新增缓存或中间数据前必须确认：真源是什么、删除后是否损失用户内容、是否有可验证的重建路径。
+
+## 7. Keychain 调试
+
+API Key 只保存到 macOS Keychain，不写入 `settings.json`、provider JSON 或其他明文 key 文件。Debug/Release entitlement 都必须包含空 `keychain-access-groups`。
+
+旧明文 key 只允许一次性执行：
+
+```text
+read -> secure write -> secure read verify -> delete legacy
+```
+
+任一步失败都删除 legacy、不返回旧 key，并写入不含 secret 的持久 quarantine 状态，要求用户重新输入。配置 JSON 与 Keychain 保存通过 transaction 协调，并使用 blocking file lock 串行化多实例访问。
+
+遇到 Keychain `-34018`、签名或 entitlement 错误时：
+
+1. 不创建明文 key 文件绕过安全存储；
+2. 检查 Debug/Release entitlement 和实际 codesign 输出；
+3. 清理并重新构建正确签名的 app；
+4. 重新启动后由用户重新输入 API Key；
+5. 日志、测试 fixture 和 issue 中不得记录真实 key。
+
+## 8. Vault Lease 调试
+
+macOS 目录选择和 bookmark 恢复返回 `VaultAccessLease(location, token)`。排查时关注 token 的完整生命周期，而不是只检查目录路径：
+
+- candidate lease 验证失败或变 stale 时必须 release；
+- candidate commit 成功后才替换 active lease；
+- 成功切仓后释放旧 active lease；
+- controller dispose 释放当前 lease；
+- application terminate 调用 Swift `releaseAll()`；
+- 重复 release 必须幂等，每次成功 start access 都应有对称 stop access。
+
+切仓发布后若 in-memory commit 失败，workspace 会进入 `reloadRequired`，不能继续操作或重复执行 backend mutation。详细安全与排障边界见 [macOS 生产说明](./macos-production.md)。
+
+## 9. 测试地图
+
+| 测试区域 | 覆盖内容 |
 | --- | --- |
-| `test/domain/markdown_document_test.dart` | frontmatter、Markdown 大纲、表格工具 |
-| `test/infrastructure/file_vault_backend_test.dart` | 文件夹/笔记创建、重命名、复制、移动、删除、Markdown 更新、附件和素材保存 |
-| `test/infrastructure/search_cache_test.dart` | 内存搜索缓存 |
-| `test/infrastructure/sqlite_search_cache_test.dart` | SQLite 搜索缓存 |
-| `test/application/proposal_service_test.dart` | proposal 生成和应用 |
-| `test/presentation/workspace_test.dart` | 三栏工作台、左右折叠、左栏全仓搜索、资源树右键菜单、创建/删除/移动、素材和设置交互 |
+| `test/domain/` | Markdown/frontmatter、模型与基础规则 |
+| `test/infrastructure/` | File/Memory backend、parity/dispatch、settings、Keychain、AI、搜索 |
+| `test/presentation/workspace/state/` | session、save、split、materials、mutation/commit |
+| `test/presentation/workspace/controller/` | AsyncNotifier lifecycle、runtime、resource 和 workspace reduction |
+| `test/presentation/workspace/` | Vault、资源、分屏、编辑器、图片、proposal、设置和布局 |
+| `test/macos_entitlements_test.dart` | Debug/Release entitlement |
+| `test/macos_vault_access_lease_test.dart` | Dart/Swift lease 与 terminate releaseAll 契约 |
 
-## 6. 开发约定
+当前记录基线为 587/587 tests、analyze no issues。9 个超长测试文件已拆为 25 个，保留 248 tests 等价覆盖，最大测试文件 869 行。该记录不是最终 production gate 结果。
 
-### 6.1 Markdown 优先
+## 10. 当前工程债
 
-新增功能只要涉及用户内容，优先考虑能否表达为 Markdown、frontmatter、相对附件路径或普通文件。不要把用户不可恢复的内容只写进 SQLite。
+- `WorkspaceController` 当前 1018 行，接近并略高于约 1000 行 review threshold；新增职责应优先进入现有 collaborators；
+- 从 Markdown、附件和 sidecar 完整重建素材清单与搜索索引的任务尚未闭合；
+- proposal 仍是 Markdown 片段，diff、局部采纳和结构化 patch 尚未实现；
+- 最终 macOS 本地 production gate 尚未执行；
+- Windows 生产构建、CI、云同步和账号体系不属于本轮范围。
 
-### 6.2 编辑器保存
+## 11. 本地 Production Gate
 
-Markdown 编辑器使用 1 秒延迟自动保存，并保留手动保存按钮作为立即保存和失败重试入口。任何会替换、刷新或重新打开当前笔记内容的 UI 操作，都必须先 flush 当前未保存 Markdown；如果保存失败，应保留当前编辑器文本并阻止切换或刷新，避免用旧文件内容覆盖用户输入。
-
-### 6.3 Provider 隔离
-
-AI、OCR、导入器和搜索都应通过接口进入业务流程。UI 不应直接调用某个具体云服务，也不应直接依赖 `dart:io`。
-
-### 6.4 桌面与 Web 分离
-
-涉及文件系统的能力必须通过 `VaultBackend` 或专门的平台 adapter。Web/H5 要能继续使用 Mock 和内存实现跑通主流程。
-
-### 6.5 Proposal 先审核后写入
-
-任何 AI 生成内容都应先进入 proposal 状态。除非用户明确确认，否则不能直接修改 Markdown。
-
-### 6.6 缓存可重建
-
-新增缓存时必须回答 3 个问题：
-
-- 缓存从哪些真源重建？
-- 删除缓存会损失什么？
-- 是否有测试证明重建路径可用？
-
-## 7. 新功能建议流程
-
-1. 先确认它属于 `domain`、`application`、`infrastructure` 还是 `presentation`。
-2. 如果是用户内容，先设计 Markdown/Vault 契约。
-3. 如果是外部能力，先定义接口，再实现具体 adapter。
-4. 写测试覆盖核心规则。
-5. 在 Web/H5 下保留 Mock 或降级行为。
-6. 跑 `flutter test` 和 `flutter analyze`。
-
-## 8. 当前已知工程债
-
-- `lib/presentation/cupertino/workspace.dart` 仍集中承担 UI、状态和用例调用，需要继续拆分。
-- `flutter_riverpod` 还没有真正承接 workspace 状态。
-- 图片导入后没有进入 OCR/视觉理解处理队列。
-- `SqliteSearchCache` 尚未接入 UI。
-- `.assets/sources.json` 还没有从素材目录重建的实现。
-- proposal 还不是结构化 patch。
-
-## 9. 验证清单
-
-提交前建议运行：
+最终门禁必须在仓库根目录按以下顺序逐项运行。前一项完成后再启动下一项，不并行执行 Flutter 命令：
 
 ```bash
-flutter test
-flutter analyze
+dart format --output=none --set-exit-if-changed lib test
+flutter test --no-pub
+flutter analyze --no-pub
+xcodebuild test -project macos/Runner.xcodeproj -scheme Runner -destination 'platform=macOS'
+flutter build macos --debug --no-pub
+flutter build macos --release --no-pub
+codesign -d --entitlements :- build/macos/Build/Products/Release/synapse.app
+git diff --check
+git status --short --branch
 ```
 
-涉及桌面文件、平台插件或构建配置时，再运行：
+检查 codesign 输出时至少确认：
+
+- app sandbox 已启用；
+- user-selected read/write entitlement 存在；
+- Release 实际签名包含 `keychain-access-groups` 空数组；
+- Debug-only entitlement 没有错误进入 Release；
+- 输出不包含用户真实路径、bookmark 或 key。
+
+只有上述命令全部通过且工作区边界清楚后，才能宣称最终 macOS production gate 通过。文档同步、既有 587 tests 基线或单独的 `flutter analyze` 都不能替代该结论。
+
+## 12. 提交前边界
 
 ```bash
-flutter build macos
+rg -n -i 'Windows|Keychain|Riverpod|workspace' README.md docs
+git diff --check
+git status --short --branch
 ```
 
-涉及 Web/H5 UI 时，运行：
-
-```bash
-flutter run -d chrome --web-hostname 127.0.0.1 --web-port 5173
-```
-
-然后在浏览器中确认三栏工作台可见，能创建文件夹和笔记、添加文本素材、生成 Mock proposal 并写入 Markdown。
+提交时只暂存本任务文件，先检查 `git diff --cached --name-only`，不要把其他协作者的未提交变化带入文档提交。

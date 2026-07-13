@@ -2,560 +2,299 @@
 
 ## 1. 架构目标
 
-Synapse 的架构目标是用 Flutter + Dart 构建一个多端学习资料整理工具，同时确保桌面端数据以 Markdown Vault 为真源。AI、搜索、SQLite、素材处理和 Web 预览都必须围绕这个原则设计：缓存可以删除，用户内容不能被锁进私有数据库。
+Synapse 使用 Flutter + Dart 构建本地优先的学习资料整理工作台。macOS 是当前唯一生产目标，用户内容以 Markdown Vault 和普通附件文件为真源；Web/H5 只提供内存预览，Windows 工程资产不在本轮生产承诺内。
+
+架构必须同时保证：
+
+- Markdown、frontmatter、相对附件路径和 sidecar JSON 数据契约稳定；
+- workspace 只有一个可观察状态源，Widget 只渲染状态并发送 intent；
+- 文件 mutation、自动保存、分屏 session 和异步编辑目标保持一致；
+- API Key 不进入明文配置文件，Keychain 失败时 fail-closed；
+- macOS security-scoped Vault 访问具有可追踪、可释放的 lease 生命周期；
+- 缓存可删除、可重建，不能成为用户核心内容的唯一副本。
 
 ## 2. 技术栈
 
 | 层面 | 技术 | 当前状态 |
 | --- | --- | --- |
 | Runtime | Flutter / Dart | 已使用 |
-| UI | Material 3、Flutter widgets | 已使用 |
-| 状态管理 | Riverpod | 依赖已引入，当前 UI 仍以 `StatefulWidget` 为主 |
-| Markdown 预览 | `flutter_markdown` | 已使用 |
-| 桌面文件 | macOS 原生目录选择、security-scoped bookmark、`dart:io` | 已使用 |
-| 路径处理 | `path`、`path_provider` | 已引入 |
-| 缓存数据库 | `sqlite3`、`sqlite3_flutter_libs` | 搜索缓存已实现 |
-| AI 请求 | `http` | 依赖已引入，真实 Provider 待实现 |
-| 测试 | `flutter_test`、Flutter widget tests | 已使用 |
+| UI | Cupertino + Flutter widgets | 已使用 |
+| 状态管理 | Riverpod `AsyncNotifier` | 已实现，`WorkspaceController` 为 workspace snapshot 唯一写入者 |
+| Markdown | `flutter_markdown` + 自定义 Live Markdown editor | 已使用 |
+| macOS 文件访问 | security-scoped bookmark + tokenized lease + `dart:io` | 已实现 |
+| 密钥存储 | macOS Keychain / `flutter_secure_storage` | strict fail-closed |
+| 搜索 | memory / SQLite `SearchIndex` | 两种实现均存在，运行期由依赖装配选择 |
+| AI | OpenAI-compatible `http` Provider + Mock Provider | 已实现 |
+| 测试 | `flutter_test`、widget tests、macOS 原生测试 | 已使用 |
 
-## 3. 分层架构
-
-目标分层如下：
+## 3. 分层与装配
 
 ```text
 presentation
-  Flutter 页面、控件、用户交互、异步状态展示
+  Cupertino 页面、Live Markdown editor、Riverpod controller/state
 
 application
-  用例编排：导入素材、生成 proposal、应用 proposal、重建索引
+  proposal 等用例编排
 
 domain
-  纯 Dart 模型、Markdown/frontmatter 解析、大纲派生、基础规则
+  纯 Dart 模型、Markdown/frontmatter 解析、大纲和基础规则
 
 infrastructure
-  Vault 文件系统、Web 内存库、AI Provider、搜索缓存、平台适配
+  Vault backend、设置与 Keychain、AI、搜索、平台 gateway
 ```
 
-当前代码已经按目录拆出 `domain`、`application`、`infrastructure` 和 `presentation` 的边界。[lib/main.dart](/Users/bruce/Workspace/1coos/synapse/lib/main.dart) 只负责应用装配，主工作台集中在 [lib/presentation/cupertino/workspace.dart](/Users/bruce/Workspace/1coos/synapse/lib/presentation/cupertino/workspace.dart)。后续建议继续把 `SynapseWorkspace` 拆为页面、controller 和 Riverpod providers。
+[main.dart](../lib/main.dart) 与 [workspace_dependencies_factory.dart](../lib/infrastructure/bootstrap/workspace_dependencies_factory.dart) 组成 composition root。具体 Vault、Settings、AI、Search、图片输入和平台 gateway 在 bootstrap/infrastructure 层创建；[workspace.dart](../lib/presentation/cupertino/workspace.dart) 只负责 Provider/Consumer 连接、FocusNode、临时输入和 screen glue，不再构造具体基础设施。
 
-## 4. 目录结构
+测试通过 Provider override 注入 fake dependencies，不在 Widget 构造器中维护第二套装配路径。
+
+## 4. 当前目录结构
 
 ```text
 lib/
   main.dart
   application/
     proposals/
-      proposal_service.dart
   domain/
     markdown/
-      markdown_document.dart
+    search/
+    settings/
     vault/
-      vault_resource.dart
+    workspace/
   infrastructure/
     ai/
-      ai_provider.dart
-      mock_ai_provider.dart
+    bootstrap/
     cache/
-      memory_search_cache.dart
-      sqlite_search_cache.dart
+    config/
+    input/
     vault/
-      vault_backend.dart
       file_vault_backend.dart
+      file_vault_paths.dart
+      file_vault_note_store.dart
+      file_vault_source_store.dart
+      file_vault_proposal_store.dart
+      file_vault_operations.dart
       memory_vault_backend.dart
-      default_vault_backend.dart
-      default_vault_backend_io.dart
-      default_vault_backend_web.dart
+      memory_vault_paths.dart
+      memory_vault_note_store.dart
+      memory_vault_source_store.dart
+      memory_vault_proposal_store.dart
+      memory_vault_state.dart
   presentation/
     cupertino/
       workspace.dart
+      workspace/
+    workspace/
+      controller/
+      editor/
+      state/
 test/
   application/
   domain/
   infrastructure/
-  presentation/
+  presentation/workspace/
+  support/
 ```
 
-### 4.1 `domain`
+`presentation/workspace/` 已按职责拆开：
 
-`domain` 不依赖 Flutter UI 和平台文件系统。它定义核心模型和 Markdown 规则：
+- `controller/`：`WorkspaceController`、不可变 `WorkspaceState`、依赖/runtime 及 startup、document、editor、resource、search、state-commit collaborators；
+- `state/`：session registry、save coordinator、split controller、materials registry、mutation barrier、commit batch；
+- `editor/`：Pane context、Live Markdown、表格、图片与 context menu；
+- `presentation/cupertino/workspace/`：布局、titlebar、资源树、搜索、素材、设置、note pane 和通用控件。
 
-- `VaultResourceNode`：资源树节点，表示文件夹或普通 Markdown 笔记。
-- `VaultNote` / `VaultNoteContent`：笔记摘要、Markdown、大纲和素材。
-- `SourceItem`：导入素材。
-- `OutlineNode`：由 Markdown 标题派生的大纲节点。
-- `AiProposal`：AI 建议。
-- `ProviderConfig`：AI Provider 配置模型。
-- `MarkdownDocument`：frontmatter 与正文解析。
+当前代码尺寸基线：
 
-### 4.2 `application`
+| 文件 | 行数 | 说明 |
+| --- | ---: | --- |
+| `lib/presentation/cupertino/workspace.dart` | 756 | Provider/Consumer 入口与 screen glue |
+| `WorkspaceController` | 1018 | 接近约 1000 行 review threshold，已拆出 runtime/search/resource 等 collaborators |
+| `FileVaultBackend` facade | 228 | 公开 API facade，内部委托专用 stores/operations |
+| `MemoryVaultBackend` facade | 184 | 与 file backend 保持公开行为 parity |
 
-`application` 负责用例编排，不直接关心 UI。当前有 `ProposalService`：
+## 5. Workspace 状态架构
 
-- 读取当前笔记和素材。
-- 调用 `AiProvider.createOutlineProposal`。
-- 保存 `AiProposal`。
-- 用户确认后把 proposal 追加写入 Markdown。
-- 更新 proposal 状态。
+### 5.1 唯一可观察状态源
 
-后续应继续放入这些用例：
+`WorkspaceController extends AsyncNotifier<WorkspaceState>`，是 workspace snapshot 的唯一写入者。
 
-- `ImportSourceService`：剪贴板、截图、文件导入。
-- `ImageProcessingService`：OCR/视觉理解任务。
-- `SearchIndexService`：索引增量更新与重建。
-- `VaultRebuildService`：从 Markdown 和附件重建缓存。
+- `AsyncValue` 只表达初始化 loading 和 fatal initialization error；
+- `WorkspaceState.phase` 表达 `needsVault`、`ready`、`webPreview`、`unsupported` 等业务阶段；
+- `WorkspaceState` 保存 resources、selection、search、pane navigation、settings、materials snapshot、saving IDs、active operation、message 和 `reloadRequired`；
+- `TextEditingController`、timer、runtime 和平台 lease 不复制进 immutable state；
+- UI 使用 `ref.watch(workspaceControllerProvider)` 渲染，用 `ref.read(...notifier)` 发送 intent。
 
-### 4.3 `infrastructure`
+这一区分避免把 Riverpod 加载错误和用户可恢复的业务阶段混为一套重复状态机。
 
-`infrastructure` 负责与外部系统交互：
+### 5.2 状态唯一所有者
 
-- `FileVaultBackend`：桌面端真实文件读写。
-- `MemoryVaultBackend`：Web/H5 预览和测试用内存库。
-- `AiProvider`：AI 能力抽象。
-- `MockAiProvider`：无 key 环境的可运行 Provider。
-- `MemorySearchCache`：UI 当前使用的内存搜索。
-- `SqliteSearchCache`：桌面端可持久化、可重建搜索缓存。
+| 状态/职责 | 唯一所有者 | 关键约束 |
+| --- | --- | --- |
+| note snapshot、document controller、dirty/save phase | `NoteDocumentSession` | 同一 note 的多个 pane 共享一个 session |
+| note ID 到 session、remap/remove/dispose | `NoteSessionRegistry` | remap 保持 controller identity |
+| debounce、串行 save、flush/quiesce | `NoteSaveCoordinator` | 每个 session 至多一个 in-flight save |
+| split tree、focus、pane note、mode、ratio | `SplitWorkspaceController` | 不依赖 Vault 或 editor controller |
+| source selection 与 proposals | `NoteMaterialsRegistry` | 按 note ID 唯一持有 |
+| mutation 顺序 | `WorkspaceMutationBarrier` | flush/discard 后执行 backend，再提交 delta |
+| registry/split/materials/workspace 原子替换 | `WorkspaceCommitBatch` | prepare/apply/publish 分离 |
+| await 前捕获的 pane/session/runtime 目标 | `PaneEditorContext` | focus 改变不改写目标；stale/dispose 后拒绝写入 |
+| workspace 可观察快照 | `WorkspaceController` | 唯一 publish 入口 |
+| active block、selection/menu/hover | editor Widget local state | 不进入 workspace 全局状态 |
 
-### 4.4 `presentation`
+不使用 split/session/materials revision counter，也不允许 Widget 与 controller 双写同一业务状态。
 
-当前 presentation 主要在 `lib/presentation/cupertino/workspace.dart`：
+### 5.3 Controller collaborators
 
-- 顶栏：Vault 选择、搜索、状态消息。
-- 左栏：根级新建、Apple Notes 式资源树、文件夹右键菜单、笔记右键菜单、大纲树。
-- 中栏：Markdown 阅读和块级 Live Preview 编辑。
-- 右栏：素材录入、图片导入、proposal 列表和确认写入。
+`WorkspaceController` 负责 Riverpod 生命周期、公开 intent 和 state reduction，具体运行期职责委托给：
 
-后续建议拆分：
+- `WorkspaceStartupCoordinator`：启动、Vault 选择/恢复、settings 与 active lease 所有权；
+- `WorkspaceRuntimeManager`：candidate/active runtime 的安装、替换和 dispose；
+- `WorkspaceResourceCoordinator`：资源加载和 backend mutation plan；
+- `WorkspaceSearchCoordinator`：fingerprint、索引更新、查询和 dispose；
+- `WorkspaceDocumentCoordinator`：session 打开、选择、remap 与文档生命周期；
+- `WorkspaceEditorCoordinator`：粘贴、图片、proposal 等编辑行为；
+- `WorkspaceEditorOperationCoordinator`：editor command lock、save-flight ownership 和 stale target 检查；
+- `WorkspaceStateCommitCoordinator`：commit batch 后的统一 workspace snapshot 发布。
 
-```text
-lib/presentation/workspace/
-  synapse_workspace.dart
-  workspace_controller.dart
-  resource_pane.dart
-  editor_pane.dart
-  source_pane.dart
-  outline_tree.dart
-  proposal_panel.dart
-```
+这些 collaborator 不成为第二个 observable state source，最终 UI 状态仍只由 `AsyncValue<WorkspaceState>` 发布。
 
-## 5. 核心数据模型
+## 6. 保存、Mutation 与编辑目标
 
-### 5.1 `VaultResourceType`
+### 6.1 Session 与自动保存
 
-| 值 | 说明 |
-| --- | --- |
-| `folder` | Vault 文件夹 |
-| `note` | 普通 Markdown 笔记 |
+- 默认自动保存 debounce 为 1000ms，并读取 `WorkspacePreferences.autoSaveDelayMillis`；
+- 保存失败保留 controller 文字、dirty 状态和错误；
+- 切笔记、切 Vault、重命名、移动、复制和会读取旧快照的素材/proposal 操作必须使用明确 flush policy；
+- 删除使用 discard/quiesce，取消 timer 并 drain in-flight save，避免删除后旧 timer 复活文件。
 
-### 5.2 `SourceType`
+### 6.2 Commit batch
 
-| 值 | 当前含义 |
-| --- | --- |
-| `text` | 用户粘贴的文本素材 |
-| `image` | 用户导入的图片素材 |
+Mutation 固定执行：
 
-### 5.3 `SourceState`
+1. 在 barrier 中串行化操作并固化 affected sessions；
+2. flush 或 discard/quiesce；失败则不调用 backend；
+3. 执行 backend operation；
+4. `WorkspaceCommitBatch.prepare` 纯计算完整 replacement 并验证 invariant；
+5. `apply` 只做 non-throwing assignment；
+6. 全部替换完成后统一 publish。
 
-| 值 | 含义 |
-| --- | --- |
-| `ready` | 素材可用于 proposal |
-| `pending` | 素材等待处理，例如图片等待 OCR |
-| `processed` | 素材已完成处理 |
-| `failed` | 素材处理失败 |
+backend 已成功但 `prepare` 失败时抛出 `WorkspaceCommitInvariantError`，controller 进入 `reloadRequired`。此时禁止把错误降级为可重试 backend failure，避免重复执行已经落盘的不可逆操作。publish listener 错误只报告，不改变已经 committed 的结果。
 
-当前文本素材写入后是 `ready`，图片素材写入后是 `pending`。
+### 6.3 Pane context
 
-### 5.4 `ProposalStatus`
+图片粘贴、导入、宽度调整、拖动和 proposal 等异步操作在 await 前捕获 `PaneEditorContext`。焦点切换不会改变发起目标；pane 重绑、关闭、session 移除、runtime 更换或 dispose 后，context 返回 stale target，不得把结果写入其他笔记。
 
-| 值 | 含义 |
-| --- | --- |
-| `pending` | 等待用户审核 |
-| `applied` | 已写入 Markdown |
-| `rejected` | 用户拒绝 |
+Live Markdown 继续遵守：活动 block 显示 Markdown marker，失焦后由预览隐藏；`TextSpan.toPlainText()` 必须与 backing controller text 完全一致；focus、selection 和 context menu 不得修改正文或插入空行。
 
-当前 UI 支持 `pending` 到 `applied`，`rejected` 模型已存在但 UI 尚未接入。
+## 7. Vault Backend 与数据契约
 
-## 6. Vault 数据契约
+### 7.1 公开 API 与内部拆分
 
-### 6.1 目标目录结构
+`FileVaultBackend` 和 `MemoryVaultBackend` 保持原有 `VaultBackend` public API、构造方式和数据格式。两个 facade 分别委托 path、note、source、proposal 与 operations/state collaborators；parity tests 和 dispatch tests 约束两种实现的公共行为。
+
+### 7.2 Vault 目录结构
 
 ```text
 <vault-root>/
-  读书/
-    心经.md
-    心经.assets/
+  <folder>/
+    note.md
+    note.assets/
       attachments/
-        image-name-uuid.png
       sources.json
       proposals.json
-  笔记.md
-  笔记.assets/
-    attachments/
-      image-name-uuid.png
   .synapse-cache/
-    search.sqlite
 ```
 
-### 6.2 真源与缓存
+- `note.md` 和普通目录是用户内容真源；
+- `note.assets/attachments/` 保存相对引用的附件；
+- `sources.json` 与 `proposals.json` 保持现有数据格式；
+- `.synapse-cache/`、SQLite 和向量索引是可删除缓存；
+- 路径型 note ID、frontmatter、附件命名和 proposal 数据契约在本轮不变。
 
-| 路径 | 类型 | 是否真源 | 说明 |
+### 7.3 文件系统边界
+
+所有桌面文件操作必须限制在用户选择的 Vault root 内。路径解析需要拒绝 `../`、绝对路径注入和通过符号链接逃逸根目录；移动、重命名、复制和删除必须同步处理 `.md` 与同名 `.assets/`。
+
+## 8. 平台与 Vault Access Lease
+
+### 8.1 平台矩阵
+
+| 平台 | Backend | 持久化 | 定位 |
 | --- | --- | --- | --- |
-| `<folder>/<note>.md` | Markdown | 是 | 用户主笔记 |
-| `<note>.assets/attachments/` | 文件 | 是 | 图片等附件 |
-| `<note>.assets/sources.json` | JSON | 过渡元数据 | 当前用于快速列出素材，后续应可从附件和 Markdown 重建 |
-| `<note>.assets/proposals.json` | JSON | 否 | 当前笔记的 proposal 缓存和状态 |
-| `<vault>/.synapse-cache/search.sqlite` | SQLite | 否 | 搜索与 embedding 缓存 |
+| macOS | `FileVaultBackend` | 本机 Markdown Vault | 唯一生产目标 |
+| Web/H5 | `MemoryVaultBackend` | 内存，刷新重置 | UI/流程预览 |
+| Windows | 工程资产保留 | 不在本轮验证范围 | 不属于当前生产 gate |
 
-### 6.3 笔记 frontmatter
+### 8.2 Tokenized security-scoped lease
 
-当前普通 Markdown 笔记使用以下 frontmatter：
+macOS 目录选择或 bookmark 恢复通过 Dart MethodChannel 和 Swift token manager 返回 `VaultAccessLease(location, token)`。lease 的所有权遵循 candidate/active 模型：
 
-```yaml
----
-title: 笔记标题
-createdAt: 2026-07-01 08:00
-updatedAt: 2026-07-01 08:00
----
-```
+1. 当前 active lease 在切仓期间保持有效；
+2. 获取 candidate lease，并用 candidate backend/list 验证目录；
+3. settings 保存、runtime/state commit 成功后，candidate 才成为 active；
+4. candidate 失败或变 stale 时释放 candidate，保留旧 active runtime/lease；
+5. 成功切换后释放旧 lease；
+6. controller dispose 释放 active lease；
+7. `AppDelegate.applicationWillTerminate` 调用原生 `releaseAll()` 兜底释放剩余访问权。
 
-笔记 id 使用相对 Vault 的 Markdown 路径，例如 `读书/心经.md`。内部 id 不写入用户可见 Markdown。
+每个成功的 `startAccessingSecurityScopedResource()` 必须对应一次 `stopAccessingSecurityScopedResource()`。lease token 重复释放保持幂等，非法原生 payload 也会尽力释放已返回 token。
 
-正文使用 Markdown 标题表达大纲：
+## 9. Keychain 与配置安全
 
-```markdown
-# 笔记标题
+`macos/Runner/DebugProfile.entitlements` 和 `Release.entitlements` 均包含插件要求的空 `keychain-access-groups`。API Key 只进入 Keychain：
 
-## 学习框架
+- `settings.json` 和 provider JSON 不包含 `apiKey`；
+- Keychain 失败后不会创建明文 key 文件；
+- legacy 明文迁移顺序固定为 read → secure write → secure read verify → delete；
+- 任一步失败都删除 legacy 文件、不返回旧 key，并要求用户重新输入；
+- 持久 quarantine marker 只记录“需要重新输入”，不包含 secret；
+- settings/provider 配置写入与 Keychain 更新使用 transaction，提交失败会清理 staged secret；
+- 同进程 mutex 与 blocking file lock 串行化 key 读取、迁移和写入，避免多实例竞态。
 
-## 知识点
+Keychain、签名或 entitlement 异常必须明确报错并 fail-closed。开发环境遇到 `-34018` 等错误时，需要修复构建签名/entitlement 后重新构建、重新输入 key，不能把 secret 写入本地 JSON 绕过问题。
 
-| 类型 | 内容 | 备注 |
+详细运行与排障见 [macOS 生产说明](./macos-production.md)。
+
+## 10. AI、OCR 与 Proposal
+
+`AiProvider` 隔离真实 OpenAI-compatible Provider 与 Mock Provider。配置支持 `baseURL`、`apiKey`、`chatModel`、`visionModel` 和可选 `embeddingModel`。
+
+- 图片素材 proposal 使用 `visionModel`；纯文本 proposal 使用 `chatModel`；
+- 纯图片 proposal 直接展示 OCR 转写，不做二次总结或 outline pass；
+- OCR 只忠实转写可见文字，不添加解释、标题、前缀、图片描述或摘要；
+- 树状菜单、表格、缩进和换行尽量保留为等价 Markdown；
+- proposal 先展示、选择和审核，再由用户决定是否写入 Markdown。
+
+当前 proposal 数据仍是 Markdown 片段，结构化 patch、diff、局部采纳和冲突处理属于后续演进。
+
+## 11. 搜索与缓存
+
+`SearchIndex` 统一 memory/sqlite 实现和 `dispose` 契约。`WorkspaceSearchCoordinator` 负责 fingerprint、索引更新、查询和 runtime 切换后的生命周期，不把索引细节写入 Widget 或主 controller。
+
+缓存必须能从 Markdown、frontmatter、附件和素材 sidecar 重建。删除 `.synapse-cache` 不得损失核心 Markdown 内容。完整的素材清单/搜索索引重建任务仍是后续工作。
+
+## 12. 测试与质量边界
+
+当前基线为 `flutter test --no-pub` 587/587、`flutter analyze --no-pub` 无 issue。9 个超长测试文件已拆成 25 个，保留 248 tests 等价覆盖，当前最大测试文件 869 行。
+
+重点测试面包括：
+
+- session/save/split/materials/mutation 的纯状态与竞态；
+- AsyncNotifier controller、Provider override 和 workspace widget 行为；
+- Live Markdown marker、caret、selection、context menu、空白行、表格和图片；
+- File/Memory backend parity 与 dispatch；
+- Keychain transaction、legacy migration、quarantine、lock 和 entitlements；
+- Dart MethodChannel、Swift lease manager、candidate/active ownership 与 terminate `releaseAll`。
+
+最终本地 production gate 的完整顺序见 [开发文档](./development.md)；当前只记录代码基线，不能据此宣称最终 macOS gate 已通过。本轮不新增 GitHub Actions。
+
+## 13. 真实风险与下一步
+
+| 风险/未完成项 | 影响 | 后续方向 |
 | --- | --- | --- |
-```
-
-编辑区表格默认按内容测量后的紧凑宽度显示，不强制撑满笔记宽度。用户在源码/编辑模式拖动表格右侧把手时，Synapse 只保存整张表的显示宽度，不保存单列宽度：
-
-```markdown
-<!-- synapse-table width="420" -->
-| 阶段 | 动作 |
-| --- | --- |
-| 一 | 整理 |
-```
-
-`<!-- synapse-table width="420" -->` 只作用于紧随其后的第一张 Markdown pipe table。阅读模式按该宽度渲染但不显示拖拽控件；源码/编辑模式可继续拖动调整。列宽由每列内容的自然宽度按整表目标宽度等比缩放，因此各列通常不等宽。无效宽度注释会被忽略，普通 Markdown 表格不需要迁移。
-
-### 6.4 大纲派生规则
-
-`MarkdownDocument.extractOutline` 扫描正文中的 `#` 到 `######` 标题：
-
-- 标题层级决定树形父子关系。
-- 行号用于定位。
-- 标题文本会去掉结尾多余 `#`。
-- 节点 ID 由行号和标题 slug 组成。
-
-大纲是派生数据，不单独落盘。这样可以避免 Markdown 和树形数据库之间出现同步冲突。
-
-### 6.5 附件路径规则
-
-图片导入时写入当前笔记的同名 `.assets/attachments/` 目录。保存到 `SourceItem.attachmentPath` 的路径使用 `/`，并保持相对 assets 根目录：
-
-```text
-attachments/filename.png
-```
-
-Markdown 中引用附件时也应使用相对路径，确保 Obsidian 可以直接解析。编辑区直接粘贴剪贴板图片时，系统复用同一条附件保存链路，并在当前光标位置插入 HTML 图片标签：
-
-```html
-<img src="foo.assets/attachments/1783082971508.png" width="480">
-```
-
-`src` 相对当前 Markdown 文件，剪贴板图片优先使用毫秒时间戳文件名，例如 `1783082971508.png`、`1783082971508-2.png`；`width` 只表示显示宽度，不改变原始附件。预览区通过拖拽图片右下角把手调整显示宽度，拖拽结束后回写同一个 `width` 属性并保存 Markdown。把图片拖到另一张图片左侧或右侧时，Synapse 会把对应 `<img>` 移动到同一段，用单个空格连接；同一段多个 `<img>` 表示并排图片流，预览宽度不足时自动换行。Synapse 自己生成的编辑区图片标签不写 `alt` 属性。
-
-## 7. 平台适配
-
-### 7.1 条件导出
-
-`default_vault_backend.dart` 使用 Dart 条件导出：
-
-```dart
-export 'default_vault_backend_web.dart'
-    if (dart.library.io) 'default_vault_backend_io.dart';
-```
-
-桌面端和 Web 端通过同一个 `createDefaultVaultBackend` 入口创建不同实现，UI 不直接依赖 `dart:io`。
-
-### 7.2 桌面端
-
-桌面端使用 `FileVaultBackend`：
-
-- 首次启动没有已保存位置时，必须通过系统目录选择器选择 Vault 目录。
-- macOS 选择目录时会保存 security-scoped bookmark；下次启动先恢复目录访问并验证目录存在，再创建 `FileVaultBackend`。
-- 已保存位置失效时提示用户重选，不自动创建目录、不回退到当前工作目录。
-- 创建文件夹时写入真实目录。
-- 创建笔记时写入普通 `.md` 文件。
-- 图片会复制到同名 `.assets/attachments/`。
-- 重命名或移动笔记时移动 `.md` 和同名 `.assets/`，并重写 sources/proposals 的 `noteId`。
-- 复制笔记时完整复制 Markdown、assets、attachments、sources 和 proposals，并为复制出的 source/proposal 生成新 id。
-- 删除笔记时删除 `.md` 和同名 `.assets/`。
-- 删除文件夹时递归删除该目录内所有子资源；禁止删除 Vault 根目录。
-
-### 7.3 Web/H5
-
-Web/H5 使用 `MemoryVaultBackend`：
-
-- 启动时注入示例笔记「心经学习」。
-- 数据保存在内存中，刷新后重置。
-- 不尝试直接读写本机 Vault。
-- 默认适合 UI 预览、流程演示和 widget 调试。
-- 删除操作会同步清理内存中的笔记、素材、附件 bytes 和 proposal。
-
-## 8. AI Provider 设计
-
-### 8.1 接口
-
-`AiProvider` 定义 3 个能力：
-
-```dart
-abstract class AiProvider {
-  Future<String> createOutlineProposal({
-    required String noteTitle,
-    required String currentMarkdown,
-    required List<SourceItem> sources,
-  });
-
-  Future<ImageExtraction> extractImageText({
-    required String filename,
-    required String mimeType,
-    required List<int> bytes,
-  });
-
-  Future<List<double>> createEmbedding(String text);
-}
-```
-
-### 8.2 当前实现
-
-`MockAiProvider` 已实现：
-
-- 从素材文本中抽取「核心概念」。
-- 生成 Markdown 小节和知识点表格。
-- 返回图片 OCR 占位内容。
-- 用可预测的 48 维向量模拟 embedding。
-
-### 8.3 后续 OpenAI 兼容 Provider
-
-真实 Provider 应支持：
-
-- `baseURL`
-- `apiKey`
-- `chatModel`
-- `visionModel`
-- `embeddingModel`
-
-建议新增：
-
-```text
-lib/infrastructure/ai/openai_compatible_provider.dart
-lib/application/settings/provider_config_service.dart
-lib/presentation/settings/provider_settings_dialog.dart
-```
-
-桌面端可以把 Provider 配置保存在用户配置目录或 Vault 内 `.synapse/config.json`。Web/H5 默认继续使用 Mock Provider，避免 CORS 和 API key 暴露问题。
-
-## 9. Proposal 工作流
-
-### 9.1 当前流程
-
-```mermaid
-sequenceDiagram
-    participant U as User
-    participant UI as SynapseWorkspace
-    participant PS as ProposalService
-    participant V as VaultBackend
-    participant AI as AiProvider
-
-    U->>UI: 选择素材并点击生成建议
-    UI->>PS: createOutlineProposal(noteId, sourceIds)
-    PS->>V: readNote(noteId)
-    PS->>V: getSources(noteId, sourceIds)
-    PS->>AI: createOutlineProposal(...)
-    AI-->>PS: proposedMarkdown
-    PS->>V: saveProposal(proposal)
-    V-->>UI: pending proposal
-    U->>UI: 点击写入笔记
-    UI->>PS: applyProposal(proposalId)
-    PS->>V: appendMarkdown(noteId, proposedMarkdown)
-    PS->>V: updateProposal(applied)
-```
-
-### 9.2 当前限制
-
-- 写入方式是追加到 Markdown 末尾。
-- 没有 diff 预览。
-- 没有拒绝按钮。
-- 没有选择写入位置。
-- proposal 内容是一个完整 Markdown 片段，不是结构化 patch。
-
-### 9.3 目标 proposal 格式
-
-后续可以把 proposal 从单纯 `proposedMarkdown` 升级为结构化变更：
-
-```json
-{
-  "id": "proposal-id",
-  "noteId": "读书/心经.md",
-  "sourceIds": ["source-id"],
-  "status": "pending",
-  "changes": [
-    {
-      "type": "append_section",
-      "targetHeading": "知识点",
-      "markdown": "### 新知识点\n\n..."
-    },
-    {
-      "type": "upsert_table_rows",
-      "targetHeading": "术语表",
-      "rows": [["术语", "解释", "来源"]]
-    }
-  ]
-}
-```
-
-这样可以支持局部采纳、冲突检测和更稳定的回滚。
-
-## 10. 搜索与索引
-
-### 10.1 当前搜索
-
-UI 当前使用 `MemorySearchCache`：
-
-- 保存当前笔记 Markdown 的索引。
-- 搜索时同时计算全文分数和语义分数。
-- 语义分数来自 `MockAiProvider.createEmbedding`。
-
-`SqliteSearchCache` 已实现：
-
-- SQLite 表 `documents`。
-- 保存 `id`、`note_id`、`title`、`body`、`embedding_json`、`updated_at`。
-- 支持按笔记搜索。
-- 有独立测试覆盖。
-
-### 10.2 目标搜索架构
-
-```text
-Markdown / Source / Attachment
-  -> Parsing / OCR / Extraction
-  -> Normalized index documents
-  -> Full-text index + embedding cache
-  -> Hybrid search result
-```
-
-### 10.3 重建策略
-
-缓存删除后，系统应能从这些真源重建：
-
-- `index.md`
-- `sources/*.md`
-- `attachments/`
-- frontmatter
-- Markdown 标题和表格
-
-当前还缺少完整 `rebuildIndex` 用例，这是后续必须补齐的工程任务。
-
-## 11. 安全边界
-
-### 11.1 文件系统边界
-
-桌面端所有笔记和资源读写都应限制在用户选择的 Vault 根目录内。当前 `FileVaultBackend` 通过递归列出资源树进行访问，任何按路径读取的 API 都必须增加路径穿越检查：
-
-- 解析真实路径。
-- 确认目标路径仍在 Vault root 下。
-- 拒绝 `../`、符号链接逃逸和绝对路径注入。
-
-### 11.2 AI 数据边界
-
-真实 Provider 接入后需要明确：
-
-- 哪些素材会发送给模型。
-- 图片和文本是否包含隐私内容。
-- API key 保存位置。
-- Web/H5 不应持久保存或暴露用户 API key。
-
-### 11.3 缓存边界
-
-`.synapse-cache` 不能存放不可重建的核心用户内容。proposal 可以视作工作流缓存，但用户确认后的内容必须进入 Markdown。
-
-## 12. 测试策略
-
-### 12.1 已有测试方向
-
-当前测试覆盖：
-
-- Markdown/frontmatter 解析。
-- 文件 Vault backend。
-- proposal service。
-- 内存搜索缓存。
-- SQLite 搜索缓存。
-- 三栏 workspace widget。
-
-### 12.2 必补测试方向
-
-后续新增真实能力时，应补充：
-
-- 图片 OCR 处理成功和失败。
-- Provider 配置读取、保存和脱敏显示。
-- 路径穿越防护。
-- 从 Vault 重建缓存。
-- proposal diff 和局部采纳。
-- Web 预览与桌面文件能力隔离。
-
-## 13. 构建与发布
-
-### 13.1 开发运行
-
-```bash
-flutter pub get
-flutter run -d macos
-flutter run -d chrome --web-hostname 127.0.0.1 --web-port 5173
-```
-
-### 13.2 验证命令
-
-```bash
-flutter test
-flutter analyze
-flutter build macos
-```
-
-Windows 构建需要在 Windows 环境执行：
-
-```bash
-flutter build windows
-```
-
-### 13.3 发布原则
-
-首版发布只面向本地桌面使用，不做安装包自动更新、云服务和账号系统。数据格式必须先稳定，再考虑同步和协作。
-
-## 14. 架构风险
-
-| 风险 | 影响 | 建议 |
-| --- | --- | --- |
-| UI 状态集中在 `presentation/cupertino/workspace.dart` | 后续功能增加后难维护 | 继续拆分 presentation，并把用例状态迁移到 Riverpod |
-| `.assets/sources.json` 暂时承载素材清单 | 删除后素材列表无法完整恢复 | 实现从 `sources/` 和 `attachments/` 重建素材清单 |
-| proposal 是纯 Markdown 片段 | 难以做 diff、局部采纳和冲突处理 | 升级为结构化 changes |
-| 图片 OCR 未接入主流程 | 图片素材暂时不能进入 AI 结构化 | 导入后触发 `extractImageText` 并更新 `SourceItem` |
-| 真实 Provider 未实现 | 无法使用生产 AI 能力 | 新增 OpenAI 兼容 Provider 和配置界面 |
-| Web 与桌面能力差异大 | 用户可能误解 H5 能力 | UI 明确标记 H5 为预览库 |
-
-## 15. 下一步工程拆分
-
-建议按以下顺序推进：
-
-1. 继续拆分 `presentation/cupertino/workspace.dart`，沉淀 presentation 组件。
-2. 接入 Riverpod controller，替代散落的本地状态。
-3. 实现 OpenAI 兼容 Provider。
-4. 图片导入后调用视觉提取，生成可审核文本。
-5. 把 UI 搜索切到 `SqliteSearchCache`。
-6. 实现缓存重建任务。
-7. 升级 proposal 为结构化 patch。
-8. 补齐路径安全测试和集成测试。
+| 最终 macOS 本地 production gate 尚未执行 | 尚无本轮 release build、xcodebuild 与 codesign 的最终证据 | 按开发文档顺序执行并保留结果 |
+| `WorkspaceController` 1018 行，略高于约 1000 review threshold | 后续 intent 增长可能重新集中职责 | 新增职责优先进入现有 collaborator，必要时继续按所有权拆分 |
+| 素材清单和搜索索引尚无完整重建任务 | sidecar/cache 损坏时恢复能力有限 | 从 Markdown、attachments 和 sidecar 建立显式 rebuild 用例 |
+| proposal 仍是 Markdown 片段 | 难以支持 diff、局部采纳和冲突检测 | 演进为结构化 changes，同时保持现有数据兼容策略 |
+| Web 与 macOS 能力不同 | 用户可能误把预览当生产端 | 产品和 UI 持续标明 Web 为内存预览 |
+
+Windows 生产验证、CI workflow、云同步、账号系统和数据格式迁移均不属于本轮下一步。
