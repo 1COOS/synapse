@@ -216,6 +216,8 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
 
   bool get hasLoadedSettingsBaseline => _startup.hasLoadedSettingsBaseline;
 
+  bool get isBusy => state.value?.isBusy ?? true;
+
   Future<SynapseSettings?> awaitSettingsForEditing() =>
       _startup.awaitSettingsForEditing();
 

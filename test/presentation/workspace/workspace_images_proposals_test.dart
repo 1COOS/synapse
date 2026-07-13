@@ -733,7 +733,7 @@ void main() {
   });
 
   testWidgets(
-    'gated OCR flushes a title remap and globally disables note typing',
+    'gated OCR flushes a title remap and globally disables note and preview image editing',
     (tester) async {
       final vault = GatedSuccessfulUpdateVaultBackend(seedExampleData: false);
       addTearDown(vault.releaseUpdate);
@@ -757,8 +757,16 @@ void main() {
         mimeType: 'image/png',
         bytes: tinyPng,
       );
+      final secondBetaSource = await vault.addImageSource(
+        noteId: beta.id,
+        filename: 'beta-second.png',
+        mimeType: 'image/png',
+        bytes: tinyPng,
+      );
       const lockedSrc = 'Alpha.assets/attachments/locked-ocr.png';
       const secondAlphaSrc = 'Alpha.assets/attachments/locked-second.png';
+      const betaSrc = 'Beta.assets/attachments/beta-control.png';
+      const secondBetaSrc = 'Beta.assets/attachments/beta-second.png';
       await vault.updateMarkdown(
         noteId: alpha.id,
         markdown:
@@ -770,7 +778,8 @@ void main() {
         noteId: beta.id,
         markdown:
             '# Beta\n\n'
-            '<img src="Beta.assets/attachments/beta-control.png" width="320">',
+            '<img src="$betaSrc" width="320">\n\n'
+            '<img src="$secondBetaSrc" width="320">',
       );
       final aiProvider = GatedAiProvider(extractedText: 'Locked OCR');
 
@@ -810,7 +819,15 @@ void main() {
       final capturedSecondPreview = tester.widget<PreviewImageBlock>(
         inNotePane(find.byKey(Key('preview-image-${secondAlphaSource.id}')), 1),
       );
+      final betaController = liveMarkdownDocumentController(tester, paneId: 2);
+      final capturedBetaPreview = tester.widget<PreviewImageBlock>(
+        inNotePane(find.byKey(Key('preview-image-${betaSource.id}')), 2),
+      );
+      final capturedSecondBetaPreview = tester.widget<PreviewImageBlock>(
+        inNotePane(find.byKey(Key('preview-image-${secondBetaSource.id}')), 2),
+      );
       final markdownBeforeCommand = alphaController.text;
+      final betaMarkdownBeforeCommand = betaController.text;
       final updatesBeforeCommand = vault.updateCalls;
       vault.gateUpdates = true;
 
@@ -845,7 +862,6 @@ void main() {
         ),
         findsNothing,
       );
-
       capturedLockedPreview.onWidthChanged(480);
       capturedSecondPreview.onImageDropped(
         PreviewImageDragData(sourceId: lockedSource.id, src: lockedSrc),
@@ -855,14 +871,44 @@ void main() {
         ),
         ImageDropSide.after,
       );
+      final betaBorderBeforeTap = previewImageFrameBorderColor(
+        tester,
+        betaSource,
+      );
+      capturedBetaPreview.onTap();
+      capturedBetaPreview.onWidthChanged(480);
+      capturedSecondBetaPreview.onImageDropped(
+        PreviewImageDragData(sourceId: betaSource.id, src: betaSrc),
+        PreviewImageDragData(sourceId: secondBetaSource.id, src: secondBetaSrc),
+        ImageDropSide.after,
+      );
       await tester.pump();
       expect(alphaController.text, markdownBeforeCommand);
+      expect(betaController.text, betaMarkdownBeforeCommand);
       expect(vault.updateCalls, updatesBeforeCommand);
+      expect(
+        previewImageFrameBorderColor(tester, betaSource),
+        betaBorderBeforeTap,
+      );
+      expect(
+        tester
+            .widget<PreviewImageBlock>(
+              inNotePane(find.byKey(Key('preview-image-${betaSource.id}')), 2),
+            )
+            .editableControls,
+        isFalse,
+      );
+      expect(
+        inNotePane(find.byKey(Key('image-resize-handle-${betaSource.id}')), 2),
+        findsNothing,
+      );
 
       vault.releaseUpdate();
       await aiProvider.extractionStarted.future;
       await tester.pump();
       expect(find.byKey(const Key('resource-row-Remapped.md')), findsOneWidget);
+      expect(betaController.text, betaMarkdownBeforeCommand);
+      expect(vault.updateCalls, updatesBeforeCommand + 1);
 
       await tester.enterText(
         activeLiveMarkdownEditableText(paneId: 1),
@@ -891,7 +937,7 @@ void main() {
               inNotePane(find.byKey(Key('preview-image-${betaSource.id}')), 2),
             )
             .editableControls,
-        isTrue,
+        isFalse,
       );
 
       aiProvider.releaseExtraction();
@@ -903,6 +949,14 @@ void main() {
               inNotePane(find.byType(LiveMarkdownEditor), 2),
             )
             .enabled,
+        isTrue,
+      );
+      expect(
+        tester
+            .widget<PreviewImageBlock>(
+              inNotePane(find.byKey(Key('preview-image-${betaSource.id}')), 2),
+            )
+            .editableControls,
         isTrue,
       );
 

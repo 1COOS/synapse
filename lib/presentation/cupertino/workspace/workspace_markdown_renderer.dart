@@ -240,11 +240,15 @@ final class WorkspaceMarkdownRenderer {
           source: source,
           src: src,
           width: width,
-          editableControls: mode == ImagePreviewMode.editing && !locked,
+          editableControls:
+              mode == ImagePreviewMode.editing &&
+              !currentWorkspace.isBusy &&
+              !locked,
           selectedImageSrc: currentWorkspace.selectedPreviewImageSrc,
           imageBytes: controller.readSourceAttachment(source),
           onTap: () {
-            if (mode != ImagePreviewMode.editing ||
+            if (controller.isBusy ||
+                mode != ImagePreviewMode.editing ||
                 controller.resolvePaneEditorContext(editorContext) == null) {
               return;
             }
@@ -252,7 +256,8 @@ final class WorkspaceMarkdownRenderer {
             _setSelectedPreviewImageSrc(src);
           },
           onWidthChanged: (value) {
-            if (controller.isPaneEditorContextLocked(editorContext)) {
+            if (controller.isBusy ||
+                controller.isPaneEditorContextLocked(editorContext)) {
               return;
             }
             unawaited(
@@ -265,7 +270,8 @@ final class WorkspaceMarkdownRenderer {
             );
           },
           onImageDropped: (dragged, target, side) {
-            if (controller.isPaneEditorContextLocked(editorContext)) {
+            if (controller.isBusy ||
+                controller.isPaneEditorContextLocked(editorContext)) {
               return;
             }
             unawaited(
