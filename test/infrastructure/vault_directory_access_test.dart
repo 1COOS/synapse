@@ -84,6 +84,31 @@ void main() {
     expect(calls.single.arguments, {'leaseToken': 'lease-3'});
   });
 
+  test('preserves an opaque lease token exactly', () async {
+    const opaqueToken = '  lease token with spaces  ';
+    final calls = <MethodCall>[];
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (call) async {
+          calls.add(call);
+          if (call.method == 'pickDirectory') {
+            return {
+              'rootPath': '/Users/bruce/Documents/Synapse',
+              'bookmarkBase64': 'bookmark-data',
+              'leaseToken': opaqueToken,
+            };
+          }
+          return null;
+        });
+    final access = VaultDirectoryAccess();
+
+    final lease = await access.pick();
+    await access.release(lease!);
+
+    expect(lease.token, opaqueToken);
+    expect(calls.last.method, 'releaseAccess');
+    expect(calls.last.arguments, {'leaseToken': opaqueToken});
+  });
+
   test('fails closed when native payload omits the lease token', () async {
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(channel, (call) async {
@@ -122,6 +147,62 @@ void main() {
     expect(calls, hasLength(2));
     expect(calls.last.method, 'releaseAccess');
     expect(calls.last.arguments, {'leaseToken': 'invalid-payload-token'});
+  });
+
+  test(
+    'rejects non-String payload fields and releases a valid token',
+    () async {
+      final invalidPayloads = <Map<String, Object?>>[
+        {
+          'rootPath': 42,
+          'bookmarkBase64': 'bookmark-data',
+          'leaseToken': 'typed-root-token',
+        },
+        {
+          'rootPath': '/Users/bruce/Documents/Synapse',
+          'bookmarkBase64': 42,
+          'leaseToken': 'typed-bookmark-token',
+        },
+      ];
+      final calls = <MethodCall>[];
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, (call) async {
+            calls.add(call);
+            if (call.method == 'pickDirectory') {
+              return invalidPayloads.removeAt(0);
+            }
+            return null;
+          });
+      final access = VaultDirectoryAccess();
+
+      await expectLater(access.pick(), throwsA(isA<FormatException>()));
+      await expectLater(access.pick(), throwsA(isA<FormatException>()));
+
+      expect(calls, hasLength(4));
+      expect(calls[1].arguments, {'leaseToken': 'typed-root-token'});
+      expect(calls[3].arguments, {'leaseToken': 'typed-bookmark-token'});
+    },
+  );
+
+  test('rejects a non-String token without attempting release', () async {
+    final calls = <MethodCall>[];
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (call) async {
+          calls.add(call);
+          return {
+            'rootPath': '/Users/bruce/Documents/Synapse',
+            'bookmarkBase64': 'bookmark-data',
+            'leaseToken': 42,
+          };
+        });
+
+    await expectLater(
+      VaultDirectoryAccess().pick(),
+      throwsA(isA<FormatException>()),
+    );
+
+    expect(calls, hasLength(1));
+    expect(calls.single.method, 'pickDirectory');
   });
 
   test('fails closed when restoring without a bookmark', () async {

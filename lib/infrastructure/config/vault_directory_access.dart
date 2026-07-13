@@ -1,23 +1,9 @@
 import 'package:flutter/services.dart';
 
-import 'vault_location_store.dart';
+import 'vault_access_gateway.dart';
 
-export 'vault_location_store.dart' show VaultLocation;
-
-final class VaultAccessLease {
-  const VaultAccessLease({required this.location, required this.token});
-
-  final VaultLocation location;
-  final String token;
-}
-
-abstract interface class VaultAccessGateway {
-  Future<VaultAccessLease?> pick();
-
-  Future<VaultAccessLease> restore(VaultLocation location);
-
-  Future<void> release(VaultAccessLease lease);
-}
+export 'vault_access_gateway.dart'
+    show VaultAccessGateway, VaultAccessLease, VaultLocation;
 
 final class VaultDirectoryAccess implements VaultAccessGateway {
   VaultDirectoryAccess({
@@ -60,7 +46,7 @@ final class VaultDirectoryAccess implements VaultAccessGateway {
 
   @override
   Future<void> release(VaultAccessLease lease) async {
-    final token = lease.token.trim();
+    final token = lease.token;
     if (token.isEmpty) {
       throw ArgumentError.value(lease.token, 'lease.token');
     }
@@ -68,15 +54,14 @@ final class VaultDirectoryAccess implements VaultAccessGateway {
   }
 
   Future<VaultAccessLease> _leaseFromMap(Map<String, Object?> raw) async {
-    final rootPath = raw['rootPath']?.toString().trim();
-    final bookmarkBase64 = raw['bookmarkBase64']?.toString().trim();
-    final leaseToken = raw['leaseToken']?.toString().trim();
-    if (rootPath == null ||
-        rootPath.isEmpty ||
-        bookmarkBase64 == null ||
-        bookmarkBase64.isEmpty ||
-        leaseToken == null ||
-        leaseToken.isEmpty) {
+    final rawRootPath = raw['rootPath'];
+    final rawBookmarkBase64 = raw['bookmarkBase64'];
+    final rawLeaseToken = raw['leaseToken'];
+    final leaseToken = rawLeaseToken is String ? rawLeaseToken : null;
+    if (rawRootPath is! String ||
+        rawBookmarkBase64 is! String ||
+        rawLeaseToken is! String ||
+        rawLeaseToken.isEmpty) {
       if (leaseToken != null && leaseToken.isNotEmpty) {
         try {
           await _releaseToken(leaseToken);
@@ -86,12 +71,23 @@ final class VaultDirectoryAccess implements VaultAccessGateway {
       }
       throw const FormatException('Invalid native Vault access payload.');
     }
+    final token = rawLeaseToken;
+    final rootPath = rawRootPath.trim();
+    final bookmarkBase64 = rawBookmarkBase64.trim();
+    if (rootPath.isEmpty || bookmarkBase64.isEmpty) {
+      try {
+        await _releaseToken(token);
+      } catch (_) {
+        // Preserve the payload validation error; native termination is fallback.
+      }
+      throw const FormatException('Invalid native Vault access payload.');
+    }
     return VaultAccessLease(
       location: VaultLocation(
         rootPath: rootPath,
         bookmarkBase64: bookmarkBase64,
       ),
-      token: leaseToken,
+      token: token,
     );
   }
 

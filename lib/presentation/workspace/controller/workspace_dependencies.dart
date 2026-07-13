@@ -2,7 +2,7 @@ import '../../../application/search/search_index.dart';
 import '../../../domain/vault/vault_resource.dart';
 import '../../../infrastructure/ai/ai_provider.dart';
 import '../../../infrastructure/config/settings_store.dart';
-import '../../../infrastructure/config/vault_directory_access.dart';
+import '../../../infrastructure/config/vault_access_gateway.dart';
 import '../../../infrastructure/input/image_input_service.dart';
 import '../../../infrastructure/vault/vault_backend.dart';
 import '../state/workspace_mutation_barrier.dart';

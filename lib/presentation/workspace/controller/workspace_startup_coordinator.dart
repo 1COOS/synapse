@@ -3,7 +3,7 @@ import 'dart:async';
 import '../../../domain/vault/vault_resource.dart';
 import '../../../infrastructure/config/settings_store.dart';
 import '../../../infrastructure/config/synapse_settings.dart';
-import '../../../infrastructure/config/vault_directory_access.dart';
+import '../../../infrastructure/config/vault_access_gateway.dart';
 import '../../../infrastructure/vault/vault_backend.dart';
 import '../state/note_save_coordinator.dart';
 import '../state/split_workspace_controller.dart';

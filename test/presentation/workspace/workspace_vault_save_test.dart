@@ -697,21 +697,43 @@ void main() {
   testWidgets(
     'candidate runtime construction failure leaves the old vault usable',
     (tester) async {
+      const firstPath = '/vault/first';
       const secondPath = '/vault/second';
+      const firstLocation = VaultLocation(
+        rootPath: firstPath,
+        bookmarkBase64: 'first-bookmark',
+      );
+      const secondLocation = VaultLocation(
+        rootPath: secondPath,
+        bookmarkBase64: 'second-bookmark',
+      );
+      const firstLease = VaultAccessLease(
+        location: firstLocation,
+        token: 'first-token',
+      );
+      const secondLease = VaultAccessLease(
+        location: secondLocation,
+        token: 'second-token',
+      );
       final firstVault = MemoryVaultBackend(seedExampleData: false);
       await firstVault.createNote(parentPath: '', title: 'First');
       final secondVault = MemoryVaultBackend(seedExampleData: false);
       await secondVault.createNote(parentPath: '', title: 'Second');
       var failRuntimeConstruction = false;
-      final settingsStore = FakeSettingsStore();
+      final settingsStore = FakeSettingsStore(
+        initialSettings: const SynapseSettings(vaultLocation: firstLocation),
+      );
+      final access = FakeVaultAccessGateway(
+        onRestore: (_) async => firstLease,
+        onPick: () async => secondLease,
+      );
       final dependencies = createWorkspaceDependencies(
-        initialVault: firstVault,
         aiProvider: MockAiProvider(),
         settingsStore: settingsStore,
         supportsDirectoryVaultOverride: true,
-        pickVaultLocation: () async =>
-            const VaultLocation(rootPath: secondPath),
-        vaultBackendFactory: (_) => secondVault,
+        vaultAccessGateway: access,
+        vaultBackendFactory: (rootPath) =>
+            rootPath == firstPath ? firstVault : secondVault,
         searchIndexFactory: (_, _) {
           if (failRuntimeConstruction) {
             throw StateError('runtime construction failed');
@@ -722,6 +744,7 @@ void main() {
 
       await pumpWorkspace(tester, vault: null, dependencies: dependencies);
       expect(find.text('First'), findsWidgets);
+      settingsStore.savedSettings.clear();
 
       failRuntimeConstruction = true;
       await tester.tap(find.byKey(const Key('vault-location-button')));
@@ -730,7 +753,9 @@ void main() {
       expect(find.text('First'), findsWidgets);
       expect(find.text('Second'), findsNothing);
       expect(settingsStore.savedSettings, isEmpty);
-      expect(settingsStore.currentSettings.vaultLocation, isNull);
+      expect(settingsStore.currentSettings.vaultLocation, firstLocation);
+      expect(access.releaseAttempts, [secondLease]);
+      expect(access.releaseAttempts, isNot(contains(firstLease)));
       expect(
         find.textContaining('runtime construction failed'),
         findsOneWidget,
@@ -740,6 +765,60 @@ void main() {
       expect(find.text('First'), findsWidgets);
     },
   );
+
+  testWidgets('candidate backend factory failure releases its lease', (
+    tester,
+  ) async {
+    const firstPath = '/vault/first';
+    const secondPath = '/vault/backend-failure';
+    const firstLocation = VaultLocation(
+      rootPath: firstPath,
+      bookmarkBase64: 'first-bookmark',
+    );
+    const secondLocation = VaultLocation(
+      rootPath: secondPath,
+      bookmarkBase64: 'second-bookmark',
+    );
+    const firstLease = VaultAccessLease(
+      location: firstLocation,
+      token: 'first-token',
+    );
+    const secondLease = VaultAccessLease(
+      location: secondLocation,
+      token: 'second-token',
+    );
+    final firstVault = MemoryVaultBackend(seedExampleData: false);
+    await firstVault.createNote(parentPath: '', title: 'First');
+    final access = FakeVaultAccessGateway(
+      onRestore: (_) async => firstLease,
+      onPick: () async => secondLease,
+    );
+    final settingsStore = FakeSettingsStore(
+      initialSettings: const SynapseSettings(vaultLocation: firstLocation),
+    );
+    final dependencies = createWorkspaceDependencies(
+      settingsStore: settingsStore,
+      aiProvider: MockAiProvider(),
+      supportsDirectoryVaultOverride: true,
+      vaultAccessGateway: access,
+      vaultBackendFactory: (rootPath) {
+        if (rootPath == secondPath) {
+          throw StateError('backend factory failed');
+        }
+        return firstVault;
+      },
+    );
+
+    await pumpWorkspace(tester, vault: null, dependencies: dependencies);
+    await tester.tap(find.byKey(const Key('vault-location-button')));
+    await tester.pumpAndSettle();
+
+    expect(find.text('First'), findsWidgets);
+    expect(settingsStore.currentSettings.vaultLocation, firstLocation);
+    expect(access.releaseAttempts, [secondLease]);
+    expect(access.releaseAttempts, isNot(contains(firstLease)));
+    expect(find.textContaining('backend factory failed'), findsOneWidget);
+  });
 
   testWidgets(
     'unreadable constructed candidate keeps old runtime and location active',
@@ -1057,28 +1136,48 @@ void main() {
   ) async {
     const firstPath = '/vault/first';
     const secondPath = '/vault/second';
+    const firstLocation = VaultLocation(
+      rootPath: firstPath,
+      bookmarkBase64: 'first-bookmark',
+    );
+    const secondLocation = VaultLocation(
+      rootPath: secondPath,
+      bookmarkBase64: 'second-bookmark',
+    );
+    const firstLease = VaultAccessLease(
+      location: firstLocation,
+      token: 'first-token',
+    );
+    const secondLease = VaultAccessLease(
+      location: secondLocation,
+      token: 'second-token',
+    );
     var pickerCalls = 0;
     final firstVault = DelayedUpdateVaultBackend(seedExampleData: false);
     await firstVault.createNote(parentPath: '', title: 'Alpha');
     final secondVault = MemoryVaultBackend(seedExampleData: false);
     await secondVault.createNote(parentPath: '', title: 'Second');
-    final locationStore = FakeVaultLocationStore(
-      loadedLocation: const VaultLocation(rootPath: firstPath),
-      existingPaths: const {firstPath, secondPath},
+    final settingsStore = FakeSettingsStore(
+      initialSettings: const SynapseSettings(vaultLocation: firstLocation),
     );
-
-    await pumpWorkspace(
-      tester,
-      vault: null,
-      vaultLocationStore: locationStore,
-      directoryPicker: () async {
+    final access = FakeVaultAccessGateway(
+      onRestore: (_) async => firstLease,
+      onPick: () async {
         pickerCalls += 1;
-        return secondPath;
+        return secondLease;
       },
+    );
+    final dependencies = createWorkspaceDependencies(
+      settingsStore: settingsStore,
+      aiProvider: MockAiProvider(),
+      supportsDirectoryVaultOverride: true,
+      vaultAccessGateway: access,
       vaultBackendFactory: (rootPath) {
         return rootPath == firstPath ? firstVault : secondVault;
       },
     );
+
+    await pumpWorkspace(tester, vault: null, dependencies: dependencies);
     await switchToSourceMode(tester);
     await enterTextInLiveMarkdownBlock(tester, '# Alpha\ndirty');
     final controller = liveMarkdownDocumentController(tester, paneId: 1);
@@ -1095,6 +1194,11 @@ void main() {
     await tester.pump();
 
     expect(pickerCalls, 1);
+    expect(access.releaseAttempts, contains(secondLease));
+    expect(
+      access.releaseAttempts.where((lease) => lease == secondLease),
+      hasLength(1),
+    );
   });
 
   testWidgets(

@@ -8,7 +8,7 @@ import 'package:synapse/infrastructure/ai/ai_provider.dart';
 import 'package:synapse/infrastructure/bootstrap/workspace_dependencies_factory.dart';
 import 'package:synapse/infrastructure/config/settings_store.dart';
 import 'package:synapse/infrastructure/config/synapse_settings.dart';
-import 'package:synapse/infrastructure/config/vault_directory_access.dart';
+import 'package:synapse/infrastructure/config/vault_access_gateway.dart';
 import 'package:synapse/infrastructure/input/image_input_service.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
 import 'package:synapse/presentation/workspace/controller/workspace_controller.dart';
