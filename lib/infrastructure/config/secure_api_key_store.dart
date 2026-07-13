@@ -101,7 +101,13 @@ final class SecureApiKeyStore {
   final SecureValueStore _secureStore;
 
   Future<SecureApiKeyLoadResult> load() async {
-    if (await _isQuarantined()) {
+    late final bool quarantined;
+    try {
+      quarantined = await _quarantineMarker.exists();
+    } catch (error) {
+      await _failAfterQuarantineError('读取', error);
+    }
+    if (quarantined) {
       await _bestEffortDeleteLegacyPlaintext();
       await _discardUnverifiedSecureApiKey();
       return const SecureApiKeyLoadResult(
@@ -110,15 +116,19 @@ final class SecureApiKeyStore {
       );
     }
     if (await _legacyPlaintextFile.exists()) {
-      await _markQuarantine();
+      try {
+        await _markQuarantine();
+      } catch (error) {
+        await _failAfterQuarantineError('写入', error);
+      }
       return _migrateLegacyPlaintext();
     }
     return SecureApiKeyLoadResult(apiKey: await _readSecureApiKey());
   }
 
   Future<void> save(String apiKey) async {
-    await _markQuarantine();
     try {
+      await _markQuarantine();
       await _deleteLegacyPlaintext();
       final normalized = apiKey.trim();
       if (normalized.isEmpty) {
@@ -185,12 +195,14 @@ final class SecureApiKeyStore {
     return SecureApiKeyLoadResult(apiKey: plaintextApiKey);
   }
 
-  Future<bool> _isQuarantined() async {
-    try {
-      return await _quarantineMarker.exists();
-    } catch (error) {
-      throw StateError('API Key 隔离状态读取失败，未加载任何 API Key：$error');
+  Future<Never> _failAfterQuarantineError(String action, Object error) async {
+    await _bestEffortMarkQuarantine();
+    final deletionError = await _tryDeleteLegacyPlaintext();
+    await _discardUnverifiedSecureApiKey();
+    if (deletionError != null) {
+      throw StateError(_legacyDeletionErrorMessage(deletionError, error));
     }
+    throw StateError('API Key 隔离状态$action失败，未加载任何 API Key：$error');
   }
 
   Future<void> _markQuarantine() async {
@@ -198,6 +210,14 @@ final class SecureApiKeyStore {
       await _quarantineMarker.mark();
     } catch (error) {
       throw StateError('API Key 隔离状态写入失败，未修改任何 API Key：$error');
+    }
+  }
+
+  Future<void> _bestEffortMarkQuarantine() async {
+    try {
+      await _quarantineMarker.mark();
+    } catch (_) {
+      // No secure value is read or returned after quarantine setup fails.
     }
   }
 

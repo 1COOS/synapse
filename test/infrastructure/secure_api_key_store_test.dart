@@ -177,7 +177,7 @@ void main() {
   });
 
   test(
-    'marker creation failure stops migration before reading plaintext',
+    'marker creation failure deletes legacy plaintext before failing closed',
     () async {
       final marker = _FakeApiKeyQuarantineMarker(
         markFailure: StateError('marker write failed'),
@@ -204,8 +204,78 @@ void main() {
         ),
       );
 
-      expect(legacyFile.events, ['exists']);
-      expect(secureStore.events, isEmpty);
+      expect(legacyFile.events, ['exists', 'exists', 'delete']);
+      expect(legacyFile.stillExists, isFalse);
+      expect(secureStore.events, ['delete:synapse.provider.apiKey']);
+    },
+  );
+
+  test(
+    'marker read failure deletes legacy plaintext before failing closed',
+    () async {
+      final marker = _FakeApiKeyQuarantineMarker(
+        existsFailure: StateError('marker read failed'),
+      );
+      final legacyFile = _FakeLegacyPlaintextApiKeyFile(
+        contents: '{"apiKey":"legacy-key"}',
+      );
+      final secureStore = _FakeSecureValueStore();
+      final store = SecureApiKeyStore(
+        configDirectory: root,
+        secureStore: secureStore,
+        legacyPlaintextFile: legacyFile,
+        quarantineMarker: marker,
+      );
+
+      await expectLater(
+        store.load(),
+        throwsA(
+          isA<StateError>().having(
+            (error) => error.message,
+            'message',
+            contains('隔离状态读取失败'),
+          ),
+        ),
+      );
+
+      expect(legacyFile.events, ['exists', 'delete']);
+      expect(legacyFile.stillExists, isFalse);
+      expect(secureStore.events, ['delete:synapse.provider.apiKey']);
+    },
+  );
+
+  test(
+    'legacy cleanup failure after marker failure stays fail closed',
+    () async {
+      final marker = _FakeApiKeyQuarantineMarker(
+        markFailure: StateError('marker write failed'),
+      );
+      final legacyFile = _FakeLegacyPlaintextApiKeyFile(
+        contents: '{"apiKey":"legacy-key"}',
+        deleteFailure: StateError('legacy delete failed'),
+      );
+      final secureStore = _FakeSecureValueStore();
+      final store = SecureApiKeyStore(
+        configDirectory: root,
+        secureStore: secureStore,
+        legacyPlaintextFile: legacyFile,
+        quarantineMarker: marker,
+      );
+
+      await expectLater(
+        store.load(),
+        throwsA(
+          isA<StateError>().having(
+            (error) => error.message,
+            'message',
+            contains('旧 API Key 删除失败'),
+          ),
+        ),
+      );
+
+      expect(legacyFile.events, ['exists', 'exists', 'delete']);
+      expect(legacyFile.stillExists, isTrue);
+      expect(secureStore.events, ['delete:synapse.provider.apiKey']);
     },
   );
 
@@ -342,11 +412,13 @@ final class _FakeLegacyPlaintextApiKeyFile
 final class _FakeApiKeyQuarantineMarker implements ApiKeyQuarantineMarker {
   _FakeApiKeyQuarantineMarker({
     this.marked = false,
+    this.existsFailure,
     this.markFailure,
     this.clearFailure,
   });
 
   bool marked;
+  final Object? existsFailure;
   final Object? markFailure;
   final Object? clearFailure;
   final List<String> events = <String>[];
@@ -364,6 +436,10 @@ final class _FakeApiKeyQuarantineMarker implements ApiKeyQuarantineMarker {
   @override
   Future<bool> exists() async {
     events.add('exists');
+    final failure = existsFailure;
+    if (failure != null) {
+      throw failure;
+    }
     return marked;
   }
 
