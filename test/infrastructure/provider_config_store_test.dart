@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:synapse/domain/vault/vault_resource.dart';
+import 'package:synapse/infrastructure/config/atomic_config_file_writer.dart';
 import 'package:synapse/infrastructure/config/file_provider_config_store.dart';
 import 'package:synapse/infrastructure/config/provider_config_store.dart';
 
@@ -142,6 +143,45 @@ void main() {
     expect(await fallbackFile.exists(), isFalse);
   });
 
+  test('migrates an orphan legacy key when provider json is absent', () async {
+    final fallbackFile = await _writeLegacyApiKey(root, 'legacy-key');
+    final store = FileProviderConfigStore(
+      configDirectory: root,
+      secureStore: secureStore,
+    );
+
+    final loaded = await store.load();
+
+    expect(loaded, isNull);
+    expect(await fallbackFile.exists(), isFalse);
+    expect(secureStore.events, [
+      'write:synapse.provider.apiKey:legacy-key',
+      'read:synapse.provider.apiKey',
+    ]);
+  });
+
+  test(
+    'cleans legacy plaintext before reporting corrupt provider json',
+    () async {
+      await File(
+        p.join(root.path, 'provider_config.json'),
+      ).writeAsString('{not-json');
+      final fallbackFile = await _writeLegacyApiKey(root, 'legacy-key');
+      final store = FileProviderConfigStore(
+        configDirectory: root,
+        secureStore: secureStore,
+      );
+
+      await expectLater(store.load(), throwsA(isA<FormatException>()));
+
+      expect(await fallbackFile.exists(), isFalse);
+      expect(secureStore.events, [
+        'write:synapse.provider.apiKey:legacy-key',
+        'read:synapse.provider.apiKey',
+      ]);
+    },
+  );
+
   test('clears secure api key when a blank key is saved', () async {
     final store = FileProviderConfigStore(
       configDirectory: root,
@@ -195,6 +235,41 @@ void main() {
     },
   );
 
+  test(
+    'keeps a staged key quarantined when provider json commit fails',
+    () async {
+      await _writeProviderConfigJson(root);
+      secureStore.values['synapse.provider.apiKey'] = 'old-key';
+      final store = FileProviderConfigStore(
+        configDirectory: root,
+        secureStore: secureStore,
+        configFileWriter: const _FailingConfigFileWriter(),
+      );
+
+      await expectLater(
+        store.save(_providerConfigWithApiKey('new-key')),
+        throwsA(isA<FileSystemException>()),
+      );
+
+      final restarted = FileProviderConfigStore(
+        configDirectory: root,
+        secureStore: secureStore,
+      );
+      final loaded = await restarted.load();
+      final raw =
+          jsonDecode(
+                await File(
+                  p.join(root.path, 'provider_config.json'),
+                ).readAsString(),
+              )
+              as Map<String, Object?>;
+
+      expect(raw['baseUrl'], 'https://api.example.com/v1');
+      expect(loaded, isNotNull);
+      expect(loaded!.apiKey, isEmpty);
+    },
+  );
+
   test('blank key deletes any legacy plaintext fallback', () async {
     secureStore.values['synapse.provider.apiKey'] = 'old-key';
     final fallbackFile = await _writeLegacyApiKey(root, 'legacy-key');
@@ -208,6 +283,15 @@ void main() {
     expect(secureStore.values, isNot(contains('synapse.provider.apiKey')));
     expect(await fallbackFile.exists(), isFalse);
   });
+}
+
+final class _FailingConfigFileWriter implements ConfigFileWriter {
+  const _FailingConfigFileWriter();
+
+  @override
+  Future<void> write(File target, String contents) {
+    throw FileSystemException('config commit failed', target.path);
+  }
 }
 
 ProviderConfig _providerConfigWithApiKey(String apiKey) {

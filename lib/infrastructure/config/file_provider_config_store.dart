@@ -5,6 +5,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:path/path.dart' as p;
 
 import '../../domain/vault/vault_resource.dart';
+import 'atomic_config_file_writer.dart';
 import 'provider_config_store.dart';
 import 'secure_api_key_store.dart';
 
@@ -12,7 +13,9 @@ class FileProviderConfigStore implements ProviderConfigStore {
   FileProviderConfigStore({
     required Directory configDirectory,
     required SecureValueStore secureStore,
+    ConfigFileWriter configFileWriter = const AtomicConfigFileWriter(),
   }) : _configDirectory = configDirectory,
+       _configFileWriter = configFileWriter,
        _apiKeys = SecureApiKeyStore(
          configDirectory: configDirectory,
          secureStore: secureStore,
@@ -21,6 +24,7 @@ class FileProviderConfigStore implements ProviderConfigStore {
   static const apiKeyStorageKey = SecureApiKeyStore.storageKey;
 
   final Directory _configDirectory;
+  final ConfigFileWriter _configFileWriter;
   final SecureApiKeyStore _apiKeys;
 
   File get _configFile {
@@ -35,24 +39,31 @@ class FileProviderConfigStore implements ProviderConfigStore {
 
   @override
   Future<ProviderConfig?> load() async {
+    final apiKey = await _apiKeys.load();
     final file = _configFile;
     if (!await file.exists()) {
       return null;
     }
     final raw = jsonDecode(await file.readAsString()) as Map<String, Object?>;
-    final apiKey = await _apiKeys.load();
     return ProviderConfig.fromJson({...raw, 'apiKey': apiKey.apiKey});
   }
 
   @override
   Future<void> save(ProviderConfig config) async {
     await _configDirectory.create(recursive: true);
-    await _apiKeys.save(config.apiKey);
-    await _configFile.writeAsString(
-      const JsonEncoder.withIndent(
-        '  ',
-      ).convert(config.toJson(includeApiKey: false)),
-    );
+    final transaction = await _apiKeys.stageSave(config.apiKey);
+    try {
+      await _configFileWriter.write(
+        _configFile,
+        const JsonEncoder.withIndent(
+          '  ',
+        ).convert(config.toJson(includeApiKey: false)),
+      );
+      await transaction.commit();
+    } catch (_) {
+      await transaction.abort();
+      rethrow;
+    }
   }
 }
 

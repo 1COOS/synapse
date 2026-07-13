@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -60,6 +61,85 @@ final class _FileApiKeyQuarantineMarker implements ApiKeyQuarantineMarker {
   }
 }
 
+final class _ApiKeyDirectoryLock {
+  _ApiKeyDirectoryLock(Directory configDirectory)
+    : _lockFile = File(p.join(configDirectory.path, 'provider_api_key.lock')),
+      _mutex = _mutexes.putIfAbsent(
+        p.normalize(p.absolute(configDirectory.path)),
+        _InProcessMutex.new,
+      );
+
+  static final Map<String, _InProcessMutex> _mutexes =
+      <String, _InProcessMutex>{};
+
+  final File _lockFile;
+  final _InProcessMutex _mutex;
+
+  Future<_ApiKeyLockLease> acquire() async {
+    final inProcessLease = await _mutex.acquire();
+    RandomAccessFile? file;
+    try {
+      await _lockFile.parent.create(recursive: true);
+      file = await _lockFile.open(mode: FileMode.append);
+      await file.lock(FileLock.exclusive);
+      return _ApiKeyLockLease(file, inProcessLease);
+    } catch (_) {
+      await file?.close();
+      inProcessLease.release();
+      rethrow;
+    }
+  }
+}
+
+final class _InProcessMutex {
+  Future<void> _tail = Future<void>.value();
+
+  Future<_InProcessLockLease> acquire() async {
+    final previous = _tail;
+    final release = Completer<void>();
+    _tail = release.future;
+    await previous;
+    return _InProcessLockLease(release);
+  }
+}
+
+final class _InProcessLockLease {
+  _InProcessLockLease(this._release);
+
+  final Completer<void> _release;
+
+  void release() {
+    if (!_release.isCompleted) {
+      _release.complete();
+    }
+  }
+}
+
+final class _ApiKeyLockLease {
+  _ApiKeyLockLease(this._file, this._inProcessLease);
+
+  final RandomAccessFile _file;
+  final _InProcessLockLease _inProcessLease;
+  bool _released = false;
+
+  Future<void> release() async {
+    if (_released) {
+      return;
+    }
+    _released = true;
+    try {
+      await _file.unlock();
+    } catch (_) {
+      // Closing the file also releases the operating-system lock.
+    }
+    try {
+      await _file.close();
+    } finally {
+      _inProcessLease.release();
+    }
+  }
+}
+
 final class SecureApiKeyLoadResult {
   const SecureApiKeyLoadResult({
     required this.apiKey,
@@ -68,6 +148,44 @@ final class SecureApiKeyLoadResult {
 
   final String apiKey;
   final String recoveryMessage;
+}
+
+enum _SecureApiKeySaveState { active, committed, aborted }
+
+final class SecureApiKeySaveTransaction {
+  SecureApiKeySaveTransaction._(this._store, this._lockLease);
+
+  final SecureApiKeyStore _store;
+  final _ApiKeyLockLease _lockLease;
+  _SecureApiKeySaveState _state = _SecureApiKeySaveState.active;
+
+  Future<void> commit() async {
+    if (_state != _SecureApiKeySaveState.active) {
+      return;
+    }
+    try {
+      await _store._clearQuarantine();
+      _state = _SecureApiKeySaveState.committed;
+    } catch (error) {
+      _state = _SecureApiKeySaveState.aborted;
+      await _store._abortStagedSave();
+      throw StateError(_store._secureStorageErrorMessage('提交', error));
+    } finally {
+      await _lockLease.release();
+    }
+  }
+
+  Future<void> abort() async {
+    if (_state != _SecureApiKeySaveState.active) {
+      return;
+    }
+    _state = _SecureApiKeySaveState.aborted;
+    try {
+      await _store._abortStagedSave();
+    } finally {
+      await _lockLease.release();
+    }
+  }
 }
 
 final class SecureApiKeyStore {
@@ -91,6 +209,7 @@ final class SecureApiKeyStore {
                ),
              ),
            ),
+       _directoryLock = _ApiKeyDirectoryLock(configDirectory),
        _secureStore = secureStore;
 
   static const storageKey = 'synapse.provider.apiKey';
@@ -98,9 +217,19 @@ final class SecureApiKeyStore {
 
   final LegacyPlaintextApiKeyFile _legacyPlaintextFile;
   final ApiKeyQuarantineMarker _quarantineMarker;
+  final _ApiKeyDirectoryLock _directoryLock;
   final SecureValueStore _secureStore;
 
   Future<SecureApiKeyLoadResult> load() async {
+    final lockLease = await _directoryLock.acquire();
+    try {
+      return await _loadLocked();
+    } finally {
+      await lockLease.release();
+    }
+  }
+
+  Future<SecureApiKeyLoadResult> _loadLocked() async {
     late final bool quarantined;
     try {
       quarantined = await _quarantineMarker.exists();
@@ -108,8 +237,11 @@ final class SecureApiKeyStore {
       await _failAfterQuarantineError('读取', error);
     }
     if (quarantined) {
-      await _bestEffortDeleteLegacyPlaintext();
+      final deletionError = await _tryDeleteLegacyPlaintext();
       await _discardUnverifiedSecureApiKey();
+      if (deletionError != null) {
+        throw StateError(_legacyDeletionErrorMessage(deletionError));
+      }
       return const SecureApiKeyLoadResult(
         apiKey: '',
         recoveryMessage: legacyRecoveryMessage,
@@ -127,6 +259,17 @@ final class SecureApiKeyStore {
   }
 
   Future<void> save(String apiKey) async {
+    final transaction = await stageSave(apiKey);
+    try {
+      await transaction.commit();
+    } catch (_) {
+      await transaction.abort();
+      rethrow;
+    }
+  }
+
+  Future<SecureApiKeySaveTransaction> stageSave(String apiKey) async {
+    final lockLease = await _directoryLock.acquire();
     try {
       await _markQuarantine();
       await _deleteLegacyPlaintext();
@@ -140,12 +283,18 @@ final class SecureApiKeyStore {
           throw StateError('secure read verification mismatch');
         }
       }
-      await _clearQuarantine();
+      return SecureApiKeySaveTransaction._(this, lockLease);
     } catch (error) {
       await _bestEffortDeleteLegacyPlaintext();
       await _discardUnverifiedSecureApiKey();
+      await lockLease.release();
       throw StateError(_secureStorageErrorMessage('保存', error));
     }
+  }
+
+  Future<void> _abortStagedSave() async {
+    await _bestEffortDeleteLegacyPlaintext();
+    await _discardUnverifiedSecureApiKey();
   }
 
   Future<SecureApiKeyLoadResult> _migrateLegacyPlaintext() async {

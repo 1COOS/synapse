@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:synapse/domain/vault/vault_resource.dart';
+import 'package:synapse/infrastructure/config/atomic_config_file_writer.dart';
 import 'package:synapse/infrastructure/config/file_settings_store.dart';
 import 'package:synapse/infrastructure/config/provider_config_store.dart';
 import 'package:synapse/infrastructure/config/settings_store.dart';
@@ -161,6 +162,47 @@ void main() {
     expect(await fallbackFile.exists(), isFalse);
   });
 
+  test(
+    'migrates an orphan legacy key when settings files are absent',
+    () async {
+      final fallbackFile = await _writeLegacyApiKey(root, 'legacy-key');
+      final store = FileSettingsStore(
+        configDirectory: root,
+        secureStore: secureStore,
+      );
+
+      final result = await store.loadResult();
+
+      expect(result.settings.providerConfig.apiKey, 'legacy-key');
+      expect(result.recoveryMessage, isEmpty);
+      expect(await fallbackFile.exists(), isFalse);
+      expect(secureStore.events, [
+        'write:synapse.provider.apiKey:legacy-key',
+        'read:synapse.provider.apiKey',
+      ]);
+    },
+  );
+
+  test(
+    'cleans legacy plaintext before reporting corrupt settings json',
+    () async {
+      await File(p.join(root.path, 'settings.json')).writeAsString('{not-json');
+      final fallbackFile = await _writeLegacyApiKey(root, 'legacy-key');
+      final store = FileSettingsStore(
+        configDirectory: root,
+        secureStore: secureStore,
+      );
+
+      await expectLater(store.loadResult(), throwsA(isA<FormatException>()));
+
+      expect(await fallbackFile.exists(), isFalse);
+      expect(secureStore.events, [
+        'write:synapse.provider.apiKey:legacy-key',
+        'read:synapse.provider.apiKey',
+      ]);
+    },
+  );
+
   test('migrates legacy provider and vault files then deletes them', () async {
     secureStore.values['synapse.provider.apiKey'] = 'legacy-key';
     await File(p.join(root.path, 'provider_config.json')).writeAsString(
@@ -244,6 +286,40 @@ void main() {
     );
   }
 
+  test(
+    'keeps a staged key quarantined when settings json commit fails',
+    () async {
+      await _writeSettingsJson(root);
+      secureStore.values['synapse.provider.apiKey'] = 'old-key';
+      final store = FileSettingsStore(
+        configDirectory: root,
+        secureStore: secureStore,
+        configFileWriter: const _FailingConfigFileWriter(),
+      );
+
+      await expectLater(
+        store.save(_settingsWithApiKey('new-key')),
+        throwsA(isA<FileSystemException>()),
+      );
+
+      final restarted = FileSettingsStore(
+        configDirectory: root,
+        secureStore: secureStore,
+      );
+      final result = await restarted.loadResult();
+      final raw =
+          jsonDecode(
+                await File(p.join(root.path, 'settings.json')).readAsString(),
+              )
+              as Map<String, Object?>;
+      final provider = raw['providerConfig']! as Map<String, Object?>;
+
+      expect(provider['baseUrl'], 'https://api.example.com/v1');
+      expect(result.settings.providerConfig.apiKey, isEmpty);
+      expect(result.recoveryMessage, '旧 API Key 已删除，请重新输入');
+    },
+  );
+
   test('blank api key clears secure storage and legacy plaintext', () async {
     secureStore.values['synapse.provider.apiKey'] = 'old-key';
     final fallbackFile = await _writeLegacyApiKey(root, 'legacy-key');
@@ -279,6 +355,15 @@ void main() {
       );
     },
   );
+}
+
+final class _FailingConfigFileWriter implements ConfigFileWriter {
+  const _FailingConfigFileWriter();
+
+  @override
+  Future<void> write(File target, String contents) {
+    throw FileSystemException('config commit failed', target.path);
+  }
 }
 
 SynapseSettings _settingsWithApiKey(String apiKey) {

@@ -302,6 +302,40 @@ void main() {
   );
 
   test(
+    'a quarantine marker reports legacy cleanup failure without returning a key',
+    () async {
+      final marker = _FakeApiKeyQuarantineMarker(marked: true);
+      final legacyFile = _FakeLegacyPlaintextApiKeyFile(
+        contents: '{"apiKey":"legacy-key"}',
+        deleteFailure: StateError('legacy delete failed'),
+      );
+      final secureStore = _FakeSecureValueStore()
+        ..values[SecureApiKeyStore.storageKey] = 'unverified-key';
+      final store = SecureApiKeyStore(
+        configDirectory: root,
+        secureStore: secureStore,
+        legacyPlaintextFile: legacyFile,
+        quarantineMarker: marker,
+      );
+
+      await expectLater(
+        store.load(),
+        throwsA(
+          isA<StateError>().having(
+            (error) => error.message,
+            'message',
+            contains('旧 API Key 删除失败'),
+          ),
+        ),
+      );
+
+      expect(marker.marked, isTrue);
+      expect(legacyFile.stillExists, isTrue);
+      expect(secureStore.values, isNot(contains(SecureApiKeyStore.storageKey)));
+    },
+  );
+
+  test(
     'a verified explicit save clears quarantine and restores reads',
     () async {
       final marker = _FakeApiKeyQuarantineMarker(marked: true);
@@ -360,6 +394,79 @@ void main() {
       final restartedResult = await restartedStore.load();
 
       expect(marker.marked, isTrue);
+      expect(restartedResult.apiKey, isEmpty);
+      expect(
+        restartedResult.recoveryMessage,
+        SecureApiKeyStore.legacyRecoveryMessage,
+      );
+    },
+  );
+
+  test(
+    'a staged save blocks another store load until abort releases it',
+    () async {
+      final secureStore = _FakeSecureValueStore();
+      final firstStore = SecureApiKeyStore(
+        configDirectory: root,
+        secureStore: secureStore,
+      );
+      final secondStore = SecureApiKeyStore(
+        configDirectory: root,
+        secureStore: secureStore,
+      );
+
+      final transaction = await firstStore.stageSave('staged-key');
+      var loadCompleted = false;
+      final pendingLoad = secondStore.load().then((result) {
+        loadCompleted = true;
+        return result;
+      });
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      expect(loadCompleted, isFalse);
+      await transaction.abort();
+      final loaded = await pendingLoad;
+
+      expect(loaded.apiKey, isEmpty);
+      expect(loaded.recoveryMessage, SecureApiKeyStore.legacyRecoveryMessage);
+    },
+  );
+
+  test(
+    'save transactions serialize and an old commit cannot clear a new marker',
+    () async {
+      final secureStore = _FakeSecureValueStore(
+        deleteFailure: StateError('secure delete failed'),
+      );
+      final firstStore = SecureApiKeyStore(
+        configDirectory: root,
+        secureStore: secureStore,
+      );
+      final secondStore = SecureApiKeyStore(
+        configDirectory: root,
+        secureStore: secureStore,
+      );
+
+      final firstTransaction = await firstStore.stageSave('first-key');
+      var secondStaged = false;
+      final pendingSecond = secondStore.stageSave('second-key').then((value) {
+        secondStaged = true;
+        return value;
+      });
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      expect(secondStaged, isFalse);
+
+      await firstTransaction.commit();
+      final secondTransaction = await pendingSecond;
+      await firstTransaction.commit();
+      await secondTransaction.abort();
+
+      final restartedStore = SecureApiKeyStore(
+        configDirectory: root,
+        secureStore: secureStore,
+      );
+      final restartedResult = await restartedStore.load();
+
       expect(restartedResult.apiKey, isEmpty);
       expect(
         restartedResult.recoveryMessage,

@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:path/path.dart' as p;
 
 import '../../domain/vault/vault_resource.dart';
+import 'atomic_config_file_writer.dart';
 import 'provider_config_store.dart';
 import 'secure_api_key_store.dart';
 import 'settings_store.dart';
@@ -14,13 +15,16 @@ class FileSettingsStore extends SettingsStore {
   FileSettingsStore({
     required Directory configDirectory,
     required SecureValueStore secureStore,
+    ConfigFileWriter configFileWriter = const AtomicConfigFileWriter(),
   }) : _configDirectory = configDirectory,
+       _configFileWriter = configFileWriter,
        _apiKeys = SecureApiKeyStore(
          configDirectory: configDirectory,
          secureStore: secureStore,
        );
 
   final Directory _configDirectory;
+  final ConfigFileWriter _configFileWriter;
   final SecureApiKeyStore _apiKeys;
 
   File get _settingsFile =>
@@ -47,27 +51,42 @@ class FileSettingsStore extends SettingsStore {
 
   @override
   Future<SettingsLoadResult> loadResult() async {
+    final apiKey = await _apiKeys.load();
     if (await _settingsFile.exists()) {
-      return _readSettingsFile();
+      return _readSettingsFile(apiKey);
     }
-    final migrated = await _loadLegacySettings();
+    final migrated = await _loadLegacySettings(apiKey);
     if (migrated != null) {
       await save(migrated.settings);
       await _deleteIfExists(_legacyProviderFile);
       await _deleteIfExists(_legacyVaultFile);
       return migrated;
     }
-    return const SettingsLoadResult(settings: SynapseSettings.defaults);
+    return SettingsLoadResult(
+      settings: SynapseSettings(
+        providerConfig: ProviderConfig.empty.copyWith(apiKey: apiKey.apiKey),
+      ),
+      recoveryMessage: apiKey.recoveryMessage,
+    );
   }
 
   @override
   Future<void> save(SynapseSettings settings) async {
     await _configDirectory.create(recursive: true);
     final normalized = _normalizeSettings(settings);
-    await _apiKeys.save(normalized.providerConfig.apiKey);
-    await _settingsFile.writeAsString(
-      const JsonEncoder.withIndent('  ').convert(normalized.toJson()),
+    final transaction = await _apiKeys.stageSave(
+      normalized.providerConfig.apiKey,
     );
+    try {
+      await _configFileWriter.write(
+        _settingsFile,
+        const JsonEncoder.withIndent('  ').convert(normalized.toJson()),
+      );
+      await transaction.commit();
+    } catch (_) {
+      await transaction.abort();
+      rethrow;
+    }
   }
 
   @override
@@ -75,10 +94,11 @@ class FileSettingsStore extends SettingsStore {
     return Directory(_normalizeRootPath(location.rootPath)).exists();
   }
 
-  Future<SettingsLoadResult> _readSettingsFile() async {
+  Future<SettingsLoadResult> _readSettingsFile(
+    SecureApiKeyLoadResult apiKey,
+  ) async {
     final raw =
         jsonDecode(await _settingsFile.readAsString()) as Map<String, Object?>;
-    final apiKey = await _apiKeys.load();
     final settings = SynapseSettings.fromJson({
       ...raw,
       'providerConfig': {
@@ -92,7 +112,9 @@ class FileSettingsStore extends SettingsStore {
     );
   }
 
-  Future<SettingsLoadResult?> _loadLegacySettings() async {
+  Future<SettingsLoadResult?> _loadLegacySettings(
+    SecureApiKeyLoadResult apiKey,
+  ) async {
     ProviderConfig providerConfig = ProviderConfig.empty;
     VaultLocation? vaultLocation;
     var foundLegacy = false;
@@ -102,7 +124,6 @@ class FileSettingsStore extends SettingsStore {
       final raw =
           jsonDecode(await _legacyProviderFile.readAsString())
               as Map<String, Object?>;
-      final apiKey = await _apiKeys.load();
       providerConfig = ProviderConfig.fromJson({
         ...raw,
         'apiKey': apiKey.apiKey,
