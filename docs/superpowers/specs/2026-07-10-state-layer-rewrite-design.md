@@ -19,7 +19,7 @@
 
 **测试长文件 follow-up：** commit `30f5fe9`；9 个超长文件拆成 25 个，保留 248 tests 等价覆盖，最大文件 869 行。
 
-**当前代码基线：** 分支相对 `main` 81 commits；`flutter test --no-pub` 587/587，`flutter analyze --no-pub` 无 issue。`workspace.dart` 756 行，`WorkspaceController` 1018 行，File facade 228 行，Memory facade 184 行。以上为代码阶段基线，不代表最终本地 macOS gate 已执行。
+**当前 checkpoint：** 代码基线 `30f5fe9` 相对 `main` 为 81 commits；文档 checkpoint `0fce068` 后当前为 82 commits。`flutter test --no-pub` 587/587，`flutter analyze --no-pub` 无 issue。`workspace.dart` 756 行，`WorkspaceController` 1018 行，File facade 228 行，Memory facade 184 行。以上测试与行数为代码阶段基线，不代表最终本地 macOS gate 已执行。
 
 > Foundation baseline 捕获时，分支相对 `main` 有 15 个实现提交，任务 1-5 的 session/save/split/mutation foundation 已完成。该 baseline 的 fresh evidence 为状态层 65 tests pass、workspace 140 tests pass，共 205 tests pass，`flutter analyze --no-pub` 无 issue，`git diff --check` clean。提交数量仅描述 baseline 捕获时点，不作为后续分支总提交数。
 
@@ -108,12 +108,14 @@
 | debounce、串行保存、flush/quiesce | `NoteSaveCoordinator` | 每 session 至多一个 in-flight save |
 | split tree、pane focus、pane note、阅读/源码 mode、ratio | `SplitWorkspaceController` | 不依赖 Vault、AI 或 controller |
 | 跨资源 mutation 顺序和原子应用 | `WorkspaceMutationBarrier` | flush/discard → backend → delta commit |
-| resources、selection、search、settings、runtime、message、busy | `WorkspaceController` | Riverpod `AsyncNotifier` 暴露不可变 `WorkspaceState` |
+| candidate/active runtime、runtime generation、dispose | `WorkspaceRuntimeManager` | 唯一持有运行期实例及其替换、代际和释放 |
+| 启动/切 Vault/settings 协调、active `VaultAccessLease` | `WorkspaceStartupCoordinator` | 协调 candidate 验证与提交，唯一持有 active lease |
+| resources、selection、search、settings snapshot、message、busy | `WorkspaceController` | 只发布 observable `WorkspaceState` snapshot 并执行 intent reduction |
 | 每 note 的 source selection 与 proposals | `NoteMaterialsRegistry` | 从 document session 分离，按 note ID 唯一持有 |
 | 发起 pane 的图片/粘贴/宽度/拖动上下文 | `PaneEditorContext` | await 前捕获稳定 session |
 | live editor block/selection/menu/hover | editor Widget local state | 不迁入 Riverpod |
 
-阶段 7 落地后，workspace snapshot 的 runtime/settings 启动协调由 `WorkspaceStartupCoordinator` 承担，editor command lock 与 save-flight ownership 由 `WorkspaceEditorOperationCoordinator` 承担。它们不成为第二个 observable state source；所有 UI 可观察状态仍只通过 `WorkspaceController` 发布的 `AsyncValue<WorkspaceState>` 暴露。
+阶段 7 落地后，`WorkspaceRuntimeManager` 唯一持有 candidate/active runtime、runtime generation 与 dispose；`WorkspaceStartupCoordinator` 协调启动、切 Vault、settings 持久化并唯一持有 active `VaultAccessLease`；editor command lock 与 save-flight ownership 由 `WorkspaceEditorOperationCoordinator` 承担。它们都不成为第二个 observable state source；`WorkspaceController` 只发布 `AsyncValue<WorkspaceState>` 并执行公开 intent 的 reduction。
 
 ## 6. 已实现组件
 
@@ -298,7 +300,7 @@ final class PaneEditorContext {
 
 不使用 split/session/materials revision counters。Registry、save coordinator、split controller 和 pane context factory 由 notifier 持有并在 `ref.onDispose` 中释放。UI 使用 `ref.watch(workspaceControllerProvider)` 渲染，使用 `ref.read(...notifier)` 发送 intent。`TextEditingController` 不复制到 immutable state；Widget 通过 provider 查询稳定 session，并用 `ListenableBuilder` 监听编辑状态。
 
-为避免形成新的巨型 controller，运行期职责已拆为 `WorkspaceRuntimeManager`、`WorkspaceSearchCoordinator` 与 `WorkspaceResourceCoordinator`，并增加 startup、document、editor operation 与 state commit collaborators。`WorkspaceController` 只负责 Riverpod 生命周期、公开 intent 与 state reduction；当前 1018 行，接近并略高于约 1000 行 review threshold，后续新增职责应优先进入现有 collaborators。
+为避免形成新的巨型 controller，运行期职责已拆为 `WorkspaceRuntimeManager`、`WorkspaceSearchCoordinator` 与 `WorkspaceResourceCoordinator`，并增加 startup、document、editor operation 与 state commit collaborators。`WorkspaceRuntimeManager` 唯一持有 candidate/active runtime、generation 与 dispose；`WorkspaceStartupCoordinator` 协调启动、切 Vault、settings 与 active lease。`WorkspaceController` 只负责 observable snapshot 发布和公开 intent reduction；当前 1018 行，接近并略高于约 1000 行 review threshold，后续新增职责应优先进入现有 collaborators。
 
 ### 6.7 Composition root
 
@@ -346,8 +348,8 @@ final class PaneEditorContext {
 2. 再选择/恢复候选 macOS Vault access lease。
 3. 使用候选 backend `listResources()` 验证可读。
 4. 保存 settings。
-5. 原子替换 runtime、清空旧 sessions/splits/search/materials，并加载候选资源。
-6. 成功后释放旧 lease；失败时释放候选 lease并继续保留旧 runtime。
+5. `WorkspaceRuntimeManager` 安装 candidate runtime 并推进 generation；`WorkspaceCommitBatch` 应用 sessions/splits/search/materials 与候选资源 replacement，`WorkspaceController` 发布最终 observable snapshot。
+6. `WorkspaceStartupCoordinator` 在提交成功后把 candidate lease 设为 active 并释放旧 lease；失败时释放候选 lease，`WorkspaceRuntimeManager` 继续保留旧 active runtime。
 
 Picker 不得在旧 session flush 之前释放旧 security scope。
 
@@ -395,7 +397,7 @@ Picker 不得在旧 session flush 之前释放旧 security scope。
 
 - 候选 Vault 验证失败；
 - 成功切换后释放旧 lease；
-- Controller/application dispose；
+- `WorkspaceStartupCoordinator` dispose；
 - macOS application terminate 时释放所有剩余 URL。
 
 原生层不能无限追加 `activeURLs`。每个成功的 `startAccessingSecurityScopedResource()` 必须有对称的 `stopAccessingSecurityScopedResource()`。
@@ -408,7 +410,7 @@ Picker 不得在旧 session flush 之前释放旧 security scope。
 
 ## 9. 错误处理
 
-- Controller 将用户可恢复错误写入 `WorkspaceState.message`，保留当前可用 runtime。
+- Controller 将用户可恢复错误发布到 `WorkspaceState.message`，`WorkspaceRuntimeManager` 保留当前 active runtime。
 - 保存失败不覆盖 controller，不执行依赖该 flush 的 mutation。
 - mutation backend 失败不应用 delta；backend 已成功后 invariant failure 进入 reload-required/fatal recovery，禁止重试 backend operation。
 - publish listener error 只上报，不改变 committed result。
@@ -429,7 +431,7 @@ Picker 不得在旧 session flush 之前释放旧 security scope。
 - pane context 在切换焦点后仍写入原 session，在 pane/runtime 失效后返回 stale target；
 - commit batch prepare invariant failure 不产生部分 in-memory commit，抛 `WorkspaceCommitInvariantError` 且不返回 retryable `BackendFailed`；
 - commit batch publish listener error 通过 reporting 上报且结果仍为 `Committed`；
-- WorkspaceController 的初始化、Vault 切换、resource mutation 和 settings runtime rebuild。
+- WorkspaceController 的 observable snapshot/intent reduction，以及 StartupCoordinator/RuntimeManager 的初始化、Vault 切换、settings、lease 和 runtime rebuild。
 
 ### 10.2 Widget characterization tests
 
