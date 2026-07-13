@@ -42,6 +42,66 @@ void main() {
     expect(await backend.listResources(), hasLength(2));
   });
 
+  test('pins the resolved vault root across symlink retargeting', () async {
+    final linkHome = await Directory.systemTemp.createTemp(
+      'synapse-vault-link-',
+    );
+    final rootLink = Link(p.join(linkHome.path, 'vault'));
+    await rootLink.create(root.path);
+    final linkedBackend = FileVaultBackend(rootLink.path);
+    final note = await linkedBackend.createNote(
+      parentPath: '',
+      title: 'Pinned',
+    );
+    await File(p.join(outside.path, note.id)).writeAsString('# Outside');
+
+    await rootLink.delete();
+    await rootLink.create(outside.path);
+
+    await _expectPathRejected(() => linkedBackend.readNote(note.id), outside);
+    await _expectPathRejected(
+      () => linkedBackend.createFolder(
+        parentPath: 'new-parent',
+        title: 'Blocked',
+      ),
+      outside,
+    );
+    expect(await File(p.join(root.path, note.id)).exists(), isTrue);
+    expect(
+      await File(p.join(outside.path, note.id)).readAsString(),
+      '# Outside',
+    );
+    expect(
+      await Directory(p.join(outside.path, 'new-parent')).exists(),
+      isFalse,
+    );
+    await linkHome.delete(recursive: true);
+  });
+
+  for (final operation in ['folder', 'note']) {
+    test(
+      'invalid $operation creation does not create the vault root',
+      () async {
+        final parent = await Directory.systemTemp.createTemp(
+          'synapse-missing-vault-',
+        );
+        final missingRoot = Directory(p.join(parent.path, 'vault'));
+        final missingBackend = FileVaultBackend(missingRoot.path);
+
+        final creation = operation == 'folder'
+            ? missingBackend.createFolder(
+                parentPath: '../outside',
+                title: 'Bad',
+              )
+            : missingBackend.createNote(parentPath: '../outside', title: 'Bad');
+
+        await expectLater(creation, throwsA(isA<ArgumentError>()));
+        expect(await missingRoot.exists(), isFalse);
+        await parent.delete(recursive: true);
+      },
+    );
+  }
+
   group('linked folder escape', () {
     test('rejects folder and note creation outside the vault', () async {
       await Link(p.join(root.path, 'linked-folder')).create(outside.path);
@@ -129,6 +189,17 @@ void main() {
       expect(await outsideNote.exists(), isTrue);
     });
   }
+
+  test('preserves FileSystemException for a broken note link', () async {
+    await Link(
+      p.join(root.path, 'broken.md'),
+    ).create(p.join(outside.path, 'missing.md'));
+
+    await expectLater(
+      backend.readNote('broken.md'),
+      throwsA(isA<FileSystemException>()),
+    );
+  });
 
   group('attachment symlink escape', () {
     late SourceItem source;
@@ -306,7 +377,7 @@ void main() {
     expect(resources.first.children, isEmpty);
   });
 
-  test('copyNote skips links while copying assets recursively', () async {
+  test('copyNote rejects links before creating the target note', () async {
     final note = await backend.createNote(parentPath: '', title: 'Note');
     final assets = Directory(p.join(root.path, 'Note.assets'));
     final outsideFile = File(p.join(outside.path, 'secret.bin'));
@@ -314,18 +385,63 @@ void main() {
     await Link(p.join(assets.path, 'linked.bin')).create(outsideFile.path);
     await Link(p.join(assets.path, 'linked-folder')).create(outside.path);
 
-    final copy = await backend.copyNote(noteId: note.id);
-    final copiedAssets = Directory(copy.assetsPath);
+    await _expectPathRejected(() => backend.copyNote(noteId: note.id), outside);
 
+    expect(await File(p.join(root.path, 'Note 2.md')).exists(), isFalse);
     expect(
-      await File(p.join(copiedAssets.path, 'linked.bin')).exists(),
-      isFalse,
-    );
-    expect(
-      await Directory(p.join(copiedAssets.path, 'linked-folder')).exists(),
+      await Directory(p.join(root.path, 'Note 2.assets')).exists(),
       isFalse,
     );
     expect(await outsideFile.readAsBytes(), const [9, 8, 7]);
+  });
+
+  test(
+    'copyNote rejects a linked registered attachment before commit',
+    () async {
+      final note = await backend.createNote(parentPath: '', title: 'Note');
+      final source = await backend.addImageSource(
+        noteId: note.id,
+        filename: 'image.png',
+        mimeType: 'image/png',
+        bytes: const [1, 2, 3],
+      );
+      final attachment = File(
+        p.join(root.path, 'Note.assets', source.attachmentPath),
+      );
+      await attachment.delete();
+      final outsideFile = File(p.join(outside.path, 'secret.png'));
+      await outsideFile.writeAsBytes(const [9, 8, 7]);
+      await Link(attachment.path).create(outsideFile.path);
+
+      await _expectPathRejected(
+        () => backend.copyNote(noteId: note.id),
+        outside,
+      );
+
+      expect(await File(p.join(root.path, 'Note 2.md')).exists(), isFalse);
+      expect(
+        await Directory(p.join(root.path, 'Note 2.assets')).exists(),
+        isFalse,
+      );
+      expect(await outsideFile.readAsBytes(), const [9, 8, 7]);
+      expect((await backend.listSources(note.id)).single.id, source.id);
+    },
+  );
+
+  test('copyNote rejects a linked assets tree root before commit', () async {
+    final note = await backend.createNote(parentPath: '', title: 'Note');
+    final assets = Directory(p.join(root.path, 'Note.assets'));
+    final storedAssets = Directory(p.join(root.path, 'stored-assets'));
+    await assets.rename(storedAssets.path);
+    await Link(assets.path).create(storedAssets.path);
+
+    await _expectPathRejected(() => backend.copyNote(noteId: note.id), outside);
+
+    expect(await File(p.join(root.path, 'Note 2.md')).exists(), isFalse);
+    expect(
+      await Directory(p.join(root.path, 'Note 2.assets')).exists(),
+      isFalse,
+    );
   });
 
   test('recursive folder deletion does not follow child links', () async {

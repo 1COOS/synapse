@@ -6,9 +6,13 @@ import '../../domain/markdown/markdown_document.dart';
 import '../../domain/vault/vault_resource.dart';
 
 final class FileVaultPaths {
-  const FileVaultPaths(this.root);
+  FileVaultPaths(this.root);
 
   final Directory root;
+  String? _pinnedResolvedRoot;
+  Future<String>? _rootResolution;
+
+  bool get hasPinnedRoot => _pinnedResolvedRoot != null;
 
   String normalizeFolderPath(String path) {
     final parts = path
@@ -159,12 +163,7 @@ final class FileVaultPaths {
       throw StateError('Vault path is outside the vault root.');
     }
 
-    final rootType = await FileSystemEntity.type(rootPath, followLinks: false);
-    if (rootType == FileSystemEntityType.notFound) {
-      throw StateError('Vault root does not exist.');
-    }
-
-    final resolvedRoot = await _resolveEntityPath(rootPath, rootType);
+    final resolvedRoot = await _resolvedRootPath(rootPath);
     var existingPath = targetPath;
     FileSystemEntityType existingType;
     while (true) {
@@ -200,15 +199,35 @@ final class FileVaultPaths {
     String path,
     FileSystemEntityType type,
   ) async {
+    final entity = switch (type) {
+      FileSystemEntityType.directory => Directory(path),
+      FileSystemEntityType.link => Link(path),
+      _ => File(path),
+    };
+    return p.normalize(p.absolute(await entity.resolveSymbolicLinks()));
+  }
+
+  Future<String> _resolvedRootPath(String rootPath) {
+    final pinned = _pinnedResolvedRoot;
+    if (pinned != null) {
+      return Future.value(pinned);
+    }
+    return _rootResolution ??= _resolveAndPinRoot(rootPath);
+  }
+
+  Future<String> _resolveAndPinRoot(String rootPath) async {
     try {
-      final entity = switch (type) {
-        FileSystemEntityType.directory => Directory(path),
-        FileSystemEntityType.link => Link(path),
-        _ => File(path),
-      };
-      return p.normalize(p.absolute(await entity.resolveSymbolicLinks()));
-    } on FileSystemException {
-      throw StateError('Vault path cannot be resolved safely.');
+      final rootType = await FileSystemEntity.type(
+        rootPath,
+        followLinks: false,
+      );
+      if (rootType == FileSystemEntityType.notFound) {
+        throw StateError('Vault root does not exist.');
+      }
+      final resolved = await _resolveEntityPath(rootPath, rootType);
+      return _pinnedResolvedRoot ??= resolved;
+    } finally {
+      _rootResolution = null;
     }
   }
 }

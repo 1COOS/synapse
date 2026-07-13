@@ -147,6 +147,25 @@ updatedAt: 2026-07-03 12:00
     });
   }
 
+  test(
+    'classifies a write failure after creating a missing parent directory',
+    () async {
+      final backend = _FaultInjectingFileVaultBackend(root.path);
+      backend.failStringWriteSuffix = p.join('Parent', 'Alpha.md');
+
+      await expectLater(
+        backend.createNote(parentPath: 'Parent', title: 'Alpha'),
+        throwsA(isA<VaultPostCommitError>()),
+      );
+
+      expect(await Directory(p.join(root.path, 'Parent')).exists(), isTrue);
+      expect(
+        await File(p.join(root.path, 'Parent', 'Alpha.md')).exists(),
+        isFalse,
+      );
+    },
+  );
+
   test('classifies note delete cleanup failure after file removal', () async {
     final backend = _FaultInjectingFileVaultBackend(root.path);
     final note = await backend.createNote(parentPath: '', title: 'Alpha');

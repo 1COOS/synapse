@@ -39,7 +39,14 @@ final class FileVaultOperations {
   final RenameDirectory _renameDirectory;
   final CopyFile _copyFile;
 
+  // Dart does not expose openat/O_NOFOLLOW. Keep target paths uncached and
+  // validate immediately before each filesystem operation instead.
+
   Future<void> ensureRoot() async {
+    if (paths.hasPinnedRoot) {
+      await paths.ensureSafePath(paths.root.path);
+      return;
+    }
     await paths.root.create(recursive: true);
     await paths.ensureSafePath(paths.root.path);
   }
@@ -81,6 +88,24 @@ final class FileVaultOperations {
   Future<List<FileSystemEntity>> listDirectory(Directory directory) async {
     await paths.ensureSafePath(directory.path);
     return directory.list(followLinks: false).toList();
+  }
+
+  Future<void> ensureLinkFreeTree(Directory directory) async {
+    await ensureNotLink(directory);
+    for (final entity in await listDirectory(directory)) {
+      await ensureNotLink(entity);
+      if (entity is Directory) {
+        await ensureLinkFreeTree(entity);
+      }
+    }
+  }
+
+  Future<void> ensureNotLink(FileSystemEntity entity) async {
+    await paths.ensureSafePath(entity.path);
+    final type = await FileSystemEntity.type(entity.path, followLinks: false);
+    if (type == FileSystemEntityType.link) {
+      throw StateError('Vault copy source contains a symbolic link.');
+    }
   }
 
   Future<void> writeFileString(File file, String contents) async {

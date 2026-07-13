@@ -34,12 +34,13 @@ final class FileVaultNoteStore {
     required String parentPath,
     required String title,
   }) async {
-    await operations.ensureRoot();
     final parent = paths.directoryForFolder(parentPath);
-    await operations.createDirectory(parent, recursive: true);
+    await operations.ensureRoot();
+    await paths.ensureSafePath(parent.path);
     final folder = await paths.uniqueDirectory(parent, title);
     await paths.ensureSafePath(folder.path);
     return runVaultPostCommit(() async {
+      await operations.createDirectory(parent, recursive: true);
       await operations.createDirectory(folder, recursive: true);
       return VaultResourceNode(
         id: paths.relativePath(folder.path),
@@ -54,9 +55,9 @@ final class FileVaultNoteStore {
     required String parentPath,
     required String title,
   }) async {
-    await operations.ensureRoot();
     final parent = paths.directoryForFolder(parentPath);
-    await operations.createDirectory(parent, recursive: true);
+    await operations.ensureRoot();
+    await paths.ensureSafePath(parent.path);
     final file = await paths.uniqueNoteFile(parent, title);
     final assets = Directory(paths.assetsDirectoryPathForFile(file));
     await paths.ensureSafePath(file.path);
@@ -68,6 +69,7 @@ final class FileVaultNoteStore {
       paths.proposalsFile(paths.relativePath(file.path)).path,
     );
     return runVaultPostCommit(() async {
+      await operations.createDirectory(parent, recursive: true);
       final now = DateTime.now().toUtc();
       final note = _noteFromFile(file, createdAt: now, updatedAt: now);
       await operations.writeFileString(file, initialVaultMarkdown(note));
@@ -178,13 +180,17 @@ final class FileVaultNoteStore {
     final copiedAssets = Directory(paths.assetsDirectoryPathForFile(target));
     await paths.ensureSafePath(assets.path);
     await paths.ensureSafePath(copiedAssets.path);
+    final hasAssets = await operations.directoryExists(assets);
+    if (hasAssets) {
+      await operations.ensureLinkFreeTree(assets);
+    }
 
     return runVaultPostCommit(() async {
       await operations.writeFileString(
         target,
         retitleVaultMarkdown(markdown, newTitle: copiedTitle, updatedAt: now),
       );
-      if (await operations.directoryExists(assets)) {
+      if (hasAssets) {
         await _copyDirectory(assets, copiedAssets);
       } else {
         await operations.createDirectory(copiedAssets, recursive: true);
@@ -443,16 +449,14 @@ final class FileVaultNoteStore {
   }
 
   Future<void> _copyDirectory(Directory source, Directory target) async {
-    await paths.ensureSafePath(source.path);
+    await operations.ensureNotLink(source);
     await paths.ensureSafePath(target.path);
     if (await operations.directoryExists(target)) {
       await operations.deleteDirectory(target, recursive: true);
     }
     await operations.createDirectory(target, recursive: true);
     for (final entity in await operations.listDirectory(source)) {
-      if (entity is Link) {
-        continue;
-      }
+      await operations.ensureNotLink(entity);
       final targetPath = p.join(target.path, p.basename(entity.path));
       if (entity is Directory) {
         await _copyDirectory(entity, Directory(targetPath));
