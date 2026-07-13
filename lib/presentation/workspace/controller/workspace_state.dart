@@ -39,6 +39,7 @@ final class WorkspaceState {
     this.narrowSection = WorkspaceSection.resources,
     this.leftPaneCollapsed = false,
     this.rightPaneCollapsed = false,
+    this.usesNativeMacTitlebar = false,
     this.settings = SynapseSettings.defaults,
     this.vaultLabel = '',
     this.vaultRoot,
@@ -74,6 +75,7 @@ final class WorkspaceState {
   final WorkspaceSection narrowSection;
   final bool leftPaneCollapsed;
   final bool rightPaneCollapsed;
+  final bool usesNativeMacTitlebar;
   final SynapseSettings settings;
   WorkspacePreferences get preferences => settings.preferences;
   ProviderConfig get providerConfig => settings.providerConfig;
@@ -112,6 +114,7 @@ final class WorkspaceState {
     WorkspaceSection? narrowSection,
     bool? leftPaneCollapsed,
     bool? rightPaneCollapsed,
+    bool? usesNativeMacTitlebar,
     SynapseSettings? settings,
     String? vaultLabel,
     Object? vaultRoot = _unset,
@@ -139,6 +142,8 @@ final class WorkspaceState {
       narrowSection: narrowSection ?? this.narrowSection,
       leftPaneCollapsed: leftPaneCollapsed ?? this.leftPaneCollapsed,
       rightPaneCollapsed: rightPaneCollapsed ?? this.rightPaneCollapsed,
+      usesNativeMacTitlebar:
+          usesNativeMacTitlebar ?? this.usesNativeMacTitlebar,
       settings: settings ?? this.settings,
       vaultLabel: vaultLabel ?? this.vaultLabel,
       vaultRoot: identical(vaultRoot, _unset)

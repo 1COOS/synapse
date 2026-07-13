@@ -808,6 +808,7 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
       splitRoot: _splits.root,
       focusedPaneId: _splits.focusedPaneId,
       sessionNoteIds: _sessions.noteIds,
+      usesNativeMacTitlebar: _dependencies.usesNativeMacTitlebar,
       settings: _startup.settings,
       vaultLabel: runtime?.label ?? _dependencies.emptyVaultLabel,
       vaultRoot: runtime?.rootPath,
@@ -844,6 +845,7 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
         narrowSection: current.narrowSection,
         leftPaneCollapsed: current.leftPaneCollapsed,
         rightPaneCollapsed: current.rightPaneCollapsed,
+        usesNativeMacTitlebar: current.usesNativeMacTitlebar,
         settings: _startup.settings,
         vaultLabel: current.vaultLabel,
         vaultRoot: current.vaultRoot,
@@ -888,6 +890,7 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
         splitRoot: _splits.root,
         focusedPaneId: _splits.focusedPaneId,
         sessionNoteIds: _sessions.noteIds,
+        usesNativeMacTitlebar: _dependencies.usesNativeMacTitlebar,
         leftMode: WorkspaceLeftMode.resources,
         narrowSection: snapshot.note == null
             ? WorkspaceSection.resources

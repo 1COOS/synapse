@@ -70,8 +70,7 @@ class _SynapseWorkspaceState extends ConsumerState<SynapseWorkspace> {
   String get _message => _workspace.message;
   String get _vaultLabel => _workspace.vaultLabel;
   String? get _vaultRootPath => _workspace.vaultRoot;
-  bool get _usesNativeMacTitlebar =>
-      ref.read(workspaceDependenciesProvider).usesNativeMacTitlebar;
+  bool get _usesNativeMacTitlebar => _workspace.usesNativeMacTitlebar;
   SplitLeaf? get _focusedPane =>
       _findSplitLeaf(_workspace.splitRoot, _workspace.focusedPaneId);
   NoteDocumentSession? get _activeSession {

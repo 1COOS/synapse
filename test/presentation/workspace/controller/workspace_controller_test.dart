@@ -99,6 +99,7 @@ void main() {
                 initialVault: vault,
                 settingsStore: FakeSettingsStore(),
                 injectedVaultLabel: 'Override Vault',
+                usesNativeMacTitlebarOverride: true,
               ),
             ),
           ],
@@ -110,6 +111,7 @@ void main() {
         );
 
         expect(workspace.vaultLabel, 'Override Vault');
+        expect(workspace.usesNativeMacTitlebar, isTrue);
         expect(workspace.resources, isNotEmpty);
         expect(workspace.selectedResourceId, 'Override.md');
       },
