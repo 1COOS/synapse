@@ -1,5 +1,6 @@
+import 'dart:typed_data';
+
 import 'package:flutter/cupertino.dart';
-import 'package:flutter/foundation.dart';
 
 import '../../../domain/vault/vault_resource.dart';
 import '../../cupertino/workspace/workspace_theme.dart';
@@ -34,7 +35,7 @@ class PreviewImageBlock extends StatefulWidget {
   final String src;
   final double width;
   final bool editableControls;
-  final ValueListenable<String?> selectedImageSrc;
+  final String? selectedImageSrc;
   final Future<List<int>> imageBytes;
   final VoidCallback onTap;
   final ValueChanged<double> onWidthChanged;
@@ -61,35 +62,13 @@ class _PreviewImageBlockState extends State<PreviewImageBlock> {
   double get _effectiveWidth => _previewWidth ?? widget.width;
   bool get _selected =>
       widget.editableControls &&
-      widget.selectedImageSrc.value == normalizeImageSrc(widget.src);
-
-  @override
-  void initState() {
-    super.initState();
-    widget.selectedImageSrc.addListener(_handleSelectionChanged);
-  }
+      widget.selectedImageSrc == normalizeImageSrc(widget.src);
 
   @override
   void didUpdateWidget(covariant PreviewImageBlock oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.selectedImageSrc != widget.selectedImageSrc) {
-      oldWidget.selectedImageSrc.removeListener(_handleSelectionChanged);
-      widget.selectedImageSrc.addListener(_handleSelectionChanged);
-    }
     if (!_dragging && oldWidget.width != widget.width) {
       _previewWidth = null;
-    }
-  }
-
-  @override
-  void dispose() {
-    widget.selectedImageSrc.removeListener(_handleSelectionChanged);
-    super.dispose();
-  }
-
-  void _handleSelectionChanged() {
-    if (mounted) {
-      setState(() {});
     }
   }
 

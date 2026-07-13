@@ -1,5 +1,3 @@
-import 'package:flutter/foundation.dart';
-
 import '../../../infrastructure/vault/vault_backend.dart';
 import '../editor/pane_editor_context.dart' as editor_context;
 import '../state/note_document_session.dart';
@@ -26,6 +24,7 @@ final class WorkspaceEditorOperationCoordinator {
     required this.endOperation,
     required this.setMessage,
     required this.reloadRequired,
+    required this.onStateChanged,
   });
 
   final WorkspaceRuntimeManager runtimes;
@@ -45,16 +44,15 @@ final class WorkspaceEditorOperationCoordinator {
   final void Function(WorkspaceOperation operation) endOperation;
   final void Function(String message) setMessage;
   final bool Function() reloadRequired;
+  final void Function() onStateChanged;
 
   final Set<NoteDocumentSession> _lockedSessions =
       Set<NoteDocumentSession>.identity();
-  final ValueNotifier<int> _lockRevision = ValueNotifier<int>(0);
   final Set<_EditorSaveScope> _saveScopes = <_EditorSaveScope>{};
 
-  Set<NoteDocumentSession> get lockedSessions =>
-      Set<NoteDocumentSession>.unmodifiable(_lockedSessions);
-
-  ValueListenable<int> get lockRevision => _lockRevision;
+  Set<String> get lockedNoteIds => Set<String>.unmodifiable(
+    _lockedSessions.map((session) => session.noteId),
+  );
 
   Future<editor_context.PaneEditorCommandOutcome> runOperation(
     Future<editor_context.PaneEditorCommandOutcome> Function() operation, {
@@ -67,13 +65,11 @@ final class WorkspaceEditorOperationCoordinator {
       return editor_context.PaneEditorCommandOutcome.staleTarget;
     }
     if (lockedSession != null) {
-      _lockedSessions.add(lockedSession);
-      _lockRevision.value += 1;
+      _setLocked(lockedSession, true);
     }
     if (!beginOperation(WorkspaceOperation.editorCommand)) {
       if (lockedSession != null) {
-        _lockedSessions.remove(lockedSession);
-        _lockRevision.value += 1;
+        _setLocked(lockedSession, false);
       }
       return editor_context.PaneEditorCommandOutcome.unchanged;
     }
@@ -88,8 +84,7 @@ final class WorkspaceEditorOperationCoordinator {
       return editor_context.PaneEditorCommandOutcome.unchanged;
     } finally {
       if (lockedSession != null) {
-        _lockedSessions.remove(lockedSession);
-        _lockRevision.value += 1;
+        _setLocked(lockedSession, false);
       }
       endOperation(WorkspaceOperation.editorCommand);
     }
@@ -241,7 +236,17 @@ final class WorkspaceEditorOperationCoordinator {
   }
 
   void dispose() {
-    _lockRevision.dispose();
+    _lockedSessions.clear();
+    _saveScopes.clear();
+  }
+
+  void _setLocked(NoteDocumentSession session, bool locked) {
+    final changed = locked
+        ? _lockedSessions.add(session)
+        : _lockedSessions.remove(session);
+    if (changed) {
+      onStateChanged();
+    }
   }
 
   bool _ownsSaveResult(NoteSaveResult result) {

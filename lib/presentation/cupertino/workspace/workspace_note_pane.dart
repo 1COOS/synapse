@@ -32,7 +32,6 @@ final class WorkspaceNotePane extends ConsumerStatefulWidget {
 final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
   final _emptyMarkdownController = TextEditingController();
   final _editorPasteFocusNode = FocusNode();
-  final _selectedPreviewImageSrcNotifier = ValueNotifier<String?>(null);
 
   WorkspaceController get _controller => widget.controller;
   WorkspaceState get _workspace => widget.workspace;
@@ -47,7 +46,7 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
       WorkspaceAppearance.fromPreferences(_workspace.preferences);
 
   bool get _busy => _workspace.isBusy;
-  bool get _autoSaving => _controller.isAutoSaving;
+  bool get _autoSaving => _workspace.isAutoSaving;
   bool get _reloadRequired => _workspace.reloadRequired;
   SplitLeaf? get _focusedPane => _splitWorkspaceController.focusedPane;
 
@@ -56,21 +55,18 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
     return noteId == null ? null : _controller.sessionFor(noteId);
   }
 
-  Set<NoteDocumentSession> get _paneEditorCommandLocks =>
-      _controller.lockedEditorSessions;
+  Set<String> get _paneEditorCommandLocks => _workspace.lockedSessionNoteIds;
 
   WorkspaceMarkdownRenderer get _markdownRenderer => WorkspaceMarkdownRenderer(
     context: context,
     workspace: _workspace,
     controller: _controller,
-    selectedImageSrc: _selectedPreviewImageSrcNotifier,
   );
 
   @override
   void dispose() {
     _emptyMarkdownController.dispose();
     _editorPasteFocusNode.dispose();
-    _selectedPreviewImageSrcNotifier.dispose();
     super.dispose();
   }
 
@@ -176,7 +172,7 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
       behavior: HitTestBehavior.opaque,
       onTap: () => setState(() => _focusPane(pane.paneId)),
       child: ListenableBuilder(
-        listenable: session ?? _controller.editorLockRevision,
+        listenable: session ?? _emptyMarkdownController,
         builder: (context, child) {
           return DecoratedBox(
             decoration: BoxDecoration(
@@ -377,7 +373,9 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
                     controller: resolvedSession.controller,
                     enabled:
                         !_reloadRequired &&
-                        !_paneEditorCommandLocks.contains(resolvedSession),
+                        !_paneEditorCommandLocks.contains(
+                          resolvedSession.noteId,
+                        ),
                     busy: _busy || _autoSaving,
                     focused: focused,
                     onFocusPane: () {

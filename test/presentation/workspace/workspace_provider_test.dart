@@ -2,6 +2,7 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:synapse/infrastructure/bootstrap/workspace_dependencies_factory.dart';
+import 'package:synapse/infrastructure/config/vault_location_store.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
 import 'package:synapse/main.dart';
 import 'package:synapse/presentation/cupertino/workspace.dart';
@@ -11,6 +12,46 @@ import 'package:synapse/presentation/workspace/state/note_document_session.dart'
 import '../../support/workspace_fakes.dart';
 
 void main() {
+  test(
+    'workspaceSessionProvider replaces a disposed same-id session after Vault switch',
+    () async {
+      final firstVault = MemoryVaultBackend(seedExampleData: false);
+      final secondVault = MemoryVaultBackend(seedExampleData: false);
+      await firstVault.createNote(parentPath: '', title: 'Shared');
+      await secondVault.createNote(parentPath: '', title: 'Shared');
+      final container = ProviderContainer(
+        overrides: [
+          workspaceDependenciesProvider.overrideWithValue(
+            createWorkspaceDependencies(
+              initialVault: firstVault,
+              settingsStore: FakeSettingsStore(),
+              supportsDirectoryVaultOverride: true,
+              pickVaultLocation: () async =>
+                  const VaultLocation(rootPath: '/second-vault'),
+              vaultBackendFactory: (_) => secondVault,
+            ),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      await container.read(workspaceControllerProvider.future);
+      final oldSession = container.read(workspaceSessionProvider('Shared.md'));
+      expect(oldSession, isNotNull);
+
+      final result = await container
+          .read(workspaceControllerProvider.notifier)
+          .chooseVault();
+      final newSession = container.read(workspaceSessionProvider('Shared.md'));
+
+      expect(result, WorkspaceActionResult.committed);
+      expect(oldSession!.savePhase, NoteSavePhase.disposed);
+      expect(newSession, isNotNull);
+      expect(newSession, isNot(same(oldSession)));
+      expect(newSession!.savePhase, NoteSavePhase.clean);
+    },
+  );
+
   testWidgets(
     'workspace reads dependencies only from ProviderScope overrides',
     (tester) async {

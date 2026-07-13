@@ -64,7 +64,7 @@ class _SynapseWorkspaceState extends ConsumerState<SynapseWorkspace> {
   List<SearchResult> get _searchResults => _workspace.searchResults;
   Set<String> get _collapsedFolderIds => _workspace.collapsedFolderIds;
   bool get _busy => _workspace.isBusy;
-  bool get _autoSaving => _controller.isAutoSaving;
+  bool get _autoSaving => _workspace.isAutoSaving;
   bool get _reloadRequired => _workspace.reloadRequired;
   bool get _hasVault => _workspace.hasVault;
   String get _message => _workspace.message;
@@ -334,17 +334,8 @@ class _SynapseWorkspaceState extends ConsumerState<SynapseWorkspace> {
 
   Future<void> _openSettings() async {
     final controller = _controller;
-    final initialSettings = controller.hasLoadedSettingsBaseline
-        ? controller.settingsForEditing
-        : await controller.awaitSettingsForEditing();
-    if (initialSettings == null || !mounted) {
-      return;
-    }
-    final dependencies = ref.read(workspaceDependenciesProvider);
-    final store =
-        dependencies.resolvedSettingsStore() ??
-        await dependencies.settingsStore();
-    if (!mounted) {
+    final dialogModel = await controller.settingsDialogModel();
+    if (dialogModel == null || !mounted) {
       return;
     }
     final currentBusy =
@@ -359,11 +350,11 @@ class _SynapseWorkspaceState extends ConsumerState<SynapseWorkspace> {
     final saved = await showCupertinoDialog<WorkspaceSettingsValue>(
       context: context,
       builder: (context) => WorkspaceSettingsSheet(
-        initialSettings: initialSettings,
+        initialSettings: dialogModel.initialSettings,
         currentVaultLabel: _vaultRootPath ?? _vaultLabel,
-        canSave: store.supportsPersistence,
-        unavailableMessage: store.unavailableMessage,
-        onTestConfig: dependencies.testProviderConfig,
+        canSave: dialogModel.canSave,
+        unavailableMessage: dialogModel.unavailableMessage,
+        onTestConfig: controller.testProviderConfig,
       ),
     );
     if (saved != null) {

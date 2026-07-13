@@ -1,12 +1,14 @@
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:synapse/domain/vault/vault_resource.dart';
 import 'package:synapse/infrastructure/config/synapse_settings.dart';
 import 'package:synapse/infrastructure/input/image_input_service.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
+import 'package:synapse/presentation/workspace/controller/workspace_controller.dart';
 import 'package:synapse/presentation/workspace/editor/live_markdown_editor.dart';
 import 'package:synapse/presentation/workspace/editor/pane_editor_context.dart';
 import 'package:synapse/presentation/workspace/editor/preview_image_block.dart';
@@ -761,6 +763,74 @@ void main() {
 
     await mouse.removePointer();
   });
+
+  testWidgets(
+    'switching notes clears preview selection even when image src matches',
+    (tester) async {
+      final vault = MemoryVaultBackend(seedExampleData: false);
+      final alpha = await vault.createNote(parentPath: '', title: 'Alpha');
+      final beta = await vault.createNote(parentPath: '', title: 'Beta');
+      final alphaSource = await vault.addImageSource(
+        noteId: alpha.id,
+        filename: 'shared.png',
+        mimeType: 'image/png',
+        bytes: tinyPng,
+      );
+      await vault.addImageSource(
+        noteId: beta.id,
+        filename: 'shared.png',
+        mimeType: 'image/png',
+        bytes: tinyPng,
+      );
+      await vault.updateMarkdown(
+        noteId: alpha.id,
+        markdown: '# Alpha\n\n<img src="shared.png" width="360">',
+      );
+      await vault.updateMarkdown(
+        noteId: beta.id,
+        markdown: '# Beta\n\n<img src="shared.png" width="360">',
+      );
+
+      await pumpWorkspace(tester, vault: vault);
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(Key('preview-image-tap-${alphaSource.id}')));
+      await tester.pumpAndSettle();
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(PreviewImageBlock)),
+      );
+      expect(
+        container
+            .read(workspaceControllerProvider)
+            .requireValue
+            .selectedPreviewImageSrc,
+        'shared.png',
+      );
+      expect(
+        previewImageFrameBorderColor(tester, alphaSource),
+        CupertinoColors.activeBlue,
+      );
+
+      await tester.tap(find.byKey(Key('resource-row-${beta.id}')));
+      await tester.pumpAndSettle();
+
+      expect(
+        container
+            .read(workspaceControllerProvider)
+            .requireValue
+            .selectedPreviewImageSrc,
+        isNull,
+      );
+      expect(find.byType(PreviewImageBlock), findsOneWidget);
+      final currentSource = tester
+          .widget<PreviewImageBlock>(find.byType(PreviewImageBlock))
+          .source;
+      expect(
+        previewImageFrameBorderColor(tester, currentSource),
+        const Color(0xFFE5E5EA),
+      );
+    },
+  );
 
   testWidgets('updates pasted image width by dragging the preview handle', (
     tester,

@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import '../../../domain/vault/vault_resource.dart';
 import '../../../infrastructure/config/synapse_settings.dart';
 import '../../../infrastructure/config/vault_location_store.dart';
 import '../../../infrastructure/vault/vault_backend.dart';
@@ -10,6 +11,7 @@ import 'workspace_dependencies.dart';
 import 'workspace_resource_coordinator.dart';
 import 'workspace_runtime.dart';
 import 'workspace_runtime_manager.dart';
+import 'workspace_settings_dialog_model.dart';
 import 'workspace_state.dart';
 
 typedef RuntimeSnapshotInstaller =
@@ -176,6 +178,37 @@ final class WorkspaceStartupCoordinator {
     }
     _loadedSettingsBaseline ??= loaded;
     return settingsForEditing;
+  }
+
+  Future<WorkspaceSettingsDialogModel?> settingsDialogModel() async {
+    final initialSettings = hasLoadedSettingsBaseline
+        ? settingsForEditing
+        : await awaitSettingsForEditing();
+    if (initialSettings == null || isDisposed()) {
+      return null;
+    }
+    final store =
+        dependencies.resolvedSettingsStore() ??
+        await dependencies.settingsStore();
+    if (isDisposed()) {
+      return null;
+    }
+    return WorkspaceSettingsDialogModel(
+      initialSettings: initialSettings,
+      canSave: store.supportsPersistence,
+      unavailableMessage: store.unavailableMessage,
+    );
+  }
+
+  Future<String> testProviderConfig(ProviderConfig config) async {
+    if (isDisposed()) {
+      throw StateError('Workspace controller is disposed.');
+    }
+    final result = await dependencies.testProviderConfig(config);
+    if (isDisposed()) {
+      throw StateError('Workspace controller is disposed.');
+    }
+    return result;
   }
 
   Future<WorkspaceActionResult> chooseVault() async {

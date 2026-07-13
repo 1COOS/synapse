@@ -1169,6 +1169,101 @@ void main() {
       expect(observations, isNotEmpty);
       expect(observations, everyElement(isTrue));
     });
+
+    test(
+      'dispose aborts queued and in-flight mutations before commit',
+      () async {
+        final harness = _BarrierHarness();
+        addTearDown(harness.dispose);
+        final session = harness.registry.upsert(_note('A.md', 'body'));
+        final blockerStarted = Completer<void>();
+        final releaseBlocker = Completer<void>();
+        var blockerApplied = false;
+        var blockerPublished = false;
+        var queuedBackendCalls = 0;
+
+        final blocker = harness.barrier.run<void>(
+          WorkspaceMutationPlan<void>(
+            affectedNoteIds: const {},
+            dirtyDisposition: DirtyDisposition.flush,
+            commitBackend: () => _backendCommit(() async {
+              blockerStarted.complete();
+              await releaseBlocker.future;
+              return const VaultMutationDelta<void>(value: null);
+            }),
+            prepareCommit: (delta) => harness.prepareBatch(
+              delta,
+              workspace: _PreparedTestWorkspaceMutation(
+                apply: () => blockerApplied = true,
+                onPublish: () => blockerPublished = true,
+              ),
+            ),
+          ),
+        );
+        await blockerStarted.future;
+        final queuedMutation = harness.barrier.run<void>(
+          WorkspaceMutationPlan<void>(
+            affectedNoteIds: const {'A.md'},
+            dirtyDisposition: DirtyDisposition.flush,
+            commitBackend: () => _backendCommit(() async {
+              queuedBackendCalls += 1;
+              return const VaultMutationDelta<void>(value: null);
+            }),
+          ),
+        );
+        final queuedSaveCommit = harness.barrier.commitPrepared<void>(
+          () => const VaultMutationDelta<void>(value: null),
+          originatingSession: session,
+        );
+        await _drainEventQueue();
+        expect(harness.barrier.pendingSaveCommitCountForTesting, 1);
+
+        final disposedError = isA<StateError>().having(
+          (error) => error.message,
+          'message',
+          contains('disposed'),
+        );
+        final blockerExpectation = expectLater(blocker, throwsA(disposedError));
+        final queuedMutationExpectation = expectLater(
+          queuedMutation,
+          throwsA(disposedError),
+        );
+        final queuedSaveExpectation = expectLater(
+          queuedSaveCommit,
+          throwsA(disposedError),
+        );
+
+        harness.barrier.dispose();
+        harness.barrier.dispose();
+        expect(harness.barrier.pendingSaveCommitCountForTesting, 0);
+        releaseBlocker.complete();
+
+        await blockerExpectation;
+        await queuedMutationExpectation;
+        await queuedSaveExpectation;
+        expect(blockerApplied, isFalse);
+        expect(blockerPublished, isFalse);
+        expect(queuedBackendCalls, 0);
+        expect(
+          () => harness.barrier.run<void>(
+            WorkspaceMutationPlan<void>(
+              affectedNoteIds: const {},
+              dirtyDisposition: DirtyDisposition.flush,
+              commitBackend: () => _backendCommit(
+                () async => const VaultMutationDelta<void>(value: null),
+              ),
+            ),
+          ),
+          throwsA(disposedError),
+        );
+        expect(
+          () => harness.barrier.commit<void>(
+            const VaultMutationDelta<void>(value: null),
+          ),
+          throwsA(disposedError),
+        );
+      },
+    );
   });
 }
 
@@ -1231,6 +1326,7 @@ final class _Stage6BarrierHarness {
   }
 
   void dispose() {
+    barrier.dispose();
     coordinator.dispose();
     materials.dispose();
     registry.dispose();
@@ -1374,6 +1470,7 @@ final class _BarrierHarness {
   }
 
   void dispose() {
+    barrier.dispose();
     coordinator.dispose();
     materials.dispose();
     registry.dispose();
@@ -1445,6 +1542,7 @@ final class _LeaseHarness {
   late final WorkspaceMutationBarrier barrier;
 
   void dispose() {
+    barrier.dispose();
     coordinator.dispose();
     materials.dispose();
     registry.dispose();

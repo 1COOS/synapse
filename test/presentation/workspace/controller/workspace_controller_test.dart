@@ -13,6 +13,7 @@ import 'package:synapse/infrastructure/input/image_input_service.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
 import 'package:synapse/presentation/workspace/controller/workspace_controller.dart';
 import 'package:synapse/presentation/workspace/editor/pane_editor_context.dart';
+import 'package:synapse/presentation/workspace/state/note_document_session.dart';
 import 'package:synapse/presentation/workspace/state/split_workspace_controller.dart';
 
 import '../../../support/workspace_fakes.dart';
@@ -185,6 +186,8 @@ void main() {
         focusedPaneId: 'pane-1',
         sessionNoteIds: const {'Folder/Note.md'},
         savingNoteIds: const {'Folder/Note.md'},
+        lockedSessionNoteIds: const {'Folder/Note.md'},
+        isAutoSaving: true,
         collapsedFolderIds: const {'Folder'},
       );
 
@@ -206,8 +209,73 @@ void main() {
       );
       expect(() => state.sessionNoteIds.clear(), throwsUnsupportedError);
       expect(() => state.savingNoteIds.clear(), throwsUnsupportedError);
+      expect(() => state.lockedSessionNoteIds.clear(), throwsUnsupportedError);
+      expect(state.isAutoSaving, isTrue);
       expect(() => state.collapsedFolderIds.clear(), throwsUnsupportedError);
     });
+
+    test(
+      'publishes editor locks and autosave through WorkspaceState',
+      () async {
+        final vault = GatedSuccessfulUpdateVaultBackend(seedExampleData: false);
+        await vault.createNote(parentPath: '', title: 'Observable');
+        final imageInput = GatedImageInputService();
+        final container = ProviderContainer(
+          overrides: [
+            workspaceDependenciesProvider.overrideWithValue(
+              createWorkspaceDependencies(
+                initialVault: vault,
+                imageInput: imageInput,
+                settingsStore: FakeSettingsStore(
+                  initialSettings: SynapseSettings.defaults.copyWith(
+                    preferences: WorkspacePreferences.defaults.copyWith(
+                      autoSaveDelayMillis: 1,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        );
+        addTearDown(container.dispose);
+        final initial = await container.read(
+          workspaceControllerProvider.future,
+        );
+        final controller = container.read(workspaceControllerProvider.notifier);
+        final context = controller.capturePaneEditorContext(
+          initial.focusedPaneId,
+        )!;
+
+        final pasting = controller.pasteImage(context);
+        await imageInput.pasteStarted.future;
+        final locked = container.read(workspaceControllerProvider).requireValue;
+        expect(locked.lockedSessionNoteIds, {'Observable.md'});
+
+        imageInput.releasePaste();
+        expect(await pasting, PaneEditorCommandOutcome.unchanged);
+        expect(
+          container
+              .read(workspaceControllerProvider)
+              .requireValue
+              .lockedSessionNoteIds,
+          isEmpty,
+        );
+
+        vault.gateUpdates = true;
+        controller.sessionFor('Observable.md')!.controller.text =
+            '# Observable\nchanged';
+        await vault.updateStarted.future;
+        final saving = container.read(workspaceControllerProvider).requireValue;
+        expect(saving.isAutoSaving, isTrue);
+        expect(saving.savingNoteIds, {'Observable.md'});
+
+        vault.releaseUpdate();
+        await Future<void>.delayed(const Duration(milliseconds: 40));
+        final saved = container.read(workspaceControllerProvider).requireValue;
+        expect(saved.isAutoSaving, isFalse);
+        expect(saved.savingNoteIds, isEmpty);
+      },
+    );
 
     test('disposes runtime collaborators with the ProviderContainer', () async {
       final searchIndex = _RecordingSearchIndex();
@@ -231,6 +299,41 @@ void main() {
 
       expect(searchIndex.disposeCalls, 1);
     });
+
+    test(
+      'ProviderContainer dispose aborts an in-flight mutation before hydration',
+      () async {
+        final vault = _HydrationRecordingDelayedDeleteVault();
+        await vault.createNote(parentPath: '', title: 'Alpha');
+        await vault.createNote(parentPath: '', title: 'Beta');
+        final container = ProviderContainer(
+          overrides: [
+            workspaceDependenciesProvider.overrideWithValue(
+              createWorkspaceDependencies(
+                initialVault: vault,
+                settingsStore: FakeSettingsStore(),
+              ),
+            ),
+          ],
+        );
+        final initial = await container.read(
+          workspaceControllerProvider.future,
+        );
+        final controller = container.read(workspaceControllerProvider.notifier);
+        final session = controller.sessionFor('Alpha.md')!;
+        final alpha = _findResource(initial.resources, 'Alpha.md')!;
+        final deleting = controller.deleteResource(alpha);
+        await vault.deleteStarted.future;
+        final listCallsBeforeDispose = vault.listResourcesCalls;
+
+        container.dispose();
+        expect(session.savePhase, NoteSavePhase.disposed);
+        vault.completeDelete();
+
+        expect(await deleting, WorkspaceActionResult.failed);
+        expect(vault.listResourcesCalls, listCallsBeforeDispose);
+      },
+    );
 
     test('opens a selected Vault with one immutable state commit', () async {
       final vault = MemoryVaultBackend();
@@ -409,6 +512,49 @@ void main() {
         expect(controller.settingsForEditing, persistedSettings);
       },
     );
+
+    test('exposes settings dialog capability through the controller', () async {
+      const settings = SynapseSettings(
+        providerConfig: ProviderConfig(
+          baseUrl: 'https://api.example.com/v1',
+          apiKey: 'secret',
+          chatModel: 'chat-model',
+          visionModel: 'vision-model',
+          embeddingModel: 'embedding-model',
+        ),
+      );
+      final store = _UnavailableSettingsStore(settings);
+      ProviderConfig? testedConfig;
+      final container = ProviderContainer(
+        overrides: [
+          workspaceDependenciesProvider.overrideWithValue(
+            createWorkspaceDependencies(
+              initialVault: MemoryVaultBackend(),
+              settingsStore: store,
+              providerConfigTester: (config) async {
+                testedConfig = config;
+                return '连接成功';
+              },
+            ),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+      await container.read(workspaceControllerProvider.future);
+      final controller = container.read(workspaceControllerProvider.notifier);
+
+      final model = await controller.settingsDialogModel();
+
+      expect(model, isNotNull);
+      expect(model!.initialSettings, settings);
+      expect(model.canSave, isFalse);
+      expect(model.unavailableMessage, '当前平台不支持保存设置');
+      expect(
+        await controller.testProviderConfig(settings.providerConfig),
+        '连接成功',
+      );
+      expect(testedConfig, settings.providerConfig);
+    });
 
     test('selects resources and retains previously opened sessions', () async {
       final vault = MemoryVaultBackend();
@@ -993,10 +1139,46 @@ final class _GatedSettingsStore implements SettingsStore {
   Future<bool> vaultExists(location) async => true;
 }
 
+final class _UnavailableSettingsStore implements SettingsStore {
+  _UnavailableSettingsStore(this.settings);
+
+  final SynapseSettings settings;
+
+  @override
+  bool get supportsPersistence => false;
+
+  @override
+  String get unavailableMessage => '当前平台不支持保存设置';
+
+  @override
+  Future<SynapseSettings> load() async => settings;
+
+  @override
+  Future<void> save(SynapseSettings settings) async {
+    throw UnsupportedError(unavailableMessage);
+  }
+
+  @override
+  Future<bool> vaultExists(VaultLocation location) async => false;
+}
+
 final class _ThrowingListVaultBackend extends MemoryVaultBackend {
   @override
   Future<List<VaultResourceNode>> listResources() async {
     throw StateError('resource load failed');
+  }
+}
+
+final class _HydrationRecordingDelayedDeleteVault
+    extends DelayedDeleteNoteVaultBackend {
+  _HydrationRecordingDelayedDeleteVault() : super(seedExampleData: false);
+
+  int listResourcesCalls = 0;
+
+  @override
+  Future<List<VaultResourceNode>> listResources() {
+    listResourcesCalls += 1;
+    return super.listResources();
   }
 }
 

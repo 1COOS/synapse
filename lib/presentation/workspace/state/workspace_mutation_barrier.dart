@@ -89,6 +89,9 @@ final class WorkspaceMutationBarrier {
       Map<NoteDocumentSession, int>.identity();
   final List<_PendingSaveCommit> _pendingSaveCommits = <_PendingSaveCommit>[];
   WorkspaceCommitInvariantError? _fatalError;
+  bool _isDisposed = false;
+  StateError? _disposedError;
+  StackTrace? _disposedStackTrace;
 
   WorkspaceCommitInvariantError? get fatalError => _fatalError;
 
@@ -100,11 +103,12 @@ final class WorkspaceMutationBarrier {
     final pending = List<_PendingSaveCommit>.of(_pendingSaveCommits);
     _pendingSaveCommits.clear();
     for (final commit in pending) {
-      commit.abort(fatalError);
+      commit.abort(fatalError, fatalError.causeStackTrace);
     }
   }
 
   void resetAfterReload() {
+    _throwIfDisposed();
     if (_pendingSaveCommits.isNotEmpty) {
       throw StateError(
         'Cannot reset the workspace mutation barrier while save commits are pending.',
@@ -114,13 +118,14 @@ final class WorkspaceMutationBarrier {
   }
 
   Future<WorkspaceMutationResult<T>> run<T>(WorkspaceMutationPlan<T> plan) {
+    _throwIfUnavailable();
     final reservedSessions = _sessions
         .sessionsForIds(plan.affectedNoteIds)
         .toList(growable: false);
     _reserveSessions(reservedSessions);
     return _synchronized(() async {
       try {
-        _throwIfFatal(reservedSessions);
+        _throwIfUnavailable(reservedSessions);
         final affectedSessions = _captureAffectedSessions(
           plan.affectedNoteIds,
           reservedSessions,
@@ -128,19 +133,19 @@ final class WorkspaceMutationBarrier {
         _activeSessions.addAll(affectedSessions);
         try {
           await _drainPendingSaveCommits(affectedSessions);
-          _throwIfFatal(affectedSessions);
+          _throwIfUnavailable(affectedSessions);
           final lease = await _saveCoordinator.acquireQuiescence(
             affectedSessions,
             disposition: plan.dirtyDisposition,
           );
           try {
-            _throwIfFatal(affectedSessions);
+            _throwIfUnavailable(affectedSessions);
             if (plan.dirtyDisposition == DirtyDisposition.flush &&
                 !lease.report.succeeded) {
               return AbortedByFlush<T>(lease.report);
             }
 
-            _throwIfFatal(affectedSessions);
+            _throwIfUnavailable(affectedSessions);
             late final WorkspaceBackendCommit<T> backendCommit;
             try {
               backendCommit = await plan.commitBackend();
@@ -153,6 +158,7 @@ final class WorkspaceMutationBarrier {
             } catch (error, stackTrace) {
               return BackendFailed<T>(error: error, stackTrace: stackTrace);
             }
+            _throwIfDisposed();
 
             late final VaultMutationDelta<T> delta;
             try {
@@ -160,6 +166,7 @@ final class WorkspaceMutationBarrier {
             } catch (error, stackTrace) {
               _throwInvariant(WorkspaceCommitPhase.hydrate, error, stackTrace);
             }
+            _throwIfDisposed();
 
             return _commitAfterBackend(
               delta,
@@ -194,7 +201,7 @@ final class WorkspaceMutationBarrier {
     prepareCommit,
     NoteDocumentSession? originatingSession,
   }) {
-    _throwIfFatal();
+    _throwIfUnavailable();
     if (originatingSession != null &&
         _activeSessions.contains(originatingSession)) {
       return _prepareCommittedDelta(
@@ -208,9 +215,9 @@ final class WorkspaceMutationBarrier {
       _pendingSaveCommits.add(
         _PendingSaveCommit(
           originatingSession: originatingSession,
-          abort: (error) {
+          abort: (error, stackTrace) {
             if (!completer.isCompleted) {
-              completer.completeError(error, error.causeStackTrace);
+              completer.completeError(error, stackTrace);
             }
           },
           apply: () async {
@@ -242,13 +249,14 @@ final class WorkspaceMutationBarrier {
     FutureOr<VaultMutationDelta<T>> Function() prepare,
     WorkspaceCommitBatch<T> Function(VaultMutationDelta<T> delta) prepareCommit,
   ) async {
-    _throwIfFatal();
+    _throwIfUnavailable();
     late final VaultMutationDelta<T> delta;
     try {
       delta = await prepare();
     } catch (error, stackTrace) {
       _throwInvariant(WorkspaceCommitPhase.hydrate, error, stackTrace);
     }
+    _throwIfDisposed();
     return _commitAfterBackend(delta, prepareCommit);
   }
 
@@ -256,6 +264,7 @@ final class WorkspaceMutationBarrier {
     VaultMutationDelta<T> delta,
     WorkspaceCommitBatch<T> Function(VaultMutationDelta<T> delta) prepareCommit,
   ) {
+    _throwIfDisposed();
     late final WorkspaceCommitBatch<T> batch;
     try {
       batch = prepareCommit(delta);
@@ -263,11 +272,13 @@ final class WorkspaceMutationBarrier {
     } catch (error, stackTrace) {
       _throwInvariant(WorkspaceCommitPhase.prepare, error, stackTrace);
     }
+    _throwIfDisposed();
     try {
       batch.applySilently();
     } catch (error, stackTrace) {
       _throwInvariant(WorkspaceCommitPhase.apply, error, stackTrace);
     }
+    _throwIfDisposed();
     try {
       batch.publish();
     } catch (error, stackTrace) {
@@ -303,6 +314,23 @@ final class WorkspaceMutationBarrier {
     }
   }
 
+  void _throwIfUnavailable([
+    Iterable<NoteDocumentSession> pendingSessions = const [],
+  ]) {
+    _throwIfDisposed();
+    _throwIfFatal(pendingSessions);
+  }
+
+  void _throwIfDisposed() {
+    final disposedError = _disposedError;
+    if (_isDisposed && disposedError != null) {
+      Error.throwWithStackTrace(
+        disposedError,
+        _disposedStackTrace ?? StackTrace.current,
+      );
+    }
+  }
+
   void _abortPendingSaveCommits(
     WorkspaceCommitInvariantError error,
     Iterable<NoteDocumentSession> sessions,
@@ -317,7 +345,7 @@ final class WorkspaceMutationBarrier {
         continue;
       }
       _pendingSaveCommits.removeAt(index);
-      pending.abort(error);
+      pending.abort(error, error.causeStackTrace);
     }
   }
 
@@ -417,6 +445,22 @@ final class WorkspaceMutationBarrier {
       release.complete();
     }
   }
+
+  void dispose() {
+    if (_isDisposed) {
+      return;
+    }
+    _isDisposed = true;
+    final error = StateError('Workspace mutation barrier is disposed.');
+    final stackTrace = StackTrace.current;
+    _disposedError = error;
+    _disposedStackTrace = stackTrace;
+    final pending = List<_PendingSaveCommit>.of(_pendingSaveCommits);
+    _pendingSaveCommits.clear();
+    for (final commit in pending) {
+      commit.abort(error, stackTrace);
+    }
+  }
 }
 
 final class _PendingSaveCommit {
@@ -427,6 +471,6 @@ final class _PendingSaveCommit {
   });
 
   final NoteDocumentSession originatingSession;
-  final void Function(WorkspaceCommitInvariantError error) abort;
+  final void Function(Object error, StackTrace stackTrace) abort;
   final Future<void> Function() apply;
 }

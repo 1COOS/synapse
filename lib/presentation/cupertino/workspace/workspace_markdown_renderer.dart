@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/cupertino.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:path/path.dart' as p;
 
@@ -20,13 +21,11 @@ final class WorkspaceMarkdownRenderer {
     required this.context,
     required this.workspace,
     required this.controller,
-    required this.selectedImageSrc,
   });
 
   final BuildContext context;
   final WorkspaceState workspace;
   final WorkspaceController controller;
-  final ValueNotifier<String?> selectedImageSrc;
 
   WorkspaceAppearance get _appearance =>
       WorkspaceAppearance.fromPreferences(workspace.preferences);
@@ -226,55 +225,62 @@ final class WorkspaceMarkdownRenderer {
     final width = clampImageWidth(
       (config.width ?? defaultMarkdownImageWidth.toDouble()).round(),
     ).toDouble();
-    return ValueListenableBuilder<int>(
-      valueListenable: controller.editorLockRevision,
-      builder: (context, revision, child) => PreviewImageBlock(
-        key: Key('preview-image-${source.id}'),
-        source: source,
-        src: src,
-        width: width,
-        editableControls:
-            mode == ImagePreviewMode.editing &&
-            !_contextIsLocked(editorContext),
-        selectedImageSrc: selectedImageSrc,
-        imageBytes: controller.readSourceAttachment(source),
-        onTap: () {
-          if (mode != ImagePreviewMode.editing ||
-              controller.resolvePaneEditorContext(editorContext) == null) {
-            return;
-          }
-          onImageTap?.call();
-          _setSelectedPreviewImageSrc(src);
-        },
-        onWidthChanged: (value) {
-          if (_contextIsLocked(editorContext)) {
-            return;
-          }
-          unawaited(
-            _applyImageWidth(
-              editorContext,
-              sourceId: source.id,
-              src: src,
-              width: clampImageWidth(value.round()),
-            ),
-          );
-        },
-        onImageDropped: (dragged, target, side) {
-          if (_contextIsLocked(editorContext)) {
-            return;
-          }
-          unawaited(
-            _applyImageDrop(
-              editorContext,
-              draggedSourceId: dragged.sourceId,
-              draggedSrc: dragged.src,
-              targetSourceId: target.sourceId,
-              targetSrc: target.src,
-              beforeTarget: side == ImageDropSide.before,
-            ),
-          );
-        },
-      ),
+    return Consumer(
+      builder: (context, ref, child) {
+        final currentWorkspace =
+            ref.watch(workspaceControllerProvider).value ?? workspace;
+        final noteId = controller
+            .resolvePaneEditorContext(editorContext)
+            ?.noteId;
+        final locked =
+            noteId != null &&
+            currentWorkspace.lockedSessionNoteIds.contains(noteId);
+        return PreviewImageBlock(
+          key: Key('preview-image-${source.id}'),
+          source: source,
+          src: src,
+          width: width,
+          editableControls: mode == ImagePreviewMode.editing && !locked,
+          selectedImageSrc: currentWorkspace.selectedPreviewImageSrc,
+          imageBytes: controller.readSourceAttachment(source),
+          onTap: () {
+            if (mode != ImagePreviewMode.editing ||
+                controller.resolvePaneEditorContext(editorContext) == null) {
+              return;
+            }
+            onImageTap?.call();
+            _setSelectedPreviewImageSrc(src);
+          },
+          onWidthChanged: (value) {
+            if (controller.isPaneEditorContextLocked(editorContext)) {
+              return;
+            }
+            unawaited(
+              _applyImageWidth(
+                editorContext,
+                sourceId: source.id,
+                src: src,
+                width: clampImageWidth(value.round()),
+              ),
+            );
+          },
+          onImageDropped: (dragged, target, side) {
+            if (controller.isPaneEditorContextLocked(editorContext)) {
+              return;
+            }
+            unawaited(
+              _applyImageDrop(
+                editorContext,
+                draggedSourceId: dragged.sourceId,
+                draggedSrc: dragged.src,
+                targetSourceId: target.sourceId,
+                targetSrc: target.src,
+                beforeTarget: side == ImageDropSide.before,
+              ),
+            );
+          },
+        );
+      },
     );
   }
 
@@ -294,7 +300,7 @@ final class WorkspaceMarkdownRenderer {
     if (resolved == null) {
       return PaneEditorCommandOutcome.staleTarget;
     }
-    if (controller.lockedEditorSessions.contains(resolved.session)) {
+    if (controller.isPaneEditorContextLocked(context)) {
       return PaneEditorCommandOutcome.unchanged;
     }
     if (_sourceForId(resolved.session, draggedSourceId) == null ||
@@ -315,7 +321,7 @@ final class WorkspaceMarkdownRenderer {
     if (resolved == null) {
       return PaneEditorCommandOutcome.staleTarget;
     }
-    if (controller.lockedEditorSessions.contains(resolved.session)) {
+    if (controller.isPaneEditorContextLocked(context)) {
       return PaneEditorCommandOutcome.unchanged;
     }
     if (_sourceForId(resolved.session, draggedSourceId) == null ||
@@ -344,7 +350,7 @@ final class WorkspaceMarkdownRenderer {
     if (resolved == null) {
       return PaneEditorCommandOutcome.staleTarget;
     }
-    if (controller.lockedEditorSessions.contains(resolved.session)) {
+    if (controller.isPaneEditorContextLocked(context)) {
       return PaneEditorCommandOutcome.unchanged;
     }
     if (_sourceForId(resolved.session, sourceId) == null) {
@@ -363,7 +369,7 @@ final class WorkspaceMarkdownRenderer {
     if (resolved == null) {
       return PaneEditorCommandOutcome.staleTarget;
     }
-    if (controller.lockedEditorSessions.contains(resolved.session)) {
+    if (controller.isPaneEditorContextLocked(context)) {
       return PaneEditorCommandOutcome.unchanged;
     }
     if (_sourceForId(resolved.session, sourceId) == null) {
@@ -450,14 +456,10 @@ final class WorkspaceMarkdownRenderer {
     return titleFallback;
   }
 
-  bool _contextIsLocked(PaneEditorContext context) {
-    return controller.lockedEditorSessions.any(
-      (session) => identical(session, context.sessionIdentity),
-    );
-  }
-
   void _setSelectedPreviewImageSrc(String? src) {
-    selectedImageSrc.value = src == null ? null : normalizeImageSrc(src);
+    controller.setSelectedPreviewImageSrc(
+      src == null ? null : normalizeImageSrc(src),
+    );
   }
 
   void _replaceSessionMarkdown(NoteDocumentSession session, String markdown) {

@@ -88,7 +88,7 @@ final class WorkspaceChromeTitlebar extends StatelessWidget {
             key: const Key('settings-button'),
             label: '设置',
             icon: CupertinoIcons.gear,
-            onPressed: workspace.isBusy || controller.isAutoSaving
+            onPressed: workspace.isBusy || workspace.isAutoSaving
                 ? null
                 : onOpenSettings,
           ),
@@ -151,7 +151,7 @@ final class WorkspaceChromeTitlebar extends StatelessWidget {
 
   Widget _buildCenterTitlebar() {
     final controlsDisabled =
-        workspace.isBusy || controller.isAutoSaving || !workspace.hasVault;
+        workspace.isBusy || workspace.isAutoSaving || !workspace.hasVault;
     return WorkspaceTitlebarStrip(
       child: Row(
         mainAxisAlignment: MainAxisAlignment.end,

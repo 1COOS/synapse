@@ -43,6 +43,8 @@ final class WorkspaceState {
     this.vaultLabel = '',
     this.vaultRoot,
     Set<String> savingNoteIds = const {},
+    Set<String> lockedSessionNoteIds = const {},
+    this.isAutoSaving = false,
     this.activeOperation,
     this.message = '',
     this.reloadRequired = false,
@@ -57,6 +59,7 @@ final class WorkspaceState {
        materials = Map<String, NoteMaterialsSnapshot>.unmodifiable(materials),
        sessionNoteIds = Set<String>.unmodifiable(sessionNoteIds),
        savingNoteIds = Set<String>.unmodifiable(savingNoteIds),
+       lockedSessionNoteIds = Set<String>.unmodifiable(lockedSessionNoteIds),
        collapsedFolderIds = Set<String>.unmodifiable(collapsedFolderIds);
 
   final WorkspacePhase phase;
@@ -77,6 +80,8 @@ final class WorkspaceState {
   final String vaultLabel;
   final String? vaultRoot;
   final Set<String> savingNoteIds;
+  final Set<String> lockedSessionNoteIds;
+  final bool isAutoSaving;
   final WorkspaceOperation? activeOperation;
   final String message;
   final bool reloadRequired;
@@ -111,6 +116,8 @@ final class WorkspaceState {
     String? vaultLabel,
     Object? vaultRoot = _unset,
     Set<String>? savingNoteIds,
+    Set<String>? lockedSessionNoteIds,
+    bool? isAutoSaving,
     Object? activeOperation = _unset,
     String? message,
     bool? reloadRequired,
@@ -138,6 +145,8 @@ final class WorkspaceState {
           ? this.vaultRoot
           : vaultRoot as String?,
       savingNoteIds: savingNoteIds ?? this.savingNoteIds,
+      lockedSessionNoteIds: lockedSessionNoteIds ?? this.lockedSessionNoteIds,
+      isAutoSaving: isAutoSaving ?? this.isAutoSaving,
       activeOperation: identical(activeOperation, _unset)
           ? this.activeOperation
           : activeOperation as WorkspaceOperation?,

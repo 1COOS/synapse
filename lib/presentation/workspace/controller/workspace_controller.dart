@@ -22,11 +22,13 @@ import 'workspace_editor_coordinator.dart';
 import 'workspace_editor_operation_coordinator.dart';
 import 'workspace_resource_coordinator.dart';
 import 'workspace_runtime_manager.dart';
+import 'workspace_settings_dialog_model.dart';
 import 'workspace_startup_coordinator.dart';
 import 'workspace_state.dart';
 import 'workspace_state_commit_coordinator.dart';
 
 export 'workspace_state.dart';
+export 'workspace_settings_dialog_model.dart';
 
 final workspaceDependenciesProvider = Provider<WorkspaceDependencies>((ref) {
   throw StateError('WorkspaceDependencies must be provided by ProviderScope.');
@@ -41,11 +43,7 @@ final workspaceSessionProvider = Provider.family<NoteDocumentSession?, String>((
   ref,
   noteId,
 ) {
-  ref.watch(
-    workspaceControllerProvider.select(
-      (value) => value.value?.sessionNoteIds.contains(noteId) ?? false,
-    ),
-  );
+  ref.watch(workspaceControllerProvider);
   return ref.read(workspaceControllerProvider.notifier).sessionFor(noteId);
 });
 
@@ -144,6 +142,7 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
       endOperation: _endOperation,
       setMessage: _setMessage,
       reloadRequired: () => _reloadRequired,
+      onStateChanged: _publishCollaboratorSnapshot,
     );
     _startup = WorkspaceStartupCoordinator(
       dependencies: _dependencies,
@@ -222,6 +221,12 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
   Future<SynapseSettings?> awaitSettingsForEditing() =>
       _startup.awaitSettingsForEditing();
 
+  Future<WorkspaceSettingsDialogModel?> settingsDialogModel() =>
+      _startup.settingsDialogModel();
+
+  Future<String> testProviderConfig(ProviderConfig config) =>
+      _startup.testProviderConfig(config);
+
   void setPaneMode(String paneId, NoteMode mode) {
     _splits.setPaneMode(paneId, mode);
     _publishCollaboratorSnapshot();
@@ -265,6 +270,13 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
       collapsed.remove(folderId);
     }
     _publish(current.copyWith(collapsedFolderIds: collapsed));
+  }
+
+  void setSelectedPreviewImageSrc(String? src) {
+    final current = _requireState();
+    if (current.selectedPreviewImageSrc != src) {
+      _publish(current.copyWith(selectedPreviewImageSrc: src));
+    }
   }
 
   String splitFocused(SplitDirection direction) {
@@ -545,12 +557,11 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
     );
   }
 
-  Set<NoteDocumentSession> get lockedEditorSessions =>
-      _editorOperations.lockedSessions;
-
-  ValueListenable<int> get editorLockRevision => _editorOperations.lockRevision;
-
-  bool get isAutoSaving => _saves.isAutoSaving;
+  bool isPaneEditorContextLocked(editor_context.PaneEditorContext context) {
+    final resolved = resolvePaneEditorContext(context);
+    return resolved != null &&
+        _editorOperations.lockedNoteIds.contains(resolved.noteId);
+  }
 
   Future<editor_context.PaneEditorCommandOutcome> importImage(
     editor_context.PaneEditorContext? context,
@@ -804,6 +815,8 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
         for (final session in _sessions.sessions)
           if (session.savePhase == NoteSavePhase.saving) session.noteId,
       },
+      lockedSessionNoteIds: _editorOperations.lockedNoteIds,
+      isAutoSaving: _saves.isAutoSaving,
       message: message,
       reloadRequired: _reloadRequired,
     );
@@ -838,6 +851,8 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
           for (final session in _sessions.sessions)
             if (session.savePhase == NoteSavePhase.saving) session.noteId,
         },
+        lockedSessionNoteIds: _editorOperations.lockedNoteIds,
+        isAutoSaving: _saves.isAutoSaving,
         activeOperation: current.activeOperation,
         message: current.message,
         reloadRequired: _reloadRequired,
@@ -964,13 +979,14 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
       return;
     }
     _isDisposed = true;
+    _mutations.dispose();
     _startup.dispose();
+    _editorOperations.dispose();
     _runtimeManager.dispose();
     _saves.dispose();
     _materials.dispose();
     _sessions.dispose();
     _splits.dispose();
-    _editorOperations.dispose();
   }
 }
 
