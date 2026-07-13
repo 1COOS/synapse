@@ -5,7 +5,7 @@
 **Initial documentation checkpoint：** `92d5576`
 **Review clarification commit：** `d4c5310`
 
-**Latest completed code stage：** test threshold follow-up `30f5fe9`；全部代码阶段已完成，Final local gate pending
+**Latest completed code stage：** test threshold follow-up `30f5fe9`；全部代码阶段已完成，Final local gate blocked/pending external signing
 
 > Foundation baseline 捕获时，分支相对 `main` 有 15 个实现提交。该数字只描述 baseline 捕获时点，不声明后续分支的固定提交总数。
 
@@ -23,7 +23,7 @@
 
 **Test threshold follow-up：** commit `30f5fe9`；9 个超长文件拆为 25 个，保留 248 tests 等价覆盖，最大文件 869 行。
 
-**代码基线与文档 checkpoints：** 代码基线 `30f5fe9` 相对 `main` 为 81 commits；文档 checkpoints 为 `0fce068`、`ae61ca5`。`flutter test --no-pub` 587/587，`flutter analyze --no-pub` 无 issue；`workspace.dart` 756 行，`WorkspaceController` 1018 行，File facade 228 行，Memory facade 184 行。代码阶段规格与质量审查均 PASS；最终本地 macOS gate 尚未执行。
+**Final local gate checkpoint（2026-07-14）：** `dart format` 162 files、0 changed，`flutter test --no-pub` 587/587，`flutter analyze --no-pub` 无 issue，`git diff --check` PASS，执行前 worktree clean。原始 `xcodebuild test`、Debug build 与 Release build 均因 Runner entitlements 需要 Apple Development certificate 而失败；Release app 未生成，因此无法完成 codesign entitlement inspection。关闭签名的辅助 `xcodebuild test` 通过 RunnerTests 3/3，但不能替代 production gate。代码与 unsigned native tests 已通过；strict final local production gate 仍被外部 Apple Development certificate/Team 阻塞。
 
 **目标：** 在已完成的 session/save/split/mutation foundation 上，拆分长文件、收敛状态所有权、绑定异步编辑目标，并完成 macOS 生产安全与本地发布门禁。
 
@@ -72,7 +72,7 @@ Foundation 验证证据：
 
 ## 执行记录与剩余 Gate
 
-以下代码阶段已依次完成。每个状态切片迁移时，同一提交内删除旧状态源，禁止 UI/controller 双写；当前仅剩 Final local gate。
+以下代码阶段已依次完成。每个状态切片迁移时，同一提交内删除旧状态源，禁止 UI/controller 双写；当前仅剩被外部签名前置条件阻塞的 Final local gate。
 
 ### 阶段 1：Test split
 
@@ -220,21 +220,40 @@ Commit：`fix: bind pane async mutations to stable context`。
 
 ### 阶段 11：Final local gate
 
-**状态：pending。** 尚未执行，不得提前宣称 macOS production gate 已通过。
+**状态：blocked/pending external signing。** 2026-07-14 已执行本机门禁；代码验证和 unsigned native tests 通过，但 strict production gate 因本机缺少有效 Apple Development certificate/Team 而未通过。不得宣称 complete、merge-ready 或 mergeable。
 
-更新架构、平台和开发文档后，按以下顺序运行：
+实测结果：
+
+| 检查 | 结果 |
+|---|---|
+| `dart format --output=none --set-exit-if-changed lib test` | PASS：162 files，0 changed |
+| `flutter test --no-pub` | PASS：587/587 |
+| `flutter analyze --no-pub` | PASS：No issues |
+| `xcodebuild test -project macos/Runner.xcodeproj -scheme Runner -destination 'platform=macOS'` | FAIL：exit 65；Runner entitlements require signing with a development certificate |
+| `flutter build macos --debug --no-pub` | FAIL：同一 signing error |
+| `flutter build macos --release --no-pub` | FAIL：同一 signing error |
+| `codesign -d --entitlements :- build/macos/Build/Products/Release/synapse.app` | BLOCKED：Release app 不存在，未能执行 inspection |
+| `git diff --check` | PASS |
+| `git status --short --branch` | clean |
+
+辅助验证：
 
 ```bash
-dart format --output=none --set-exit-if-changed lib test
-flutter test --no-pub
-flutter analyze --no-pub
+xcodebuild test -project macos/Runner.xcodeproj -scheme Runner -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO
+```
+
+该命令 PASS，RunnerTests 3/3；它只证明 unsigned native tests 通过，不能替代 production gate，也不能消除原始签名命令的失败。
+
+在 Xcode 配置有效 certificate/team 后，必须重跑以下四项原始检查：
+
+```bash
 xcodebuild test -project macos/Runner.xcodeproj -scheme Runner -destination 'platform=macOS'
 flutter build macos --debug --no-pub
 flutter build macos --release --no-pub
 codesign -d --entitlements :- build/macos/Build/Products/Release/synapse.app
-git diff --check
-git status --short --branch
 ```
+
+仅当这四项均通过并记录 Release entitlement 后，才能把分支状态更新为 mergeable。
 
 最终审查：
 
@@ -243,7 +262,7 @@ git status --short --branch
 - 无 timer/runtime/lease 泄漏。
 - 无重复状态源或 revision counters。
 - commitBackend/postCommitHydrate/prepare/apply/publish 契约和故障注入测试全部覆盖。
-- 输出分支可合并报告；不自动 merge 或 push `main`。
+- 当前输出 signing blocker 报告；签名门禁通过后再输出分支可合并报告。不自动 merge 或 push `main`。
 
 ## 执行约束
 

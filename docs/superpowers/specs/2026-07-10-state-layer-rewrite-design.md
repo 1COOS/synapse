@@ -1,7 +1,7 @@
 # Synapse macOS 生产化与状态层重写设计
 
 **日期：** 2026-07-10
-**状态：** 代码阶段全部完成；最终本地 macOS production gate pending
+**状态：** 代码阶段全部完成；最终本地 macOS production gate blocked/pending external signing
 **目标分支：** `codex/state-layer-rewrite`
 **Foundation implementation baseline：** `3cc85d9c9b3e54920a98b91e8d1fc69b76b08ac9`
 **Initial documentation checkpoint：** `92d5576`
@@ -19,7 +19,7 @@
 
 **测试长文件 follow-up：** commit `30f5fe9`；9 个超长文件拆成 25 个，保留 248 tests 等价覆盖，最大文件 869 行。
 
-**代码基线与文档 checkpoints：** 代码基线 `30f5fe9` 相对 `main` 为 81 commits；文档 checkpoints 为 `0fce068`、`ae61ca5`。`flutter test --no-pub` 587/587，`flutter analyze --no-pub` 无 issue。`workspace.dart` 756 行，`WorkspaceController` 1018 行，File facade 228 行，Memory facade 184 行。以上测试与行数为代码阶段基线，不代表最终本地 macOS gate 已执行。
+**Final local gate checkpoint（2026-07-14）：** `dart format` 162 files、0 changed，`flutter test --no-pub` 587/587，`flutter analyze --no-pub` 无 issue，`git diff --check` PASS，执行前 worktree clean。原始 `xcodebuild test`、Debug build 与 Release build 均因 Runner entitlements 需要 Apple Development certificate 而失败；Release app 未生成，codesign entitlement inspection 因此未完成。关闭签名的辅助 `xcodebuild test` 通过 RunnerTests 3/3，但不能替代 production gate。代码与 unsigned native tests 已通过；strict final local production gate 仍被外部 Apple Development certificate/Team 阻塞。
 
 > Foundation baseline 捕获时，分支相对 `main` 有 15 个实现提交，任务 1-5 的 session/save/split/mutation foundation 已完成。该 baseline 的 fresh evidence 为状态层 65 tests pass、workspace 140 tests pass，共 205 tests pass，`flutter analyze --no-pub` 无 issue，`git diff --check` clean。提交数量仅描述 baseline 捕获时点，不作为后续分支总提交数。
 
@@ -504,7 +504,7 @@ Picker 不得在旧 session flush 之前释放旧 security scope。
 
 ## 11. 迁移顺序
 
-Foundation 与后续代码阶段均已完成，最终只剩本地 production gate：
+Foundation 与后续代码阶段均已完成，最终只剩被外部签名前置条件阻塞的本地 production gate：
 
 1. test split（已完成）；
 2. UI leaf split（已完成）；
@@ -516,11 +516,11 @@ Foundation 与后续代码阶段均已完成，最终只剩本地 production gat
 8. Keychain fail-closed（已完成，`34725ad..a50f229`）；
 9. tokenized Vault lease（已完成，`1bf1d51..7b0e822`）；
 10. backend split（已完成，`2b23026..9455287`）；
-11. final local gate（pending）。
+11. final local gate（blocked/pending external signing）。
 
 测试阈值 follow-up 已由 `30f5fe9` 完成，不改变上述生产阶段编号。
 
-本轮不新增 GitHub Actions workflow；最终生产门禁将在本地按顺序执行，包含 `dart format --output=none --set-exit-if-changed lib test`，当前仍为 pending。
+本轮不新增 GitHub Actions workflow。2026-07-14 本机实测中，Dart format、587/587 Flutter tests、analyze、diff check 与 unsigned RunnerTests 3/3 均通过；原始 `xcodebuild test`、Debug build、Release build 因缺少有效 Apple Development certificate/Team 失败，Release app 未生成，因而无法检查实际 codesign entitlement。unsigned native tests 不替代 production gate；在 Xcode 配置有效 certificate/team 后，必须重跑原始 `xcodebuild test`、Debug build、Release build 和 codesign inspection，四项全部通过后才能更新为 mergeable。
 
 ## 12. 长文件治理
 
