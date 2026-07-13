@@ -21,6 +21,7 @@ final class FileVaultProposalStore {
   final Future<List<AiProposal>> Function(String noteId) listProposalsCallback;
 
   Future<AiProposal> saveProposal(AiProposal proposal) async {
+    await paths.ensureSafePath(paths.proposalsFile(proposal.noteId).path);
     final proposals = await listProposalsCallback(proposal.noteId);
     return runVaultPostCommit(() async {
       await writeProposals(proposal.noteId, [
@@ -49,6 +50,7 @@ final class FileVaultProposalStore {
   }
 
   Future<AiProposal> updateProposal(AiProposal proposal) async {
+    await paths.ensureSafePath(paths.proposalsFile(proposal.noteId).path);
     final proposals = await listProposalsCallback(proposal.noteId);
     return runVaultPostCommit(() async {
       await writeProposals(proposal.noteId, [
@@ -65,6 +67,7 @@ final class FileVaultProposalStore {
       throw StateError('Proposal not found: $proposalId');
     }
     final (noteId, proposal) = match;
+    await paths.ensureSafePath(paths.proposalsFile(noteId).path);
     final proposals = await listProposalsCallback(noteId);
     final updated = proposals.where((item) => item.id != proposal.id).toList();
     await runVaultPostCommit(() => writeProposals(noteId, updated));
@@ -72,10 +75,10 @@ final class FileVaultProposalStore {
 
   Future<List<AiProposal>> readProposalsFile(String noteId) async {
     final file = paths.proposalsFile(noteId);
-    if (!await file.exists()) {
+    if (!await operations.fileExists(file)) {
       return const [];
     }
-    return (jsonDecode(await file.readAsString()) as List<Object?>)
+    return (jsonDecode(await operations.readFileString(file)) as List<Object?>)
         .map(
           (item) => AiProposal.fromJson((item as Map).cast<String, Object?>()),
         )
@@ -84,7 +87,8 @@ final class FileVaultProposalStore {
 
   Future<void> writeProposals(String noteId, List<AiProposal> proposals) async {
     final file = paths.proposalsFile(noteId);
-    await file.parent.create(recursive: true);
+    await paths.ensureSafePath(file.path);
+    await operations.createDirectory(file.parent, recursive: true);
     await operations.writeFileString(
       file,
       const JsonEncoder.withIndent(
@@ -95,7 +99,8 @@ final class FileVaultProposalStore {
 
   Future<void> rewriteMoved(String noteId) async {
     final proposals = await readProposalsFile(noteId);
-    if (proposals.isNotEmpty || await paths.proposalsFile(noteId).exists()) {
+    if (proposals.isNotEmpty ||
+        await operations.fileExists(paths.proposalsFile(noteId))) {
       await writeProposals(noteId, [
         for (final proposal in proposals) proposal.copyWith(noteId: noteId),
       ]);
@@ -108,7 +113,8 @@ final class FileVaultProposalStore {
     DateTime now,
   ) async {
     final proposals = await readProposalsFile(noteId);
-    if (proposals.isNotEmpty || await paths.proposalsFile(noteId).exists()) {
+    if (proposals.isNotEmpty ||
+        await operations.fileExists(paths.proposalsFile(noteId))) {
       await writeProposals(noteId, [
         for (final proposal in proposals)
           AiProposal(

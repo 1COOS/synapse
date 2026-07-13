@@ -97,7 +97,7 @@ final class FileVaultPaths {
           p.normalize(candidate.path),
           p.normalize(excludePath ?? ''),
         ) &&
-        await candidate.exists()) {
+        await _entityExists(candidate)) {
       candidate = Directory(p.join(parent.path, '$base $suffix'));
       suffix += 1;
     }
@@ -116,8 +116,10 @@ final class FileVaultPaths {
           p.normalize(candidate.path),
           p.normalize(excludePath ?? ''),
         ) &&
-        (await candidate.exists() ||
-            await Directory(assetsDirectoryPathForFile(candidate)).exists())) {
+        (await _entityExists(candidate) ||
+            await _entityExists(
+              Directory(assetsDirectoryPathForFile(candidate)),
+            ))) {
       candidate = File(p.join(parent.path, '$base $suffix.md'));
       suffix += 1;
     }
@@ -135,7 +137,7 @@ final class FileVaultPaths {
           ? '$base$extension'
           : '$base-$index$extension';
       final relative = p.join('attachments', filename).replaceAll('\\', '/');
-      if (!await File(p.join(assetsPath, relative)).exists()) {
+      if (!await _entityExists(File(p.join(assetsPath, relative)))) {
         return relative;
       }
       index += 1;
@@ -143,10 +145,70 @@ final class FileVaultPaths {
   }
 
   void _ensureWithinRoot(String path, String message) {
-    final rootPath = p.normalize(root.path);
-    final normalized = p.normalize(path);
+    final rootPath = p.normalize(p.absolute(root.path));
+    final normalized = p.normalize(p.absolute(path));
     if (!p.equals(normalized, rootPath) && !p.isWithin(rootPath, normalized)) {
       throw StateError(message);
+    }
+  }
+
+  Future<void> ensureSafePath(String path) async {
+    final rootPath = p.normalize(p.absolute(root.path));
+    final targetPath = p.normalize(p.absolute(path));
+    if (!p.equals(targetPath, rootPath) && !p.isWithin(rootPath, targetPath)) {
+      throw StateError('Vault path is outside the vault root.');
+    }
+
+    final rootType = await FileSystemEntity.type(rootPath, followLinks: false);
+    if (rootType == FileSystemEntityType.notFound) {
+      throw StateError('Vault root does not exist.');
+    }
+
+    final resolvedRoot = await _resolveEntityPath(rootPath, rootType);
+    var existingPath = targetPath;
+    FileSystemEntityType existingType;
+    while (true) {
+      existingType = await FileSystemEntity.type(
+        existingPath,
+        followLinks: false,
+      );
+      if (existingType != FileSystemEntityType.notFound) {
+        break;
+      }
+      if (p.equals(existingPath, rootPath)) {
+        throw StateError('Vault path cannot be resolved safely.');
+      }
+      existingPath = p.dirname(existingPath);
+    }
+
+    final resolvedExisting = await _resolveEntityPath(
+      existingPath,
+      existingType,
+    );
+    if (!p.equals(resolvedExisting, resolvedRoot) &&
+        !p.isWithin(resolvedRoot, resolvedExisting)) {
+      throw StateError('Vault path resolves outside the vault root.');
+    }
+  }
+
+  Future<bool> _entityExists(FileSystemEntity entity) async {
+    await ensureSafePath(entity.path);
+    return entity.exists();
+  }
+
+  Future<String> _resolveEntityPath(
+    String path,
+    FileSystemEntityType type,
+  ) async {
+    try {
+      final entity = switch (type) {
+        FileSystemEntityType.directory => Directory(path),
+        FileSystemEntityType.link => Link(path),
+        _ => File(path),
+      };
+      return p.normalize(p.absolute(await entity.resolveSymbolicLinks()));
+    } on FileSystemException {
+      throw StateError('Vault path cannot be resolved safely.');
     }
   }
 }

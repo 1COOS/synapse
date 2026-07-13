@@ -12,6 +12,7 @@ class FileVaultBackend implements VaultBackend {
   FileVaultBackend(String rootPath) : root = Directory(rootPath) {
     final paths = FileVaultPaths(root);
     final operations = FileVaultOperations(
+      paths: paths,
       writeFileString: (file, contents) => writeFileString(file, contents),
       writeFileBytes: (file, bytes) => writeFileBytes(file, bytes),
       deleteFile: (file) => deleteFile(file),

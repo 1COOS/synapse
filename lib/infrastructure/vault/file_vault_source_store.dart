@@ -48,9 +48,11 @@ final class FileVaultSourceStore {
         '${sanitizeFileName(source.title)}-${source.id}.md',
       ),
     );
+    await paths.ensureSafePath(sourceFile.path);
+    await paths.ensureSafePath(paths.sourcesFile(note.id).path);
 
     return runVaultPostCommit(() async {
-      await sourceFile.parent.create(recursive: true);
+      await operations.createDirectory(sourceFile.parent, recursive: true);
       await operations.writeFileString(sourceFile, '''---
 id: ${source.id}
 type: text
@@ -97,9 +99,11 @@ $text
       attachmentPath: relative,
       mimeType: mimeType,
     );
+    await paths.ensureSafePath(file.path);
+    await paths.ensureSafePath(paths.sourcesFile(note.id).path);
 
     return runVaultPostCommit(() async {
-      await file.parent.create(recursive: true);
+      await operations.createDirectory(file.parent, recursive: true);
       await operations.writeFileBytes(file, bytes);
       final sources = await listSourcesCallback(note.id);
       await writeSources(note.id, [...sources, source]);
@@ -109,10 +113,11 @@ $text
 
   Future<List<SourceItem>> listSources(String noteId) async {
     final file = paths.sourcesFile(noteId);
-    if (!await file.exists()) {
+    if (!await operations.fileExists(file)) {
       return const [];
     }
-    final json = jsonDecode(await file.readAsString()) as List<Object?>;
+    final json =
+        jsonDecode(await operations.readFileString(file)) as List<Object?>;
     return json
         .map(
           (item) => SourceItem.fromJson((item as Map).cast<String, Object?>()),
@@ -132,13 +137,17 @@ $text
 
   Future<List<int>> readSourceAttachment(SourceItem source) async {
     final file = paths.attachmentFileFor(source);
-    if (!await file.exists()) {
+    if (!await operations.fileExists(file)) {
       throw StateError('Attachment not found: ${source.attachmentPath}');
     }
-    return file.readAsBytes();
+    return operations.readFileBytes(file);
   }
 
   Future<SourceItem> updateSource(SourceItem source) async {
+    if (source.type == SourceType.image) {
+      await paths.ensureSafePath(paths.attachmentFileFor(source).path);
+    }
+    await paths.ensureSafePath(paths.sourcesFile(source.noteId).path);
     final sources = await listSourcesCallback(source.noteId);
     final index = sources.indexWhere((item) => item.id == source.id);
     if (index < 0) {
@@ -153,6 +162,10 @@ $text
   }
 
   Future<void> deleteSource(SourceItem source) async {
+    if (source.type == SourceType.image) {
+      await paths.ensureSafePath(paths.attachmentFileFor(source).path);
+    }
+    await paths.ensureSafePath(paths.sourcesFile(source.noteId).path);
     final sources = await listSourcesCallback(source.noteId);
     final index = sources.indexWhere((item) => item.id == source.id);
     if (index < 0) {
@@ -164,7 +177,7 @@ $text
     }
     final updated = [...sources]..removeAt(index);
     await runVaultPostCommit(() async {
-      if (attachment != null && await attachment.exists()) {
+      if (attachment != null && await operations.fileExists(attachment)) {
         await operations.deleteFile(attachment);
       }
       await writeSources(source.noteId, updated);
@@ -173,7 +186,8 @@ $text
 
   Future<void> writeSources(String noteId, List<SourceItem> sources) async {
     final file = paths.sourcesFile(noteId);
-    await file.parent.create(recursive: true);
+    await paths.ensureSafePath(file.path);
+    await operations.createDirectory(file.parent, recursive: true);
     await operations.writeFileString(
       file,
       const JsonEncoder.withIndent(
@@ -184,7 +198,8 @@ $text
 
   Future<void> rewriteMoved(String noteId) async {
     final sources = await listSourcesCallback(noteId);
-    if (sources.isNotEmpty || await paths.sourcesFile(noteId).exists()) {
+    if (sources.isNotEmpty ||
+        await operations.fileExists(paths.sourcesFile(noteId))) {
       await writeSources(noteId, [
         for (final source in sources) source.copyWith(noteId: noteId),
       ]);
@@ -194,7 +209,8 @@ $text
   Future<Map<String, String>> rewriteCopied(String noteId, DateTime now) async {
     final sourceIdMap = <String, String>{};
     final sources = await listSourcesCallback(noteId);
-    if (sources.isNotEmpty || await paths.sourcesFile(noteId).exists()) {
+    if (sources.isNotEmpty ||
+        await operations.fileExists(paths.sourcesFile(noteId))) {
       await writeSources(noteId, [
         for (final source in sources)
           copyVaultSource(
