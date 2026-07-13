@@ -117,14 +117,199 @@ void main() {
       ]);
     },
   );
+
+  test(
+    'rejects an unverified key after secure cleanup fails and the store restarts',
+    () async {
+      final legacyFile = _FakeLegacyPlaintextApiKeyFile(
+        contents: '{"apiKey":"legacy-key"}',
+      );
+      final secureStore = _FakeSecureValueStore(
+        readResults: ['different-key'],
+        deleteFailure: StateError('secure delete failed'),
+      );
+      final firstStore = SecureApiKeyStore(
+        configDirectory: root,
+        secureStore: secureStore,
+        legacyPlaintextFile: legacyFile,
+      );
+
+      final firstResult = await firstStore.load();
+      final restartedStore = SecureApiKeyStore(
+        configDirectory: root,
+        secureStore: secureStore,
+        legacyPlaintextFile: legacyFile,
+      );
+      final restartedResult = await restartedStore.load();
+
+      expect(firstResult.apiKey, isEmpty);
+      expect(
+        firstResult.recoveryMessage,
+        SecureApiKeyStore.legacyRecoveryMessage,
+      );
+      expect(restartedResult.apiKey, isEmpty);
+      expect(
+        restartedResult.recoveryMessage,
+        SecureApiKeyStore.legacyRecoveryMessage,
+      );
+    },
+  );
+
+  test('marks quarantine before reading legacy plaintext', () async {
+    final marker = _FakeApiKeyQuarantineMarker();
+    final legacyFile = _FakeLegacyPlaintextApiKeyFile(
+      contents: '{"apiKey":"legacy-key"}',
+      allowRead: () => marker.marked,
+    );
+    final secureStore = _FakeSecureValueStore();
+    final store = SecureApiKeyStore(
+      configDirectory: root,
+      secureStore: secureStore,
+      legacyPlaintextFile: legacyFile,
+      quarantineMarker: marker,
+    );
+
+    final result = await store.load();
+
+    expect(result.apiKey, 'legacy-key');
+    expect(marker.events, ['exists', 'mark', 'clear']);
+    expect(marker.marked, isFalse);
+  });
+
+  test(
+    'marker creation failure stops migration before reading plaintext',
+    () async {
+      final marker = _FakeApiKeyQuarantineMarker(
+        markFailure: StateError('marker write failed'),
+      );
+      final legacyFile = _FakeLegacyPlaintextApiKeyFile(
+        contents: '{"apiKey":"legacy-key"}',
+      );
+      final secureStore = _FakeSecureValueStore();
+      final store = SecureApiKeyStore(
+        configDirectory: root,
+        secureStore: secureStore,
+        legacyPlaintextFile: legacyFile,
+        quarantineMarker: marker,
+      );
+
+      await expectLater(
+        store.load(),
+        throwsA(
+          isA<StateError>().having(
+            (error) => error.message,
+            'message',
+            contains('隔离状态写入失败'),
+          ),
+        ),
+      );
+
+      expect(legacyFile.events, ['exists']);
+      expect(secureStore.events, isEmpty);
+    },
+  );
+
+  test(
+    'a quarantine marker rejects secure values even when cleanup keeps failing',
+    () async {
+      final marker = _FakeApiKeyQuarantineMarker(marked: true);
+      final secureStore = _FakeSecureValueStore(
+        deleteFailure: StateError('secure delete failed'),
+      )..values[SecureApiKeyStore.storageKey] = 'unverified-key';
+      final store = SecureApiKeyStore(
+        configDirectory: root,
+        secureStore: secureStore,
+        quarantineMarker: marker,
+      );
+
+      final result = await store.load();
+
+      expect(result.apiKey, isEmpty);
+      expect(result.recoveryMessage, SecureApiKeyStore.legacyRecoveryMessage);
+      expect(marker.marked, isTrue);
+      expect(secureStore.events, ['delete:synapse.provider.apiKey']);
+    },
+  );
+
+  test(
+    'a verified explicit save clears quarantine and restores reads',
+    () async {
+      final marker = _FakeApiKeyQuarantineMarker(marked: true);
+      final secureStore = _FakeSecureValueStore();
+      final store = SecureApiKeyStore(
+        configDirectory: root,
+        secureStore: secureStore,
+        quarantineMarker: marker,
+      );
+
+      await store.save('new-key');
+      final restartedStore = SecureApiKeyStore(
+        configDirectory: root,
+        secureStore: secureStore,
+        quarantineMarker: marker,
+      );
+      final restartedResult = await restartedStore.load();
+
+      expect(marker.marked, isFalse);
+      expect(restartedResult.apiKey, 'new-key');
+      expect(restartedResult.recoveryMessage, isEmpty);
+    },
+  );
+
+  test(
+    'save fails closed when quarantine cannot be cleared after verification',
+    () async {
+      final marker = _FakeApiKeyQuarantineMarker(
+        marked: true,
+        clearFailure: StateError('marker clear failed'),
+      );
+      final secureStore = _FakeSecureValueStore(
+        deleteFailure: StateError('secure delete failed'),
+      );
+      final store = SecureApiKeyStore(
+        configDirectory: root,
+        secureStore: secureStore,
+        quarantineMarker: marker,
+      );
+
+      await expectLater(
+        store.save('new-key'),
+        throwsA(
+          isA<StateError>().having(
+            (error) => error.message,
+            'message',
+            contains('隔离状态'),
+          ),
+        ),
+      );
+      final restartedStore = SecureApiKeyStore(
+        configDirectory: root,
+        secureStore: secureStore,
+        quarantineMarker: marker,
+      );
+      final restartedResult = await restartedStore.load();
+
+      expect(marker.marked, isTrue);
+      expect(restartedResult.apiKey, isEmpty);
+      expect(
+        restartedResult.recoveryMessage,
+        SecureApiKeyStore.legacyRecoveryMessage,
+      );
+    },
+  );
 }
 
 final class _FakeLegacyPlaintextApiKeyFile
     implements LegacyPlaintextApiKeyFile {
-  _FakeLegacyPlaintextApiKeyFile({required this.contents, this.deleteFailure});
+  _FakeLegacyPlaintextApiKeyFile({
+    required this.contents,
+    this.deleteFailure,
+    this.allowRead,
+  });
 
   final String contents;
   final Object? deleteFailure;
+  final bool Function()? allowRead;
   final List<String> events = <String>[];
   bool stillExists = true;
 
@@ -147,7 +332,49 @@ final class _FakeLegacyPlaintextApiKeyFile
   @override
   Future<String> readAsString() async {
     events.add('read');
+    if (!(allowRead?.call() ?? true)) {
+      throw StateError('legacy plaintext read before quarantine');
+    }
     return contents;
+  }
+}
+
+final class _FakeApiKeyQuarantineMarker implements ApiKeyQuarantineMarker {
+  _FakeApiKeyQuarantineMarker({
+    this.marked = false,
+    this.markFailure,
+    this.clearFailure,
+  });
+
+  bool marked;
+  final Object? markFailure;
+  final Object? clearFailure;
+  final List<String> events = <String>[];
+
+  @override
+  Future<void> clear() async {
+    events.add('clear');
+    final failure = clearFailure;
+    if (failure != null) {
+      throw failure;
+    }
+    marked = false;
+  }
+
+  @override
+  Future<bool> exists() async {
+    events.add('exists');
+    return marked;
+  }
+
+  @override
+  Future<void> mark() async {
+    events.add('mark');
+    final failure = markFailure;
+    if (failure != null) {
+      throw failure;
+    }
+    marked = true;
   }
 }
 

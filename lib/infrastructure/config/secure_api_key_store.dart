@@ -14,6 +14,14 @@ abstract interface class LegacyPlaintextApiKeyFile {
   Future<void> delete();
 }
 
+abstract interface class ApiKeyQuarantineMarker {
+  Future<bool> exists();
+
+  Future<void> mark();
+
+  Future<void> clear();
+}
+
 final class _FileLegacyPlaintextApiKeyFile
     implements LegacyPlaintextApiKeyFile {
   _FileLegacyPlaintextApiKeyFile(this._file);
@@ -28,6 +36,28 @@ final class _FileLegacyPlaintextApiKeyFile
 
   @override
   Future<String> readAsString() => _file.readAsString();
+}
+
+final class _FileApiKeyQuarantineMarker implements ApiKeyQuarantineMarker {
+  _FileApiKeyQuarantineMarker(this._file);
+
+  final File _file;
+
+  @override
+  Future<void> clear() async {
+    if (await _file.exists()) {
+      await _file.delete();
+    }
+  }
+
+  @override
+  Future<bool> exists() => _file.exists();
+
+  @override
+  Future<void> mark() async {
+    await _file.parent.create(recursive: true);
+    await _file.writeAsString('reentry-required\n', flush: true);
+  }
 }
 
 final class SecureApiKeyLoadResult {
@@ -45,10 +75,21 @@ final class SecureApiKeyStore {
     required Directory configDirectory,
     required SecureValueStore secureStore,
     LegacyPlaintextApiKeyFile? legacyPlaintextFile,
+    ApiKeyQuarantineMarker? quarantineMarker,
   }) : _legacyPlaintextFile =
            legacyPlaintextFile ??
            _FileLegacyPlaintextApiKeyFile(
              File(p.join(configDirectory.path, 'provider_api_key.local.json')),
+           ),
+       _quarantineMarker =
+           quarantineMarker ??
+           _FileApiKeyQuarantineMarker(
+             File(
+               p.join(
+                 configDirectory.path,
+                 'provider_api_key.reentry_required',
+               ),
+             ),
            ),
        _secureStore = secureStore;
 
@@ -56,30 +97,42 @@ final class SecureApiKeyStore {
   static const legacyRecoveryMessage = '旧 API Key 已删除，请重新输入';
 
   final LegacyPlaintextApiKeyFile _legacyPlaintextFile;
+  final ApiKeyQuarantineMarker _quarantineMarker;
   final SecureValueStore _secureStore;
 
   Future<SecureApiKeyLoadResult> load() async {
+    if (await _isQuarantined()) {
+      await _bestEffortDeleteLegacyPlaintext();
+      await _discardUnverifiedSecureApiKey();
+      return const SecureApiKeyLoadResult(
+        apiKey: '',
+        recoveryMessage: legacyRecoveryMessage,
+      );
+    }
     if (await _legacyPlaintextFile.exists()) {
+      await _markQuarantine();
       return _migrateLegacyPlaintext();
     }
     return SecureApiKeyLoadResult(apiKey: await _readSecureApiKey());
   }
 
   Future<void> save(String apiKey) async {
-    await _deleteLegacyPlaintext();
-    final normalized = apiKey.trim();
-    if (normalized.isEmpty) {
-      await _deleteSecureApiKey();
-      return;
-    }
-
+    await _markQuarantine();
     try {
-      await _secureStore.write(key: storageKey, value: normalized);
-      final verified = await _secureStore.read(key: storageKey);
-      if (verified != normalized) {
-        throw StateError('secure read verification mismatch');
+      await _deleteLegacyPlaintext();
+      final normalized = apiKey.trim();
+      if (normalized.isEmpty) {
+        await _deleteSecureApiKey();
+      } else {
+        await _secureStore.write(key: storageKey, value: normalized);
+        final verified = await _secureStore.read(key: storageKey);
+        if (verified != normalized) {
+          throw StateError('secure read verification mismatch');
+        }
       }
+      await _clearQuarantine();
     } catch (error) {
+      await _bestEffortDeleteLegacyPlaintext();
       await _discardUnverifiedSecureApiKey();
       throw StateError(_secureStorageErrorMessage('保存', error));
     }
@@ -123,7 +176,37 @@ final class SecureApiKeyStore {
       await _discardUnverifiedSecureApiKey();
       throw StateError(_legacyDeletionErrorMessage(deletionError));
     }
+    try {
+      await _clearQuarantine();
+    } catch (error) {
+      await _discardUnverifiedSecureApiKey();
+      throw StateError(_secureStorageErrorMessage('迁移', error));
+    }
     return SecureApiKeyLoadResult(apiKey: plaintextApiKey);
+  }
+
+  Future<bool> _isQuarantined() async {
+    try {
+      return await _quarantineMarker.exists();
+    } catch (error) {
+      throw StateError('API Key 隔离状态读取失败，未加载任何 API Key：$error');
+    }
+  }
+
+  Future<void> _markQuarantine() async {
+    try {
+      await _quarantineMarker.mark();
+    } catch (error) {
+      throw StateError('API Key 隔离状态写入失败，未修改任何 API Key：$error');
+    }
+  }
+
+  Future<void> _clearQuarantine() async {
+    try {
+      await _quarantineMarker.clear();
+    } catch (error) {
+      throw StateError('API Key 隔离状态清除失败：$error');
+    }
   }
 
   Future<String> _readSecureApiKey() async {
@@ -153,6 +236,14 @@ final class SecureApiKeyStore {
   Future<void> _deleteLegacyPlaintext() async {
     if (await _legacyPlaintextFile.exists()) {
       await _legacyPlaintextFile.delete();
+    }
+  }
+
+  Future<void> _bestEffortDeleteLegacyPlaintext() async {
+    try {
+      await _deleteLegacyPlaintext();
+    } catch (_) {
+      // The persistent quarantine still prevents either key from being used.
     }
   }
 
