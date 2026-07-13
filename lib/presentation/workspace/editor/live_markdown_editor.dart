@@ -2,9 +2,9 @@ import 'dart:async';
 
 import 'package:flutter/cupertino.dart';
 
-import '../../cupertino/markdown_context_commands.dart';
 import '../../cupertino/markdown_live_blocks.dart';
 import '../../cupertino/workspace/workspace_theme.dart';
+import 'live_markdown_context_menu.dart';
 import 'live_markdown_editable_text.dart';
 import 'live_markdown_editor_controller.dart';
 import 'markdown_context_menu.dart';
@@ -268,207 +268,19 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
         builder: (context, snapshot) {
           final availability =
               snapshot.data ?? NoteEditorPasteAvailability.empty;
-          final hasSelection =
-              _editorController.resolveCommandTarget(
-                menuTarget: menuTarget,
-                requireSelection: true,
-              ) !=
-              null;
           final canEdit = widget.enabled && !widget.busy;
           return NoteContextMenuToolbar(
             anchors: anchors,
             child: NoteContextMenu(
-              children: [
-                NoteMenuAction(
-                  itemKey: const Key('note-menu-copy'),
-                  label: '复制',
-                  enabled: hasSelection,
-                  onPressed: () =>
-                      _copySelectionFromContextMenu(menuTarget: menuTarget),
-                ),
-                NoteMenuAction(
-                  itemKey: const Key('note-menu-cut'),
-                  label: '剪切',
-                  enabled: canEdit && hasSelection,
-                  onPressed: () =>
-                      _cutSelectionFromContextMenu(menuTarget: menuTarget),
-                ),
-                NoteMenuAction(
-                  itemKey: const Key('note-menu-paste'),
-                  label: '粘贴',
-                  enabled: canEdit && availability.canPaste,
-                  onPressed: () =>
-                      _pasteFromContextMenu(menuTarget: menuTarget),
-                ),
-                NoteMenuAction(
-                  itemKey: const Key('note-menu-paste-plain'),
-                  label: '以纯文本粘贴',
-                  enabled: canEdit && availability.hasText,
-                  onPressed: () =>
-                      _pastePlainTextFromContextMenu(menuTarget: menuTarget),
-                ),
-                const NoteMenuSeparator(key: Key('note-menu-separator-0')),
-                NoteMenuSubmenu(
-                  itemKey: const Key('note-menu-insert'),
-                  submenuKey: const Key('note-submenu-insert'),
-                  label: '插入',
-                  children: [
-                    NoteMenuAction(
-                      itemKey: const Key('note-menu-insert-table'),
-                      label: '表格',
-                      enabled: canEdit,
-                      onPressed: () => _applyInsertion(
-                        MarkdownInsertion.table,
-                        menuTarget: menuTarget,
-                      ),
-                    ),
-                    NoteMenuAction(
-                      itemKey: const Key('note-menu-insert-annotation'),
-                      label: '标注',
-                      enabled: canEdit,
-                      onPressed: () => _applyInsertion(
-                        MarkdownInsertion.annotation,
-                        menuTarget: menuTarget,
-                      ),
-                    ),
-                    NoteMenuAction(
-                      itemKey: const Key('note-menu-insert-divider'),
-                      label: '分割线',
-                      enabled: canEdit,
-                      onPressed: () => _applyInsertion(
-                        MarkdownInsertion.divider,
-                        menuTarget: menuTarget,
-                      ),
-                    ),
-                  ],
-                ),
-                NoteMenuSubmenu(
-                  itemKey: const Key('note-menu-text-format'),
-                  submenuKey: const Key('note-submenu-text-format'),
-                  label: '文本格式',
-                  children: [
-                    const NoteMenuAction(
-                      itemKey: Key('note-menu-highlight'),
-                      label: '高亮',
-                      enabled: false,
-                      onPressed: null,
-                    ),
-                    NoteMenuAction(
-                      itemKey: const Key('note-menu-bold'),
-                      label: '加粗',
-                      enabled: canEdit && hasSelection,
-                      onPressed: () => _applyInlineFormat(
-                        MarkdownInlineFormat.bold,
-                        menuTarget: menuTarget,
-                      ),
-                    ),
-                    NoteMenuAction(
-                      itemKey: const Key('note-menu-italic'),
-                      label: '斜体',
-                      enabled: canEdit && hasSelection,
-                      onPressed: () => _applyInlineFormat(
-                        MarkdownInlineFormat.italic,
-                        menuTarget: menuTarget,
-                      ),
-                    ),
-                    NoteMenuAction(
-                      itemKey: const Key('note-menu-strikethrough'),
-                      label: '删除线',
-                      enabled: canEdit && hasSelection,
-                      onPressed: () => _applyInlineFormat(
-                        MarkdownInlineFormat.strikethrough,
-                        menuTarget: menuTarget,
-                      ),
-                    ),
-                  ],
-                ),
-                NoteMenuSubmenu(
-                  itemKey: const Key('note-menu-paragraph'),
-                  submenuKey: const Key('note-submenu-paragraph'),
-                  label: '段落设置',
-                  children: [
-                    NoteMenuAction(
-                      itemKey: const Key('note-menu-heading-1'),
-                      label: '标题 1',
-                      enabled: canEdit,
-                      onPressed: () => _applyParagraphStyle(
-                        MarkdownParagraphStyle.heading1,
-                        menuTarget: menuTarget,
-                      ),
-                    ),
-                    NoteMenuAction(
-                      itemKey: const Key('note-menu-heading-2'),
-                      label: '标题 2',
-                      enabled: canEdit,
-                      onPressed: () => _applyParagraphStyle(
-                        MarkdownParagraphStyle.heading2,
-                        menuTarget: menuTarget,
-                      ),
-                    ),
-                    NoteMenuAction(
-                      itemKey: const Key('note-menu-heading-3'),
-                      label: '标题 3',
-                      enabled: canEdit,
-                      onPressed: () => _applyParagraphStyle(
-                        MarkdownParagraphStyle.heading3,
-                        menuTarget: menuTarget,
-                      ),
-                    ),
-                    NoteMenuAction(
-                      itemKey: const Key('note-menu-heading-4'),
-                      label: '标题 4',
-                      enabled: canEdit,
-                      onPressed: () => _applyParagraphStyle(
-                        MarkdownParagraphStyle.heading4,
-                        menuTarget: menuTarget,
-                      ),
-                    ),
-                    NoteMenuAction(
-                      itemKey: const Key('note-menu-body'),
-                      label: '正文',
-                      enabled: canEdit,
-                      onPressed: () => _applyParagraphStyle(
-                        MarkdownParagraphStyle.body,
-                        menuTarget: menuTarget,
-                      ),
-                    ),
-                  ],
-                ),
-                NoteMenuSubmenu(
-                  itemKey: const Key('note-menu-list'),
-                  submenuKey: const Key('note-submenu-list'),
-                  label: '列表设置',
-                  children: [
-                    NoteMenuAction(
-                      itemKey: const Key('note-menu-unordered-list'),
-                      label: '无序列表',
-                      enabled: canEdit,
-                      onPressed: () => _applyListStyle(
-                        MarkdownListStyle.unordered,
-                        menuTarget: menuTarget,
-                      ),
-                    ),
-                    NoteMenuAction(
-                      itemKey: const Key('note-menu-ordered-list'),
-                      label: '有序列表',
-                      enabled: canEdit,
-                      onPressed: () => _applyListStyle(
-                        MarkdownListStyle.ordered,
-                        menuTarget: menuTarget,
-                      ),
-                    ),
-                    NoteMenuAction(
-                      itemKey: const Key('note-menu-task-list'),
-                      label: '任务列表',
-                      enabled: canEdit,
-                      onPressed: () => _applyListStyle(
-                        MarkdownListStyle.task,
-                        menuTarget: menuTarget,
-                      ),
-                    ),
-                  ],
-                ),
-              ],
+              children: buildLiveMarkdownContextMenuItems(
+                controller: _editorController,
+                menuTarget: menuTarget,
+                canEdit: canEdit,
+                canPaste: availability.canPaste,
+                hasText: availability.hasText,
+                busy: widget.busy,
+                onPaste: (target) => _pasteFromContextMenu(menuTarget: target),
+              ),
             ),
           );
         },
@@ -553,21 +365,6 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
     return renderObject.paintBounds.inflate(2).contains(localPosition);
   }
 
-  Future<void> _copySelectionFromContextMenu({
-    MarkdownCommandTarget? menuTarget,
-  }) {
-    return _editorController.copySelection(menuTarget: menuTarget);
-  }
-
-  Future<void> _cutSelectionFromContextMenu({
-    MarkdownCommandTarget? menuTarget,
-  }) {
-    return _editorController.cutSelection(
-      menuTarget: menuTarget,
-      busy: widget.busy,
-    );
-  }
-
   Future<void> _pasteFromContextMenu({
     MarkdownCommandTarget? menuTarget,
   }) async {
@@ -580,59 +377,6 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
     if (mounted) {
       _syncBlockController();
     }
-  }
-
-  Future<void> _pastePlainTextFromContextMenu({
-    MarkdownCommandTarget? menuTarget,
-  }) {
-    return _editorController.pastePlainText(
-      menuTarget: menuTarget,
-      busy: widget.busy,
-    );
-  }
-
-  void _applyInlineFormat(
-    MarkdownInlineFormat format, {
-    MarkdownCommandTarget? menuTarget,
-  }) {
-    _editorController.applyInlineFormat(
-      format,
-      menuTarget: menuTarget,
-      busy: widget.busy,
-    );
-  }
-
-  void _applyParagraphStyle(
-    MarkdownParagraphStyle style, {
-    MarkdownCommandTarget? menuTarget,
-  }) {
-    _editorController.applyParagraphStyle(
-      style,
-      menuTarget: menuTarget,
-      busy: widget.busy,
-    );
-  }
-
-  void _applyListStyle(
-    MarkdownListStyle style, {
-    MarkdownCommandTarget? menuTarget,
-  }) {
-    _editorController.applyListStyle(
-      style,
-      menuTarget: menuTarget,
-      busy: widget.busy,
-    );
-  }
-
-  void _applyInsertion(
-    MarkdownInsertion insertion, {
-    MarkdownCommandTarget? menuTarget,
-  }) {
-    _editorController.applyInsertion(
-      insertion,
-      menuTarget: menuTarget,
-      busy: widget.busy,
-    );
   }
 
   void _replaceTableBlock(MarkdownLiveBlock block, MarkdownLiveTable table) {

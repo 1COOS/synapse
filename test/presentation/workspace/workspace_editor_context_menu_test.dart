@@ -1,14 +1,110 @@
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/gestures.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:synapse/infrastructure/config/synapse_settings.dart';
 import 'package:synapse/infrastructure/input/image_input_service.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
+import 'package:synapse/presentation/cupertino/workspace/workspace_context_menu.dart';
+import 'package:synapse/presentation/cupertino/workspace/workspace_theme.dart';
 
 import '../../support/workspace_fakes.dart';
 import '../../support/workspace_harness.dart';
 
 void main() {
+  for (final error in <Object>[
+    PlatformException(code: 'clipboard-failed'),
+    StateError('menu command failed'),
+  ]) {
+    testWidgets('context menu reports async ${error.runtimeType}', (
+      tester,
+    ) async {
+      final reported = <FlutterErrorDetails>[];
+      final previousOnError = FlutterError.onError;
+      FlutterError.onError = reported.add;
+      addTearDown(() => FlutterError.onError = previousOnError);
+
+      await tester.pumpWidget(
+        CupertinoApp(
+          home: WorkspaceAppearanceScope(
+            appearance: WorkspaceAppearance.defaults,
+            child: Center(
+              child: WorkspaceContextMenuItem(
+                itemKey: const Key('failing-menu-item'),
+                label: '失败命令',
+                enabled: true,
+                dismissContextMenuOnPressed: true,
+                onPressed: () async => throw error,
+              ),
+            ),
+          ),
+        ),
+      );
+
+      await tester.tap(find.byKey(const Key('failing-menu-item')));
+      await tester.pump();
+
+      FlutterError.onError = previousOnError;
+      expect(reported, hasLength(1));
+      expect(reported.single.exception, same(error));
+      expect(tester.takeException(), isNull);
+    });
+  }
+
+  testWidgets('failing async context menu command still dismisses the menu', (
+    tester,
+  ) async {
+    final reported = <FlutterErrorDetails>[];
+    final previousOnError = FlutterError.onError;
+    FlutterError.onError = reported.add;
+    addTearDown(() => FlutterError.onError = previousOnError);
+
+    await tester.pumpWidget(
+      CupertinoApp(
+        home: WorkspaceAppearanceScope(
+          appearance: WorkspaceAppearance.defaults,
+          child: Builder(
+            builder: (context) => CupertinoButton(
+              key: const Key('open-failing-menu'),
+              onPressed: () {
+                ContextMenuController().show(
+                  context: context,
+                  contextMenuBuilder: (context) => WorkspaceContextMenuPanel(
+                    width: 160,
+                    children: [
+                      WorkspaceContextMenuItem(
+                        itemKey: const Key('failing-overlay-menu-item'),
+                        label: '失败命令',
+                        enabled: true,
+                        dismissContextMenuOnPressed: true,
+                        onPressed: () async => throw StateError('failed'),
+                      ),
+                    ],
+                  ),
+                  debugRequiredFor: context.widget,
+                );
+              },
+              child: const Text('打开'),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.byKey(const Key('open-failing-menu')));
+    await tester.pump();
+    expect(find.byKey(const Key('failing-overlay-menu-item')), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('failing-overlay-menu-item')));
+    await tester.pump();
+
+    FlutterError.onError = previousOnError;
+    expect(find.byKey(const Key('failing-overlay-menu-item')), findsNothing);
+    expect(reported, hasLength(1));
+    expect(reported.single.exception, isA<StateError>());
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('note editor context menu opens in edit mode', (tester) async {
     final vault = MemoryVaultBackend(seedExampleData: false);
     final note = await vault.createNote(parentPath: '', title: 'Menu Study');

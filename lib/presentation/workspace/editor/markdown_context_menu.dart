@@ -115,6 +115,7 @@ class NoteMenuAction extends StatefulWidget {
     this.trailing,
     this.highlighted = false,
     this.onHoverChanged,
+    this.dismissContextMenuOnPressed = true,
   });
 
   final Key itemKey;
@@ -124,6 +125,7 @@ class NoteMenuAction extends StatefulWidget {
   final Widget? trailing;
   final bool highlighted;
   final ValueChanged<bool>? onHoverChanged;
+  final bool dismissContextMenuOnPressed;
 
   @override
   State<NoteMenuAction> createState() => _NoteMenuActionState();
@@ -140,6 +142,7 @@ class _NoteMenuActionState extends State<NoteMenuAction> {
       trailing: widget.trailing,
       highlighted: widget.highlighted,
       onHoverChanged: widget.onHoverChanged,
+      dismissContextMenuOnPressed: widget.dismissContextMenuOnPressed,
     );
   }
 }
@@ -271,6 +274,7 @@ class _NoteMenuSubmenuState extends State<NoteMenuSubmenu> {
         label: widget.label,
         enabled: true,
         highlighted: _open,
+        dismissContextMenuOnPressed: false,
         onHoverChanged: (hovered) {
           _parentHovered = hovered;
           if (hovered) {

@@ -11,6 +11,7 @@ class LiveMarkdownEditorController extends ChangeNotifier {
     : _document = document;
 
   TextEditingController _document;
+  int _documentGeneration = 0;
   final blockController = MarkdownStyledTextEditingController();
   int? _activeOffset;
   MarkdownCommandTarget? _activeSelectionTarget;
@@ -28,6 +29,7 @@ class LiveMarkdownEditorController extends ChangeNotifier {
 
   void replaceDocument(TextEditingController document) {
     _document = document;
+    _documentGeneration += 1;
     _activeOffset = null;
     _activeSelectionTarget = null;
     _activeTrailingInsertion = false;
@@ -202,6 +204,7 @@ class LiveMarkdownEditorController extends ChangeNotifier {
     if (target == null || busy) {
       return;
     }
+    final captured = _captureAsyncCommand(target);
     dismissAllMacContextMenus();
     await Clipboard.setData(
       ClipboardData(
@@ -211,6 +214,9 @@ class LiveMarkdownEditorController extends ChangeNotifier {
         ),
       ),
     );
+    if (!_isCurrentAsyncCommand(captured)) {
+      return;
+    }
     replaceBlockSelection('', target: target);
   }
 
@@ -221,12 +227,20 @@ class LiveMarkdownEditorController extends ChangeNotifier {
     if (busy) {
       return;
     }
+    final target = resolveCommandTarget(menuTarget: menuTarget);
+    if (target == null) {
+      return;
+    }
+    final captured = _captureAsyncCommand(target);
     dismissAllMacContextMenus();
     final text = (await Clipboard.getData(Clipboard.kTextPlain))?.text;
     if (text == null || text.isEmpty) {
       return;
     }
-    replaceBlockSelection(text, target: menuTarget);
+    if (!_isCurrentAsyncCommand(captured)) {
+      return;
+    }
+    replaceBlockSelection(text, target: target);
   }
 
   void applyInlineFormat(
@@ -526,6 +540,51 @@ class LiveMarkdownEditorController extends ChangeNotifier {
       blockStart: target.blockStart,
     );
   }
+
+  _AsyncMarkdownCommand _captureAsyncCommand(MarkdownCommandTarget target) {
+    return _AsyncMarkdownCommand(
+      document: _document,
+      documentGeneration: _documentGeneration,
+      target: target,
+      activeOffset: _activeOffset,
+      trailingInsertion: _activeTrailingInsertion,
+    );
+  }
+
+  bool _isCurrentAsyncCommand(_AsyncMarkdownCommand command) {
+    if (!identical(_document, command.document) ||
+        _documentGeneration != command.documentGeneration) {
+      return false;
+    }
+    final target = command.target;
+    if (target.blockStart == null) {
+      return command.trailingInsertion &&
+          _activeTrailingInsertion &&
+          _activeOffset == command.activeOffset &&
+          blockController.text == target.value.text;
+    }
+    final block = currentActiveTextBlock();
+    return block != null &&
+        block.start == target.blockStart &&
+        block.text == target.value.text &&
+        blockController.text == target.value.text;
+  }
+}
+
+class _AsyncMarkdownCommand {
+  const _AsyncMarkdownCommand({
+    required this.document,
+    required this.documentGeneration,
+    required this.target,
+    required this.activeOffset,
+    required this.trailingInsertion,
+  });
+
+  final TextEditingController document;
+  final int documentGeneration;
+  final MarkdownCommandTarget target;
+  final int? activeOffset;
+  final bool trailingInsertion;
 }
 
 String _trailingInsertionPrefix(String markdown) {

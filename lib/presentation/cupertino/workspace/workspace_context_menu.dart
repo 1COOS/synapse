@@ -43,6 +43,7 @@ class WorkspaceContextMenuItem extends StatefulWidget {
     this.trailing,
     this.highlighted = false,
     this.onHoverChanged,
+    this.dismissContextMenuOnPressed = false,
   });
 
   final Key itemKey;
@@ -52,6 +53,7 @@ class WorkspaceContextMenuItem extends StatefulWidget {
   final Widget? trailing;
   final bool highlighted;
   final ValueChanged<bool>? onHoverChanged;
+  final bool dismissContextMenuOnPressed;
 
   @override
   State<WorkspaceContextMenuItem> createState() =>
@@ -60,6 +62,24 @@ class WorkspaceContextMenuItem extends StatefulWidget {
 
 class _WorkspaceContextMenuItemState extends State<WorkspaceContextMenuItem> {
   bool _hovered = false;
+
+  Future<void> _invokeCommand() async {
+    if (widget.dismissContextMenuOnPressed) {
+      ContextMenuController.removeAny();
+    }
+    try {
+      await widget.onPressed?.call();
+    } catch (error, stackTrace) {
+      FlutterError.reportError(
+        FlutterErrorDetails(
+          exception: error,
+          stack: stackTrace,
+          library: 'Synapse workspace context menu',
+          context: ErrorDescription('while executing a context menu command'),
+        ),
+      );
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -72,11 +92,7 @@ class _WorkspaceContextMenuItemState extends State<WorkspaceContextMenuItem> {
     return GestureDetector(
       key: widget.itemKey,
       behavior: HitTestBehavior.opaque,
-      onTap: enabled
-          ? () async {
-              await widget.onPressed?.call();
-            }
-          : null,
+      onTap: enabled ? _invokeCommand : null,
       child: MouseRegion(
         cursor: enabled ? SystemMouseCursors.click : SystemMouseCursors.basic,
         onEnter: (_) {
