@@ -406,13 +406,20 @@ void main() {
     'a staged save blocks another store load until abort releases it',
     () async {
       final secureStore = _FakeSecureValueStore();
+      final lockHandles = [
+        _FakeApiKeyLockFileHandle(),
+        _FakeApiKeyLockFileHandle(),
+      ];
+      final lockFileOpener = _FakeApiKeyLockFileOpener(lockHandles);
       final firstStore = SecureApiKeyStore(
         configDirectory: root,
         secureStore: secureStore,
+        lockFileOpener: lockFileOpener,
       );
       final secondStore = SecureApiKeyStore(
         configDirectory: root,
         secureStore: secureStore,
+        lockFileOpener: lockFileOpener,
       );
 
       final transaction = await firstStore.stageSave('staged-key');
@@ -429,6 +436,10 @@ void main() {
 
       expect(loaded.apiKey, isEmpty);
       expect(loaded.recoveryMessage, SecureApiKeyStore.legacyRecoveryMessage);
+      expect(
+        lockHandles.expand((handle) => handle.lockModes),
+        everyElement(FileLock.blockingExclusive),
+      );
     },
   );
 
@@ -571,6 +582,86 @@ void main() {
       expect(secureStore.events, ['delete:synapse.provider.apiKey']);
     },
   );
+
+  test(
+    'lock close failure releases the in-process mutex and preserves both errors',
+    () async {
+      final failingHandle = _FakeApiKeyLockFileHandle(
+        lockFailure: StateError('lock failed'),
+        closeFailure: StateError('close failed'),
+      );
+      final firstStore = SecureApiKeyStore(
+        configDirectory: root,
+        secureStore: _FakeSecureValueStore(),
+        lockFileOpener: _FakeApiKeyLockFileOpener([failingHandle]),
+      );
+
+      await expectLater(
+        firstStore.load(),
+        throwsA(
+          isA<StateError>().having(
+            (error) => error.message,
+            'message',
+            allOf(contains('lock failed'), contains('close failed')),
+          ),
+        ),
+      );
+
+      final secondStore = SecureApiKeyStore(
+        configDirectory: root,
+        secureStore: _FakeSecureValueStore(),
+        lockFileOpener: _FakeApiKeyLockFileOpener([
+          _FakeApiKeyLockFileHandle(),
+        ]),
+      );
+      final result = await secondStore.load().timeout(
+        const Duration(seconds: 1),
+      );
+
+      expect(result.apiKey, isEmpty);
+      expect(result.recoveryMessage, SecureApiKeyStore.legacyRecoveryMessage);
+    },
+  );
+}
+
+final class _FakeApiKeyLockFileOpener implements ApiKeyLockFileOpener {
+  _FakeApiKeyLockFileOpener(List<_FakeApiKeyLockFileHandle> handles)
+    : _handles = [...handles];
+
+  final List<_FakeApiKeyLockFileHandle> _handles;
+
+  @override
+  Future<ApiKeyLockFileHandle> open(File file) async {
+    return _handles.removeAt(0);
+  }
+}
+
+final class _FakeApiKeyLockFileHandle implements ApiKeyLockFileHandle {
+  _FakeApiKeyLockFileHandle({this.lockFailure, this.closeFailure});
+
+  final Object? lockFailure;
+  final Object? closeFailure;
+  final List<FileLock> lockModes = <FileLock>[];
+
+  @override
+  Future<void> close() async {
+    final failure = closeFailure;
+    if (failure != null) {
+      throw failure;
+    }
+  }
+
+  @override
+  Future<void> lock(FileLock mode) async {
+    lockModes.add(mode);
+    final failure = lockFailure;
+    if (failure != null) {
+      throw failure;
+    }
+  }
+
+  @override
+  Future<void> unlock() async {}
 }
 
 final class _FailingApiKeyStoreLock implements ApiKeyStoreLock {

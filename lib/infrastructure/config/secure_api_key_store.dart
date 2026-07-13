@@ -69,33 +69,90 @@ abstract interface class ApiKeyStoreLockLease {
   Future<void> release();
 }
 
+abstract interface class ApiKeyLockFileOpener {
+  Future<ApiKeyLockFileHandle> open(File file);
+}
+
+abstract interface class ApiKeyLockFileHandle {
+  Future<void> lock(FileLock mode);
+
+  Future<void> unlock();
+
+  Future<void> close();
+}
+
+final class _RandomAccessApiKeyLockFileOpener implements ApiKeyLockFileOpener {
+  const _RandomAccessApiKeyLockFileOpener();
+
+  @override
+  Future<ApiKeyLockFileHandle> open(File file) async {
+    return _RandomAccessApiKeyLockFileHandle(
+      await file.open(mode: FileMode.append),
+    );
+  }
+}
+
+final class _RandomAccessApiKeyLockFileHandle implements ApiKeyLockFileHandle {
+  _RandomAccessApiKeyLockFileHandle(this._file);
+
+  final RandomAccessFile _file;
+
+  @override
+  Future<void> close() => _file.close();
+
+  @override
+  Future<void> lock(FileLock mode) => _file.lock(mode);
+
+  @override
+  Future<void> unlock() => _file.unlock();
+}
+
 final class _ApiKeyDirectoryLock implements ApiKeyStoreLock {
-  _ApiKeyDirectoryLock(Directory configDirectory)
-    : _lockFile = File(p.join(configDirectory.path, 'provider_api_key.lock')),
-      _mutex = _mutexes.putIfAbsent(
-        p.normalize(p.absolute(configDirectory.path)),
-        _InProcessMutex.new,
-      );
+  _ApiKeyDirectoryLock(
+    Directory configDirectory, {
+    ApiKeyLockFileOpener fileOpener = const _RandomAccessApiKeyLockFileOpener(),
+  }) : _fileOpener = fileOpener,
+       _lockFile = File(p.join(configDirectory.path, 'provider_api_key.lock')),
+       _mutex = _mutexes.putIfAbsent(
+         p.normalize(p.absolute(configDirectory.path)),
+         _InProcessMutex.new,
+       );
 
   static final Map<String, _InProcessMutex> _mutexes =
       <String, _InProcessMutex>{};
 
   final File _lockFile;
+  final ApiKeyLockFileOpener _fileOpener;
   final _InProcessMutex _mutex;
 
   @override
   Future<_ApiKeyLockLease> acquire() async {
     final inProcessLease = await _mutex.acquire();
-    RandomAccessFile? file;
+    ApiKeyLockFileHandle? file;
+    var acquired = false;
     try {
       await _lockFile.parent.create(recursive: true);
-      file = await _lockFile.open(mode: FileMode.append);
-      await file.lock(FileLock.exclusive);
+      file = await _fileOpener.open(_lockFile);
+      await file.lock(FileLock.blockingExclusive);
+      acquired = true;
       return _ApiKeyLockLease(file, inProcessLease);
-    } catch (_) {
-      await file?.close();
-      inProcessLease.release();
-      rethrow;
+    } catch (error, stackTrace) {
+      Object failure = error;
+      if (file != null) {
+        try {
+          await file.close();
+        } catch (closeError) {
+          failure = StateError(
+            'API Key lock acquisition failed: $error; '
+            'lock file close failed: $closeError',
+          );
+        }
+      }
+      Error.throwWithStackTrace(failure, stackTrace);
+    } finally {
+      if (!acquired) {
+        inProcessLease.release();
+      }
     }
   }
 }
@@ -127,7 +184,7 @@ final class _InProcessLockLease {
 final class _ApiKeyLockLease implements ApiKeyStoreLockLease {
   _ApiKeyLockLease(this._file, this._inProcessLease);
 
-  final RandomAccessFile _file;
+  final ApiKeyLockFileHandle _file;
   final _InProcessLockLease _inProcessLease;
   bool _released = false;
 
@@ -205,6 +262,7 @@ final class SecureApiKeyStore {
     LegacyPlaintextApiKeyFile? legacyPlaintextFile,
     ApiKeyQuarantineMarker? quarantineMarker,
     ApiKeyStoreLock? directoryLock,
+    ApiKeyLockFileOpener? lockFileOpener,
   }) : _legacyPlaintextFile =
            legacyPlaintextFile ??
            _FileLegacyPlaintextApiKeyFile(
@@ -220,7 +278,13 @@ final class SecureApiKeyStore {
                ),
              ),
            ),
-       _directoryLock = directoryLock ?? _ApiKeyDirectoryLock(configDirectory),
+       _directoryLock =
+           directoryLock ??
+           _ApiKeyDirectoryLock(
+             configDirectory,
+             fileOpener:
+                 lockFileOpener ?? const _RandomAccessApiKeyLockFileOpener(),
+           ),
        _secureStore = secureStore;
 
   static const storageKey = 'synapse.provider.apiKey';
