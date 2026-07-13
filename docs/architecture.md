@@ -134,8 +134,8 @@ test/
 | debounce、串行 save、flush/quiesce | `NoteSaveCoordinator` | 每个 session 至多一个 in-flight save |
 | split tree、focus、pane note、mode、ratio | `SplitWorkspaceController` | 不依赖 Vault 或 editor controller |
 | source selection 与 proposals | `NoteMaterialsRegistry` | 按 note ID 唯一持有 |
-| mutation 顺序 | `WorkspaceMutationBarrier` | flush/discard 后执行 backend，再提交 delta |
-| registry/split/materials/workspace 原子替换 | `WorkspaceCommitBatch` | prepare/apply/publish 分离 |
+| mutation 顺序 | `WorkspaceMutationBarrier` | flush/quiesce → `commitBackend` → post-commit hydrate → commit batch |
+| registry/split/materials/workspace 原子替换 | `WorkspaceCommitBatch` | prepare/validate、apply、publish 分离 |
 | await 前捕获的 pane/session/runtime 目标 | `PaneEditorContext` | focus 改变不改写目标；stale/dispose 后拒绝写入 |
 | workspace 可观察快照 | `WorkspaceController` | 唯一 publish 入口 |
 | active block、selection/menu/hover | editor Widget local state | 不进入 workspace 全局状态 |
@@ -172,12 +172,14 @@ Mutation 固定执行：
 
 1. 在 barrier 中串行化操作并固化 affected sessions；
 2. flush 或 discard/quiesce；失败则不调用 backend；
-3. 执行 backend operation；
-4. `WorkspaceCommitBatch.prepare` 纯计算完整 replacement 并验证 invariant；
-5. `apply` 只做 non-throwing assignment；
-6. 全部替换完成后统一 publish。
+3. 调用 `WorkspaceMutationPlan.commitBackend()`；backend 未提交时失败返回 `BackendFailed`；
+4. backend 提交成功后得到 `WorkspaceBackendCommit<T>`；
+5. 调用 `postCommitHydrate()` 读取提交后的 `VaultMutationDelta<T>`；
+6. 调用可选 `prepareCommit(delta)`，未提供时使用默认 builder 构造 `WorkspaceCommitBatch`，并执行 `validateCurrent()`；
+7. `applySilently()` 应用已准备 replacement；
+8. `publish()` 统一通知 observers。
 
-backend 已成功但 `prepare` 失败时抛出 `WorkspaceCommitInvariantError`，controller 进入 `reloadRequired`。此时禁止把错误降级为可重试 backend failure，避免重复执行已经落盘的不可逆操作。publish listener 错误只报告，不改变已经 committed 的结果。
+backend commit 成功后，`postCommitHydrate`、prepare/validate、apply 或 publish 任一失败，都抛出对应 phase 的 `WorkspaceCommitInvariantError`，barrier 进入 fatal，controller 进入 `reloadRequired`/fatal recovery。此时 backend 已可能产生不可逆落盘结果，禁止重试 backend operation，也不得把错误降级为 `BackendFailed`；`BackendFailed` 仅表示 backend 尚未提交。
 
 ### 6.3 Pane context
 

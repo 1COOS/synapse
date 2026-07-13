@@ -123,29 +123,28 @@ Foundation 验证证据：
 - paste/import/image width/drag/proposal 等异步命令都接收 context。
 - focus 变化不使 context 失效；pane 重绑、关闭、session 移除或 Vault 切换返回 `staleTarget`，不得写入其他 note。
 
-`WorkspaceCommitBatch`：
+`WorkspaceMutationPlan` / `WorkspaceCommitBatch`：
 
-1. backend operation 成功后调用 `prepare(delta)`。
-2. `prepare` 是纯计算、无副作用；基于提交前 snapshot 构造并验证完整的 registry/split/materials/workspace replacement。
-3. `prepare` 不允许 I/O、await、状态写入或 callback。
-4. `apply` 只做已准备 immutable state/reference 的 non-throwing assignment，不允许 I/O、await、callback 或可能失败的增量 mutation。
-5. 全部 assignment 完成后统一 publish。
-6. publish listener error 通过 `FlutterError.reportError` 或等价 reporting 上报，mutation 结果保持 `Committed`。
+1. barrier 完成 flush/discard quiesce 后调用 `commitBackend()`。
+2. `commitBackend()` 成功返回 `WorkspaceBackendCommit<T>`，表示 backend 已提交；其 `postCommitHydrate()` 读取提交后的 `VaultMutationDelta<T>`。
+3. plan 可选 `prepareCommit(delta)` 构造 `WorkspaceCommitBatch`；未提供时使用默认 batch builder。
+4. batch 通过 `validateCurrent()` 验证完整的 registry/split/materials/workspace replacement 仍基于当前 snapshot。
+5. `applySilently()` 应用已准备 immutable replacement，再由 `publish()` 统一通知。
+6. hydrate/prepare/apply/publish phase 由 barrier 分别归类，post-backend failure 不返回可重试结果。
 
 失败语义：
 
-- `BackendFailed` 只表示 backend operation 本身失败且未提交。
+- `BackendFailed` 只表示 `commitBackend` 在 backend 尚未提交时失败。
 - flush 失败返回 `AbortedByFlush`，backend 不执行。
-- backend 成功后，`prepare` 发现 invariant violation 时抛 `WorkspaceCommitInvariantError`。
-- controller 捕获该错误后进入 `reloadRequired`/fatal recovery 状态，明确禁止重试 backend operation。
-- invariant、assignment 或 listener notification 问题不得映射为可重试 `MutationFailed` 或 `BackendFailed`。
+- backend commit 成功后，`postCommitHydrate`、`prepareCommit`/`validateCurrent`、`applySilently` 或 `publish` 任一失败都抛对应 phase 的 `WorkspaceCommitInvariantError`。
+- barrier 进入 fatal，controller 进入 `reloadRequired`/fatal recovery，明确禁止重试 backend operation。
+- post-backend failure 不得映射为 `BackendFailed` 或其他可重试结果。
 
 故障注入测试：
 
-- `prepare` invariant failure 不产生任何部分 in-memory commit。
-- `prepare` invariant failure 抛 `WorkspaceCommitInvariantError`，不返回 retryable `BackendFailed`。
+- hydrate/prepare invariant failure 不产生部分 in-memory commit。
+- hydrate/prepare/apply/publish failure 抛对应 phase 的 `WorkspaceCommitInvariantError`，不返回 retryable `BackendFailed`。
 - controller 进入 reload-required/fatal recovery，且不会再次调用 backend operation。
-- publish listener error 被 reporting 捕获，但结果仍为 `Committed`。
 - focus change 保持原目标；stale pane/session/runtime 返回 `staleTarget`。
 
 Commit：`fix: bind pane async mutations to stable context`。
@@ -243,7 +242,7 @@ git status --short --branch
 - 无 await 后重新读取焦点作为 mutation target。
 - 无 timer/runtime/lease 泄漏。
 - 无重复状态源或 revision counters。
-- commit prepare/apply/publish 契约和故障注入测试全部覆盖。
+- commitBackend/postCommitHydrate/prepare/apply/publish 契约和故障注入测试全部覆盖。
 - 输出分支可合并报告；不自动 merge 或 push `main`。
 
 ## 执行约束
