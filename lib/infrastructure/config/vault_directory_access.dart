@@ -11,7 +11,7 @@ final class VaultDirectoryAccess implements VaultAccessGateway {
   }) : _channel = channel;
 
   final MethodChannel _channel;
-  final Set<String> _releasedTokens = <String>{};
+  final Map<String, Future<void>> _releaseFlights = <String, Future<void>>{};
 
   @override
   Future<VaultAccessLease?> pick() async {
@@ -92,14 +92,22 @@ final class VaultDirectoryAccess implements VaultAccessGateway {
   }
 
   Future<void> _releaseToken(String token) async {
-    if (!_releasedTokens.add(token)) {
-      return;
+    final existing = _releaseFlights[token];
+    if (existing != null) {
+      return existing;
     }
-    try {
-      await _channel.invokeMethod<void>('releaseAccess', {'leaseToken': token});
-    } catch (_) {
-      _releasedTokens.remove(token);
-      rethrow;
-    }
+    late final Future<void> flight;
+    flight =
+        Future<void>.sync(
+          () => _channel.invokeMethod<void>('releaseAccess', {
+            'leaseToken': token,
+          }),
+        ).then((_) {}).whenComplete(() {
+          if (identical(_releaseFlights[token], flight)) {
+            _releaseFlights.remove(token);
+          }
+        });
+    _releaseFlights[token] = flight;
+    return flight;
   }
 }

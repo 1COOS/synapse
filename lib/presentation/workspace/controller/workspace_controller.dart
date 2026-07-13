@@ -878,30 +878,30 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
     }
     final current = _requireState();
     final runtime = _runtimeManager.requireCurrent();
-    _publishCommittedState(
-      WorkspaceState(
-        phase: _dependencies.supportsDirectoryVault
-            ? WorkspacePhase.ready
-            : WorkspacePhase.webPreview,
-        resources: snapshot.resources,
-        selectedResourceId: snapshot.selectedResource?.id,
-        searchResults: const [],
-        materials: _materials.snapshots,
-        splitRoot: _splits.root,
-        focusedPaneId: _splits.focusedPaneId,
-        sessionNoteIds: _sessions.noteIds,
-        usesNativeMacTitlebar: _dependencies.usesNativeMacTitlebar,
-        leftMode: WorkspaceLeftMode.resources,
-        narrowSection: snapshot.note == null
-            ? WorkspaceSection.resources
-            : WorkspaceSection.notes,
-        settings: _startup.settings,
-        vaultLabel: runtime.label,
-        vaultRoot: runtime.rootPath,
-        activeOperation: current.activeOperation,
-        message: message,
-      ),
+    final next = WorkspaceState(
+      phase: _dependencies.supportsDirectoryVault
+          ? WorkspacePhase.ready
+          : WorkspacePhase.webPreview,
+      resources: snapshot.resources,
+      selectedResourceId: snapshot.selectedResource?.id,
+      searchResults: const [],
+      materials: _materials.snapshots,
+      splitRoot: _splits.root,
+      focusedPaneId: _splits.focusedPaneId,
+      sessionNoteIds: _sessions.noteIds,
+      usesNativeMacTitlebar: _dependencies.usesNativeMacTitlebar,
+      leftMode: WorkspaceLeftMode.resources,
+      narrowSection: snapshot.note == null
+          ? WorkspaceSection.resources
+          : WorkspaceSection.notes,
+      settings: _startup.settings,
+      vaultLabel: runtime.label,
+      vaultRoot: runtime.rootPath,
+      activeOperation: current.activeOperation,
+      message: message,
     );
+    _dependencies.runtimeSnapshotPublishHookForTesting?.call();
+    _publishCommittedState(next);
   }
 
   bool _beginOperation(WorkspaceOperation operation) {

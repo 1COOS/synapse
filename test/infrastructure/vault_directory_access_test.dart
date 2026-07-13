@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:synapse/infrastructure/config/vault_directory_access.dart';
@@ -60,7 +62,7 @@ void main() {
     expect(lease.token, 'lease-2');
   });
 
-  test('releases a lease by token exactly once', () async {
+  test('releases a lease using its opaque token', () async {
     final calls = <MethodCall>[];
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(channel, (call) async {
@@ -77,11 +79,73 @@ void main() {
     final access = VaultDirectoryAccess();
 
     await access.release(lease);
-    await access.release(lease);
 
     expect(calls, hasLength(1));
     expect(calls.single.method, 'releaseAccess');
     expect(calls.single.arguments, {'leaseToken': 'lease-3'});
+  });
+
+  test(
+    'concurrent release callers await the same in-flight operation',
+    () async {
+      final calls = <MethodCall>[];
+      final releaseGate = Completer<void>();
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, (call) {
+            calls.add(call);
+            return releaseGate.future;
+          });
+      const lease = VaultAccessLease(
+        location: VaultLocation(rootPath: '/vault/shared'),
+        token: 'shared-token',
+      );
+      final access = VaultDirectoryAccess();
+      var firstCompleted = false;
+      var secondCompleted = false;
+
+      final first = access.release(lease).then((_) => firstCompleted = true);
+      final second = access.release(lease).then((_) => secondCompleted = true);
+      await Future<void>.delayed(Duration.zero);
+
+      expect(calls, hasLength(1));
+      expect(firstCompleted, isFalse);
+      expect(secondCompleted, isFalse);
+
+      releaseGate.complete();
+      await Future.wait([first, second]);
+      expect(firstCompleted, isTrue);
+      expect(secondCompleted, isTrue);
+    },
+  );
+
+  test('failed shared release can be retried by every caller', () async {
+    final calls = <MethodCall>[];
+    final releaseGate = Completer<void>();
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (call) {
+          calls.add(call);
+          return calls.length == 1 ? releaseGate.future : Future<void>.value();
+        });
+    const lease = VaultAccessLease(
+      location: VaultLocation(rootPath: '/vault/retry'),
+      token: 'retry-token',
+    );
+    final access = VaultDirectoryAccess();
+
+    final first = access.release(lease);
+    final second = access.release(lease);
+    final firstFailure = expectLater(first, throwsA(isA<PlatformException>()));
+    final secondFailure = expectLater(
+      second,
+      throwsA(isA<PlatformException>()),
+    );
+    releaseGate.completeError(StateError('native release failed'));
+
+    await Future.wait([firstFailure, secondFailure]);
+    await access.release(lease);
+
+    expect(calls, hasLength(2));
+    expect(calls.last.arguments, {'leaseToken': 'retry-token'});
   });
 
   test('preserves an opaque lease token exactly', () async {

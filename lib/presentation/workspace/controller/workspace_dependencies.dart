@@ -66,6 +66,7 @@ final class WorkspaceDependencies {
     required this.injectedVaultLabel,
     required this.defaultVaultLabel,
     required this.workspaceCommitFailureForTesting,
+    required this.runtimeSnapshotPublishHookForTesting,
     required this.cleanupErrorReporter,
   });
 
@@ -91,5 +92,6 @@ final class WorkspaceDependencies {
   final String injectedVaultLabel;
   final String defaultVaultLabel;
   final WorkspaceCommitPhase? workspaceCommitFailureForTesting;
+  final void Function()? runtimeSnapshotPublishHookForTesting;
   final WorkspaceRuntimeCleanupErrorReporter cleanupErrorReporter;
 }

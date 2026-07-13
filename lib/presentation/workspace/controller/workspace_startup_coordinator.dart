@@ -235,7 +235,10 @@ final class WorkspaceStartupCoordinator {
     }
     WorkspaceRuntime? candidate;
     _VaultAccessCandidate? candidateAccess;
-    var leaseCommitted = false;
+    VaultAccessLease? previousLease;
+    var runtimeCommitted = false;
+    var leaseOwnershipCommitted = false;
+    var postCommitFailed = false;
     try {
       candidateAccess = await _pickVaultAccess();
       if (candidateAccess == null) {
@@ -283,24 +286,38 @@ final class WorkspaceStartupCoordinator {
       _startupSettingsError = null;
       saves.resetAfterReload();
       mutations.resetAfterReload();
+      previousLease = _activeVaultLease;
       runtimes.install(candidate);
       candidate = null;
+      runtimeCommitted = true;
+      if (isDisposed()) {
+        previousLease = null;
+      } else {
+        _activeVaultLease = candidateAccess.lease;
+        leaseOwnershipCommitted = true;
+        candidateAccess = null;
+      }
       _settings = nextSettings;
       _loadedSettingsBaseline = nextSettings;
       replaceRuntimeSnapshot(snapshot, message: '仓库已打开');
-      final previousLease = _activeVaultLease;
-      _activeVaultLease = candidateAccess.lease;
-      leaseCommitted = true;
-      candidateAccess = null;
-      await _releaseLease(previousLease, reportMessage: true);
       return WorkspaceActionResult.committed;
     } catch (error) {
+      if (runtimeCommitted) {
+        postCommitFailed = true;
+        if (!isDisposed()) {
+          setMessage('仓库已切换，但界面状态刷新失败，请重新加载：$error');
+        }
+        return WorkspaceActionResult.committed;
+      }
       setMessage('仓库位置读取失败：$error');
       return WorkspaceActionResult.failed;
     } finally {
       candidate?.dispose(reportCleanupError: dependencies.cleanupErrorReporter);
-      if (!leaseCommitted) {
+      if (!leaseOwnershipCommitted) {
         await _releaseLease(candidateAccess?.lease);
+      }
+      if (runtimeCommitted) {
+        await _releaseLease(previousLease, reportMessage: !postCommitFailed);
       }
       if (ownsOperation) {
         endOperation(WorkspaceOperation.vaultSwitch);
@@ -415,7 +432,10 @@ final class WorkspaceStartupCoordinator {
   ) async {
     WorkspaceRuntime? candidate;
     _VaultAccessCandidate? candidateAccess;
-    var leaseCommitted = false;
+    VaultAccessLease? previousLease;
+    var runtimeCommitted = false;
+    var leaseOwnershipCommitted = false;
+    var postCommitFailed = false;
     var settingsLoaded = false;
     try {
       final loadResult = await settingsLoad;
@@ -485,20 +505,33 @@ final class WorkspaceStartupCoordinator {
         candidate = null;
         return;
       }
+      previousLease = _activeVaultLease;
       runtimes.install(candidate);
       candidate = null;
+      runtimeCommitted = true;
+      if (isDisposed()) {
+        previousLease = null;
+      } else {
+        _activeVaultLease = candidateAccess.lease;
+        leaseOwnershipCommitted = true;
+        candidateAccess = null;
+      }
       _settings = restoredSettings;
       _loadedSettingsBaseline = restoredSettings;
       replaceRuntimeSnapshot(
         snapshot,
         message: _startupMessage(recoveryMessage, fallback: '仓库已打开'),
       );
-      _activeVaultLease = candidateAccess.lease;
-      leaseCommitted = true;
-      candidateAccess = null;
     } catch (error) {
       await Future<void>.delayed(Duration.zero);
       candidate?.dispose(reportCleanupError: dependencies.cleanupErrorReporter);
+      if (runtimeCommitted) {
+        postCommitFailed = true;
+        if (!isDisposed()) {
+          setMessage('仓库已恢复，但界面状态刷新失败，请重新加载：$error');
+        }
+        return;
+      }
       if (_isStartupCurrent(startupToken)) {
         if (!settingsLoaded) {
           _startupSettingsError = error;
@@ -507,8 +540,11 @@ final class WorkspaceStartupCoordinator {
         setMessage('$prefix：$error');
       }
     } finally {
-      if (!leaseCommitted) {
+      if (!leaseOwnershipCommitted) {
         await _releaseLease(candidateAccess?.lease);
+      }
+      if (runtimeCommitted) {
+        await _releaseLease(previousLease, reportMessage: !postCommitFailed);
       }
       if (_isStartupCurrent(startupToken)) {
         _startupToken = null;

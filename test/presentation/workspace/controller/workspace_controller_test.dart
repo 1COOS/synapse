@@ -441,6 +441,200 @@ void main() {
     );
 
     test(
+      'snapshot publish failure after install keeps the new lease committed',
+      () async {
+        const oldLocation = VaultLocation(
+          rootPath: '/vault/old',
+          bookmarkBase64: 'old-bookmark',
+        );
+        const newLocation = VaultLocation(
+          rootPath: '/vault/new',
+          bookmarkBase64: 'new-bookmark',
+        );
+        const oldLease = VaultAccessLease(
+          location: oldLocation,
+          token: 'old-token',
+        );
+        const newLease = VaultAccessLease(
+          location: newLocation,
+          token: 'new-token',
+        );
+        final oldVault = MemoryVaultBackend(seedExampleData: false);
+        await oldVault.createNote(parentPath: '', title: 'Old');
+        final newVault = MemoryVaultBackend(seedExampleData: false);
+        await newVault.createNote(parentPath: '', title: 'New');
+        final access = FakeVaultAccessGateway(
+          onRestore: (_) async => oldLease,
+          onPick: () async => newLease,
+        );
+        void Function() publishHook = () {};
+        final container = ProviderContainer(
+          overrides: [
+            workspaceDependenciesProvider.overrideWithValue(
+              createWorkspaceDependencies(
+                settingsStore: FakeSettingsStore(
+                  initialSettings: const SynapseSettings(
+                    vaultLocation: oldLocation,
+                  ),
+                ),
+                supportsDirectoryVaultOverride: true,
+                vaultAccessGateway: access,
+                vaultBackendFactory: (rootPath) =>
+                    rootPath == oldLocation.rootPath ? oldVault : newVault,
+                runtimeSnapshotPublishHookForTesting: () => publishHook(),
+              ),
+            ),
+          ],
+        );
+        final ready = Completer<void>();
+        final subscription = container.listen(workspaceControllerProvider, (
+          _,
+          next,
+        ) {
+          if (next.value?.phase == WorkspacePhase.ready && !ready.isCompleted) {
+            ready.complete();
+          }
+        }, fireImmediately: true);
+        addTearDown(subscription.close);
+        addTearDown(container.dispose);
+        await container.read(workspaceControllerProvider.future);
+        await ready.future;
+        publishHook = () => throw StateError('snapshot publish failed');
+
+        final result = await container
+            .read(workspaceControllerProvider.notifier)
+            .chooseVault();
+
+        expect(result, WorkspaceActionResult.committed);
+        expect(access.releaseAttempts, [oldLease]);
+        expect(access.releaseAttempts, isNot(contains(newLease)));
+
+        container.dispose();
+        await Future<void>.delayed(Duration.zero);
+        expect(
+          access.releaseAttempts.where((lease) => lease == newLease),
+          hasLength(1),
+        );
+      },
+    );
+
+    test(
+      'startup snapshot publish failure keeps the restored lease active',
+      () async {
+        const location = VaultLocation(
+          rootPath: '/vault/startup-publish',
+          bookmarkBase64: 'startup-bookmark',
+        );
+        const lease = VaultAccessLease(
+          location: location,
+          token: 'startup-token',
+        );
+        final access = FakeVaultAccessGateway(onRestore: (_) async => lease);
+        final publishAttempted = Completer<void>();
+        final container = ProviderContainer(
+          overrides: [
+            workspaceDependenciesProvider.overrideWithValue(
+              createWorkspaceDependencies(
+                settingsStore: FakeSettingsStore(
+                  initialSettings: const SynapseSettings(
+                    vaultLocation: location,
+                  ),
+                ),
+                supportsDirectoryVaultOverride: true,
+                vaultAccessGateway: access,
+                vaultBackendFactory: (_) => MemoryVaultBackend(),
+                runtimeSnapshotPublishHookForTesting: () {
+                  publishAttempted.complete();
+                  throw StateError('startup snapshot publish failed');
+                },
+              ),
+            ),
+          ],
+        );
+        addTearDown(container.dispose);
+
+        await container.read(workspaceControllerProvider.future);
+        await publishAttempted.future;
+        await Future<void>.delayed(Duration.zero);
+
+        expect(access.releaseAttempts, isEmpty);
+
+        container.dispose();
+        await Future<void>.delayed(Duration.zero);
+        expect(access.releaseAttempts, [lease]);
+      },
+    );
+
+    test(
+      'dispose reentry during snapshot publish releases new ownership once',
+      () async {
+        const oldLocation = VaultLocation(
+          rootPath: '/vault/reentry-old',
+          bookmarkBase64: 'old-bookmark',
+        );
+        const newLocation = VaultLocation(
+          rootPath: '/vault/reentry-new',
+          bookmarkBase64: 'new-bookmark',
+        );
+        const oldLease = VaultAccessLease(
+          location: oldLocation,
+          token: 'old-token',
+        );
+        const newLease = VaultAccessLease(
+          location: newLocation,
+          token: 'new-token',
+        );
+        final access = FakeVaultAccessGateway(
+          onRestore: (_) async => oldLease,
+          onPick: () async => newLease,
+        );
+        void Function() publishHook = () {};
+        late final ProviderContainer container;
+        container = ProviderContainer(
+          overrides: [
+            workspaceDependenciesProvider.overrideWithValue(
+              createWorkspaceDependencies(
+                settingsStore: FakeSettingsStore(
+                  initialSettings: const SynapseSettings(
+                    vaultLocation: oldLocation,
+                  ),
+                ),
+                supportsDirectoryVaultOverride: true,
+                vaultAccessGateway: access,
+                vaultBackendFactory: (_) => MemoryVaultBackend(),
+                runtimeSnapshotPublishHookForTesting: () => publishHook(),
+              ),
+            ),
+          ],
+        );
+        final ready = Completer<void>();
+        container.listen(workspaceControllerProvider, (_, next) {
+          if (next.value?.phase == WorkspacePhase.ready && !ready.isCompleted) {
+            ready.complete();
+          }
+        }, fireImmediately: true);
+        await container.read(workspaceControllerProvider.future);
+        await ready.future;
+        publishHook = container.dispose;
+
+        final result = await container
+            .read(workspaceControllerProvider.notifier)
+            .chooseVault();
+        await Future<void>.delayed(Duration.zero);
+
+        expect(result, WorkspaceActionResult.committed);
+        expect(
+          access.releaseAttempts.where((lease) => lease == oldLease),
+          hasLength(1),
+        );
+        expect(
+          access.releaseAttempts.where((lease) => lease == newLease),
+          hasLength(1),
+        );
+      },
+    );
+
+    test(
       'ProviderContainer dispose aborts an in-flight mutation before hydration',
       () async {
         final vault = _HydrationRecordingDelayedDeleteVault();

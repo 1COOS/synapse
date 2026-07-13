@@ -43,6 +43,7 @@ WorkspaceDependencies createWorkspaceDependencies({
   String? injectedVaultLabel,
   String? defaultVaultLabel,
   WorkspaceCommitPhase? workspaceCommitFailureForTesting,
+  void Function()? runtimeSnapshotPublishHookForTesting,
   WorkspaceRuntimeCleanupErrorReporter? cleanupErrorReporter,
 }) {
   SettingsStore? resolvedSettingsStore =
@@ -147,6 +148,7 @@ WorkspaceDependencies createWorkspaceDependencies({
         injectedVaultLabel ?? (supportsDirectoryVault ? '测试仓库' : 'H5 预览库'),
     defaultVaultLabel: defaultVaultLabel ?? 'H5 预览库',
     workspaceCommitFailureForTesting: workspaceCommitFailureForTesting,
+    runtimeSnapshotPublishHookForTesting: runtimeSnapshotPublishHookForTesting,
     cleanupErrorReporter: reportCleanupError,
   );
 }
