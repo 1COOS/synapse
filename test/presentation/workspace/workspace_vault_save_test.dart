@@ -420,6 +420,84 @@ void main() {
     expect(find.textContaining('baseline load failed'), findsOneWidget);
   });
 
+  testWidgets(
+    'Vault switch after startup runtime failure uses the loaded settings',
+    (tester) async {
+      const secondPath = '/vault/after-startup-runtime-failure';
+      const startupSettings = SynapseSettings(
+        providerConfig: ProviderConfig(
+          baseUrl: 'loaded-url',
+          apiKey: 'loaded-key',
+          chatModel: 'loaded-chat',
+          visionModel: 'loaded-vision',
+          embeddingModel: 'loaded-embedding',
+        ),
+        preferences: WorkspacePreferences(
+          defaultNoteMode: WorkspaceDefaultNoteMode.reading,
+          semanticSearchEnabled: true,
+          pastedImageWidth: 720,
+          autoSaveDelayMillis: 1600,
+          accentColor: WorkspaceAccentColor.green,
+          noteFontSize: 20,
+        ),
+      );
+      final settingsStore = FakeSettingsStore(initialSettings: startupSettings);
+      final firstVault = MemoryVaultBackend(seedExampleData: false);
+      await firstVault.createNote(parentPath: '', title: 'First');
+      final secondVault = MemoryVaultBackend(seedExampleData: false);
+      await secondVault.createNote(parentPath: '', title: 'Second');
+      final providerConfigs = <ProviderConfig>[];
+      final semanticSearchFlags = <bool>[];
+      final dependencies = createWorkspaceDependencies(
+        initialVault: firstVault,
+        settingsStore: settingsStore,
+        supportsDirectoryVaultOverride: true,
+        pickVaultLocation: () async =>
+            const VaultLocation(rootPath: secondPath),
+        vaultBackendFactory: (_) => secondVault,
+        aiProviderFactory: (config) {
+          providerConfigs.add(config);
+          return MockAiProvider();
+        },
+        searchIndexFactory: (_, semanticSearchEnabled) {
+          semanticSearchFlags.add(semanticSearchEnabled);
+          if (semanticSearchFlags.length == 2) {
+            throw StateError('startup runtime build failed');
+          }
+          return _EmptySearchIndex();
+        },
+      );
+
+      await pumpWorkspace(tester, vault: null, dependencies: dependencies);
+
+      expect(find.text('First'), findsWidgets);
+      expect(
+        primaryButtonColor(tester, const Key('add-image-button')),
+        CupertinoColors.systemBlue,
+      );
+
+      await tester.tap(find.byKey(const Key('vault-location-button')));
+      await tester.pumpAndSettle();
+
+      final saved = settingsStore.savedSettings.single;
+      expect(saved.vaultLocation?.rootPath, secondPath);
+      expect(saved.providerConfig.baseUrl, 'loaded-url');
+      expect(saved.providerConfig.apiKey, 'loaded-key');
+      expect(saved.preferences, startupSettings.preferences);
+      expect(providerConfigs, hasLength(3));
+      expect(providerConfigs.last.baseUrl, 'loaded-url');
+      expect(providerConfigs.last.apiKey, 'loaded-key');
+      expect(providerConfigs.last.embeddingModel, 'loaded-embedding');
+      expect(semanticSearchFlags, [false, true, true]);
+      expect(find.text('Second'), findsWidgets);
+      expect(
+        primaryButtonColor(tester, const Key('add-image-button')),
+        CupertinoColors.systemGreen,
+      );
+      expect(find.byKey(const Key('markdown-reading-preview')), findsOneWidget);
+    },
+  );
+
   testWidgets('prompts for a new vault when the saved path is unavailable', (
     tester,
   ) async {

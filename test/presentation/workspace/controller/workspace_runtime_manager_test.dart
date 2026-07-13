@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:synapse/application/proposals/proposal_service.dart';
 import 'package:synapse/application/search/search_index.dart';
@@ -182,6 +184,47 @@ void main() {
       expect(candidateIndex.disposeCalls, 1);
       expect(candidateProvider.disposeCalls, 1);
       expect(cleanupErrors, hasLength(2));
+    });
+
+    test('newer candidate intent prevents an older candidate commit', () async {
+      final manager = WorkspaceRuntimeManager();
+      final oldIndex = _RecordingSearchIndex();
+      final oldRuntime = _runtime(index: oldIndex);
+      final olderIndex = _RecordingSearchIndex();
+      final olderCandidate = _runtime(index: olderIndex);
+      final newerIndex = _RecordingSearchIndex();
+      final newerCandidate = _runtime(index: newerIndex);
+      final olderValidation = Completer<void>();
+      final newerValidation = Completer<void>();
+      manager.install(oldRuntime);
+
+      final olderInstall = manager.installCandidate(
+        () => olderCandidate,
+        validate: (_) => olderValidation.future,
+      );
+      await Future<void>.delayed(Duration.zero);
+      final newerInstall = manager.installCandidate(
+        () => newerCandidate,
+        validate: (_) => newerValidation.future,
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      olderValidation.complete();
+      await olderInstall;
+
+      expect(manager.current, same(oldRuntime));
+      expect(manager.generation, 1);
+      expect(olderIndex.disposeCalls, 1);
+      expect(oldIndex.disposeCalls, 0);
+
+      newerValidation.complete();
+      await newerInstall;
+
+      expect(manager.current, same(newerCandidate));
+      expect(manager.generation, 2);
+      expect(oldIndex.disposeCalls, 1);
+      expect(olderIndex.disposeCalls, 1);
+      expect(newerIndex.disposeCalls, 0);
     });
 
     test('clear and dispose are idempotent and reject later use', () {

@@ -932,13 +932,14 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     _workspaceMutationToken = Object();
   }
 
-  WorkspaceRuntime _createDetachedRuntime(VaultLocation location) {
+  WorkspaceRuntime _createDetachedRuntime(
+    VaultLocation location,
+    SynapseSettings settings,
+  ) {
     return _dependencies.createRuntime(
       vault: _dependencies.createVault(location.rootPath),
-      aiProvider: _dependencies.createAiProvider(
-        _providerConfig ?? ProviderConfig.empty,
-      ),
-      semanticSearchEnabled: _semanticSearchEnabled,
+      aiProvider: _dependencies.createAiProvider(settings.providerConfig),
+      semanticSearchEnabled: _semanticSearchEnabledFor(settings),
       rootPath: location.rootPath,
       label: _dependencies.formatVaultLabel(location.rootPath),
     );
@@ -954,7 +955,8 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       if (!_canCommitStartup(startupToken)) {
         return;
       }
-      candidate = _createDetachedRuntime(location);
+      final settingsSource = _settingsBaseline;
+      candidate = _createDetachedRuntime(location, settingsSource);
       final snapshot = await _resourceCoordinator.loadDetachedRuntime(
         candidate,
       );
@@ -963,7 +965,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
         candidate = null;
         return;
       }
-      final savedSettings = _settingsBaseline.copyWith(vaultLocation: location);
+      final savedSettings = settingsSource.copyWith(vaultLocation: location);
       await _persistSettings(savedSettings);
       if (!_canCommitStartup(startupToken)) {
         _disposeDetachedRuntime(candidate);
@@ -1001,6 +1003,9 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     setState(() {
       _settings = settings;
       _loadedSettingsBaseline = settings;
+      _workspacePreferences = settings.preferences;
+      _providerConfig = settings.providerConfig;
+      _splitWorkspaceController.updateDefaultMode(_preferredNoteMode);
       _resources = snapshot.resources;
       _selectedResource = snapshot.selectedResource;
       _searchResults = const [];
@@ -1166,14 +1171,10 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
     WorkspaceRuntime current,
     SynapseSettings settings,
   ) {
-    final semanticSearchEnabled =
-        settings.preferences.semanticSearchEnabled &&
-        (_dependencies.usesInjectedAiProvider ||
-            settings.providerConfig.hasEmbeddingConfig);
     return _dependencies.createRuntime(
       vault: current.vault,
       aiProvider: _dependencies.createAiProvider(settings.providerConfig),
-      semanticSearchEnabled: semanticSearchEnabled,
+      semanticSearchEnabled: _semanticSearchEnabledFor(settings),
       rootPath: current.rootPath,
       label: current.label,
     );
@@ -3346,6 +3347,12 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   }
 
   SynapseSettings get _settingsBaseline => _loadedSettingsBaseline ?? _settings;
+
+  bool _semanticSearchEnabledFor(SynapseSettings settings) {
+    return settings.preferences.semanticSearchEnabled &&
+        (_dependencies.usesInjectedAiProvider ||
+            settings.providerConfig.hasEmbeddingConfig);
+  }
 
   @override
   Widget build(BuildContext context) {
