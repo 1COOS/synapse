@@ -1,6 +1,111 @@
 import Cocoa
 import FlutterMacOS
 
+enum VaultAccessManagerError: LocalizedError {
+  case accessDenied
+  case invalidToken
+
+  var errorDescription: String? {
+    switch self {
+    case .accessDenied:
+      return "Could not start security-scoped Vault access."
+    case .invalidToken:
+      return "Could not create a unique Vault access token."
+    }
+  }
+}
+
+final class VaultAccessManager {
+  static let shared = VaultAccessManager()
+
+  private struct Lease {
+    let url: URL
+    let startedAccess: Bool
+  }
+
+  typealias StartAccessing = (URL) -> Bool
+  typealias StopAccessing = (URL) -> Void
+  typealias MakeBookmark = (URL) throws -> Data
+  typealias MakeToken = () -> String
+
+  private let startAccessing: StartAccessing
+  private let stopAccessing: StopAccessing
+  private let makeBookmark: MakeBookmark
+  private let makeToken: MakeToken
+  private var leases: [String: Lease] = [:]
+
+  init(
+    startAccessing: @escaping StartAccessing = { $0.startAccessingSecurityScopedResource() },
+    stopAccessing: @escaping StopAccessing = { $0.stopAccessingSecurityScopedResource() },
+    makeBookmark: @escaping MakeBookmark = { url in
+      try url.bookmarkData(
+        options: [.withSecurityScope],
+        includingResourceValuesForKeys: nil,
+        relativeTo: nil)
+    },
+    makeToken: @escaping MakeToken = { UUID().uuidString }
+  ) {
+    self.startAccessing = startAccessing
+    self.stopAccessing = stopAccessing
+    self.makeBookmark = makeBookmark
+    self.makeToken = makeToken
+  }
+
+  var activeLeaseCount: Int {
+    leases.count
+  }
+
+  func createLease(
+    for url: URL,
+    fallbackBookmarkBase64: String? = nil
+  ) throws -> [String: Any] {
+    guard startAccessing(url) else {
+      throw VaultAccessManagerError.accessDenied
+    }
+    var ownsStartedAccess = true
+    defer {
+      if ownsStartedAccess {
+        stopAccessing(url)
+      }
+    }
+
+    let bookmarkBase64: String
+    if let fallbackBookmarkBase64, !fallbackBookmarkBase64.isEmpty {
+      bookmarkBase64 = fallbackBookmarkBase64
+    } else {
+      bookmarkBase64 = try makeBookmark(url).base64EncodedString()
+    }
+    let token = makeToken()
+    guard !token.isEmpty, leases[token] == nil else {
+      throw VaultAccessManagerError.invalidToken
+    }
+    leases[token] = Lease(url: url, startedAccess: true)
+    ownsStartedAccess = false
+    return [
+      "rootPath": url.path,
+      "bookmarkBase64": bookmarkBase64,
+      "leaseToken": token,
+    ]
+  }
+
+  func release(token: String) {
+    guard let lease = leases.removeValue(forKey: token) else {
+      return
+    }
+    if lease.startedAccess {
+      stopAccessing(lease.url)
+    }
+  }
+
+  func releaseAll() {
+    let remaining = Array(leases.values)
+    leases.removeAll()
+    for lease in remaining where lease.startedAccess {
+      stopAccessing(lease.url)
+    }
+  }
+}
+
 class MainFlutterWindow: NSWindow {
   override func awakeFromNib() {
     titleVisibility = .hidden
@@ -23,7 +128,11 @@ class MainFlutterWindow: NSWindow {
 private final class VaultAccessChannel: NSObject {
   private static var instance: VaultAccessChannel?
 
-  private var activeURLs: [URL] = []
+  private let accessManager: VaultAccessManager
+
+  init(accessManager: VaultAccessManager = .shared) {
+    self.accessManager = accessManager
+  }
 
   static func register(with controller: FlutterViewController) {
     let instance = VaultAccessChannel()
@@ -50,6 +159,20 @@ private final class VaultAccessChannel: NSObject {
         return
       }
       startAccessingBookmark(bookmarkBase64, result: result)
+    case "releaseAccess":
+      guard
+        let arguments = call.arguments as? [String: Any],
+        let leaseToken = arguments["leaseToken"] as? String,
+        !leaseToken.isEmpty
+      else {
+        result(FlutterError(
+          code: "invalid-arguments",
+          message: "leaseToken is required.",
+          details: nil))
+        return
+      }
+      accessManager.release(token: leaseToken)
+      result(nil)
     default:
       result(FlutterMethodNotImplemented)
     }
@@ -70,7 +193,7 @@ private final class VaultAccessChannel: NSObject {
           return
         }
         do {
-          result(try self.payload(for: url))
+          result(try self.accessManager.createLease(for: url))
         } catch {
           result(FlutterError(
             code: "bookmark-create-failed",
@@ -103,7 +226,9 @@ private final class VaultAccessChannel: NSObject {
         options: [.withSecurityScope],
         relativeTo: nil,
         bookmarkDataIsStale: &isStale)
-      result(try payload(for: url, fallbackBookmarkBase64: isStale ? nil : bookmarkBase64))
+      result(try accessManager.createLease(
+        for: url,
+        fallbackBookmarkBase64: isStale ? nil : bookmarkBase64))
     } catch {
       result(FlutterError(
         code: "bookmark-resolve-failed",
@@ -112,26 +237,4 @@ private final class VaultAccessChannel: NSObject {
     }
   }
 
-  private func payload(
-    for url: URL,
-    fallbackBookmarkBase64: String? = nil
-  ) throws -> [String: Any] {
-    if url.startAccessingSecurityScopedResource() {
-      activeURLs.append(url)
-    }
-    let bookmarkBase64: String
-    if let fallbackBookmarkBase64 {
-      bookmarkBase64 = fallbackBookmarkBase64
-    } else {
-      let bookmarkData = try url.bookmarkData(
-        options: [.withSecurityScope],
-        includingResourceValuesForKeys: nil,
-        relativeTo: nil)
-      bookmarkBase64 = bookmarkData.base64EncodedString()
-    }
-    return [
-      "rootPath": url.path,
-      "bookmarkBase64": bookmarkBase64,
-    ]
-  }
 }

@@ -7,6 +7,7 @@ import 'package:synapse/infrastructure/ai/ai_provider.dart';
 import 'package:synapse/infrastructure/config/provider_config_store.dart';
 import 'package:synapse/infrastructure/config/settings_store.dart';
 import 'package:synapse/infrastructure/config/synapse_settings.dart';
+import 'package:synapse/infrastructure/config/vault_directory_access.dart';
 import 'package:synapse/infrastructure/config/vault_location_store.dart';
 import 'package:synapse/infrastructure/input/image_input_service.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
@@ -80,6 +81,40 @@ const tinyPng = <int>[
   96,
   130,
 ];
+
+class FakeVaultAccessGateway implements VaultAccessGateway {
+  FakeVaultAccessGateway({this.onPick, this.onRestore, this.onRelease});
+
+  Future<VaultAccessLease?> Function()? onPick;
+  Future<VaultAccessLease> Function(VaultLocation location)? onRestore;
+  Future<void> Function(VaultAccessLease lease)? onRelease;
+  final pickedLeases = <VaultAccessLease?>[];
+  final restoredLocations = <VaultLocation>[];
+  final releaseAttempts = <VaultAccessLease>[];
+
+  @override
+  Future<VaultAccessLease?> pick() async {
+    final lease = await onPick?.call();
+    pickedLeases.add(lease);
+    return lease;
+  }
+
+  @override
+  Future<VaultAccessLease> restore(VaultLocation location) async {
+    restoredLocations.add(location);
+    final restore = onRestore;
+    if (restore == null) {
+      throw StateError('No fake Vault restore is configured.');
+    }
+    return restore(location);
+  }
+
+  @override
+  Future<void> release(VaultAccessLease lease) async {
+    releaseAttempts.add(lease);
+    await onRelease?.call(lease);
+  }
+}
 
 class FakeVaultLocationStore implements VaultLocationStore {
   FakeVaultLocationStore({

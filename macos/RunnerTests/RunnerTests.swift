@@ -1,12 +1,72 @@
 import Cocoa
 import FlutterMacOS
 import XCTest
+@testable import synapse
 
 class RunnerTests: XCTestCase {
 
-  func testExample() {
-    // If you add code to the Runner application, consider adding tests here.
-    // See https://developer.apple.com/documentation/xctest for more information about using XCTest.
+  func testVaultAccessManagerReleasesEachStartedLeaseExactlyOnce() throws {
+    var starts = 0
+    var stops: [URL] = []
+    let manager = VaultAccessManager(
+      startAccessing: { _ in
+        starts += 1
+        return true
+      },
+      stopAccessing: { stops.append($0) },
+      makeBookmark: { _ in Data([1, 2, 3]) },
+      makeToken: { "lease-1" })
+    let url = URL(fileURLWithPath: "/vault/one")
+
+    let payload = try manager.createLease(for: url)
+
+    XCTAssertEqual(payload["rootPath"] as? String, "/vault/one")
+    XCTAssertEqual(payload["bookmarkBase64"] as? String, "AQID")
+    XCTAssertEqual(payload["leaseToken"] as? String, "lease-1")
+    XCTAssertEqual(manager.activeLeaseCount, 1)
+    XCTAssertEqual(starts, 1)
+
+    manager.release(token: "lease-1")
+    manager.release(token: "lease-1")
+
+    XCTAssertEqual(manager.activeLeaseCount, 0)
+    XCTAssertEqual(stops, [url])
+  }
+
+  func testVaultAccessManagerReleaseAllStopsEveryRemainingLease() throws {
+    var tokens = ["lease-1", "lease-2"]
+    var stops: [URL] = []
+    let manager = VaultAccessManager(
+      startAccessing: { _ in true },
+      stopAccessing: { stops.append($0) },
+      makeBookmark: { _ in Data([4]) },
+      makeToken: { tokens.removeFirst() })
+    let first = URL(fileURLWithPath: "/vault/one")
+    let second = URL(fileURLWithPath: "/vault/two")
+
+    _ = try manager.createLease(for: first)
+    _ = try manager.createLease(for: second)
+    manager.releaseAll()
+    manager.releaseAll()
+
+    XCTAssertEqual(manager.activeLeaseCount, 0)
+    XCTAssertEqual(Set(stops), Set([first, second]))
+    XCTAssertEqual(stops.count, 2)
+  }
+
+  func testVaultAccessManagerStopsAccessWhenBookmarkCreationFails() {
+    enum TestError: Error { case bookmark }
+    let url = URL(fileURLWithPath: "/vault/failure")
+    var stops: [URL] = []
+    let manager = VaultAccessManager(
+      startAccessing: { _ in true },
+      stopAccessing: { stops.append($0) },
+      makeBookmark: { _ in throw TestError.bookmark },
+      makeToken: { "unused" })
+
+    XCTAssertThrowsError(try manager.createLease(for: url))
+    XCTAssertEqual(manager.activeLeaseCount, 0)
+    XCTAssertEqual(stops, [url])
   }
 
 }

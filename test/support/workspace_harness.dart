@@ -9,6 +9,7 @@ import 'package:synapse/infrastructure/bootstrap/workspace_dependencies_factory.
 import 'package:synapse/infrastructure/config/provider_config_store.dart';
 import 'package:synapse/infrastructure/config/settings_store.dart';
 import 'package:synapse/infrastructure/config/synapse_settings.dart';
+import 'package:synapse/infrastructure/config/vault_directory_access.dart';
 import 'package:synapse/infrastructure/config/vault_location_store.dart';
 import 'package:synapse/infrastructure/input/image_input_service.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
@@ -114,6 +115,7 @@ Future<void> pumpWorkspace(
   ProviderConfigStore? configStore,
   SettingsStore? settingsStore,
   VaultLocationStore? vaultLocationStore,
+  VaultAccessGateway? vaultAccessGateway,
   Future<String?> Function()? directoryPicker,
   VaultBackend Function(String rootPath)? vaultBackendFactory,
   Future<String> Function(ProviderConfig config)? providerConfigTester,
@@ -133,6 +135,7 @@ Future<void> pumpWorkspace(
         settingsStore: settingsStore,
         providerConfigStore: configStore ?? FakeProviderConfigStore(),
         vaultLocationStore: vaultLocationStore,
+        vaultAccessGateway: vaultAccessGateway,
         directoryPicker: directoryPicker,
         vaultBackendFactory: vaultBackendFactory,
         providerConfigTester: providerConfigTester,

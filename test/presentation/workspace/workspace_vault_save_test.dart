@@ -11,7 +11,7 @@ import 'package:synapse/application/search/search_index.dart';
 import 'package:synapse/infrastructure/ai/mock_ai_provider.dart';
 import 'package:synapse/infrastructure/bootstrap/workspace_dependencies_factory.dart';
 import 'package:synapse/infrastructure/config/synapse_settings.dart';
-import 'package:synapse/infrastructure/config/vault_location_store.dart';
+import 'package:synapse/infrastructure/config/vault_directory_access.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
 import 'package:synapse/presentation/workspace/editor/live_markdown_editor.dart';
 import 'package:synapse/presentation/workspace/state/workspace_mutation_barrier.dart';
@@ -174,7 +174,11 @@ void main() {
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(channel, (call) async {
           calls.add(call);
-          return {'rootPath': rootPath, 'bookmarkBase64': 'fresh-bookmark'};
+          return {
+            'rootPath': rootPath,
+            'bookmarkBase64': 'fresh-bookmark',
+            'leaseToken': 'restored-token',
+          };
         });
     addTearDown(() {
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
@@ -195,6 +199,7 @@ void main() {
       tester,
       vault: null,
       vaultLocationStore: locationStore,
+      vaultAccessGateway: VaultDirectoryAccess(),
       directoryPicker: () async => null,
       vaultBackendFactory: (_) => vault,
     );
@@ -214,32 +219,49 @@ void main() {
     (tester) async {
       const oldPath = '/vault/startup-old';
       const newPath = '/vault/user-new';
+      const oldLocation = VaultLocation(
+        rootPath: oldPath,
+        bookmarkBase64: 'old-bookmark',
+      );
+      const newLocation = VaultLocation(
+        rootPath: newPath,
+        bookmarkBase64: 'new-bookmark',
+      );
+      const oldLease = VaultAccessLease(
+        location: oldLocation,
+        token: 'old-token',
+      );
+      const newLease = VaultAccessLease(
+        location: newLocation,
+        token: 'new-token',
+      );
       final oldVault = _GatedListVault();
       await oldVault.createNote(parentPath: '', title: 'Old');
       final newVault = MemoryVaultBackend(seedExampleData: false);
       await newVault.createNote(parentPath: '', title: 'New');
       final settingsStore = FakeSettingsStore(
-        initialSettings: const SynapseSettings(
-          vaultLocation: VaultLocation(rootPath: oldPath),
-        ),
+        initialSettings: const SynapseSettings(vaultLocation: oldLocation),
       );
       final restoreStarted = Completer<void>();
       final restoreRelease = Completer<void>();
       final pickerStarted = Completer<void>();
+      final access = FakeVaultAccessGateway(
+        onRestore: (_) async {
+          restoreStarted.complete();
+          await restoreRelease.future;
+          return oldLease;
+        },
+        onPick: () async {
+          pickerStarted.complete();
+          return newLease;
+        },
+      );
       final indexes = <_RecordingSearchIndex>[];
       final dependencies = createWorkspaceDependencies(
         settingsStore: settingsStore,
         aiProvider: MockAiProvider(),
         supportsDirectoryVaultOverride: true,
-        restoreVaultAccess: (location) async {
-          restoreStarted.complete();
-          await restoreRelease.future;
-          return location;
-        },
-        pickVaultLocation: () async {
-          pickerStarted.complete();
-          return const VaultLocation(rootPath: newPath);
-        },
+        vaultAccessGateway: access,
         vaultBackendFactory: (rootPath) {
           return rootPath == oldPath ? oldVault : newVault;
         },
@@ -280,6 +302,8 @@ void main() {
       expect(settingsStore.currentSettings.vaultLocation?.rootPath, newPath);
       expect(indexes[0].disposeCalls, 1);
       expect(indexes[1].disposeCalls, 0);
+      expect(access.releaseAttempts, [oldLease]);
+      expect(access.releaseAttempts, isNot(contains(newLease)));
     },
   );
 
@@ -395,40 +419,44 @@ void main() {
     },
   );
 
-  testWidgets(
-    'settings load failure saves a selected Vault from safe defaults',
-    (tester) async {
-      var pickerCalls = 0;
-      final settingsStore = _FailingBaselineSettingsStore();
-      final dependencies = createWorkspaceDependencies(
-        settingsStore: settingsStore,
-        aiProvider: MockAiProvider(),
-        supportsDirectoryVaultOverride: true,
-        pickVaultLocation: () async {
-          pickerCalls += 1;
-          return const VaultLocation(rootPath: '/vault/not-saved');
-        },
-        vaultBackendFactory: (_) => MemoryVaultBackend(seedExampleData: false),
-      );
+  testWidgets('settings baseline failure releases the selected Vault lease', (
+    tester,
+  ) async {
+    var pickerCalls = 0;
+    final settingsStore = _FailingBaselineSettingsStore();
+    const candidateLease = VaultAccessLease(
+      location: VaultLocation(
+        rootPath: '/vault/not-saved',
+        bookmarkBase64: 'candidate-bookmark',
+      ),
+      token: 'candidate-token',
+    );
+    final access = FakeVaultAccessGateway(
+      onPick: () async {
+        pickerCalls += 1;
+        return candidateLease;
+      },
+    );
+    final dependencies = createWorkspaceDependencies(
+      settingsStore: settingsStore,
+      aiProvider: MockAiProvider(),
+      supportsDirectoryVaultOverride: true,
+      vaultAccessGateway: access,
+      vaultBackendFactory: (_) => MemoryVaultBackend(seedExampleData: false),
+    );
 
-      await pumpWorkspace(tester, vault: null, dependencies: dependencies);
-      expect(find.textContaining('设置读取失败'), findsOneWidget);
-      expect(find.textContaining('baseline load failed'), findsOneWidget);
+    await pumpWorkspace(tester, vault: null, dependencies: dependencies);
+    expect(find.textContaining('设置读取失败'), findsOneWidget);
+    expect(find.textContaining('baseline load failed'), findsOneWidget);
 
-      await tester.tap(find.byKey(const Key('choose-vault-empty-button')));
-      await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('choose-vault-empty-button')));
+    await tester.pumpAndSettle();
 
-      expect(pickerCalls, 1);
-      expect(settingsStore.savedSettings, hasLength(1));
-      expect(
-        settingsStore.savedSettings.single,
-        SynapseSettings.defaults.copyWith(
-          vaultLocation: const VaultLocation(rootPath: '/vault/not-saved'),
-        ),
-      );
-      expect(find.textContaining('设置读取失败'), findsNothing);
-    },
-  );
+    expect(pickerCalls, 1);
+    expect(settingsStore.savedSettings, isEmpty);
+    expect(access.releaseAttempts, [candidateLease]);
+    expect(find.textContaining('设置读取失败'), findsOneWidget);
+  });
 
   testWidgets(
     'Vault switch after startup runtime failure uses the loaded settings',
@@ -515,28 +543,40 @@ void main() {
       Directory.systemTemp.path,
       'synapse-missing-vault-for-test',
     );
-    final locationStore = FakeVaultLocationStore(
-      loadedLocation: VaultLocation(rootPath: missingPath),
+    final location = VaultLocation(
+      rootPath: missingPath,
+      bookmarkBase64: 'missing-bookmark',
     );
+    final lease = VaultAccessLease(location: location, token: 'missing-token');
+    final access = FakeVaultAccessGateway(onRestore: (_) async => lease);
+    final locationStore = FakeVaultLocationStore(loadedLocation: location);
 
     await pumpWorkspace(
       tester,
       vault: null,
       vaultLocationStore: locationStore,
+      vaultAccessGateway: access,
       directoryPicker: () async => null,
     );
 
     expect(find.byKey(const Key('choose-vault-empty-button')), findsOneWidget);
     expect(find.textContaining('仓库位置不可用'), findsOneWidget);
     expect(Directory(missingPath).existsSync(), isFalse);
+    expect(access.releaseAttempts, [lease]);
   });
 
   testWidgets('returns to the chooser when a saved vault cannot be read', (
     tester,
   ) async {
     const rootPath = '/vault/locked';
+    const location = VaultLocation(
+      rootPath: rootPath,
+      bookmarkBase64: 'locked-bookmark',
+    );
+    const lease = VaultAccessLease(location: location, token: 'locked-token');
+    final access = FakeVaultAccessGateway(onRestore: (_) async => lease);
     final locationStore = FakeVaultLocationStore(
-      loadedLocation: const VaultLocation(rootPath: rootPath),
+      loadedLocation: location,
       existingPaths: const {rootPath},
     );
 
@@ -544,6 +584,7 @@ void main() {
       tester,
       vault: null,
       vaultLocationStore: locationStore,
+      vaultAccessGateway: access,
       directoryPicker: () async => null,
       vaultBackendFactory: (_) =>
           ListingFailureVaultBackend(seedExampleData: false),
@@ -553,6 +594,7 @@ void main() {
     expect(find.text('暂无资源'), findsNothing);
     expect(find.textContaining('仓库位置读取失败'), findsOneWidget);
     expect(locationStore.savedLocations, isEmpty);
+    expect(access.releaseAttempts, [lease]);
   });
 
   testWidgets('auto-saves dirty markdown before switching vaults', (
@@ -704,23 +746,40 @@ void main() {
     (tester) async {
       const firstPath = '/vault/first';
       const secondPath = '/vault/unreadable';
+      const firstLocation = VaultLocation(
+        rootPath: firstPath,
+        bookmarkBase64: 'first-bookmark',
+      );
+      const secondLocation = VaultLocation(
+        rootPath: secondPath,
+        bookmarkBase64: 'second-bookmark',
+      );
+      const firstLease = VaultAccessLease(
+        location: firstLocation,
+        token: 'first-token',
+      );
+      const secondLease = VaultAccessLease(
+        location: secondLocation,
+        token: 'second-token',
+      );
       final firstVault = MemoryVaultBackend(seedExampleData: false);
       await firstVault.createNote(parentPath: '', title: 'First');
       final candidateVault = _UnreadableListVault();
       final settingsStore = FakeSettingsStore(
-        initialSettings: const SynapseSettings(
-          vaultLocation: VaultLocation(rootPath: firstPath),
-        ),
+        initialSettings: const SynapseSettings(vaultLocation: firstLocation),
+      );
+      final access = FakeVaultAccessGateway(
+        onPick: () async => secondLease,
+        onRestore: (_) async => firstLease,
       );
       final indexes = <_RecordingSearchIndex>[];
       final dependencies = createWorkspaceDependencies(
-        initialVault: firstVault,
         aiProvider: MockAiProvider(),
         settingsStore: settingsStore,
         supportsDirectoryVaultOverride: true,
-        pickVaultLocation: () async =>
-            const VaultLocation(rootPath: secondPath),
-        vaultBackendFactory: (_) => candidateVault,
+        vaultAccessGateway: access,
+        vaultBackendFactory: (rootPath) =>
+            rootPath == firstPath ? firstVault : candidateVault,
         searchIndexFactory: (_, _) {
           final index = _RecordingSearchIndex();
           indexes.add(index);
@@ -745,6 +804,8 @@ void main() {
       );
       expect(find.text('First'), findsWidgets);
       expect(find.textContaining('candidate unreadable'), findsOneWidget);
+      expect(access.releaseAttempts, [secondLease]);
+      expect(access.releaseAttempts, isNot(contains(firstLease)));
       await tester.tap(find.byKey(const Key('resource-row-First.md')));
       await tester.pump(const Duration(milliseconds: 250));
       expect(find.text('First'), findsWidgets);
@@ -756,24 +817,41 @@ void main() {
     (tester) async {
       const firstPath = '/vault/first';
       const secondPath = '/vault/second';
+      const firstLocation = VaultLocation(
+        rootPath: firstPath,
+        bookmarkBase64: 'first-bookmark',
+      );
+      const secondLocation = VaultLocation(
+        rootPath: secondPath,
+        bookmarkBase64: 'second-bookmark',
+      );
+      const firstLease = VaultAccessLease(
+        location: firstLocation,
+        token: 'first-token',
+      );
+      const secondLease = VaultAccessLease(
+        location: secondLocation,
+        token: 'second-token',
+      );
       final firstVault = MemoryVaultBackend(seedExampleData: false);
       await firstVault.createNote(parentPath: '', title: 'First');
       final secondVault = MemoryVaultBackend(seedExampleData: false);
       await secondVault.createNote(parentPath: '', title: 'Second');
       final settingsStore = _FailingSettingsStore(
-        initialSettings: const SynapseSettings(
-          vaultLocation: VaultLocation(rootPath: firstPath),
-        ),
+        initialSettings: const SynapseSettings(vaultLocation: firstLocation),
+      );
+      final access = FakeVaultAccessGateway(
+        onPick: () async => secondLease,
+        onRestore: (_) async => firstLease,
       );
       final indexes = <_RecordingSearchIndex>[];
       final dependencies = createWorkspaceDependencies(
-        initialVault: firstVault,
         aiProvider: MockAiProvider(),
         settingsStore: settingsStore,
         supportsDirectoryVaultOverride: true,
-        pickVaultLocation: () async =>
-            const VaultLocation(rootPath: secondPath),
-        vaultBackendFactory: (_) => secondVault,
+        vaultAccessGateway: access,
+        vaultBackendFactory: (rootPath) =>
+            rootPath == firstPath ? firstVault : secondVault,
         searchIndexFactory: (_, _) {
           final index = _RecordingSearchIndex();
           indexes.add(index);
@@ -794,8 +872,119 @@ void main() {
       expect(find.text('First'), findsWidgets);
       expect(find.text('Second'), findsNothing);
       expect(find.textContaining('settings save failed'), findsOneWidget);
+      expect(access.releaseAttempts, [secondLease]);
+      expect(access.releaseAttempts, isNot(contains(firstLease)));
     },
   );
+
+  testWidgets('successful Vault switch releases only the old lease', (
+    tester,
+  ) async {
+    const firstPath = '/vault/first';
+    const secondPath = '/vault/second';
+    const firstLocation = VaultLocation(
+      rootPath: firstPath,
+      bookmarkBase64: 'first-bookmark',
+    );
+    const secondLocation = VaultLocation(
+      rootPath: secondPath,
+      bookmarkBase64: 'second-bookmark',
+    );
+    const firstLease = VaultAccessLease(
+      location: firstLocation,
+      token: 'first-token',
+    );
+    const secondLease = VaultAccessLease(
+      location: secondLocation,
+      token: 'second-token',
+    );
+    final firstVault = MemoryVaultBackend(seedExampleData: false);
+    await firstVault.createNote(parentPath: '', title: 'First');
+    final secondVault = MemoryVaultBackend(seedExampleData: false);
+    await secondVault.createNote(parentPath: '', title: 'Second');
+    final access = FakeVaultAccessGateway(
+      onPick: () async => secondLease,
+      onRestore: (_) async => firstLease,
+    );
+    final settingsStore = FakeSettingsStore(
+      initialSettings: const SynapseSettings(vaultLocation: firstLocation),
+    );
+    final dependencies = createWorkspaceDependencies(
+      settingsStore: settingsStore,
+      aiProvider: MockAiProvider(),
+      supportsDirectoryVaultOverride: true,
+      vaultAccessGateway: access,
+      vaultBackendFactory: (rootPath) =>
+          rootPath == firstPath ? firstVault : secondVault,
+    );
+
+    await pumpWorkspace(tester, vault: null, dependencies: dependencies);
+    await tester.tap(find.byKey(const Key('vault-location-button')));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Second'), findsWidgets);
+    expect(settingsStore.currentSettings.vaultLocation, secondLocation);
+    expect(access.releaseAttempts, [firstLease]);
+    expect(access.releaseAttempts, isNot(contains(secondLease)));
+  });
+
+  testWidgets('old lease cleanup failure keeps the new Vault committed', (
+    tester,
+  ) async {
+    const firstLocation = VaultLocation(
+      rootPath: '/vault/first',
+      bookmarkBase64: 'first-bookmark',
+    );
+    const secondLocation = VaultLocation(
+      rootPath: '/vault/second',
+      bookmarkBase64: 'second-bookmark',
+    );
+    const firstLease = VaultAccessLease(
+      location: firstLocation,
+      token: 'first-token',
+    );
+    const secondLease = VaultAccessLease(
+      location: secondLocation,
+      token: 'second-token',
+    );
+    final firstVault = MemoryVaultBackend(seedExampleData: false);
+    await firstVault.createNote(parentPath: '', title: 'First');
+    final secondVault = MemoryVaultBackend(seedExampleData: false);
+    await secondVault.createNote(parentPath: '', title: 'Second');
+    final access = FakeVaultAccessGateway(
+      onRestore: (_) async => firstLease,
+      onPick: () async => secondLease,
+      onRelease: (lease) async {
+        if (lease == firstLease) {
+          throw StateError('old lease cleanup failed');
+        }
+      },
+    );
+    final cleanupErrors = <Object>[];
+    final settingsStore = FakeSettingsStore(
+      initialSettings: const SynapseSettings(vaultLocation: firstLocation),
+    );
+    final dependencies = createWorkspaceDependencies(
+      settingsStore: settingsStore,
+      aiProvider: MockAiProvider(),
+      supportsDirectoryVaultOverride: true,
+      vaultAccessGateway: access,
+      cleanupErrorReporter: (error, _) => cleanupErrors.add(error),
+      vaultBackendFactory: (rootPath) =>
+          rootPath == firstLocation.rootPath ? firstVault : secondVault,
+    );
+
+    await pumpWorkspace(tester, vault: null, dependencies: dependencies);
+    await tester.tap(find.byKey(const Key('vault-location-button')));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Second'), findsWidgets);
+    expect(settingsStore.currentSettings.vaultLocation, secondLocation);
+    expect(access.releaseAttempts, [firstLease]);
+    expect(access.releaseAttempts, isNot(contains(secondLease)));
+    expect(cleanupErrors, hasLength(1));
+    expect(find.textContaining('旧仓库访问清理失败'), findsOneWidget);
+  });
 
   testWidgets('flushes every dirty pane after Vault selection', (tester) async {
     const firstPath = '/vault/first';
@@ -1021,36 +1210,56 @@ void main() {
   );
 
   testWidgets('does not switch vaults when auto-save fails', (tester) async {
+    const firstLocation = VaultLocation(
+      rootPath: '/vault/first',
+      bookmarkBase64: 'first-bookmark',
+    );
+    const secondLocation = VaultLocation(
+      rootPath: '/vault/second',
+      bookmarkBase64: 'second-bookmark',
+    );
+    const firstLease = VaultAccessLease(
+      location: firstLocation,
+      token: 'first-token',
+    );
+    const secondLease = VaultAccessLease(
+      location: secondLocation,
+      token: 'second-token',
+    );
     final firstVault = FailingUpdateVaultBackend(seedExampleData: false);
     await firstVault.createNote(parentPath: '', title: 'First');
     final secondVault = MemoryVaultBackend(seedExampleData: false);
     await secondVault.createNote(parentPath: '', title: 'Second');
-    final locationStore = FakeVaultLocationStore(
-      loadedLocation: const VaultLocation(rootPath: '/vault/first'),
-      existingPaths: const {'/vault/first', '/vault/second'},
+    final settingsStore = FakeSettingsStore(
+      initialSettings: const SynapseSettings(vaultLocation: firstLocation),
     );
-
-    await pumpWorkspace(
-      tester,
-      vault: null,
-      vaultLocationStore: locationStore,
-      directoryPicker: () async => '/vault/second',
+    final access = FakeVaultAccessGateway(
+      onRestore: (_) async => firstLease,
+      onPick: () async => secondLease,
+    );
+    final dependencies = createWorkspaceDependencies(
+      settingsStore: settingsStore,
+      aiProvider: MockAiProvider(),
+      supportsDirectoryVaultOverride: true,
+      vaultAccessGateway: access,
       vaultBackendFactory: (rootPath) {
         return rootPath == '/vault/first' ? firstVault : secondVault;
       },
     );
+
+    await pumpWorkspace(tester, vault: null, dependencies: dependencies);
     await switchToSourceMode(tester);
     await enterTextInLiveMarkdownBlock(tester, '# First\nchanged');
     firstVault.failUpdates = true;
-    expect(locationStore.savedLocations.single.rootPath, '/vault/first');
-    locationStore.savedLocations.clear();
 
     await tester.tap(find.byKey(const Key('vault-location-button')));
     await tester.pump(const Duration(milliseconds: 500));
 
     expect(find.text('First'), findsWidgets);
     expect(find.text('Second'), findsNothing);
-    expect(locationStore.savedLocations, isEmpty);
+    expect(settingsStore.currentSettings.vaultLocation, firstLocation);
+    expect(access.releaseAttempts, [secondLease]);
+    expect(access.releaseAttempts, isNot(contains(firstLease)));
     expect(find.textContaining('save failed'), findsOneWidget);
   });
 

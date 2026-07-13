@@ -3,7 +3,7 @@ import 'dart:async';
 import '../../../domain/vault/vault_resource.dart';
 import '../../../infrastructure/config/settings_store.dart';
 import '../../../infrastructure/config/synapse_settings.dart';
-import '../../../infrastructure/config/vault_location_store.dart';
+import '../../../infrastructure/config/vault_directory_access.dart';
 import '../../../infrastructure/vault/vault_backend.dart';
 import '../state/note_save_coordinator.dart';
 import '../state/split_workspace_controller.dart';
@@ -58,6 +58,8 @@ final class WorkspaceStartupCoordinator {
   SynapseSettings? _loadedSettingsBaseline;
   Future<void> _settingsPersistenceTail = Future<void>.value();
   Object? _startupToken;
+  Object? _vaultIntent;
+  VaultAccessLease? _activeVaultLease;
   Future<SettingsLoadResult>? _startupSettingsFuture;
   Object? _startupSettingsError;
 
@@ -232,23 +234,37 @@ final class WorkspaceStartupCoordinator {
       beginOperation(WorkspaceOperation.vaultSwitch);
     }
     WorkspaceRuntime? candidate;
+    _VaultAccessCandidate? candidateAccess;
+    var leaseCommitted = false;
     try {
-      final location = await _pickVaultLocation();
-      if (location == null) {
+      candidateAccess = await _pickVaultAccess();
+      if (candidateAccess == null) {
         return WorkspaceActionResult.cancelled;
       }
+      final intent = Object();
+      _vaultIntent = intent;
+      _startupToken = null;
       await _invalidateEditorContextsAndWaitForMutations();
-      final baseline = await _awaitStartupSettings();
-      if (baseline == null) {
+      if (!_isVaultIntentCurrent(intent)) {
         return WorkspaceActionResult.aborted;
       }
-      _startupToken = null;
+      final baseline = await _awaitStartupSettings();
+      if (baseline == null || _startupSettingsError != null) {
+        return WorkspaceActionResult.aborted;
+      }
+      if (!_isVaultIntentCurrent(intent)) {
+        return WorkspaceActionResult.aborted;
+      }
       final flush = await saves.flushAll();
+      if (!_isVaultIntentCurrent(intent)) {
+        return WorkspaceActionResult.aborted;
+      }
       if (!flush.succeeded) {
         final error = flush.results.isEmpty ? '未知错误' : flush.results.last.error;
         setMessage('笔记保存失败：$error');
         return WorkspaceActionResult.aborted;
       }
+      final location = candidateAccess.location;
       final nextSettings = baseline.copyWith(vaultLocation: location);
       candidate = _createRuntime(
         vault: dependencies.createVault(location.rootPath),
@@ -257,7 +273,13 @@ final class WorkspaceStartupCoordinator {
         settings: nextSettings,
       );
       final snapshot = await resources.loadDetachedRuntime(candidate);
+      if (!_isVaultIntentCurrent(intent)) {
+        return WorkspaceActionResult.aborted;
+      }
       await _persistSettings(nextSettings);
+      if (!_isVaultIntentCurrent(intent)) {
+        return WorkspaceActionResult.aborted;
+      }
       _startupSettingsError = null;
       saves.resetAfterReload();
       mutations.resetAfterReload();
@@ -266,12 +288,20 @@ final class WorkspaceStartupCoordinator {
       _settings = nextSettings;
       _loadedSettingsBaseline = nextSettings;
       replaceRuntimeSnapshot(snapshot, message: '仓库已打开');
+      final previousLease = _activeVaultLease;
+      _activeVaultLease = candidateAccess.lease;
+      leaseCommitted = true;
+      candidateAccess = null;
+      await _releaseLease(previousLease, reportMessage: true);
       return WorkspaceActionResult.committed;
     } catch (error) {
-      candidate?.dispose(reportCleanupError: dependencies.cleanupErrorReporter);
       setMessage('仓库位置读取失败：$error');
       return WorkspaceActionResult.failed;
     } finally {
+      candidate?.dispose(reportCleanupError: dependencies.cleanupErrorReporter);
+      if (!leaseCommitted) {
+        await _releaseLease(candidateAccess?.lease);
+      }
       if (ownsOperation) {
         endOperation(WorkspaceOperation.vaultSwitch);
       }
@@ -337,6 +367,10 @@ final class WorkspaceStartupCoordinator {
 
   void dispose() {
     _startupToken = null;
+    _vaultIntent = null;
+    final activeLease = _activeVaultLease;
+    _activeVaultLease = null;
+    unawaited(_releaseLease(activeLease));
   }
 
   Future<SettingsLoadResult> _loadSettings() async {
@@ -357,9 +391,18 @@ final class WorkspaceStartupCoordinator {
     }
   }
 
-  Future<VaultLocation?> _pickVaultLocation() async {
+  Future<_VaultAccessCandidate?> _pickVaultAccess() async {
     try {
-      return await dependencies.pickVaultLocation();
+      if (dependencies.pickUsesVaultAccessGateway) {
+        final lease = await dependencies.vaultAccessGateway!.pick();
+        return lease == null
+            ? null
+            : _VaultAccessCandidate(location: lease.location, lease: lease);
+      }
+      final location = await dependencies.pickVaultLocation();
+      return location == null
+          ? null
+          : _VaultAccessCandidate(location: location);
     } catch (error) {
       setMessage('仓库位置选择失败：$error');
       return null;
@@ -371,6 +414,8 @@ final class WorkspaceStartupCoordinator {
     Future<SettingsLoadResult> settingsLoad,
   ) async {
     WorkspaceRuntime? candidate;
+    _VaultAccessCandidate? candidateAccess;
+    var leaseCommitted = false;
     var settingsLoaded = false;
     try {
       final loadResult = await settingsLoad;
@@ -397,10 +442,11 @@ final class WorkspaceStartupCoordinator {
         );
         return;
       }
-      final restored = await dependencies.restoreVaultAccess(location);
+      candidateAccess = await _restoreVaultAccess(location);
       if (!_isStartupCurrent(startupToken)) {
         return;
       }
+      final restored = candidateAccess.location;
       final store = await dependencies.settingsStore();
       if (!await store.vaultExists(restored)) {
         if (_isStartupCurrent(startupToken)) {
@@ -447,6 +493,9 @@ final class WorkspaceStartupCoordinator {
         snapshot,
         message: _startupMessage(recoveryMessage, fallback: '仓库已打开'),
       );
+      _activeVaultLease = candidateAccess.lease;
+      leaseCommitted = true;
+      candidateAccess = null;
     } catch (error) {
       await Future<void>.delayed(Duration.zero);
       candidate?.dispose(reportCleanupError: dependencies.cleanupErrorReporter);
@@ -458,6 +507,9 @@ final class WorkspaceStartupCoordinator {
         setMessage('$prefix：$error');
       }
     } finally {
+      if (!leaseCommitted) {
+        await _releaseLease(candidateAccess?.lease);
+      }
       if (_isStartupCurrent(startupToken)) {
         _startupToken = null;
       }
@@ -466,6 +518,50 @@ final class WorkspaceStartupCoordinator {
 
   bool _isStartupCurrent(Object token) {
     return !isDisposed() && identical(_startupToken, token);
+  }
+
+  bool _isVaultIntentCurrent(Object intent) {
+    return !isDisposed() && identical(_vaultIntent, intent);
+  }
+
+  Future<_VaultAccessCandidate> _restoreVaultAccess(
+    VaultLocation location,
+  ) async {
+    final bookmark = location.bookmarkBase64?.trim();
+    if (dependencies.restoreUsesVaultAccessGateway &&
+        bookmark != null &&
+        bookmark.isNotEmpty) {
+      final lease = await dependencies.vaultAccessGateway!.restore(location);
+      return _VaultAccessCandidate(location: lease.location, lease: lease);
+    }
+    return _VaultAccessCandidate(
+      location: await dependencies.restoreVaultAccess(location),
+    );
+  }
+
+  Future<void> _releaseLease(
+    VaultAccessLease? lease, {
+    bool reportMessage = false,
+  }) async {
+    if (lease == null) {
+      return;
+    }
+    final gateway = dependencies.vaultAccessGateway;
+    if (gateway == null) {
+      return;
+    }
+    try {
+      await gateway.release(lease);
+    } catch (error, stackTrace) {
+      try {
+        dependencies.cleanupErrorReporter(error, stackTrace);
+      } catch (_) {
+        // Cleanup reporting must not surface an unhandled Future error.
+      }
+      if (reportMessage && !isDisposed()) {
+        setMessage('仓库已打开；旧仓库访问清理失败：$error');
+      }
+    }
   }
 
   void _installRuntime({
@@ -529,4 +625,11 @@ final class WorkspaceStartupCoordinator {
     }
     return '$recoveryMessage；$fallback';
   }
+}
+
+final class _VaultAccessCandidate {
+  const _VaultAccessCandidate({required this.location, this.lease});
+
+  final VaultLocation location;
+  final VaultAccessLease? lease;
 }

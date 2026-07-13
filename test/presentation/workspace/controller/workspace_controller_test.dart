@@ -8,7 +8,7 @@ import 'package:synapse/infrastructure/ai/ai_provider.dart';
 import 'package:synapse/infrastructure/bootstrap/workspace_dependencies_factory.dart';
 import 'package:synapse/infrastructure/config/settings_store.dart';
 import 'package:synapse/infrastructure/config/synapse_settings.dart';
-import 'package:synapse/infrastructure/config/vault_location_store.dart';
+import 'package:synapse/infrastructure/config/vault_directory_access.dart';
 import 'package:synapse/infrastructure/input/image_input_service.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
 import 'package:synapse/presentation/workspace/controller/workspace_controller.dart';
@@ -348,6 +348,97 @@ void main() {
 
       expect(searchIndex.disposeCalls, 1);
     });
+
+    test('ProviderContainer dispose releases the active Vault lease', () async {
+      const location = VaultLocation(
+        rootPath: '/vault/active',
+        bookmarkBase64: 'active-bookmark',
+      );
+      const lease = VaultAccessLease(location: location, token: 'active-token');
+      final access = FakeVaultAccessGateway(onRestore: (_) async => lease);
+      final vault = MemoryVaultBackend(seedExampleData: false);
+      await vault.createNote(parentPath: '', title: 'Active');
+      final container = ProviderContainer(
+        overrides: [
+          workspaceDependenciesProvider.overrideWithValue(
+            createWorkspaceDependencies(
+              settingsStore: FakeSettingsStore(
+                initialSettings: const SynapseSettings(vaultLocation: location),
+              ),
+              supportsDirectoryVaultOverride: true,
+              vaultAccessGateway: access,
+              vaultBackendFactory: (_) => vault,
+            ),
+          ),
+        ],
+      );
+      final ready = Completer<void>();
+      final subscription = container.listen(workspaceControllerProvider, (
+        _,
+        next,
+      ) {
+        if (next.value?.phase == WorkspacePhase.ready && !ready.isCompleted) {
+          ready.complete();
+        }
+      }, fireImmediately: true);
+
+      await container.read(workspaceControllerProvider.future);
+      await ready.future;
+      expect(access.releaseAttempts, isEmpty);
+
+      subscription.close();
+      container.dispose();
+      await Future<void>.delayed(Duration.zero);
+
+      expect(access.releaseAttempts, [lease]);
+    });
+
+    test(
+      'dispose releases a startup lease that resolves after disposal',
+      () async {
+        const location = VaultLocation(
+          rootPath: '/vault/startup',
+          bookmarkBase64: 'startup-bookmark',
+        );
+        const lease = VaultAccessLease(
+          location: location,
+          token: 'startup-token',
+        );
+        final restoreStarted = Completer<void>();
+        final restoreResult = Completer<VaultAccessLease>();
+        final access = FakeVaultAccessGateway(
+          onRestore: (_) {
+            restoreStarted.complete();
+            return restoreResult.future;
+          },
+        );
+        final container = ProviderContainer(
+          overrides: [
+            workspaceDependenciesProvider.overrideWithValue(
+              createWorkspaceDependencies(
+                settingsStore: FakeSettingsStore(
+                  initialSettings: const SynapseSettings(
+                    vaultLocation: location,
+                  ),
+                ),
+                supportsDirectoryVaultOverride: true,
+                vaultAccessGateway: access,
+                vaultBackendFactory: (_) => MemoryVaultBackend(),
+              ),
+            ),
+          ],
+        );
+
+        await container.read(workspaceControllerProvider.future);
+        await restoreStarted.future;
+        container.dispose();
+        restoreResult.complete(lease);
+        await Future<void>.delayed(Duration.zero);
+        await Future<void>.delayed(Duration.zero);
+
+        expect(access.releaseAttempts, [lease]);
+      },
+    );
 
     test(
       'ProviderContainer dispose aborts an in-flight mutation before hydration',

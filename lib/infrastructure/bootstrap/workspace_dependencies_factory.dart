@@ -35,6 +35,7 @@ WorkspaceDependencies createWorkspaceDependencies({
   AiProviderConfigTester? providerConfigTester,
   VaultLocationPicker? pickVaultLocation,
   VaultAccessRestorer? restoreVaultAccess,
+  VaultAccessGateway? vaultAccessGateway,
   VaultBackend Function()? defaultVaultFactory,
   bool? supportsDirectoryVaultOverride,
   bool? usesNativeMacTitlebarOverride,
@@ -55,6 +56,18 @@ WorkspaceDependencies createWorkspaceDependencies({
   final createSearchIndex = searchIndexFactory ?? _createSearchIndex;
   final createPlatformAiProvider = aiProviderFactory ?? _createAiProvider;
   final reportCleanupError = cleanupErrorReporter ?? _reportCleanupError;
+  final supportsNativeVaultAccess =
+      !kIsWeb && defaultTargetPlatform == TargetPlatform.macOS;
+  final resolvedVaultAccessGateway =
+      vaultAccessGateway ??
+      (supportsNativeVaultAccess ? VaultDirectoryAccess() : null);
+  final pickUsesVaultAccessGateway =
+      resolvedVaultAccessGateway != null &&
+      (vaultAccessGateway != null ||
+          (pickVaultLocation == null && directoryPicker == null));
+  final restoreUsesVaultAccessGateway =
+      resolvedVaultAccessGateway != null &&
+      (vaultAccessGateway != null || restoreVaultAccess == null);
 
   return WorkspaceDependencies(
     initialVault: initialVault,
@@ -108,15 +121,17 @@ WorkspaceDependencies createWorkspaceDependencies({
     pickVaultLocation:
         pickVaultLocation ??
         (directoryPicker == null
-            ? VaultDirectoryAccess.pickDirectory
+            ? () async => null
             : () async {
                 final rootPath = await directoryPicker();
                 return rootPath == null
                     ? null
                     : VaultLocation(rootPath: rootPath);
               }),
-    restoreVaultAccess:
-        restoreVaultAccess ?? VaultDirectoryAccess.startAccessing,
+    restoreVaultAccess: restoreVaultAccess ?? (location) async => location,
+    vaultAccessGateway: resolvedVaultAccessGateway,
+    pickUsesVaultAccessGateway: pickUsesVaultAccessGateway,
+    restoreUsesVaultAccessGateway: restoreUsesVaultAccessGateway,
     formatVaultLabel: (rootPath) {
       final basename = p.basename(rootPath);
       return basename.isEmpty ? rootPath : basename;
