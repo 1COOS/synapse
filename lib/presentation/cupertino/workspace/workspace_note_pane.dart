@@ -372,6 +372,7 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
                 : LiveMarkdownEditor(
                     controller: resolvedSession.controller,
                     enabled:
+                        !_busy &&
                         !_reloadRequired &&
                         !_paneEditorCommandLocks.contains(
                           resolvedSession.noteId,

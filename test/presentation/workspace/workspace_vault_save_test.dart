@@ -592,6 +592,67 @@ void main() {
   });
 
   testWidgets(
+    'blocks note typing after Vault flush while the candidate snapshot loads',
+    (tester) async {
+      const secondPath = '/vault/busy-candidate';
+      final firstVault = MemoryVaultBackend(seedExampleData: false);
+      final firstNote = await firstVault.createNote(
+        parentPath: '',
+        title: 'First',
+      );
+      await firstVault.updateMarkdown(
+        noteId: firstNote.id,
+        markdown: '# First\noriginal body',
+      );
+      final secondVault = _GatedListVault();
+      addTearDown(secondVault.releaseList);
+      await secondVault.createNote(parentPath: '', title: 'Second');
+
+      await pumpWorkspace(
+        tester,
+        vault: firstVault,
+        settingsStore: FakeSettingsStore(),
+        directoryPicker: () async => secondPath,
+        vaultBackendFactory: (_) => secondVault,
+      );
+      await activateLiveMarkdownBlock(tester);
+      final initialEditor = tester.widget<LiveMarkdownEditor>(
+        find.byType(LiveMarkdownEditor),
+      );
+      final oldController = initialEditor.controller;
+      final oldText = oldController.text;
+      expect(initialEditor.enabled, isTrue);
+
+      await tester.tap(find.byKey(const Key('vault-location-button')));
+      await secondVault.listStarted.future;
+      await tester.pump();
+
+      final busyEditor = tester.widget<LiveMarkdownEditor>(
+        find.byType(LiveMarkdownEditor),
+      );
+      expect(busyEditor.enabled, isFalse);
+      final editableText = tester.widget<EditableText>(
+        activeLiveMarkdownEditableText(),
+      );
+      editableText.focusNode.requestFocus();
+      await tester.pump();
+      await tester.sendKeyEvent(LogicalKeyboardKey.keyX);
+      await tester.pump();
+      expect(oldController.text, oldText);
+
+      secondVault.releaseList();
+      await tester.pumpAndSettle();
+
+      expect(find.text('Second'), findsWidgets);
+      expect(find.text('First'), findsNothing);
+      expect(
+        (await secondVault.readNote('Second.md')).markdown,
+        isNot(contains('x')),
+      );
+    },
+  );
+
+  testWidgets(
     'candidate runtime construction failure leaves the old vault usable',
     (tester) async {
       const secondPath = '/vault/second';

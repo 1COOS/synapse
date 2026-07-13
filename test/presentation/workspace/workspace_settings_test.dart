@@ -10,6 +10,7 @@ import 'package:synapse/infrastructure/bootstrap/workspace_dependencies_factory.
 import 'package:synapse/infrastructure/config/synapse_settings.dart';
 import 'package:synapse/infrastructure/config/vault_location_store.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
+import 'package:synapse/presentation/workspace/editor/live_markdown_editor.dart';
 
 import '../../support/workspace_fakes.dart';
 import '../../support/workspace_harness.dart';
@@ -64,6 +65,46 @@ void main() {
     expect(preferences.autoSaveDelayMillis, 1500);
     expect(preferences.pastedImageWidth, 720);
     expect(preferences.semanticSearchEnabled, isFalse);
+  });
+
+  testWidgets('settings runtime rebuild disables note editing while saving', (
+    tester,
+  ) async {
+    final settingsStore = _GatedSaveSettingsStore();
+    addTearDown(settingsStore.releaseSave);
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    await vault.createNote(parentPath: '', title: 'Alpha');
+
+    await pumpWorkspace(tester, vault: vault, settingsStore: settingsStore);
+    expect(
+      tester
+          .widget<LiveMarkdownEditor>(find.byType(LiveMarkdownEditor))
+          .enabled,
+      isTrue,
+    );
+
+    await tester.tap(find.byKey(const Key('settings-button')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('settings-default-mode-reading')));
+    await tester.tap(find.text('保存设置'));
+    await settingsStore.saveStarted.future;
+    await tester.pump();
+
+    expect(
+      tester
+          .widget<LiveMarkdownEditor>(find.byType(LiveMarkdownEditor))
+          .enabled,
+      isFalse,
+    );
+
+    settingsStore.releaseSave();
+    await tester.pumpAndSettle();
+    expect(
+      tester
+          .widget<LiveMarkdownEditor>(find.byType(LiveMarkdownEditor))
+          .enabled,
+      isTrue,
+    );
   });
 
   testWidgets('saves appearance preferences from the settings panel', (
@@ -908,6 +949,26 @@ final class _FailingLoadSettingsStore extends FakeSettingsStore {
   @override
   Future<SynapseSettings> load() async {
     throw StateError('settings load failed');
+  }
+}
+
+final class _GatedSaveSettingsStore extends FakeSettingsStore {
+  final saveStarted = Completer<void>();
+  final _saveRelease = Completer<void>();
+
+  void releaseSave() {
+    if (!_saveRelease.isCompleted) {
+      _saveRelease.complete();
+    }
+  }
+
+  @override
+  Future<void> save(SynapseSettings settings) async {
+    if (!saveStarted.isCompleted) {
+      saveStarted.complete();
+    }
+    await _saveRelease.future;
+    await super.save(settings);
   }
 }
 

@@ -733,7 +733,7 @@ void main() {
   });
 
   testWidgets(
-    'gated OCR flushes a title remap and locks only its session editor',
+    'gated OCR flushes a title remap and globally disables note typing',
     (tester) async {
       final vault = GatedSuccessfulUpdateVaultBackend(seedExampleData: false);
       addTearDown(vault.releaseUpdate);
@@ -883,7 +883,7 @@ void main() {
               inNotePane(find.byType(LiveMarkdownEditor), 2),
             )
             .enabled,
-        isTrue,
+        isFalse,
       );
       expect(
         tester
@@ -896,6 +896,15 @@ void main() {
 
       aiProvider.releaseExtraction();
       await tester.pumpAndSettle();
+
+      expect(
+        tester
+            .widget<LiveMarkdownEditor>(
+              inNotePane(find.byType(LiveMarkdownEditor), 2),
+            )
+            .enabled,
+        isTrue,
+      );
 
       expect(
         (await vault.listProposals('Remapped.md')).single.proposedMarkdown,
