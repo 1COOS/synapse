@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:path/path.dart' as p;
@@ -17,6 +18,7 @@ import '../../infrastructure/input/image_input_service.dart';
 import '../../infrastructure/vault/vault_backend.dart';
 import '../../infrastructure/vault/vault_post_commit_error.dart';
 import '../workspace/controller/workspace_dependencies.dart';
+import '../workspace/controller/workspace_controller.dart';
 import '../workspace/controller/workspace_resource_coordinator.dart';
 import '../workspace/controller/workspace_runtime.dart';
 import '../workspace/controller/workspace_runtime_manager.dart';
@@ -237,16 +239,14 @@ enum _WorkspaceSection {
 
 enum _LeftPaneMode { resources, search }
 
-class SynapseWorkspace extends StatefulWidget {
-  const SynapseWorkspace({super.key, required this.dependencies});
-
-  final WorkspaceDependencies dependencies;
+class SynapseWorkspace extends ConsumerStatefulWidget {
+  const SynapseWorkspace({super.key});
 
   @override
-  State<SynapseWorkspace> createState() => _SynapseWorkspaceState();
+  ConsumerState<SynapseWorkspace> createState() => _SynapseWorkspaceState();
 }
 
-class _SynapseWorkspaceState extends State<SynapseWorkspace> {
+class _SynapseWorkspaceState extends ConsumerState<SynapseWorkspace> {
   late final WorkspaceDependencies _dependencies;
   late final WorkspaceRuntimeManager _runtimeManager;
   late final WorkspaceResourceCoordinator _resourceCoordinator;
@@ -297,7 +297,7 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
   @override
   void initState() {
     super.initState();
-    _dependencies = widget.dependencies;
+    _dependencies = ref.read(workspaceDependenciesProvider);
     _runtimeManager = WorkspaceRuntimeManager(
       cleanupErrorReporter: _dependencies.cleanupErrorReporter,
     );
@@ -3973,44 +3973,51 @@ class _SynapseWorkspaceState extends State<SynapseWorkspace> {
       session: session,
     );
     final accentColor = _workspaceAppearance.accentColor;
-    return GestureDetector(
-      key: Key('split-pane-${pane.paneId}'),
-      behavior: HitTestBehavior.opaque,
-      onTap: () => setState(() => _focusPane(pane.paneId)),
-      child: DecoratedBox(
-        decoration: BoxDecoration(
-          color: workspaceSurfaceColor,
-          border: Border.all(color: focused ? accentColor : workspaceLineColor),
-          borderRadius: workspaceBorderRadius,
-        ),
-        child: ClipRRect(
-          borderRadius: workspaceBorderRadius,
-          child: Stack(
-            children: [
-              Positioned.fill(
-                child: pane.mode == NoteMode.reading
-                    ? session == null
-                          ? const EmptyState(text: '选择或创建笔记后开始整理 Markdown')
-                          : _buildMarkdownPreview(
-                              session: session,
-                              editorContext: editorContext!,
-                            )
-                    : _buildNoteEditor(session: session, pane: pane),
+    return ListenableBuilder(
+      listenable: session ?? _splitWorkspaceController,
+      builder: (context, child) {
+        return GestureDetector(
+          key: Key('split-pane-${pane.paneId}'),
+          behavior: HitTestBehavior.opaque,
+          onTap: () => setState(() => _focusPane(pane.paneId)),
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              color: workspaceSurfaceColor,
+              border: Border.all(
+                color: focused ? accentColor : workspaceLineColor,
               ),
-              Positioned(
-                top: 10,
-                left: 12,
-                right: 10,
-                child: _buildPaneHeader(
-                  pane,
-                  session: session,
-                  focused: focused,
-                ),
+              borderRadius: workspaceBorderRadius,
+            ),
+            child: ClipRRect(
+              borderRadius: workspaceBorderRadius,
+              child: Stack(
+                children: [
+                  Positioned.fill(
+                    child: pane.mode == NoteMode.reading
+                        ? session == null
+                              ? const EmptyState(text: '选择或创建笔记后开始整理 Markdown')
+                              : _buildMarkdownPreview(
+                                  session: session,
+                                  editorContext: editorContext!,
+                                )
+                        : _buildNoteEditor(session: session, pane: pane),
+                  ),
+                  Positioned(
+                    top: 10,
+                    left: 12,
+                    right: 10,
+                    child: _buildPaneHeader(
+                      pane,
+                      session: session,
+                      focused: focused,
+                    ),
+                  ),
+                ],
               ),
-            ],
+            ),
           ),
-        ),
-      ),
+        );
+      },
     );
   }
 

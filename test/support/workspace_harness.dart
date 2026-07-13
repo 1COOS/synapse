@@ -1,9 +1,11 @@
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/gestures.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:synapse/domain/vault/vault_resource.dart';
 import 'package:synapse/infrastructure/ai/ai_provider.dart';
+import 'package:synapse/infrastructure/bootstrap/workspace_dependencies_factory.dart';
 import 'package:synapse/infrastructure/config/provider_config_store.dart';
 import 'package:synapse/infrastructure/config/settings_store.dart';
 import 'package:synapse/infrastructure/config/synapse_settings.dart';
@@ -13,6 +15,7 @@ import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
 import 'package:synapse/infrastructure/vault/vault_backend.dart';
 import 'package:synapse/main.dart';
 import 'package:synapse/presentation/workspace/controller/workspace_dependencies.dart';
+import 'package:synapse/presentation/workspace/controller/workspace_controller.dart';
 import 'package:synapse/presentation/workspace/state/workspace_mutation_barrier.dart';
 import 'package:synapse/presentation/workspace/editor/live_markdown_editable_text.dart';
 import 'package:synapse/presentation/workspace/editor/live_markdown_editor.dart';
@@ -121,19 +124,26 @@ Future<void> pumpWorkspace(
   addTearDown(() async {
     await tester.binding.setSurfaceSize(null);
   });
+  final workspaceDependencies =
+      dependencies ??
+      createWorkspaceDependencies(
+        initialVault: vault,
+        imageInput: imageInput,
+        aiProvider: aiProvider,
+        settingsStore: settingsStore,
+        providerConfigStore: configStore ?? FakeProviderConfigStore(),
+        vaultLocationStore: vaultLocationStore,
+        directoryPicker: directoryPicker,
+        vaultBackendFactory: vaultBackendFactory,
+        providerConfigTester: providerConfigTester,
+        workspaceCommitFailureForTesting: workspaceCommitFailureForTesting,
+      );
   await tester.pumpWidget(
-    SynapseApp(
-      dependencies: dependencies,
-      vault: vault,
-      imageInput: imageInput,
-      aiProvider: aiProvider,
-      settingsStore: settingsStore,
-      providerConfigStore: configStore ?? FakeProviderConfigStore(),
-      vaultLocationStore: vaultLocationStore,
-      directoryPicker: directoryPicker,
-      vaultBackendFactory: vaultBackendFactory,
-      providerConfigTester: providerConfigTester,
-      workspaceCommitFailureForTesting: workspaceCommitFailureForTesting,
+    ProviderScope(
+      overrides: [
+        workspaceDependenciesProvider.overrideWithValue(workspaceDependencies),
+      ],
+      child: const SynapseApp(),
     ),
   );
   await tester.pump(const Duration(milliseconds: 250));

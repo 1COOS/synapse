@@ -1,76 +1,36 @@
 import 'package:flutter/cupertino.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import 'infrastructure/ai/ai_provider.dart';
 import 'infrastructure/bootstrap/workspace_dependencies_factory.dart';
-import 'infrastructure/config/provider_config_store.dart';
-import 'infrastructure/config/settings_store.dart';
-import 'infrastructure/config/vault_location_store.dart';
-import 'infrastructure/input/image_input_service.dart';
-import 'infrastructure/vault/vault_backend.dart';
 import 'presentation/cupertino/workspace.dart';
-import 'presentation/workspace/state/workspace_mutation_barrier.dart';
+import 'presentation/workspace/controller/workspace_controller.dart';
 
 void main() {
-  runApp(const SynapseApp());
+  final dependencies = createWorkspaceDependencies();
+  runApp(
+    ProviderScope(
+      overrides: [
+        workspaceDependenciesProvider.overrideWithValue(dependencies),
+      ],
+      child: const SynapseApp(),
+    ),
+  );
 }
 
 class SynapseApp extends StatelessWidget {
-  const SynapseApp({
-    super.key,
-    this.dependencies,
-    this.vault,
-    this.imageInput,
-    this.settingsStore,
-    this.providerConfigStore,
-    this.vaultLocationStore,
-    this.aiProvider,
-    this.directoryPicker,
-    this.vaultBackendFactory,
-    this.providerConfigTester,
-    this.workspaceCommitFailureForTesting,
-  });
-
-  final WorkspaceDependencies? dependencies;
-  final VaultBackend? vault;
-  final ImageInputService? imageInput;
-  final SettingsStore? settingsStore;
-  final ProviderConfigStore? providerConfigStore;
-  final VaultLocationStore? vaultLocationStore;
-  final AiProvider? aiProvider;
-  final DirectoryPicker? directoryPicker;
-  final VaultBackendFactory? vaultBackendFactory;
-  final ProviderConfigTester? providerConfigTester;
-  @visibleForTesting
-  final WorkspaceCommitPhase? workspaceCommitFailureForTesting;
+  const SynapseApp({super.key});
 
   @override
   Widget build(BuildContext context) {
-    final workspaceDependencies =
-        dependencies ??
-        createWorkspaceDependencies(
-          initialVault: vault,
-          imageInput: imageInput,
-          settingsStore: settingsStore,
-          providerConfigStore: providerConfigStore,
-          vaultLocationStore: vaultLocationStore,
-          aiProvider: aiProvider,
-          directoryPicker: directoryPicker,
-          vaultBackendFactory: vaultBackendFactory,
-          providerConfigTester: providerConfigTester,
-          workspaceCommitFailureForTesting: workspaceCommitFailureForTesting,
-        );
-    return ProviderScope(
-      child: CupertinoApp(
-        debugShowCheckedModeBanner: false,
-        title: 'Synapse',
-        theme: const CupertinoThemeData(
-          brightness: Brightness.light,
-          primaryColor: CupertinoColors.activeBlue,
-          scaffoldBackgroundColor: Color(0xFFF5F5F7),
-        ),
-        home: SynapseWorkspace(dependencies: workspaceDependencies),
+    return const CupertinoApp(
+      debugShowCheckedModeBanner: false,
+      title: 'Synapse',
+      theme: CupertinoThemeData(
+        brightness: Brightness.light,
+        primaryColor: CupertinoColors.activeBlue,
+        scaffoldBackgroundColor: Color(0xFFF5F5F7),
       ),
+      home: SynapseWorkspace(),
     );
   }
 }
