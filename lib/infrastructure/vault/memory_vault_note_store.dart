@@ -12,12 +12,16 @@ final class MemoryVaultNoteStore {
     required this.paths,
     required this.sources,
     required this.proposals,
+    required this.readNoteCallback,
+    required this.deleteNoteCallback,
   });
 
   final MemoryVaultState state;
   final MemoryVaultPaths paths;
   final MemoryVaultSourceStore sources;
   final MemoryVaultProposalStore proposals;
+  final Future<VaultNoteContent> Function(String noteId) readNoteCallback;
+  final Future<void> Function(String noteId) deleteNoteCallback;
 
   Future<VaultResourceNode> createFolder({
     required String parentPath,
@@ -128,7 +132,7 @@ final class MemoryVaultNoteStore {
   }) async {
     state.markdown[noteId] = markdown;
     _touch(noteId);
-    return readNote(noteId);
+    return readNoteCallback(noteId);
   }
 
   Future<VaultNoteContent> appendMarkdown({
@@ -138,7 +142,7 @@ final class MemoryVaultNoteStore {
     final current = state.markdown[noteId] ?? '';
     state.markdown[noteId] = '${current.trimRight()}\n\n${markdown.trim()}\n';
     _touch(noteId);
-    return readNote(noteId);
+    return readNoteCallback(noteId);
   }
 
   Future<void> deleteNote(String noteId) async {
@@ -214,7 +218,7 @@ final class MemoryVaultNoteStore {
         .where((noteId) => isVaultPathInside(noteId, folder))
         .toList();
     for (final noteId in noteIds) {
-      await deleteNote(noteId);
+      await deleteNoteCallback(noteId);
     }
     state.folders.removeWhere((path) => isVaultPathInside(path, folder));
   }

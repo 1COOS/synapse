@@ -17,6 +17,8 @@ class MemoryVaultBackend implements VaultBackend {
       paths: paths,
       sources: _sources,
       proposals: _proposals,
+      readNoteCallback: (noteId) => readNote(noteId),
+      deleteNoteCallback: (noteId) => deleteNote(noteId),
     );
     if (seedExampleData) {
       seedExample();

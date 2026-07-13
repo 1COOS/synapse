@@ -12,14 +12,16 @@ final class FileVaultProposalStore {
     required this.paths,
     required this.operations,
     required this.listNoteIds,
+    required this.listProposalsCallback,
   });
 
   final FileVaultPaths paths;
   final FileVaultOperations operations;
   final Future<List<String>> Function() listNoteIds;
+  final Future<List<AiProposal>> Function(String noteId) listProposalsCallback;
 
   Future<AiProposal> saveProposal(AiProposal proposal) async {
-    final proposals = await listProposals(proposal.noteId);
+    final proposals = await listProposalsCallback(proposal.noteId);
     return runVaultPostCommit(() async {
       await writeProposals(proposal.noteId, [
         ...proposals.where((item) => item.id != proposal.id),
@@ -47,7 +49,7 @@ final class FileVaultProposalStore {
   }
 
   Future<AiProposal> updateProposal(AiProposal proposal) async {
-    final proposals = await listProposals(proposal.noteId);
+    final proposals = await listProposalsCallback(proposal.noteId);
     return runVaultPostCommit(() async {
       await writeProposals(proposal.noteId, [
         ...proposals.where((item) => item.id != proposal.id),
@@ -63,7 +65,7 @@ final class FileVaultProposalStore {
       throw StateError('Proposal not found: $proposalId');
     }
     final (noteId, proposal) = match;
-    final proposals = await listProposals(noteId);
+    final proposals = await listProposalsCallback(noteId);
     final updated = proposals.where((item) => item.id != proposal.id).toList();
     await runVaultPostCommit(() => writeProposals(noteId, updated));
   }
@@ -103,8 +105,8 @@ final class FileVaultProposalStore {
   Future<void> rewriteCopied(
     String noteId,
     Map<String, String> sourceIdMap,
+    DateTime now,
   ) async {
-    final now = DateTime.now().toUtc();
     final proposals = await readProposalsFile(noteId);
     if (proposals.isNotEmpty || await paths.proposalsFile(noteId).exists()) {
       await writeProposals(noteId, [
@@ -128,7 +130,7 @@ final class FileVaultProposalStore {
 
   Future<(String, AiProposal)?> _findProposal(String proposalId) async {
     for (final noteId in await listNoteIds()) {
-      for (final proposal in await listProposals(noteId)) {
+      for (final proposal in await listProposalsCallback(noteId)) {
         if (proposal.id == proposalId) {
           return (noteId, proposal);
         }

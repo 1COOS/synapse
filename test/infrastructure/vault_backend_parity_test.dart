@@ -245,6 +245,9 @@ updatedAt: 2026-07-13 10:01
       expect(copiedProposal.id, isNot(proposal.id));
       expect(copiedProposal.noteId, copied.id);
       expect(copiedProposal.sourceIds, [copiedSource.id]);
+      expect(copiedSource.createdAt, copiedSource.updatedAt);
+      expect(copiedProposal.createdAt, copiedProposal.updatedAt);
+      expect(copiedSource.createdAt, copiedProposal.createdAt);
       expect(await backend.readSourceAttachment(copiedSource), [4, 5, 6]);
 
       await backend.deleteNote(moved.id);

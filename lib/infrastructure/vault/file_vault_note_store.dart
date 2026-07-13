@@ -17,6 +17,9 @@ final class FileVaultNoteStore {
     required this.operations,
     required this.sources,
     required this.proposals,
+    required this.readNoteCallback,
+    required this.deleteNoteCallback,
+    required this.listResourcesCallback,
     required this.listSources,
   });
 
@@ -24,6 +27,9 @@ final class FileVaultNoteStore {
   final FileVaultOperations operations;
   final FileVaultSourceStore sources;
   final FileVaultProposalStore proposals;
+  final Future<VaultNoteContent> Function(String noteId) readNoteCallback;
+  final Future<void> Function(String noteId) deleteNoteCallback;
+  final Future<List<VaultResourceNode>> Function() listResourcesCallback;
   final Future<List<SourceItem>> Function(String noteId) listSources;
 
   Future<VaultResourceNode> createFolder({
@@ -98,7 +104,7 @@ final class FileVaultNoteStore {
     final file = paths.fileForNoteId(noteId);
     return runVaultPostCommit(() async {
       await operations.writeFileString(file, markdown);
-      return readNote(noteId);
+      return readNoteCallback(noteId);
     });
   }
 
@@ -113,7 +119,7 @@ final class FileVaultNoteStore {
         file,
         '${current.trimRight()}\n\n${markdown.trim()}\n',
       );
-      return readNote(noteId);
+      return readNoteCallback(noteId);
     });
   }
 
@@ -167,9 +173,9 @@ final class FileVaultNoteStore {
       } else {
         await copiedAssets.create(recursive: true);
       }
-      final sourceIdMap = await sources.rewriteCopied(copiedId);
-      await proposals.rewriteCopied(copiedId, sourceIdMap);
-      return (await readNote(copiedId)).note;
+      final sourceIdMap = await sources.rewriteCopied(copiedId, now);
+      await proposals.rewriteCopied(copiedId, sourceIdMap, now);
+      return (await readNoteCallback(copiedId)).note;
     });
   }
 
@@ -198,6 +204,9 @@ final class FileVaultNoteStore {
     final directory = paths.directoryForFolder(relative);
     if (!await directory.exists()) {
       throw StateError('Folder not found: $folderPath');
+    }
+    for (final noteId in await noteIdsInsideFolder(relative)) {
+      await deleteNoteCallback(noteId);
     }
     await runVaultPostCommit(
       () => operations.deleteDirectory(directory, recursive: true),
@@ -263,7 +272,7 @@ final class FileVaultNoteStore {
       }
     }
 
-    collect(await listResources());
+    collect(await listResourcesCallback());
     return noteIds;
   }
 
@@ -278,7 +287,7 @@ final class FileVaultNoteStore {
       }
     }
 
-    collect(await listResources());
+    collect(await listResourcesCallback());
     return noteIds;
   }
 
@@ -411,7 +420,7 @@ final class FileVaultNoteStore {
       }
       await sources.rewriteMoved(movedId);
       await proposals.rewriteMoved(movedId);
-      return (await readNote(movedId)).note;
+      return (await readNoteCallback(movedId)).note;
     });
   }
 

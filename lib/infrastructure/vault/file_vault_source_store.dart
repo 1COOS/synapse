@@ -16,11 +16,13 @@ final class FileVaultSourceStore {
     required this.paths,
     required this.operations,
     required this.readNote,
+    required this.listSourcesCallback,
   });
 
   final FileVaultPaths paths;
   final FileVaultOperations operations;
   final Future<VaultNoteContent> Function(String noteId) readNote;
+  final Future<List<SourceItem>> Function(String noteId) listSourcesCallback;
 
   Future<SourceItem> addTextSource({
     required String noteId,
@@ -60,7 +62,7 @@ createdAt: ${source.createdAt.toIso8601String()}
 
 $text
 ''');
-      final sources = await listSources(note.id);
+      final sources = await listSourcesCallback(note.id);
       await writeSources(note.id, [...sources, source]);
       return source;
     });
@@ -99,7 +101,7 @@ $text
     return runVaultPostCommit(() async {
       await file.parent.create(recursive: true);
       await operations.writeFileBytes(file, bytes);
-      final sources = await listSources(note.id);
+      final sources = await listSourcesCallback(note.id);
       await writeSources(note.id, [...sources, source]);
       return source;
     });
@@ -123,7 +125,7 @@ $text
     List<String> sourceIds,
   ) async {
     final wanted = sourceIds.toSet();
-    return (await listSources(
+    return (await listSourcesCallback(
       noteId,
     )).where((source) => wanted.contains(source.id)).toList();
   }
@@ -137,7 +139,7 @@ $text
   }
 
   Future<SourceItem> updateSource(SourceItem source) async {
-    final sources = await listSources(source.noteId);
+    final sources = await listSourcesCallback(source.noteId);
     final index = sources.indexWhere((item) => item.id == source.id);
     if (index < 0) {
       throw StateError('Source not found: ${source.id}');
@@ -151,7 +153,7 @@ $text
   }
 
   Future<void> deleteSource(SourceItem source) async {
-    final sources = await listSources(source.noteId);
+    final sources = await listSourcesCallback(source.noteId);
     final index = sources.indexWhere((item) => item.id == source.id);
     if (index < 0) {
       throw StateError('Source not found: ${source.id}');
@@ -181,7 +183,7 @@ $text
   }
 
   Future<void> rewriteMoved(String noteId) async {
-    final sources = await listSources(noteId);
+    final sources = await listSourcesCallback(noteId);
     if (sources.isNotEmpty || await paths.sourcesFile(noteId).exists()) {
       await writeSources(noteId, [
         for (final source in sources) source.copyWith(noteId: noteId),
@@ -189,10 +191,9 @@ $text
     }
   }
 
-  Future<Map<String, String>> rewriteCopied(String noteId) async {
-    final now = DateTime.now().toUtc();
+  Future<Map<String, String>> rewriteCopied(String noteId, DateTime now) async {
     final sourceIdMap = <String, String>{};
-    final sources = await listSources(noteId);
+    final sources = await listSourcesCallback(noteId);
     if (sources.isNotEmpty || await paths.sourcesFile(noteId).exists()) {
       await writeSources(noteId, [
         for (final source in sources)

@@ -25,18 +25,23 @@ class FileVaultBackend implements VaultBackend {
     _sources = FileVaultSourceStore(
       paths: paths,
       operations: operations,
-      readNote: (noteId) => _notes.readNote(noteId),
+      readNote: (noteId) => readNote(noteId),
+      listSourcesCallback: (noteId) => listSources(noteId),
     );
     _proposals = FileVaultProposalStore(
       paths: paths,
       operations: operations,
       listNoteIds: () => _notes.listNoteIds(),
+      listProposalsCallback: (noteId) => listProposals(noteId),
     );
     _notes = FileVaultNoteStore(
       paths: paths,
       operations: operations,
       sources: _sources,
       proposals: _proposals,
+      readNoteCallback: (noteId) => readNote(noteId),
+      deleteNoteCallback: (noteId) => deleteNote(noteId),
+      listResourcesCallback: () => listResources(),
       listSources: (noteId) => listSources(noteId),
     );
   }
