@@ -19,7 +19,9 @@
 
 **测试长文件 follow-up：** commit `30f5fe9`；9 个超长文件拆成 25 个，保留 248 tests 等价覆盖，最大文件 869 行。
 
-**Final local gate checkpoint（2026-07-14）：** `dart format` 162 files、0 changed，`flutter test --no-pub` 587/587，`flutter analyze --no-pub` 无 issue，`git diff --check` PASS，执行前 worktree clean。原始 `xcodebuild test`、Debug build 与 Release build 均因 Runner entitlements 需要 Apple Development certificate 而失败；Release app 未生成，codesign entitlement inspection 因此未完成。关闭签名的辅助 `xcodebuild test` 通过 RunnerTests 3/3，但不能替代 production gate。代码与 unsigned native tests 已通过；strict final local production gate 仍被外部 Apple Development certificate/Team 阻塞。
+**Post-gate remediation checkpoint：** commits `12b0e09..a88fd18`；live editor clipboard/paste 命令已绑定稳定编辑目标，普通粘贴保持当前 selection；File Vault 拒绝 symlink escape，并在事务 I/O 前固定 root realpath、预检目标和临近复验。最终整分支代码审查 `APPROVED`，无剩余 Critical/Important finding。
+
+**Final local gate checkpoint（2026-07-14）：** `dart format` 165 files、0 changed，`flutter test --no-pub` 630/630，`flutter analyze --no-pub` 无 issue，`git diff --check` PASS，执行前后 worktree clean。原始 `xcodebuild test`、Debug build 与 Release build 均因 Runner entitlements 需要 Apple Development certificate 而失败；Release app 未生成，codesign entitlement inspection 因此未完成。关闭签名的辅助 `xcodebuild test` 通过 RunnerTests 3/3，但不能替代 production gate。代码与 unsigned native tests 已通过；strict final local production gate 仍被外部 Apple Development certificate/Team 阻塞。
 
 > Foundation baseline 捕获时，分支相对 `main` 有 15 个实现提交，任务 1-5 的 session/save/split/mutation foundation 已完成。该 baseline 的 fresh evidence 为状态层 65 tests pass、workspace 140 tests pass，共 205 tests pass，`flutter analyze --no-pub` 无 issue，`git diff --check` clean。提交数量仅描述 baseline 捕获时点，不作为后续分支总提交数。
 
@@ -350,7 +352,7 @@ ResolvedPaneEditorContext? resolvePaneEditorContext(
 
 不使用 split/session/materials revision counters。Registry、save coordinator、split controller 和 pane context factory 由 notifier 持有并在 `ref.onDispose` 中释放。UI 使用 `ref.watch(workspaceControllerProvider)` 渲染，使用 `ref.read(...notifier)` 发送 intent。`TextEditingController` 不复制到 immutable state；Widget 通过 provider 查询稳定 session，并用 `ListenableBuilder` 监听编辑状态。
 
-为避免形成新的巨型 controller，运行期职责已拆为 `WorkspaceRuntimeManager`、`WorkspaceSearchCoordinator` 与 `WorkspaceResourceCoordinator`，并增加 startup、document、editor operation 与 state commit collaborators。`WorkspaceRuntimeManager` 唯一持有 candidate/active runtime、generation 与 dispose；`WorkspaceStartupCoordinator` 协调启动、切 Vault、settings 与 active lease。`WorkspaceController` 只负责 observable snapshot 发布和公开 intent reduction；当前 1018 行，接近并略高于约 1000 行 review threshold，后续新增职责应优先进入现有 collaborators。
+为避免形成新的巨型 controller，运行期职责已拆为 `WorkspaceRuntimeManager`、`WorkspaceSearchCoordinator` 与 `WorkspaceResourceCoordinator`，并增加 startup、document、editor operation 与 state commit collaborators。`WorkspaceRuntimeManager` 唯一持有 candidate/active runtime、generation 与 dispose；`WorkspaceStartupCoordinator` 协调启动、切 Vault、settings 与 active lease。`WorkspaceController` 只负责 observable snapshot 发布和公开 intent reduction；当前 1020 行，接近并略高于约 1000 行 review threshold，后续新增职责应优先进入现有 collaborators。
 
 ### 6.7 Composition root
 
@@ -520,14 +522,16 @@ Foundation 与后续代码阶段均已完成，最终只剩被外部签名前置
 
 测试阈值 follow-up 已由 `30f5fe9` 完成，不改变上述生产阶段编号。
 
-本轮不新增 GitHub Actions workflow。2026-07-14 本机实测中，Dart format、587/587 Flutter tests、analyze、diff check 与 unsigned RunnerTests 3/3 均通过；原始 `xcodebuild test`、Debug build、Release build 因缺少有效 Apple Development certificate/Team 失败，Release app 未生成，因而无法检查实际 codesign entitlement。unsigned native tests 不替代 production gate；在 Xcode 配置有效 certificate/team 后，必须重跑原始 `xcodebuild test`、Debug build、Release build 和 codesign inspection，四项全部通过后才能更新为 mergeable。
+本轮不新增 GitHub Actions workflow。2026-07-14 本机实测中，Dart format、630/630 Flutter tests、analyze、diff check 与 unsigned RunnerTests 3/3 均通过；原始 `xcodebuild test`、Debug build、Release build 因缺少有效 Apple Development certificate/Team 失败，Release app 未生成，因而无法检查实际 codesign entitlement。unsigned native tests 不替代 production gate；在 Xcode 配置有效 certificate/team 后，必须重跑原始 `xcodebuild test`、Debug build、Release build 和 codesign inspection，四项全部通过后才能更新为 mergeable。
+
+最终整分支代码审查结论为 `APPROVED`，无剩余 Critical/Important finding。File Vault 的安全边界是固定 root realpath，并在事务 I/O 前做路径预检与临近复验；由于纯 Dart 文件 API 不提供 `openat`/`O_NOFOLLOW` 等句柄级原语，本设计不承诺抵御恶意并发 symlink swap，该限制在当前 macOS 本地应用威胁模型下不阻塞发布。
 
 ## 12. 长文件治理
 
 - `lib/presentation/cupertino/workspace.dart` 最终只保留 `SynapseWorkspace` 入口、Provider/Consumer 连接和少量 screen glue，目标 500-800 行。
 - 9 个超长测试文件已按 controller、save、mutation、vault、editor/images、resources、settings 等行为拆成 25 个，共用 fake 与 harness 位于 `test/support/`；当前最大 869 行。
 - 新 production file 通常以约 800 行作为 review threshold。
-- `WorkspaceController` 是显式例外，review threshold 约 1000 行；当前 1018 行且 runtime/search/resource/startup/editor 等 collaborators 已拆出，新增职责不得无条件回流主 controller。
+- `WorkspaceController` 是显式例外，review threshold 约 1000 行；当前 1020 行且 runtime/search/resource/startup/editor 等 collaborators 已拆出，新增职责不得无条件回流主 controller。live editor 当前 634 行，仍低于 production file review threshold。
 - 当前较 cohesive 的 `note_save_coordinator.dart` 与 `markdown_live_blocks.dart` 本轮不为行数机械强拆。
 - 不使用 Dart `part`；拆分文件采用显式 import 与显式 API。
 

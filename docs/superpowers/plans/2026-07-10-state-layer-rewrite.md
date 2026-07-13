@@ -5,7 +5,7 @@
 **Initial documentation checkpoint：** `92d5576`
 **Review clarification commit：** `d4c5310`
 
-**Latest completed code stage：** test threshold follow-up `30f5fe9`；全部代码阶段已完成，Final local gate blocked/pending external signing
+**Latest completed code checkpoint：** file Vault path transaction hardening `a88fd18`；全部代码阶段与最终代码审查已完成，Final local gate blocked/pending external signing
 
 > Foundation baseline 捕获时，分支相对 `main` 有 15 个实现提交。该数字只描述 baseline 捕获时点，不声明后续分支的固定提交总数。
 
@@ -23,7 +23,9 @@
 
 **Test threshold follow-up：** commit `30f5fe9`；9 个超长文件拆为 25 个，保留 248 tests 等价覆盖，最大文件 869 行。
 
-**Final local gate checkpoint（2026-07-14）：** `dart format` 162 files、0 changed，`flutter test --no-pub` 587/587，`flutter analyze --no-pub` 无 issue，`git diff --check` PASS，执行前 worktree clean。原始 `xcodebuild test`、Debug build 与 Release build 均因 Runner entitlements 需要 Apple Development certificate 而失败；Release app 未生成，因此无法完成 codesign entitlement inspection。关闭签名的辅助 `xcodebuild test` 通过 RunnerTests 3/3，但不能替代 production gate。代码与 unsigned native tests 已通过；strict final local production gate 仍被外部 Apple Development certificate/Team 阻塞。
+**Post-gate remediation checkpoint：** commits `12b0e09..a88fd18`；live editor clipboard/paste 命令绑定稳定编辑目标，普通粘贴保持当前 selection；File Vault 拒绝 symlink escape，并在事务 I/O 前固定 root realpath、预检目标和临近复验。最终整分支代码审查 `APPROVED`，无剩余 Critical/Important finding。
+
+**Final local gate checkpoint（2026-07-14）：** `dart format` 165 files、0 changed，`flutter test --no-pub` 630/630，`flutter analyze --no-pub` 无 issue，`git diff --check` PASS，执行前后 worktree clean。原始 `xcodebuild test`、Debug build 与 Release build 均因 Runner entitlements 需要 Apple Development certificate 而失败；Release app 未生成，因此无法完成 codesign entitlement inspection。关闭签名的辅助 `xcodebuild test` 通过 RunnerTests 3/3，但不能替代 production gate。代码与 unsigned native tests 已通过；strict final local production gate 仍被外部 Apple Development certificate/Team 阻塞。
 
 **目标：** 在已完成的 session/save/split/mutation foundation 上，拆分长文件、收敛状态所有权、绑定异步编辑目标，并完成 macOS 生产安全与本地发布门禁。
 
@@ -67,7 +69,7 @@ Foundation 验证证据：
 - `workspace.dart` 目标 500-800 行。
 - workspace tests 按行为拆分，新测试文件原则上不超过约 900 行。
 - 新 production file 通常以约 800 行作为 review threshold。
-- `WorkspaceController` 是显式例外，约 1000 行是持续保留的 review threshold，不是机械硬上限。当前 1018 行在 runtime/search/resource/startup/editor 等 collaborators 已拆分且 review PASS 后接受；后续新增职责或持续增长必须继续按所有权拆分。
+- `WorkspaceController` 是显式例外，约 1000 行是持续保留的 review threshold，不是机械硬上限。当前 1020 行在 runtime/search/resource/startup/editor 等 collaborators 已拆分且 review PASS 后接受；后续新增职责或持续增长必须继续按所有权拆分。
 - cohesive 的 `note_save_coordinator.dart` 与 `markdown_live_blocks.dart` 本轮不为行数机械强拆。
 
 ## 执行记录与剩余 Gate
@@ -168,9 +170,9 @@ Commit：`fix: bind pane async mutations to stable context`。
 - pane 通过 provider 查询稳定 session，并使用 `ListenableBuilder` 监听编辑状态。
 - `SynapseWorkspace` 移除具体 infrastructure import 和构造器测试依赖参数；测试使用 Provider override。
 - controller 只负责 Riverpod 生命周期、公开 intent 与 state reduction。
-- runtime/search/resource/startup/editor collaborators 已拆出；当前 Controller 1018 行经 review 接受，但约 1000 行 review threshold 继续有效，后续新增职责或持续增长必须继续拆分。
+- runtime/search/resource/startup/editor collaborators 已拆出；当前 Controller 1020 行经 review 接受，但约 1000 行 review threshold 继续有效，后续新增职责或持续增长必须继续拆分。
 - startup/runtime/settings 生命周期由 `WorkspaceStartupCoordinator` 持有；editor command lock 与 save-flight ownership 由 `WorkspaceEditorOperationCoordinator` 持有。
-- 阶段 7 checkpoint 中 `workspace.dart` 为 756 行、`WorkspaceController` 为 1004 行；当前 Controller 为 1018 行。Consumer pane、Markdown renderer、chrome 与 source pane 均为显式 import 文件，不使用 Dart `part`。
+- 阶段 7 checkpoint 中 `workspace.dart` 为 756 行、`WorkspaceController` 为 1004 行；当前 Controller 为 1020 行，live editor 为 634 行。Consumer pane、Markdown renderer、chrome 与 source pane 均为显式 import 文件，不使用 Dart `part`。
 - Commit：`refactor: complete Riverpod workspace controller`。
 
 ### 阶段 8：Keychain fail-closed
@@ -226,8 +228,8 @@ Commit：`fix: bind pane async mutations to stable context`。
 
 | 检查 | 结果 |
 |---|---|
-| `dart format --output=none --set-exit-if-changed lib test` | PASS：162 files，0 changed |
-| `flutter test --no-pub` | PASS：587/587 |
+| `dart format --output=none --set-exit-if-changed lib test` | PASS：165 files，0 changed |
+| `flutter test --no-pub` | PASS：630/630 |
 | `flutter analyze --no-pub` | PASS：No issues |
 | `xcodebuild test -project macos/Runner.xcodeproj -scheme Runner -destination 'platform=macOS'` | FAIL：exit 65；Runner entitlements require signing with a development certificate |
 | `flutter build macos --debug --no-pub` | FAIL：同一 signing error |
@@ -257,11 +259,13 @@ codesign -d --entitlements :- build/macos/Build/Products/Release/synapse.app
 
 最终审查：
 
+- 整分支代码审查结论为 `APPROVED`，无剩余 Critical/Important finding。
 - presentation 无 concrete infrastructure import。
 - 无 await 后重新读取焦点作为 mutation target。
 - 无 timer/runtime/lease 泄漏。
 - 无重复状态源或 revision counters。
 - commitBackend/postCommitHydrate/prepare/apply/publish 契约和故障注入测试全部覆盖。
+- File Vault 固定 root realpath，并在每次事务 I/O 前做路径预检与临近复验；受 Dart 文件 API 限制，不承诺抵御恶意并发 symlink swap，该边界不阻塞当前 macOS 本地应用模型。
 - 当前输出 signing blocker 报告；签名门禁通过后再输出分支可合并报告。不自动 merge 或 push `main`。
 
 ## 执行约束
