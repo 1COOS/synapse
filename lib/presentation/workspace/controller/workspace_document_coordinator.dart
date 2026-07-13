@@ -29,6 +29,9 @@ final class WorkspaceDocumentCoordinator {
   final NoteSessionRegistry _sessions;
   final SplitWorkspaceController _splits;
   final WorkspaceState Function() _readState;
+  Object? _lastCloseError;
+
+  Object? get lastCloseError => _lastCloseError;
 
   Future<WorkspaceActionResult> createFolder({
     required String parentPath,
@@ -230,8 +233,8 @@ final class WorkspaceDocumentCoordinator {
   }) async {
     final vault = _runtimes.requireCurrent().vault;
     final oldId = note.id;
-    final result = await _mutations.run<VaultNoteContent>(
-      WorkspaceMutationPlan<VaultNoteContent>(
+    final result = await _mutations.run<_NoteHydration>(
+      WorkspaceMutationPlan<_NoteHydration>(
         affectedNoteIds: {oldId},
         dirtyDisposition: DirtyDisposition.flush,
         commitBackend: () async {
@@ -242,8 +245,9 @@ final class WorkspaceDocumentCoordinator {
           return WorkspaceBackendCommit(
             postCommitHydrate: () async {
               final loaded = await vault.readNote(moved.id);
+              final proposals = await vault.listProposals(loaded.id);
               return VaultMutationDelta(
-                value: loaded,
+                value: _NoteHydration(note: loaded, proposals: proposals),
                 remappedNoteIds: {oldId: loaded.id},
                 refreshedNotesByNewId: {loaded.id: loaded},
                 resources: await vault.listResources(),
@@ -253,9 +257,12 @@ final class WorkspaceDocumentCoordinator {
         },
         prepareCommit: (delta) => _commits.prepare(
           delta,
+          replacementProposalsByNoteId: {
+            delta.value.note.id: delta.value.proposals,
+          },
           patch: WorkspaceStatePatch(
             resources: delta.resources,
-            selectedResourceId: delta.value.id,
+            selectedResourceId: delta.value.note.id,
             searchResults: const [],
             narrowSection: WorkspaceSection.notes,
             message: '笔记已移动',
@@ -268,6 +275,7 @@ final class WorkspaceDocumentCoordinator {
   }
 
   Future<WorkspaceActionResult> closeFocusedPane() async {
+    _lastCloseError = null;
     final target = _captureFocusedPane();
     if (target == null || !_splits.closeImpact(target.paneId).canClose) {
       return WorkspaceActionResult.cancelled;
@@ -310,6 +318,11 @@ final class WorkspaceDocumentCoordinator {
         },
       ),
     );
+    if (result case AbortedByFlush<void>(:final flushReport)) {
+      _lastCloseError = flushReport.results.isEmpty
+          ? null
+          : flushReport.results.last.error;
+    }
     return _actionResult(result);
   }
 

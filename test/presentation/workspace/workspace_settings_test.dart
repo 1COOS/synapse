@@ -410,7 +410,7 @@ void main() {
   );
 
   testWidgets(
-    'delayed startup settings cannot overwrite a user settings save',
+    'initialization loading prevents edits against stale startup settings',
     (tester) async {
       final vault = MemoryVaultBackend(seedExampleData: false);
       await vault.createNote(parentPath: '', title: 'Alpha');
@@ -432,13 +432,13 @@ void main() {
       await pumpWorkspace(tester, vault: null, dependencies: dependencies);
       await settingsStore.loadStarted.future;
 
-      await tester.tap(find.byKey(const Key('settings-button')));
-      await tester.pump();
+      expect(find.byType(CupertinoActivityIndicator), findsOneWidget);
+      expect(find.byKey(const Key('settings-button')), findsNothing);
       expect(find.text('设置'), findsNothing);
 
       settingsStore.releaseLoad();
       await tester.pumpAndSettle();
-      await _enterReplacementSettingsInOpenDialog(tester);
+      await _enterReplacementSettings(tester);
       await tester.tap(find.text('保存设置'));
       await tester.pumpAndSettle();
       expect(settingsStore.currentSettings.providerConfig.baseUrl, 'new-url');
@@ -462,7 +462,7 @@ void main() {
   );
 
   testWidgets(
-    'settings dialog waits for and preserves the startup settings baseline',
+    'settings dialog opens with the completed startup settings baseline',
     (tester) async {
       const startupSettings = SynapseSettings(
         vaultLocation: VaultLocation(rootPath: '/vault/loaded'),
@@ -491,15 +491,16 @@ void main() {
       await pumpWorkspace(tester, vault: vault, settingsStore: settingsStore);
       await settingsStore.loadStarted.future;
 
-      await tester.tap(find.byKey(const Key('settings-button')));
-      await tester.pump();
-
+      expect(find.byType(CupertinoActivityIndicator), findsOneWidget);
+      expect(find.byKey(const Key('settings-button')), findsNothing);
       expect(find.text('设置'), findsNothing);
       expect(settingsStore.savedSettings, isEmpty);
 
       settingsStore.releaseLoad();
       await tester.pumpAndSettle();
 
+      await tester.tap(find.byKey(const Key('settings-button')));
+      await tester.pumpAndSettle();
       expect(find.text('设置'), findsOneWidget);
       await tester.tap(find.byKey(const Key('settings-nav-appearance')));
       await tester.pumpAndSettle();
@@ -524,7 +525,7 @@ void main() {
   );
 
   testWidgets(
-    'canceling settings leaves delayed startup initialization active',
+    'canceling settings after initialization preserves the loaded workspace',
     (tester) async {
       final vault = MemoryVaultBackend(seedExampleData: false);
       await vault.createNote(parentPath: '', title: 'Alpha');
@@ -538,11 +539,14 @@ void main() {
 
       await pumpWorkspace(tester, vault: null, dependencies: dependencies);
       await settingsStore.loadStarted.future;
-      await tester.tap(find.byKey(const Key('settings-button')));
-      await tester.pump();
+
+      expect(find.byType(CupertinoActivityIndicator), findsOneWidget);
+      expect(find.byKey(const Key('settings-button')), findsNothing);
       expect(find.text('设置'), findsNothing);
 
       settingsStore.releaseLoad();
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('settings-button')));
       await tester.pumpAndSettle();
       await tester.tap(find.text('取消'));
       await tester.pumpAndSettle();

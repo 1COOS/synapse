@@ -1,12 +1,16 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../application/search/search_index.dart';
 import '../../../domain/markdown/markdown_document.dart';
 import '../../../domain/vault/vault_resource.dart';
 import '../../../infrastructure/config/synapse_settings.dart';
+import '../../../infrastructure/config/vault_location_store.dart';
 import '../../../infrastructure/vault/vault_backend.dart';
+import '../editor/pane_editor_context.dart' as editor_context;
+import '../editor/live_markdown_editor.dart' show NoteEditorPasteAvailability;
 import '../state/note_document_session.dart';
 import '../state/note_materials_registry.dart';
 import '../state/note_save_coordinator.dart';
@@ -15,6 +19,7 @@ import '../state/split_workspace_controller.dart';
 import '../state/workspace_mutation_barrier.dart';
 import 'workspace_dependencies.dart';
 import 'workspace_document_coordinator.dart';
+import 'workspace_editor_coordinator.dart';
 import 'workspace_resource_coordinator.dart';
 import 'workspace_runtime.dart';
 import 'workspace_runtime_manager.dart';
@@ -45,6 +50,7 @@ final workspaceSessionProvider = Provider.family<NoteDocumentSession?, String>((
 });
 
 final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
+  static const reloadRequiredMessage = '工作区状态提交异常。后端操作可能已完成，请重新加载工作区后再继续。';
   late final WorkspaceDependencies _dependencies;
   late final WorkspaceRuntimeManager _runtimeManager;
   late final WorkspaceResourceCoordinator _resourceCoordinator;
@@ -55,10 +61,23 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
   late final WorkspaceMutationBarrier _mutations;
   late final WorkspaceStateCommitCoordinator _stateCommits;
   late final WorkspaceDocumentCoordinator _documents;
+  late final WorkspaceEditorCoordinator _editor;
   bool _isDisposed = false;
   bool _reloadRequired = false;
   SynapseSettings _settings = SynapseSettings.defaults;
+  SynapseSettings? _loadedSettingsBaseline;
   Future<void> _settingsPersistenceTail = Future<void>.value();
+  int _searchIntent = 0;
+  int _pendingCloseOperations = 0;
+  bool _closeOperationsOwnActiveOperation = false;
+  Object _resourceSnapshotToken = Object();
+  Object? _startupToken;
+  Future<SynapseSettings>? _startupSettingsFuture;
+  Object? _startupSettingsError;
+  final Set<NoteDocumentSession> _lockedEditorSessions =
+      Set<NoteDocumentSession>.identity();
+  final ValueNotifier<int> _editorLockRevision = ValueNotifier<int>(0);
+  final Set<_EditorSaveScope> _editorSaveScopes = <_EditorSaveScope>{};
 
   @override
   Future<WorkspaceState> build() async {
@@ -95,7 +114,7 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
       splits: _splits,
       materials: _materials,
       readState: _requireState,
-      publishState: _publish,
+      publishState: _publishCommittedState,
       forcedFailure: _dependencies.workspaceCommitFailureForTesting,
     );
     _documents = WorkspaceDocumentCoordinator(
@@ -106,17 +125,63 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
       splits: _splits,
       readState: _requireState,
     );
+    _editor = WorkspaceEditorCoordinator(
+      imageInput: _dependencies.imageInput,
+      runtimes: _runtimeManager,
+      mutations: _mutations,
+      commits: _stateCommits,
+      sessions: _sessions,
+      materials: _materials,
+      saves: _saves,
+      splits: _splits,
+      readState: _requireState,
+    );
     ref.onDispose(_dispose);
 
+    final settingsLoad = _loadSettings();
+    _startupSettingsFuture = settingsLoad;
+    if (_dependencies.initialVault == null &&
+        _dependencies.supportsDirectoryVault) {
+      final startupToken = Object();
+      _startupToken = startupToken;
+      unawaited(_continueDirectoryStartup(startupToken, settingsLoad));
+      return _snapshot(phase: WorkspacePhase.needsVault, message: '请选择仓库位置');
+    }
+
+    _installStartupRuntime();
     var message = '';
     try {
-      _settings = await (await _dependencies.settingsStore()).load();
+      final loadedSettings = await settingsLoad;
+      _loadedSettingsBaseline = loadedSettings;
+      _startupSettingsError = null;
+      final current = _runtimeManager.current;
+      if (current != null && loadedSettings != _settings) {
+        WorkspaceRuntime? candidate;
+        try {
+          candidate = _createRuntime(
+            vault: current.vault,
+            rootPath: current.rootPath,
+            label: current.label,
+            settings: loadedSettings,
+          );
+          _runtimeManager.install(candidate);
+          candidate = null;
+          _settings = loadedSettings;
+          _splits.updateDefaultMode(_preferredNoteMode);
+        } catch (_) {
+          candidate?.dispose(
+            reportCleanupError: _dependencies.cleanupErrorReporter,
+          );
+        }
+      } else {
+        _settings = loadedSettings;
+      }
     } catch (error) {
+      _startupSettingsError = error;
       message = '设置读取失败：$error';
     }
     _splits.updateDefaultMode(_preferredNoteMode);
 
-    await _installStartupRuntime();
     final runtime = _runtimeManager.current;
     if (runtime == null) {
       return _snapshot(
@@ -158,6 +223,20 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
 
   NoteDocumentSession? sessionFor(String noteId) =>
       _sessions.sessionFor(noteId);
+
+  SynapseSettings get settingsForEditing =>
+      _loadedSettingsBaseline ?? _settings;
+
+  bool get hasLoadedSettingsBaseline => _loadedSettingsBaseline != null;
+
+  Future<SynapseSettings?> awaitSettingsForEditing() async {
+    final loaded = await _awaitStartupSettings();
+    if (loaded == null) {
+      return null;
+    }
+    _loadedSettingsBaseline ??= loaded;
+    return settingsForEditing;
+  }
 
   void setPaneMode(String paneId, NoteMode mode) {
     _splits.setPaneMode(paneId, mode);
@@ -230,6 +309,11 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
   Future<WorkspaceActionResult> selectResource(
     VaultResourceNode resource,
   ) async {
+    final currentOperation = _requireState().activeOperation;
+    if (currentOperation != null &&
+        currentOperation != WorkspaceOperation.editorCommand) {
+      return WorkspaceActionResult.busy;
+    }
     if (resource.isFolder) {
       final current = _requireState();
       _publish(
@@ -240,23 +324,39 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
       );
       return WorkspaceActionResult.committed;
     }
-    if (!_beginOperation(WorkspaceOperation.resourceMutation)) {
-      return WorkspaceActionResult.busy;
+    final ownsOperation = currentOperation == null;
+    if (ownsOperation) {
+      _beginOperation(WorkspaceOperation.resourceMutation);
     }
     try {
+      final targetSession = _sessions.sessionFor(resource.id);
       if (!await _flushFocusedSession()) {
         return WorkspaceActionResult.aborted;
       }
-      final result = await _resourceCoordinator.loadNote(resource.id);
-      return _applyResourceResult(
-        result,
-        missingMessage: '资源已不存在：${resource.title}',
-      );
+      for (var attempt = 0; attempt < 2; attempt += 1) {
+        final snapshotToken = _resourceSnapshotToken;
+        final noteId = attempt == 0
+            ? targetSession?.noteId ?? resource.id
+            : targetSession?.noteId ?? resource.id;
+        final result = attempt == 0
+            ? await _resourceCoordinator.loadNote(noteId)
+            : await _resourceCoordinator.refreshNote(noteId);
+        if (!identical(snapshotToken, _resourceSnapshotToken)) {
+          continue;
+        }
+        return _applyResourceResult(
+          result,
+          missingMessage: '资源已不存在：${resource.title}',
+        );
+      }
+      return WorkspaceActionResult.aborted;
     } catch (error) {
       _setMessage(error.toString());
       return WorkspaceActionResult.failed;
     } finally {
-      _endOperation(WorkspaceOperation.resourceMutation);
+      if (ownsOperation) {
+        _endOperation(WorkspaceOperation.resourceMutation);
+      }
     }
   }
 
@@ -265,9 +365,15 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
     if (normalized.isEmpty || _runtimeManager.current == null) {
       return WorkspaceActionResult.cancelled;
     }
-    if (!_beginOperation(WorkspaceOperation.search)) {
+    final currentOperation = _requireState().activeOperation;
+    if (currentOperation != null &&
+        currentOperation != WorkspaceOperation.search) {
       return WorkspaceActionResult.busy;
     }
+    if (currentOperation == null) {
+      _beginOperation(WorkspaceOperation.search);
+    }
+    final intent = ++_searchIntent;
     try {
       final capture = _runtimeManager.capture();
       if (capture == null) {
@@ -277,7 +383,9 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
         query: normalized,
         vault: capture.runtime.vault,
       );
-      if (results == null || !_runtimeManager.isCurrent(capture)) {
+      if (results == null ||
+          !_runtimeManager.isCurrent(capture) ||
+          intent != _searchIntent) {
         return WorkspaceActionResult.aborted;
       }
       final current = _requireState();
@@ -292,16 +400,26 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
       );
       return WorkspaceActionResult.committed;
     } catch (error) {
-      _setMessage(error.toString());
+      if (intent == _searchIntent) {
+        _setMessage(error.toString());
+      }
       return WorkspaceActionResult.failed;
     } finally {
-      _endOperation(WorkspaceOperation.search);
+      if (intent == _searchIntent) {
+        _endOperation(WorkspaceOperation.search);
+      }
     }
   }
 
   Future<WorkspaceActionResult> openSearchResult(SearchResult result) async {
-    if (!_beginOperation(WorkspaceOperation.resourceMutation)) {
+    final currentOperation = _requireState().activeOperation;
+    if (currentOperation != null &&
+        currentOperation != WorkspaceOperation.editorCommand) {
       return WorkspaceActionResult.busy;
+    }
+    final ownsOperation = currentOperation == null;
+    if (ownsOperation) {
+      _beginOperation(WorkspaceOperation.resourceMutation);
     }
     try {
       if (!await _flushFocusedSession()) {
@@ -319,7 +437,9 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
       _setMessage(error.toString());
       return WorkspaceActionResult.failed;
     } finally {
-      _endOperation(WorkspaceOperation.resourceMutation);
+      if (ownsOperation) {
+        _endOperation(WorkspaceOperation.resourceMutation);
+      }
     }
   }
 
@@ -368,41 +488,374 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
   }
 
   Future<WorkspaceActionResult> closeFocusedPane() {
-    return _runDocumentOperation(_documents.closeFocusedPane);
+    return _runCloseOperation();
+  }
+
+  Future<WorkspaceActionResult> _runCloseOperation() async {
+    final currentOperation = _requireState().activeOperation;
+    if (currentOperation != null &&
+        currentOperation != WorkspaceOperation.editorCommand &&
+        !(currentOperation == WorkspaceOperation.resourceMutation &&
+            _pendingCloseOperations > 0)) {
+      return WorkspaceActionResult.busy;
+    }
+    if (currentOperation == null && _pendingCloseOperations == 0) {
+      _beginOperation(WorkspaceOperation.resourceMutation);
+      _closeOperationsOwnActiveOperation = true;
+    }
+    _pendingCloseOperations += 1;
+    try {
+      final result = await _documents.closeFocusedPane();
+      if (result == WorkspaceActionResult.aborted) {
+        final error = _documents.lastCloseError;
+        _setMessage('笔记保存失败：${error ?? '未知错误'}');
+      }
+      return result;
+    } catch (error) {
+      if (!_reloadRequired) {
+        _setMessage(error.toString());
+      }
+      return WorkspaceActionResult.failed;
+    } finally {
+      _pendingCloseOperations -= 1;
+      if (_pendingCloseOperations == 0) {
+        if (_closeOperationsOwnActiveOperation) {
+          _endOperation(WorkspaceOperation.resourceMutation);
+        }
+        _closeOperationsOwnActiveOperation = false;
+      }
+    }
+  }
+
+  void toggleSourceSelection(String noteId, String sourceId) {
+    _materials.toggleSource(noteId, sourceId);
+    _publishCollaboratorSnapshot();
+  }
+
+  editor_context.PaneEditorContext? capturePaneEditorContext(String paneId) {
+    final pane = _splits.pane(paneId);
+    final noteId = pane?.noteId;
+    if (noteId == null || _sessions.sessionFor(noteId) == null) {
+      return null;
+    }
+    return editor_context.capturePaneEditorContext(
+      paneId: paneId,
+      splits: _splits,
+      sessions: _sessions,
+      runtimeGeneration: _runtimeManager.generation,
+    );
+  }
+
+  bool isPaneEditorContextCurrent(editor_context.PaneEditorContext context) {
+    return resolvePaneEditorContext(context) != null;
+  }
+
+  editor_context.ResolvedPaneEditorContext? resolvePaneEditorContext(
+    editor_context.PaneEditorContext context,
+  ) {
+    return editor_context.resolvePaneEditorContext(
+      context,
+      splits: _splits,
+      sessions: _sessions,
+      runtimeGeneration: _runtimeManager.generation,
+    );
+  }
+
+  Set<NoteDocumentSession> get lockedEditorSessions =>
+      Set<NoteDocumentSession>.unmodifiable(_lockedEditorSessions);
+
+  ValueListenable<int> get editorLockRevision => _editorLockRevision;
+
+  bool get isAutoSaving => _saves.isAutoSaving;
+
+  Future<editor_context.PaneEditorCommandOutcome> importImage(
+    editor_context.PaneEditorContext? context,
+  ) {
+    if (context == null) {
+      _setMessage('请先选择或创建笔记');
+      return Future.value(editor_context.PaneEditorCommandOutcome.unchanged);
+    }
+    return _withEditorSaveScope(
+      context,
+      () => _runEditorCommand(
+        () => _editor.importImage(context),
+        context: context,
+      ),
+    );
+  }
+
+  Future<editor_context.PaneEditorCommandOutcome> pasteImage(
+    editor_context.PaneEditorContext? context,
+  ) {
+    if (context == null) {
+      _setMessage('请先选择或创建笔记');
+      return Future.value(editor_context.PaneEditorCommandOutcome.unchanged);
+    }
+    return _withEditorSaveScope(
+      context,
+      () => _runEditorOperation(
+        () => _editor.pasteImage(context),
+        context: context,
+      ),
+    );
+  }
+
+  Future<editor_context.PaneEditorCommandOutcome> pasteIntoNote(
+    editor_context.PaneEditorContext? context,
+  ) {
+    if (context == null) {
+      _setMessage('请先选择或创建笔记');
+      return Future.value(editor_context.PaneEditorCommandOutcome.unchanged);
+    }
+    return _runEditorOperation(
+      () => _editor.pasteIntoNote(context),
+      context: context,
+    );
+  }
+
+  Future<NoteEditorPasteAvailability> notePasteAvailability(
+    editor_context.PaneEditorContext? context,
+  ) {
+    if (_reloadRequired ||
+        _requireState().isBusy ||
+        _saves.isAutoSaving ||
+        context == null) {
+      return Future.value(NoteEditorPasteAvailability.empty);
+    }
+    return _editor.pasteAvailability(context);
+  }
+
+  Future<editor_context.PaneEditorCommandOutcome> generateProposal(
+    editor_context.PaneEditorContext? context,
+  ) {
+    if (context == null) {
+      return Future.value(editor_context.PaneEditorCommandOutcome.unchanged);
+    }
+    if (!_hasUsableAiProvider) {
+      _setMessage(_modelConfigurationMessage());
+      return Future.value(editor_context.PaneEditorCommandOutcome.unchanged);
+    }
+    return _withEditorSaveScope(
+      context,
+      () => _runEditorOperation(
+        () => _editor.generateProposal(context),
+        context: context,
+      ),
+    );
+  }
+
+  Future<editor_context.PaneEditorCommandOutcome> deleteProposal(
+    editor_context.PaneEditorContext context,
+    AiProposal proposal,
+  ) {
+    return _withEditorSaveScope(
+      context,
+      () => _runEditorOperation(
+        () => _editor.deleteProposal(context, proposal),
+        context: context,
+      ),
+    );
+  }
+
+  Future<editor_context.PaneEditorCommandOutcome> copyProposal(
+    editor_context.PaneEditorContext context,
+    AiProposal proposal,
+  ) {
+    return _runEditorCommand(
+      () => _editor.copyProposal(context, proposal),
+      context: context,
+      successMessage: '建议已复制到剪贴板',
+    );
+  }
+
+  Future<editor_context.PaneEditorCommandOutcome> saveEditorSession(
+    editor_context.PaneEditorContext context,
+    NoteDocumentSession session, {
+    required bool automatic,
+    required bool rescheduleIfDirty,
+    String? successMessage,
+  }) async {
+    final scope = _EditorSaveScope(
+      session: session,
+      bodySnapshot: session.controller.text,
+      runtimeGeneration: context.runtimeGeneration,
+    );
+    _editorSaveScopes.add(scope);
+    try {
+      return await _runEditorCommand(
+        () => _editor.saveSession(
+          context,
+          session,
+          automatic: automatic,
+          rescheduleIfDirty: rescheduleIfDirty,
+          successMessage: successMessage,
+        ),
+        context: context,
+      );
+    } finally {
+      _editorSaveScopes.remove(scope);
+    }
+  }
+
+  Future<editor_context.PaneEditorCommandOutcome> deleteSource(
+    editor_context.PaneEditorContext context,
+    SourceItem source,
+  ) {
+    return _withEditorSaveScope(
+      context,
+      () => _runEditorOperation(
+        () => _editor.deleteSource(context, source),
+        context: context,
+      ),
+    );
+  }
+
+  Future<List<int>> readSourceAttachment(SourceItem source) {
+    return _editor.readSourceAttachment(source);
+  }
+
+  Future<editor_context.PaneEditorCommandOutcome> _runEditorOperation(
+    Future<editor_context.PaneEditorCommandOutcome> Function() operation, {
+    editor_context.PaneEditorContext? context,
+  }) async {
+    final lockedSession = context == null
+        ? null
+        : resolvePaneEditorContext(context)?.session;
+    if (context != null && lockedSession == null) {
+      return editor_context.PaneEditorCommandOutcome.staleTarget;
+    }
+    if (lockedSession != null) {
+      _lockedEditorSessions.add(lockedSession);
+      _editorLockRevision.value += 1;
+    }
+    if (!_beginOperation(WorkspaceOperation.editorCommand)) {
+      if (lockedSession != null) {
+        _lockedEditorSessions.remove(lockedSession);
+        _editorLockRevision.value += 1;
+      }
+      return editor_context.PaneEditorCommandOutcome.unchanged;
+    }
+    try {
+      return await operation();
+    } on WorkspaceCommitInvariantError {
+      return editor_context.PaneEditorCommandOutcome.unchanged;
+    } catch (error) {
+      if (!_reloadRequired &&
+          (context == null || isPaneEditorContextCurrent(context))) {
+        _setMessage(error.toString());
+      }
+      return editor_context.PaneEditorCommandOutcome.unchanged;
+    } finally {
+      if (lockedSession != null) {
+        _lockedEditorSessions.remove(lockedSession);
+        _editorLockRevision.value += 1;
+      }
+      _endOperation(WorkspaceOperation.editorCommand);
+    }
+  }
+
+  Future<editor_context.PaneEditorCommandOutcome> _runEditorCommand(
+    Future<editor_context.PaneEditorCommandOutcome> Function() operation, {
+    required editor_context.PaneEditorContext context,
+    String? successMessage,
+  }) async {
+    try {
+      final outcome = await operation();
+      if (outcome == editor_context.PaneEditorCommandOutcome.committed &&
+          successMessage != null &&
+          isPaneEditorContextCurrent(context)) {
+        _setMessage(successMessage);
+      }
+      return outcome;
+    } on WorkspaceCommitInvariantError {
+      return editor_context.PaneEditorCommandOutcome.unchanged;
+    } catch (error) {
+      if (!_reloadRequired && isPaneEditorContextCurrent(context)) {
+        _setMessage(error.toString());
+      }
+      return editor_context.PaneEditorCommandOutcome.unchanged;
+    }
+  }
+
+  Future<editor_context.PaneEditorCommandOutcome> _withEditorSaveScope(
+    editor_context.PaneEditorContext context,
+    Future<editor_context.PaneEditorCommandOutcome> Function() operation,
+  ) async {
+    final resolved = resolvePaneEditorContext(context);
+    if (resolved == null) {
+      return editor_context.PaneEditorCommandOutcome.staleTarget;
+    }
+    final scope = _EditorSaveScope(
+      session: resolved.session,
+      bodySnapshot: resolved.session.controller.text,
+      runtimeGeneration: context.runtimeGeneration,
+    );
+    _editorSaveScopes.add(scope);
+    try {
+      return await operation();
+    } finally {
+      _editorSaveScopes.remove(scope);
+    }
   }
 
   Future<WorkspaceActionResult> _runDocumentOperation(
     Future<WorkspaceActionResult> Function() operation,
   ) async {
-    if (!_beginOperation(WorkspaceOperation.resourceMutation)) {
+    final currentOperation = _requireState().activeOperation;
+    if (currentOperation != null &&
+        currentOperation != WorkspaceOperation.editorCommand) {
       return WorkspaceActionResult.busy;
+    }
+    final ownsOperation = currentOperation == null;
+    if (ownsOperation) {
+      _beginOperation(WorkspaceOperation.resourceMutation);
     }
     try {
       return await operation();
     } catch (error) {
-      _setMessage(error.toString());
+      if (!_reloadRequired) {
+        _setMessage(error.toString());
+      }
       return WorkspaceActionResult.failed;
     } finally {
-      _endOperation(WorkspaceOperation.resourceMutation);
+      if (ownsOperation) {
+        _endOperation(WorkspaceOperation.resourceMutation);
+      }
     }
   }
 
   Future<WorkspaceActionResult> chooseVault() async {
-    if (!_beginOperation(WorkspaceOperation.vaultSwitch)) {
+    final currentOperation = _requireState().activeOperation;
+    if (currentOperation != null &&
+        currentOperation != WorkspaceOperation.editorCommand) {
       return WorkspaceActionResult.busy;
+    }
+    final ownsOperation =
+        currentOperation == null ||
+        currentOperation == WorkspaceOperation.editorCommand;
+    if (currentOperation == WorkspaceOperation.editorCommand) {
+      _replaceOperation(WorkspaceOperation.vaultSwitch);
+    } else if (ownsOperation) {
+      _beginOperation(WorkspaceOperation.vaultSwitch);
     }
     WorkspaceRuntime? candidate;
     try {
-      final flush = await _saves.flushAll();
-      if (!flush.succeeded) {
-        _setMessage('自动保存失败，已取消切换仓库');
-        return WorkspaceActionResult.aborted;
-      }
-      final location = await _dependencies.pickVaultLocation();
+      final location = await _pickVaultLocation();
       if (location == null) {
         return WorkspaceActionResult.cancelled;
       }
-      final nextSettings = _settings.copyWith(vaultLocation: location);
+      final baseline = await _awaitStartupSettings();
+      if (baseline == null) {
+        return WorkspaceActionResult.aborted;
+      }
+      _startupToken = null;
+      final flush = await _saves.flushAll();
+      if (!flush.succeeded) {
+        final error = flush.results.isEmpty ? '未知错误' : flush.results.last.error;
+        _setMessage('笔记保存失败：$error');
+        return WorkspaceActionResult.aborted;
+      }
+      final nextSettings = baseline.copyWith(vaultLocation: location);
       candidate = _createRuntime(
         vault: _dependencies.createVault(location.rootPath),
         rootPath: location.rootPath,
@@ -418,6 +871,7 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
       _runtimeManager.install(candidate);
       candidate = null;
       _settings = nextSettings;
+      _loadedSettingsBaseline = nextSettings;
       _replaceRuntimeSnapshot(snapshot, message: '仓库已打开');
       return WorkspaceActionResult.committed;
     } catch (error) {
@@ -427,14 +881,27 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
       _setMessage('仓库位置读取失败：$error');
       return WorkspaceActionResult.failed;
     } finally {
-      _endOperation(WorkspaceOperation.vaultSwitch);
+      if (ownsOperation) {
+        _endOperation(WorkspaceOperation.vaultSwitch);
+      }
     }
   }
 
   Future<WorkspaceActionResult> updateSettings(SynapseSettings settings) async {
-    if (!_beginOperation(WorkspaceOperation.settings)) {
+    final currentOperation = _requireState().activeOperation;
+    if (currentOperation != null &&
+        currentOperation != WorkspaceOperation.editorCommand) {
       return WorkspaceActionResult.busy;
     }
+    final ownsOperation =
+        currentOperation == null ||
+        currentOperation == WorkspaceOperation.editorCommand;
+    if (currentOperation == WorkspaceOperation.editorCommand) {
+      _replaceOperation(WorkspaceOperation.settings);
+    } else if (ownsOperation) {
+      _beginOperation(WorkspaceOperation.settings);
+    }
+    _startupToken = null;
     WorkspaceRuntime? candidate;
     try {
       final current = _runtimeManager.current;
@@ -452,6 +919,7 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
         candidate = null;
       }
       _settings = settings;
+      _loadedSettingsBaseline = settings;
       _splits.updateDefaultMode(_preferredNoteMode);
       final currentState = _requireState();
       _publish(
@@ -470,7 +938,9 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
       _setMessage('设置保存失败：$error');
       return WorkspaceActionResult.failed;
     } finally {
-      _endOperation(WorkspaceOperation.settings);
+      if (ownsOperation) {
+        _endOperation(WorkspaceOperation.settings);
+      }
     }
   }
 
@@ -518,7 +988,7 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
     _splits.setPaneNote(_splits.focusedPaneId, note.id);
     _splits.setPaneMode(_splits.focusedPaneId, _preferredNoteMode);
     final current = _requireState();
-    _publish(
+    _publishCommittedState(
       current.copyWith(
         resources: snapshot.resources,
         selectedResourceId: snapshot.selectedResource!.id,
@@ -599,7 +1069,7 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
     );
   }
 
-  Future<void> _installStartupRuntime() async {
+  void _installStartupRuntime() {
     if (_dependencies.initialVault case final vault?) {
       _installRuntime(
         vault: vault,
@@ -616,20 +1086,130 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
       );
       return;
     }
-    final location = _settings.vaultLocation;
-    if (location == null) {
-      return;
+  }
+
+  Future<SynapseSettings> _loadSettings() async {
+    return (await _dependencies.settingsStore()).load();
+  }
+
+  Future<SynapseSettings?> _awaitStartupSettings() async {
+    final future = _startupSettingsFuture;
+    if (future == null) {
+      return _startupSettingsError == null
+          ? _loadedSettingsBaseline ?? _settings
+          : null;
     }
-    final restored = await _dependencies.restoreVaultAccess(location);
-    final store = await _dependencies.settingsStore();
-    if (!await store.vaultExists(restored)) {
-      return;
+    try {
+      return await future;
+    } catch (error) {
+      _startupSettingsError = error;
+      _setMessage('设置读取失败：$error');
+      return null;
     }
-    _installRuntime(
-      vault: _dependencies.createVault(restored.rootPath),
-      rootPath: restored.rootPath,
-      label: _dependencies.formatVaultLabel(restored.rootPath),
-    );
+  }
+
+  Future<VaultLocation?> _pickVaultLocation() async {
+    try {
+      return await _dependencies.pickVaultLocation();
+    } catch (error) {
+      _setMessage('仓库位置选择失败：$error');
+      return null;
+    }
+  }
+
+  Future<void> _continueDirectoryStartup(
+    Object startupToken,
+    Future<SynapseSettings> settingsLoad,
+  ) async {
+    WorkspaceRuntime? candidate;
+    var settingsLoaded = false;
+    try {
+      final settings = await settingsLoad;
+      settingsLoaded = true;
+      if (!_isStartupCurrent(startupToken)) {
+        return;
+      }
+      _settings = settings;
+      _loadedSettingsBaseline = settings;
+      _startupSettingsError = null;
+      await Future<void>.delayed(Duration.zero);
+      if (!_isStartupCurrent(startupToken)) {
+        return;
+      }
+      final location = settings.vaultLocation;
+      if (location == null) {
+        _publish(
+          _requireState().copyWith(settings: settings, message: '请选择仓库位置'),
+        );
+        return;
+      }
+      final restored = await _dependencies.restoreVaultAccess(location);
+      if (!_isStartupCurrent(startupToken)) {
+        return;
+      }
+      final store = await _dependencies.settingsStore();
+      if (!await store.vaultExists(restored)) {
+        if (_isStartupCurrent(startupToken)) {
+          _publish(
+            _requireState().copyWith(
+              settings: settings,
+              message: '仓库位置不可用：${restored.rootPath}',
+            ),
+          );
+        }
+        return;
+      }
+      candidate = _createRuntime(
+        vault: _dependencies.createVault(restored.rootPath),
+        rootPath: restored.rootPath,
+        label: _dependencies.formatVaultLabel(restored.rootPath),
+        settings: settings,
+      );
+      final snapshot = await _resourceCoordinator.loadDetachedRuntime(
+        candidate,
+      );
+      if (!_isStartupCurrent(startupToken)) {
+        candidate.dispose(
+          reportCleanupError: _dependencies.cleanupErrorReporter,
+        );
+        candidate = null;
+        return;
+      }
+      final restoredSettings = settings.copyWith(vaultLocation: restored);
+      await _persistSettings(restoredSettings);
+      if (!_isStartupCurrent(startupToken)) {
+        candidate.dispose(
+          reportCleanupError: _dependencies.cleanupErrorReporter,
+        );
+        candidate = null;
+        return;
+      }
+      _runtimeManager.install(candidate);
+      candidate = null;
+      _settings = restoredSettings;
+      _loadedSettingsBaseline = restoredSettings;
+      _replaceRuntimeSnapshot(snapshot, message: '仓库已打开');
+    } catch (error) {
+      await Future<void>.delayed(Duration.zero);
+      candidate?.dispose(
+        reportCleanupError: _dependencies.cleanupErrorReporter,
+      );
+      if (_isStartupCurrent(startupToken)) {
+        if (!settingsLoaded) {
+          _startupSettingsError = error;
+        }
+        final prefix = settingsLoaded ? '仓库位置读取失败' : '设置读取失败';
+        _setMessage('$prefix：$error');
+      }
+    } finally {
+      if (_isStartupCurrent(startupToken)) {
+        _startupToken = null;
+      }
+    }
+  }
+
+  bool _isStartupCurrent(Object token) {
+    return !_isDisposed && identical(_startupToken, token);
   }
 
   void _installRuntime({
@@ -687,7 +1267,7 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
     }
     final current = _requireState();
     final runtime = _runtimeManager.requireCurrent();
-    _publish(
+    _publishCommittedState(
       WorkspaceState(
         phase: _dependencies.supportsDirectoryVault
             ? WorkspacePhase.ready
@@ -721,6 +1301,11 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
     return true;
   }
 
+  void _replaceOperation(WorkspaceOperation operation) {
+    final current = _requireState();
+    _publish(current.copyWith(activeOperation: operation, message: ''));
+  }
+
   void _endOperation(WorkspaceOperation operation) {
     if (_isDisposed) {
       return;
@@ -749,6 +1334,11 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
     }
   }
 
+  void _publishCommittedState(WorkspaceState next) {
+    _resourceSnapshotToken = Object();
+    _publish(next);
+  }
+
   String _modelConfigurationMessage() {
     if (_dependencies.usesInjectedAiProvider) {
       return '';
@@ -766,6 +1356,10 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
     }
     return '请先在设置中配置模型';
   }
+
+  bool get _hasUsableAiProvider =>
+      _dependencies.usesInjectedAiProvider ||
+      _settings.providerConfig.isComplete;
 
   bool _semanticSearchEnabledFor(SynapseSettings settings) {
     return settings.preferences.semanticSearchEnabled &&
@@ -805,38 +1399,121 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
     NoteSaveResult result,
     SaveRequest request,
   ) async {
-    if (!result.succeeded || result.savedNote == null) {
-      _publishCollaboratorSnapshot();
+    if (_reloadRequired || !_ownsSaveResult(result)) {
+      return;
+    }
+    final runtimeStale = _saveResultRuntimeIsStale(result);
+    if (!result.succeeded) {
+      if (!runtimeStale) {
+        _setMessage('笔记保存失败：${result.error}');
+      }
       return;
     }
     final savedNote = result.savedNote!;
-    if (result.idChanged) {
-      _sessions.remapSavedNote(
-        session: result.session,
-        oldNoteId: result.oldNoteId,
-        savedNote: savedNote,
-        preserveCurrentBody: result.stillDirty,
-      );
-      _splits.remapNoteIds({result.oldNoteId: savedNote.id});
-      final materialsMutation = _materials.prepareMutation(
+    final mutationResult = await _mutations.commitPrepared<void>(
+      () async => VaultMutationDelta<void>(
+        value: null,
         remappedNoteIds: {result.oldNoteId: savedNote.id},
         refreshedNotesByNewId: {savedNote.id: savedNote},
-      );
-      materialsMutation.publish();
-    } else {
-      result.session.applySavedNote(
-        savedNote,
-        preserveCurrentBody: result.stillDirty,
-      );
+        resources: result.idChanged
+            ? await _requireVault().listResources()
+            : null,
+      ),
+      prepareCommit: (delta) {
+        if (!_ownsSaveResult(result)) {
+          return _stateCommits.prepare(delta);
+        }
+        final current = _requireState();
+        final idChanged = result.oldNoteId != savedNote.id;
+        final selected =
+            idChanged && current.selectedResourceId == result.oldNoteId
+            ? savedNote.id
+            : current.selectedResourceId;
+        final focusedSession = _splits.focusedPane?.noteId == null
+            ? null
+            : _sessions.sessionFor(_splits.focusedPane!.noteId!);
+        return _stateCommits.prepare(
+          delta,
+          savedNoteCommit: SavedNoteSessionCommit(
+            session: result.session,
+            oldNoteId: result.oldNoteId,
+            savedNote: savedNote,
+            preserveCurrentBody: result.stillDirty,
+          ),
+          patch: WorkspaceStatePatch(
+            resources: delta.resources,
+            selectedResourceId: selected,
+            searchResults: idChanged ? const [] : null,
+            message:
+                !runtimeStale &&
+                    request.successMessage != null &&
+                    !result.stillDirty
+                ? request.successMessage
+                : null,
+            selectedPreviewImageSrc:
+                idChanged && identical(focusedSession, result.session)
+                ? null
+                : current.selectedPreviewImageSrc,
+          ),
+        );
+      },
+      originatingSession: result.session,
+    );
+    if (mutationResult case BackendFailed<void>(
+      :final error,
+      :final stackTrace,
+    )) {
+      Error.throwWithStackTrace(error, stackTrace);
     }
-    _publishCollaboratorSnapshot();
+  }
+
+  bool _ownsSaveResult(NoteSaveResult result) {
+    return editor_context.noteSessionRegistryOwnsSession(
+      sessions: _sessions,
+      sessionIdentity: result.session,
+      noteIds: {
+        result.oldNoteId,
+        result.session.noteId,
+        if (result.savedNote case final savedNote?) savedNote.id,
+      },
+    );
+  }
+
+  bool _saveResultRuntimeIsStale(NoteSaveResult result) {
+    var foundMatch = false;
+    for (final scope in _editorSaveScopes) {
+      if (identical(scope.session, result.session) &&
+          scope.bodySnapshot == result.bodySnapshot) {
+        foundMatch = true;
+        if (scope.runtimeGeneration == _runtimeManager.generation) {
+          return false;
+        }
+      }
+    }
+    return foundMatch;
   }
 
   void _enterReloadRequired(WorkspaceCommitInvariantError error) {
+    if (_reloadRequired) {
+      return;
+    }
     _reloadRequired = true;
     _saves.enterFatal(error);
     _mutations.enterFatal(error);
-    _publishCollaboratorSnapshot();
+    final current = state.value;
+    if (current != null) {
+      _publish(
+        current.copyWith(reloadRequired: true, message: reloadRequiredMessage),
+      );
+    }
+    FlutterError.reportError(
+      FlutterErrorDetails(
+        exception: error,
+        stack: error.causeStackTrace,
+        library: 'synapse workspace',
+        context: ErrorDescription('while committing workspace state'),
+      ),
+    );
   }
 
   void _dispose() {
@@ -844,12 +1521,26 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
       return;
     }
     _isDisposed = true;
+    _startupToken = null;
     _runtimeManager.dispose();
     _saves.dispose();
     _materials.dispose();
     _sessions.dispose();
     _splits.dispose();
+    _editorLockRevision.dispose();
   }
+}
+
+final class _EditorSaveScope {
+  const _EditorSaveScope({
+    required this.session,
+    required this.bodySnapshot,
+    required this.runtimeGeneration,
+  });
+
+  final NoteDocumentSession session;
+  final String bodySnapshot;
+  final int runtimeGeneration;
 }
 
 String _visibleMarkdownBody(String markdown) {

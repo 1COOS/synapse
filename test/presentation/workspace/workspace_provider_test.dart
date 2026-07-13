@@ -93,7 +93,7 @@ void main() {
 
     final paneListeners = tester
         .widgetList<ListenableBuilder>(
-          find.ancestor(
+          find.descendant(
             of: find.byKey(const Key('split-pane-pane-1')),
             matching: find.byType(ListenableBuilder),
           ),

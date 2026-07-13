@@ -9,8 +9,10 @@ import 'package:synapse/infrastructure/bootstrap/workspace_dependencies_factory.
 import 'package:synapse/infrastructure/config/settings_store.dart';
 import 'package:synapse/infrastructure/config/synapse_settings.dart';
 import 'package:synapse/infrastructure/config/vault_location_store.dart';
+import 'package:synapse/infrastructure/input/image_input_service.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
 import 'package:synapse/presentation/workspace/controller/workspace_controller.dart';
+import 'package:synapse/presentation/workspace/editor/pane_editor_context.dart';
 import 'package:synapse/presentation/workspace/state/split_workspace_controller.dart';
 
 import '../../../support/workspace_fakes.dart';
@@ -355,6 +357,59 @@ void main() {
       },
     );
 
+    test(
+      'retains loaded settings as the editing baseline when runtime rebuild fails',
+      () async {
+        const persistedSettings = SynapseSettings(
+          vaultLocation: VaultLocation(rootPath: '/vault/persisted'),
+          providerConfig: ProviderConfig(
+            baseUrl: 'loaded-url',
+            apiKey: 'loaded-key',
+            chatModel: 'loaded-chat',
+            visionModel: 'loaded-vision',
+            embeddingModel: 'loaded-embedding',
+          ),
+          preferences: WorkspacePreferences(
+            defaultNoteMode: WorkspaceDefaultNoteMode.reading,
+            semanticSearchEnabled: true,
+            pastedImageWidth: 640,
+            autoSaveDelayMillis: 1500,
+          ),
+        );
+        var runtimeBuilds = 0;
+        final container = ProviderContainer(
+          overrides: [
+            workspaceDependenciesProvider.overrideWithValue(
+              createWorkspaceDependencies(
+                initialVault: MemoryVaultBackend(),
+                settingsStore: FakeSettingsStore(
+                  initialSettings: persistedSettings,
+                ),
+                aiProviderFactory: (_) => const _NoopAiProvider(),
+                searchIndexFactory: (_, _) {
+                  runtimeBuilds += 1;
+                  if (runtimeBuilds == 2) {
+                    throw StateError('startup runtime build failed');
+                  }
+                  return _RecordingSearchIndex();
+                },
+              ),
+            ),
+          ],
+        );
+        addTearDown(container.dispose);
+
+        final workspace = await container.read(
+          workspaceControllerProvider.future,
+        );
+        final controller = container.read(workspaceControllerProvider.notifier);
+
+        expect(runtimeBuilds, 2);
+        expect(workspace.settings, SynapseSettings.defaults);
+        expect(controller.settingsForEditing, persistedSettings);
+      },
+    );
+
     test('selects resources and retains previously opened sessions', () async {
       final vault = MemoryVaultBackend();
       await vault.createNote(parentPath: '', title: 'Alpha');
@@ -679,6 +734,223 @@ void main() {
           controller.sessionFor(initial.selectedResourceId!),
           same(session),
         );
+      },
+    );
+
+    test('publishes note materials selection in immutable state', () async {
+      final vault = MemoryVaultBackend();
+      final note = await vault.createNote(parentPath: '', title: 'Materials');
+      final source = await vault.addImageSource(
+        noteId: note.id,
+        filename: 'image.png',
+        mimeType: 'image/png',
+        bytes: tinyPng,
+      );
+      final container = ProviderContainer(
+        overrides: [
+          workspaceDependenciesProvider.overrideWithValue(
+            createWorkspaceDependencies(
+              initialVault: vault,
+              settingsStore: FakeSettingsStore(),
+            ),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+      final initial = await container.read(workspaceControllerProvider.future);
+      final controller = container.read(workspaceControllerProvider.notifier);
+      await controller.selectResource(
+        _findResource(initial.resources, note.id)!,
+      );
+
+      controller.toggleSourceSelection(note.id, source.id);
+      final selected = container.read(workspaceControllerProvider).requireValue;
+
+      expect(selected.materialsFor(note.id).selectedSourceIds, {source.id});
+      expect(
+        () => selected.materialsFor(note.id).selectedSourceIds.clear(),
+        throwsUnsupportedError,
+      );
+    });
+
+    test(
+      'pane editor context survives focus and rejects pane rebinding',
+      () async {
+        final vault = MemoryVaultBackend();
+        await vault.createNote(parentPath: '', title: 'Alpha');
+        await vault.createNote(parentPath: '', title: 'Beta');
+        final container = ProviderContainer(
+          overrides: [
+            workspaceDependenciesProvider.overrideWithValue(
+              createWorkspaceDependencies(
+                initialVault: vault,
+                settingsStore: FakeSettingsStore(),
+              ),
+            ),
+          ],
+        );
+        addTearDown(container.dispose);
+        final initial = await container.read(
+          workspaceControllerProvider.future,
+        );
+        final controller = container.read(workspaceControllerProvider.notifier);
+        final originalPaneId = initial.focusedPaneId;
+        final context = controller.capturePaneEditorContext(originalPaneId);
+        final secondPaneId = controller.splitFocused(SplitDirection.right);
+
+        controller.focusPane(originalPaneId);
+        expect(controller.isPaneEditorContextCurrent(context!), isTrue);
+
+        controller.focusPane(secondPaneId);
+        final beta = _findResource(
+          container.read(workspaceControllerProvider).requireValue.resources,
+          'Beta.md',
+        )!;
+        await controller.selectResource(beta);
+        expect(controller.isPaneEditorContextCurrent(context), isTrue);
+
+        controller.focusPane(originalPaneId);
+        await controller.selectResource(beta);
+        expect(controller.isPaneEditorContextCurrent(context), isFalse);
+      },
+    );
+
+    test(
+      'imports and deletes image materials through a stable pane context',
+      () async {
+        final vault = MemoryVaultBackend();
+        await vault.createNote(parentPath: '', title: 'Images');
+        final imageInput = FakeImageInputService(
+          pickedImage: const ImportedImage(
+            filename: 'picked.png',
+            mimeType: 'image/png',
+            bytes: tinyPng,
+          ),
+        );
+        final container = ProviderContainer(
+          overrides: [
+            workspaceDependenciesProvider.overrideWithValue(
+              createWorkspaceDependencies(
+                initialVault: vault,
+                imageInput: imageInput,
+                settingsStore: FakeSettingsStore(),
+              ),
+            ),
+          ],
+        );
+        addTearDown(container.dispose);
+        final initial = await container.read(
+          workspaceControllerProvider.future,
+        );
+        final controller = container.read(workspaceControllerProvider.notifier);
+        final context = controller.capturePaneEditorContext(
+          initial.focusedPaneId,
+        )!;
+
+        expect(
+          await controller.importImage(context),
+          PaneEditorCommandOutcome.committed,
+        );
+        final imported = container
+            .read(workspaceControllerProvider)
+            .requireValue;
+        final session = controller.sessionFor(imported.selectedResourceId!)!;
+        final source = session.note.sources.singleWhere(
+          (source) => source.title == 'picked.png',
+        );
+        expect(imported.materialsFor(session.noteId).selectedSourceIds, {
+          source.id,
+        });
+        expect(imported.narrowSection, WorkspaceSection.sources);
+
+        expect(
+          await controller.deleteSource(context, source),
+          PaneEditorCommandOutcome.committed,
+        );
+        final deleted = container
+            .read(workspaceControllerProvider)
+            .requireValue;
+        expect(controller.sessionFor(session.noteId)!.note.sources, isEmpty);
+        expect(deleted.materialsFor(session.noteId).selectedSourceIds, isEmpty);
+      },
+    );
+
+    test('autosave title changes remap the full workspace snapshot', () async {
+      final vault = MemoryVaultBackend(seedExampleData: false);
+      await vault.createNote(parentPath: '', title: 'Alpha');
+      final container = ProviderContainer(
+        overrides: [
+          workspaceDependenciesProvider.overrideWithValue(
+            createWorkspaceDependencies(
+              initialVault: vault,
+              settingsStore: FakeSettingsStore(
+                initialSettings: SynapseSettings.defaults.copyWith(
+                  preferences: WorkspacePreferences.defaults.copyWith(
+                    autoSaveDelayMillis: 1,
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+      final initial = await container.read(workspaceControllerProvider.future);
+      final controller = container.read(workspaceControllerProvider.notifier);
+      final session = controller.sessionFor('Alpha.md')!;
+
+      session.controller.text = '# Renamed Alpha\nbody';
+      await Future<void>.delayed(const Duration(milliseconds: 80));
+      final renamed = container.read(workspaceControllerProvider).requireValue;
+
+      expect(_findResource(renamed.resources, 'Renamed Alpha.md'), isNotNull);
+      expect(renamed.selectedResourceId, 'Renamed Alpha.md');
+      expect((renamed.splitRoot as SplitLeaf).noteId, 'Renamed Alpha.md');
+      expect(controller.sessionFor('Renamed Alpha.md'), same(session));
+      expect(controller.sessionFor('Alpha.md'), isNull);
+      expect(initial.selectedResourceId, 'Alpha.md');
+    });
+
+    test(
+      'close flush failures keep the pane and publish the save error',
+      () async {
+        final vault = FailingUpdateVaultBackend(seedExampleData: false);
+        await vault.createNote(parentPath: '', title: 'Alpha');
+        final container = ProviderContainer(
+          overrides: [
+            workspaceDependenciesProvider.overrideWithValue(
+              createWorkspaceDependencies(
+                initialVault: vault,
+                settingsStore: FakeSettingsStore(
+                  initialSettings: SynapseSettings.defaults.copyWith(
+                    preferences: WorkspacePreferences.defaults.copyWith(
+                      autoSaveDelayMillis: 10000,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        );
+        addTearDown(container.dispose);
+        final initial = await container.read(
+          workspaceControllerProvider.future,
+        );
+        final controller = container.read(workspaceControllerProvider.notifier);
+        controller.splitFocused(SplitDirection.right);
+        final session = controller.sessionFor('Alpha.md')!;
+        session.controller.text = '# Alpha\ndirty';
+        vault.failUpdates = true;
+
+        expect(
+          await controller.closeFocusedPane(),
+          WorkspaceActionResult.aborted,
+        );
+        final failed = container.read(workspaceControllerProvider).requireValue;
+
+        expect(failed.message, contains('save failed'));
+        expect(failed.splitRoot, isA<SplitBranch>());
+        expect(initial.selectedResourceId, 'Alpha.md');
       },
     );
   });

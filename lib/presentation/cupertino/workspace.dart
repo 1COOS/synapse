@@ -2,37 +2,27 @@ import 'dart:async';
 
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart';
-import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path/path.dart' as p;
 
-import '../../application/proposals/proposal_service.dart';
 import '../../application/search/search_index.dart';
 import '../../domain/markdown/markdown_document.dart';
 import '../../domain/vault/vault_resource.dart';
 import '../../infrastructure/config/settings_store.dart';
 import '../../infrastructure/config/synapse_settings.dart';
-import '../../infrastructure/config/vault_location_store.dart';
-import '../../infrastructure/input/image_input_service.dart';
-import '../../infrastructure/vault/vault_backend.dart';
-import '../../infrastructure/vault/vault_post_commit_error.dart';
-import '../workspace/controller/workspace_dependencies.dart';
 import '../workspace/controller/workspace_controller.dart';
-import '../workspace/controller/workspace_resource_coordinator.dart';
-import '../workspace/controller/workspace_runtime.dart';
-import '../workspace/controller/workspace_runtime_manager.dart';
-import '../workspace/state/note_document_session.dart';
-import '../workspace/state/note_materials_registry.dart';
-import '../workspace/state/note_save_coordinator.dart';
-import '../workspace/state/note_session_registry.dart';
-import '../workspace/state/split_workspace_controller.dart';
-import '../workspace/state/workspace_mutation_barrier.dart';
-import '../workspace/editor/markdown_image_transform.dart';
+import '../workspace/controller/workspace_dependencies.dart';
+import '../workspace/controller/workspace_state.dart';
 import '../workspace/editor/live_markdown_editor.dart';
+import '../workspace/editor/markdown_image_transform.dart';
 import '../workspace/editor/markdown_table_editor.dart';
 import '../workspace/editor/pane_editor_context.dart';
 import '../workspace/editor/preview_image_block.dart';
+import '../workspace/state/note_document_session.dart';
+import '../workspace/state/note_materials_registry.dart';
+import '../workspace/state/split_workspace_controller.dart';
 import 'browser_context_menu_guard.dart';
 import 'markdown_live_blocks.dart';
 
@@ -48,183 +38,6 @@ import 'workspace/workspace_titlebar.dart';
 export 'workspace/workspace_settings.dart' show ProviderConfigTester;
 export '../workspace/controller/workspace_dependencies.dart'
     show DirectoryPicker, VaultBackendFactory, WorkspaceDependencies;
-
-final class _PaneMutationTarget {
-  const _PaneMutationTarget({
-    required this.paneId,
-    required this.generation,
-    required this.noteId,
-    required this.session,
-  });
-
-  final String paneId;
-  final int generation;
-  final String? noteId;
-  final NoteDocumentSession? session;
-}
-
-final class _NoteMutationPayload {
-  const _NoteMutationPayload({required this.note, required this.proposals});
-
-  final VaultNoteContent note;
-  final List<AiProposal> proposals;
-}
-
-final class _DeleteMutationPayload {
-  const _DeleteMutationPayload({
-    required this.fallbackNote,
-    required this.fallbackProposals,
-  });
-
-  final VaultNoteContent? fallbackNote;
-  final List<AiProposal> fallbackProposals;
-}
-
-final class _SourceMutationPayload {
-  const _SourceMutationPayload({required this.note, required this.source});
-
-  final VaultNoteContent note;
-  final SourceItem source;
-}
-
-final class _SilentValueNotifier<T> extends ChangeNotifier
-    implements ValueListenable<T> {
-  _SilentValueNotifier(this._value);
-
-  T _value;
-  bool _hasSuppressedChange = false;
-
-  @override
-  T get value => _value;
-
-  set value(T next) {
-    if (_value == next) {
-      return;
-    }
-    _value = next;
-    notifyListeners();
-  }
-
-  void setSilently(T next) {
-    if (_value == next) {
-      return;
-    }
-    _value = next;
-    _hasSuppressedChange = true;
-  }
-
-  void publishSuppressedChange() {
-    if (!_hasSuppressedChange) {
-      return;
-    }
-    _hasSuppressedChange = false;
-    notifyListeners();
-  }
-}
-
-final class _WorkspaceSnapshotField<T> {
-  const _WorkspaceSnapshotField.unchanged() : isChanged = false, value = null;
-
-  const _WorkspaceSnapshotField.set(this.value) : isChanged = true;
-
-  final bool isChanged;
-  final T? value;
-}
-
-final class _WorkspaceCommitSnapshot {
-  const _WorkspaceCommitSnapshot({
-    this.resources = const _WorkspaceSnapshotField.unchanged(),
-    this.selectedResource = const _WorkspaceSnapshotField.unchanged(),
-    this.searchResults = const _WorkspaceSnapshotField.unchanged(),
-    this.narrowSection = const _WorkspaceSnapshotField.unchanged(),
-    this.message = const _WorkspaceSnapshotField.unchanged(),
-    this.previewImageSrc = const _WorkspaceSnapshotField.unchanged(),
-    this.collapsedFolderIds = const _WorkspaceSnapshotField.unchanged(),
-  });
-
-  final _WorkspaceSnapshotField<List<VaultResourceNode>> resources;
-  final _WorkspaceSnapshotField<VaultResourceNode?> selectedResource;
-  final _WorkspaceSnapshotField<List<SearchResult>> searchResults;
-  final _WorkspaceSnapshotField<_WorkspaceSection> narrowSection;
-  final _WorkspaceSnapshotField<String> message;
-  final _WorkspaceSnapshotField<String?> previewImageSrc;
-  final _WorkspaceSnapshotField<Set<String>> collapsedFolderIds;
-}
-
-final class _PreparedWorkspaceSnapshotMutation
-    implements PreparedWorkspaceSnapshotMutation {
-  _PreparedWorkspaceSnapshotMutation({
-    required _SynapseWorkspaceState state,
-    required Object preparedToken,
-    required _WorkspaceCommitSnapshot snapshot,
-    required WorkspaceCommitPhase? forcedFailure,
-  }) : _state = state,
-       _preparedToken = preparedToken,
-       _snapshot = snapshot,
-       _forcedFailure = forcedFailure;
-
-  final _SynapseWorkspaceState _state;
-  final Object _preparedToken;
-  final _WorkspaceCommitSnapshot _snapshot;
-  final WorkspaceCommitPhase? _forcedFailure;
-  Object? _appliedToken;
-  bool _isApplied = false;
-  bool _isPublished = false;
-  bool _isPreflighted = false;
-
-  @override
-  void validateCurrent() {
-    _state._validatePreparedWorkspaceMutation(
-      _isApplied ? _appliedToken! : _preparedToken,
-    );
-  }
-
-  @override
-  void preflightApply() {
-    if (_isApplied) {
-      return;
-    }
-    validateCurrent();
-    if (_forcedFailure == WorkspaceCommitPhase.apply) {
-      throw StateError('Forced workspace commit apply failure.');
-    }
-    _isPreflighted = true;
-  }
-
-  @override
-  void applySilently() {
-    if (_isApplied) {
-      return;
-    }
-    preflightApply();
-    applySilentlyPreflighted();
-  }
-
-  @override
-  void applySilentlyPreflighted() {
-    if (_isApplied) {
-      return;
-    }
-    assert(_isPreflighted);
-    _state._applyWorkspaceCommitSnapshot(_snapshot);
-    _appliedToken = _state._advanceWorkspaceMutationToken();
-    _isApplied = true;
-  }
-
-  @override
-  void publish() {
-    if (_isPublished) {
-      return;
-    }
-    applySilently();
-    validateCurrent();
-    if (_forcedFailure == WorkspaceCommitPhase.publish) {
-      throw StateError('Forced workspace commit publish failure.');
-    }
-    _state._publishPreparedWorkspaceMutation();
-    _isPublished = true;
-  }
-}
 
 enum _WorkspaceSection {
   resources('资源', CupertinoIcons.folder),
@@ -247,86 +60,89 @@ class SynapseWorkspace extends ConsumerStatefulWidget {
 }
 
 class _SynapseWorkspaceState extends ConsumerState<SynapseWorkspace> {
-  late final WorkspaceDependencies _dependencies;
-  late final WorkspaceRuntimeManager _runtimeManager;
-  late final WorkspaceResourceCoordinator _resourceCoordinator;
-  late ImageInputService _imageInput;
-
   final _emptyMarkdownController = TextEditingController();
-  late final NoteSessionRegistry _noteSessionRegistry;
-  late final NoteMaterialsRegistry _noteMaterialsRegistry;
-  late final NoteSaveCoordinator _noteSaveCoordinator;
-  late final SplitWorkspaceController _splitWorkspaceController;
-  late final WorkspaceMutationBarrier _workspaceMutationBarrier;
   final _searchController = TextEditingController();
   final _editorPasteFocusNode = FocusNode();
   final _sourcePaneFocusNode = FocusNode();
+  final _selectedPreviewImageSrcNotifier = ValueNotifier<String?>(null);
 
-  List<VaultResourceNode> _resources = const [];
-  VaultResourceNode? _selectedResource;
-  List<SearchResult> _searchResults = const [];
-  final Set<String> _collapsedFolderIds = <String>{};
-  _WorkspaceSection _narrowSection = _WorkspaceSection.resources;
-  _LeftPaneMode _leftPaneMode = _LeftPaneMode.resources;
-  bool _leftPaneCollapsed = false;
-  bool _rightPaneCollapsed = false;
-  bool _busy = false;
-  bool _resourceSelectionInProgress = false;
-  bool _reloadRequired = false;
-  String _message = '';
-  Object _workspaceMutationToken = Object();
-  Object? _startupOperationToken;
-  Future<SynapseSettings>? _startupSettingsLoadFuture;
-  Future<void>? _startupSettingsCommitFuture;
-  Object? _startupSettingsLoadError;
-  Future<void> _settingsPersistenceTail = Future<void>.value();
-  final _selectedPreviewImageSrcNotifier = _SilentValueNotifier<String?>(null);
-  SynapseSettings _settings = SynapseSettings.defaults;
-  SynapseSettings? _loadedSettingsBaseline;
-  WorkspacePreferences _workspacePreferences = WorkspacePreferences.defaults;
-  ProviderConfig? _providerConfig;
-  final Set<_PaneEditorSaveScope> _paneEditorSaveScopes = {};
-  final Set<NoteDocumentSession> _paneEditorCommandLocks =
-      Set<NoteDocumentSession>.identity();
-  final ValueNotifier<int> _paneEditorCommandLockRevision = ValueNotifier(0);
+  late WorkspaceState _workspace;
 
-  WorkspaceAppearance get _workspaceAppearance {
-    return WorkspaceAppearance.fromPreferences(_workspacePreferences);
+  WorkspaceController get _controller =>
+      ref.read(workspaceControllerProvider.notifier);
+
+  _SplitWorkspaceView get _splitWorkspaceController =>
+      _SplitWorkspaceView(_workspace, _controller);
+
+  _SessionRegistryView get _noteSessionRegistry =>
+      _SessionRegistryView(ref, _controller);
+
+  _MaterialsRegistryView get _noteMaterialsRegistry =>
+      _MaterialsRegistryView(_workspace, _controller);
+
+  WorkspaceAppearance get _workspaceAppearance =>
+      WorkspaceAppearance.fromPreferences(_workspace.preferences);
+
+  List<VaultResourceNode> get _resources => _workspace.resources;
+  VaultResourceNode? get _selectedResource => _workspace.selectedResource;
+  List<SearchResult> get _searchResults => _workspace.searchResults;
+  Set<String> get _collapsedFolderIds => _workspace.collapsedFolderIds;
+  bool get _busy => _workspace.isBusy;
+  bool get _autoSaving => _controller.isAutoSaving;
+  bool get _reloadRequired => _workspace.reloadRequired;
+  bool get _hasVault => _workspace.hasVault;
+  String get _message => _workspace.message;
+  String get _vaultLabel => _workspace.vaultLabel;
+  String? get _vaultRootPath => _workspace.vaultRoot;
+  bool get _usesNativeMacTitlebar =>
+      ref.read(workspaceDependenciesProvider).usesNativeMacTitlebar;
+  SplitLeaf? get _focusedPane => _splitWorkspaceController.focusedPane;
+  NoteDocumentSession? get _activeSession {
+    final noteId = _focusedPane?.noteId;
+    return noteId == null ? null : _controller.sessionFor(noteId);
   }
+
+  VaultNoteContent? get _activeNote => _activeSession?.note;
+
+  _LeftPaneMode get _leftPaneMode =>
+      _workspace.leftMode == WorkspaceLeftMode.search
+      ? _LeftPaneMode.search
+      : _LeftPaneMode.resources;
+
+  set _leftPaneMode(_LeftPaneMode value) {
+    _controller.setLeftMode(
+      value == _LeftPaneMode.search
+          ? WorkspaceLeftMode.search
+          : WorkspaceLeftMode.resources,
+    );
+  }
+
+  _WorkspaceSection get _narrowSection => switch (_workspace.narrowSection) {
+    WorkspaceSection.resources => _WorkspaceSection.resources,
+    WorkspaceSection.notes => _WorkspaceSection.notes,
+    WorkspaceSection.sources => _WorkspaceSection.sources,
+  };
+
+  set _narrowSection(_WorkspaceSection value) {
+    _controller.setNarrowSection(switch (value) {
+      _WorkspaceSection.resources => WorkspaceSection.resources,
+      _WorkspaceSection.notes => WorkspaceSection.notes,
+      _WorkspaceSection.sources => WorkspaceSection.sources,
+    });
+  }
+
+  bool get _leftPaneCollapsed => _workspace.leftPaneCollapsed;
+  set _leftPaneCollapsed(bool value) => _controller.setLeftPaneCollapsed(value);
+  bool get _rightPaneCollapsed => _workspace.rightPaneCollapsed;
+  set _rightPaneCollapsed(bool value) =>
+      _controller.setRightPaneCollapsed(value);
+
+  Set<NoteDocumentSession> get _paneEditorCommandLocks =>
+      _controller.lockedEditorSessions;
 
   @override
   void initState() {
     super.initState();
-    _dependencies = ref.read(workspaceDependenciesProvider);
-    _runtimeManager = WorkspaceRuntimeManager(
-      cleanupErrorReporter: _dependencies.cleanupErrorReporter,
-    );
-    _resourceCoordinator = WorkspaceResourceCoordinator(_runtimeManager);
-    _splitWorkspaceController = SplitWorkspaceController(
-      defaultMode: _preferredNoteMode,
-    );
-    _noteSessionRegistry = NoteSessionRegistry(
-      visibleBody: _visibleMarkdownBody,
-      onEdited: _handleSessionMarkdownEdited,
-    );
-    _noteMaterialsRegistry = NoteMaterialsRegistry();
-    _noteSaveCoordinator = NoteSaveCoordinator(
-      sessions: _noteSessionRegistry,
-      vault: _requireVault,
-      debounceDuration: () =>
-          Duration(milliseconds: _workspacePreferences.autoSaveDelayMillis),
-      serializeVisibleBody: _markdownForVisibleBody,
-      onResult: _applyNoteSaveResult,
-      onStateChanged: _handleNoteSaveCoordinatorStateChanged,
-      onFatalError: _handleNoteSaveFatalError,
-    );
-    _workspaceMutationBarrier = WorkspaceMutationBarrier(
-      sessions: _noteSessionRegistry,
-      saveCoordinator: _noteSaveCoordinator,
-      splits: _splitWorkspaceController,
-      materials: _noteMaterialsRegistry,
-      onInvariantFailure: _handleWorkspaceCommitInvariant,
-    );
     unawaited(
       disableBrowserContextMenuForFlutterWeb().catchError((
         Object error,
@@ -344,1273 +160,136 @@ class _SynapseWorkspaceState extends ConsumerState<SynapseWorkspace> {
         );
       }),
     );
-    _resetSplitWorkspace(disposeSessions: false);
-    _imageInput = _dependencies.imageInput;
-    if (_dependencies.initialVault case final vault?) {
-      _installRuntime(
-        vault: vault,
-        rootPath: null,
-        label: _dependencies.injectedVaultLabel,
-      );
-    } else if (!_dependencies.supportsDirectoryVault) {
-      _installRuntime(
-        vault: _dependencies.createDefaultVault(),
-        rootPath: null,
-        label: _dependencies.defaultVaultLabel,
-      );
-    }
-    _initializeWorkspace();
   }
 
   @override
   void dispose() {
-    _workspaceMutationToken = Object();
-    _runtimeManager.dispose();
-    _noteSaveCoordinator.dispose();
-    _noteMaterialsRegistry.dispose();
-    _noteSessionRegistry.dispose();
-    _splitWorkspaceController.dispose();
     _emptyMarkdownController.dispose();
     _searchController.dispose();
     _editorPasteFocusNode.dispose();
     _sourcePaneFocusNode.dispose();
     _selectedPreviewImageSrcNotifier.dispose();
-    _paneEditorCommandLockRevision.dispose();
     super.dispose();
   }
 
-  static const _reloadRequiredMessage = '工作区状态提交异常。后端操作可能已完成，请重新加载工作区后再继续。';
-
-  void _handleWorkspaceCommitInvariant(WorkspaceCommitInvariantError error) {
-    if (mounted) {
-      setState(() {
-        _reloadRequired = true;
-        _message = _reloadRequiredMessage;
-      });
-    }
-    _noteSaveCoordinator.enterFatal(error);
-    _workspaceMutationBarrier.enterFatal(error);
-    FlutterError.reportError(
-      FlutterErrorDetails(
-        exception: error,
-        stack: error.causeStackTrace,
-        library: 'synapse workspace',
-        context: ErrorDescription('while committing workspace state'),
+  @override
+  Widget build(BuildContext context) {
+    final workspace = ref.watch(workspaceControllerProvider);
+    return workspace.when(
+      loading: () => const CupertinoPageScaffold(
+        child: Center(child: CupertinoActivityIndicator()),
       ),
+      error: (error, stackTrace) =>
+          CupertinoPageScaffold(child: Center(child: Text(error.toString()))),
+      data: (state) {
+        _workspace = state;
+        return _buildWorkspace(context);
+      },
     );
   }
 
-  void _validatePreparedWorkspaceMutation(Object token) {
-    if (!mounted) {
-      throw StateError('Workspace has been disposed.');
-    }
-    if (!identical(_workspaceMutationToken, token)) {
-      throw StateError('Prepared workspace snapshot mutation is stale.');
-    }
-  }
-
-  Object _advanceWorkspaceMutationToken() {
-    final token = Object();
-    _workspaceMutationToken = token;
-    return token;
-  }
-
-  void _publishPreparedWorkspaceMutation() {
-    _selectedPreviewImageSrcNotifier.publishSuppressedChange();
-    setState(() {});
-  }
-
-  void _applyWorkspaceCommitSnapshot(_WorkspaceCommitSnapshot snapshot) {
-    if (snapshot.resources case final field when field.isChanged) {
-      _resources = field.value!;
-    }
-    if (snapshot.selectedResource case final field when field.isChanged) {
-      _selectedResource = field.value;
-    }
-    if (snapshot.searchResults case final field when field.isChanged) {
-      _searchResults = field.value!;
-    }
-    if (snapshot.narrowSection case final field when field.isChanged) {
-      _narrowSection = field.value!;
-    }
-    if (snapshot.message case final field when field.isChanged) {
-      _message = field.value!;
-    }
-    if (snapshot.previewImageSrc case final field when field.isChanged) {
-      _setSelectedPreviewImageSrcSilently(field.value);
-    }
-    if (snapshot.collapsedFolderIds case final field when field.isChanged) {
-      _collapsedFolderIds
-        ..clear()
-        ..addAll(field.value!);
-    }
-  }
-
-  WorkspaceCommitBatch<T> _prepareWorkspaceCommit<T>(
-    VaultMutationDelta<T> delta, {
-    Map<String, String>? remappedNoteIds,
-    Set<String>? removedNoteIds,
-    Map<String, VaultNoteContent> upsertedNotesById = const {},
-    SavedNoteSessionCommit? savedNoteCommit,
-    Map<String, List<AiProposal>> replacementProposalsByNoteId = const {},
-    Map<String, Set<String>> selectedSourceIdsByNoteId = const {},
-    String? fallbackNoteId,
-    Map<String, String?> paneNoteAssignments = const {},
-    Set<String> closedPaneIds = const {},
-    _WorkspaceCommitSnapshot workspaceSnapshot =
-        const _WorkspaceCommitSnapshot(),
-  }) {
-    if (_dependencies.workspaceCommitFailureForTesting ==
-        WorkspaceCommitPhase.prepare) {
-      throw StateError('Forced workspace commit prepare failure.');
-    }
-    final committedRemaps = remappedNoteIds ?? delta.remappedNoteIds;
-    final committedRemovals = removedNoteIds ?? delta.removedNoteIds;
-    return WorkspaceCommitBatch<T>(
-      delta: delta,
-      preparedSessions: _noteSessionRegistry.prepareMutation(
-        remappedNoteIds: committedRemaps,
-        removedNoteIds: committedRemovals,
-        refreshedNotesByNewId: delta.refreshedNotesByNewId,
-        upsertedNotesById: upsertedNotesById,
-        savedNoteCommit: savedNoteCommit,
-      ),
-      preparedSplits: _splitWorkspaceController.prepareMutation(
-        remappedNoteIds: committedRemaps,
-        removedNoteIds: committedRemovals,
-        fallbackNoteId: fallbackNoteId,
-        paneNoteAssignments: paneNoteAssignments,
-        closedPaneIds: closedPaneIds,
-      ),
-      preparedMaterials: _noteMaterialsRegistry.prepareMutation(
-        remappedNoteIds: _actualNoteIdRemaps(committedRemaps),
-        removedNoteIds: committedRemovals,
-        refreshedNotesByNewId: delta.refreshedNotesByNewId,
-        replacementProposalsByNoteId: replacementProposalsByNoteId,
-        selectedSourceIdsByNoteId: selectedSourceIdsByNoteId,
-      ),
-      preparedWorkspace: _PreparedWorkspaceSnapshotMutation(
-        state: this,
-        preparedToken: _workspaceMutationToken,
-        snapshot: workspaceSnapshot,
-        forcedFailure: _dependencies.workspaceCommitFailureForTesting,
-      ),
-    );
-  }
-
-  void _setSelectedPreviewImageSrc(String? src) {
-    final normalized = src == null ? null : normalizeImageSrc(src);
-    if (_selectedPreviewImageSrcNotifier.value != normalized) {
-      _selectedPreviewImageSrcNotifier.value = normalized;
-    }
-  }
-
-  void _setSelectedPreviewImageSrcSilently(String? src) {
-    _selectedPreviewImageSrcNotifier.setSilently(
-      src == null ? null : normalizeImageSrc(src),
-    );
-  }
-
-  void _resetSplitWorkspace({bool disposeSessions = true}) {
-    if (disposeSessions) {
-      _noteSessionRegistry.clear();
-    }
-    _noteMaterialsRegistry.clear();
-    _splitWorkspaceController.reset(defaultMode: _preferredNoteMode);
-  }
-
-  NoteDocumentSession _upsertNoteSession(VaultNoteContent note) {
-    final session = _noteSessionRegistry.upsert(note);
-    _noteMaterialsRegistry.reconcileNote(note);
-    return session;
-  }
-
-  void _focusPane(String paneId) {
-    if (!_splitWorkspaceController.focus(paneId)) {
-      return;
-    }
-    final pane = _splitWorkspaceController.pane(paneId)!;
-    _selectedResource = pane.noteId == null
-        ? null
-        : _findResource(_resources, pane.noteId!);
-    _setSelectedPreviewImageSrc(null);
-  }
-
-  void _syncFocusedPaneSelection() {
-    final noteId = _focusedPane?.noteId;
-    _selectedResource = noteId == null
-        ? null
-        : _findResource(_resources, noteId);
-  }
-
-  Map<String, String> _actualNoteIdRemaps(Map<String, String> remaps) {
-    return <String, String>{
-      for (final entry in remaps.entries)
-        if (entry.key != entry.value) entry.key: entry.value,
-    };
-  }
+  void _focusPane(String paneId) => _controller.focusPane(paneId);
 
   void _splitFocusedPane(SplitDirection direction) {
-    setState(() {
-      _splitWorkspaceController.splitFocused(direction);
-      _syncFocusedPaneSelection();
-    });
-  }
-
-  Future<void> _closeFocusedPane() async {
-    if (_resourceSelectionInProgress) {
-      return;
-    }
-    if (_reloadRequired) {
-      setState(() => _message = _reloadRequiredMessage);
-      return;
-    }
-    final target = _captureFocusedPaneMutationTarget();
-    if (target == null) {
-      return;
-    }
-    final impact = _splitWorkspaceController.closeImpact(target.paneId);
-    if (!impact.canClose) {
-      return;
-    }
-    final targetNoteId = target.noteId;
-    final affectedNoteIds = targetNoteId == null
-        ? const <String>{}
-        : <String>{_ownedNoteId(target.session, fallback: targetNoteId)};
-    final result = await _workspaceMutationBarrier.run<void>(
-      WorkspaceMutationPlan<void>(
-        affectedNoteIds: affectedNoteIds,
-        dirtyDisposition: DirtyDisposition.flush,
-        commitBackend: () async => WorkspaceBackendCommit<void>.completed(
-          const VaultMutationDelta<void>(value: null),
-        ),
-        prepareCommit: (delta) {
-          if (!mounted || !_paneMutationTargetStillOwnsSession(target)) {
-            return _prepareWorkspaceCommit(delta);
-          }
-          final closingNoteId = _splitWorkspaceController
-              .pane(target.paneId)
-              ?.noteId;
-          final shouldRemoveSession =
-              closingNoteId != null &&
-              target.session != null &&
-              _splitWorkspaceController.paneCountForNote(closingNoteId) == 1 &&
-              identical(
-                _noteSessionRegistry.sessionFor(closingNoteId),
-                target.session,
-              );
-          final remainingPanes = _splitWorkspaceController.panes
-              .where((pane) => pane.paneId != target.paneId)
-              .toList(growable: false);
-          final nextFocusedPane =
-              _splitWorkspaceController.focusedPaneId == target.paneId
-              ? remainingPanes.first
-              : _splitWorkspaceController.focusedPane;
-          final nextSelectedResource = nextFocusedPane?.noteId == null
-              ? null
-              : _findResource(_resources, nextFocusedPane!.noteId!);
-          return _prepareWorkspaceCommit(
-            delta,
-            removedNoteIds: shouldRemoveSession ? {closingNoteId} : const {},
-            closedPaneIds: {target.paneId},
-            workspaceSnapshot: _WorkspaceCommitSnapshot(
-              selectedResource: _WorkspaceSnapshotField.set(
-                nextSelectedResource,
-              ),
-              previewImageSrc: const _WorkspaceSnapshotField.set(null),
-            ),
-          );
-        },
-      ),
-    );
-    if (result case BackendFailed<void>(:final error)) {
-      if (mounted) {
-        setState(() => _message = error.toString());
-      }
-    }
-  }
-
-  _PaneMutationTarget? _captureFocusedPaneMutationTarget() {
-    final pane = _focusedPane;
-    if (pane == null) {
-      return null;
-    }
-    final generation = _splitWorkspaceController.paneGeneration(pane.paneId);
-    if (generation == null) {
-      return null;
-    }
-    final session = pane.noteId == null
-        ? null
-        : _noteSessionRegistry.sessionFor(pane.noteId!);
-    return _PaneMutationTarget(
-      paneId: pane.paneId,
-      generation: generation,
-      noteId: pane.noteId,
-      session: session,
-    );
-  }
-
-  bool _paneMutationTargetHasCurrentGeneration(_PaneMutationTarget target) {
-    return _splitWorkspaceController.paneGeneration(target.paneId) ==
-        target.generation;
-  }
-
-  bool _paneMutationTargetStillOwnsSession(_PaneMutationTarget target) {
-    if (!_paneMutationTargetHasCurrentGeneration(target)) {
-      return false;
-    }
-    final pane = _splitWorkspaceController.pane(target.paneId);
-    if (pane == null) {
-      return false;
-    }
-    final session = target.session;
-    if (session == null) {
-      return pane.noteId == target.noteId;
-    }
-    final noteId = pane.noteId;
-    return noteId != null &&
-        identical(_noteSessionRegistry.sessionFor(noteId), session);
-  }
-
-  String _ownedNoteId(
-    NoteDocumentSession? session, {
-    required String fallback,
-  }) {
-    if (session != null &&
-        identical(_noteSessionRegistry.sessionFor(session.noteId), session)) {
-      return session.noteId;
-    }
-    return fallback;
-  }
-
-  bool _commitSucceededOrThrow<T>(WorkspaceMutationResult<T> result) {
-    if (result is Committed<T>) {
-      return true;
-    }
-    if (result is AbortedByFlush<T>) {
-      return false;
-    }
-    final failed = result as BackendFailed<T>;
-    Error.throwWithStackTrace(failed.error, failed.stackTrace);
+    _controller.splitFocused(direction);
   }
 
   void _resizeSplitBranch(String branchId, double delta, double extent) {
-    setState(() {
-      _splitWorkspaceController.resizeBranch(branchId, delta, extent);
-    });
+    _controller.resizeSplit(branchId, delta, extent);
   }
-
-  VaultResourceNode? _preparedSelectedResourceAfterMutation({
-    required List<VaultResourceNode> resources,
-    required Map<String, String> remappedNoteIds,
-    String? oldFolderPath,
-    String? newFolderPath,
-  }) {
-    final selectedResourceId = _selectedResource?.id;
-    if (selectedResourceId != null) {
-      var committedResourceId = remappedNoteIds[selectedResourceId];
-      if (committedResourceId == null &&
-          oldFolderPath != null &&
-          newFolderPath != null &&
-          _pathIsInside(selectedResourceId, oldFolderPath)) {
-        committedResourceId = _replacePathPrefix(
-          selectedResourceId,
-          oldFolderPath,
-          newFolderPath,
-        );
-      }
-      final selected = _findResource(
-        resources,
-        committedResourceId ?? selectedResourceId,
-      );
-      if (selected != null) {
-        return selected;
-      }
-    }
-    final focusedNoteId = _focusedPane?.noteId;
-    final committedFocusedNoteId = focusedNoteId == null
-        ? null
-        : remappedNoteIds[focusedNoteId] ?? focusedNoteId;
-    return committedFocusedNoteId == null
-        ? null
-        : _findResource(resources, committedFocusedNoteId);
-  }
-
-  bool get _semanticSearchEnabled {
-    return _workspacePreferences.semanticSearchEnabled &&
-        (_dependencies.usesInjectedAiProvider ||
-            (_providerConfig?.hasEmbeddingConfig ?? false));
-  }
-
-  String get _semanticSearchFallbackMessage {
-    if (!_workspacePreferences.semanticSearchEnabled) {
-      return '语义搜索已关闭，已使用全文搜索';
-    }
-    return '未配置 Embedding，已使用全文搜索';
-  }
-
-  bool get _hasVault => _runtimeManager.current != null;
-
-  String get _vaultLabel =>
-      _runtimeManager.current?.label ?? _dependencies.emptyVaultLabel;
-
-  String? get _vaultRootPath => _runtimeManager.current?.rootPath;
-
-  bool get _autoSaving => _noteSaveCoordinator.isAutoSaving;
-
-  bool get _usesNativeMacTitlebar {
-    return _dependencies.usesNativeMacTitlebar;
-  }
-
-  SplitLeaf? get _focusedPane => _splitWorkspaceController.focusedPane;
 
   PaneEditorContext? _capturePaneEditorContext({
     SplitLeaf? pane,
     NoteDocumentSession? session,
   }) {
-    final resolvedPane = pane ?? _focusedPane;
-    if (resolvedPane == null) {
-      return null;
-    }
-    final resolvedSession =
-        session ??
-        (resolvedPane.noteId == null
-            ? null
-            : _noteSessionRegistry.sessionFor(resolvedPane.noteId!));
-    if (resolvedSession == null ||
-        resolvedPane.noteId == null ||
-        !identical(
-          _noteSessionRegistry.sessionFor(resolvedPane.noteId!),
-          resolvedSession,
-        )) {
-      return null;
-    }
-    return capturePaneEditorContext(
-      paneId: resolvedPane.paneId,
-      splits: _splitWorkspaceController,
-      sessions: _noteSessionRegistry,
-      runtimeGeneration: _runtimeManager.generation,
-    );
+    final target = pane ?? _focusedPane;
+    return target == null
+        ? null
+        : _controller.capturePaneEditorContext(target.paneId);
   }
 
   ResolvedPaneEditorContext? _resolvePaneEditorContext(
     PaneEditorContext context,
-  ) {
-    return resolvePaneEditorContext(
-      context,
-      splits: _splitWorkspaceController,
-      sessions: _noteSessionRegistry,
-      runtimeGeneration: _runtimeManager.generation,
-    );
-  }
+  ) => _controller.resolvePaneEditorContext(context);
 
   bool _paneEditorContextIsLocked(PaneEditorContext context) {
-    final resolved = _resolvePaneEditorContext(context);
-    return resolved != null &&
-        _paneEditorCommandLocks.contains(resolved.session);
-  }
-
-  NoteDocumentSession? get _activeSession {
-    final noteId = _focusedPane?.noteId;
-    if (noteId == null) {
-      return null;
-    }
-    return _noteSessionRegistry.sessionFor(noteId);
-  }
-
-  VaultNoteContent? get _activeNote => _activeSession?.note;
-
-  set _activeNote(VaultNoteContent? note) {
-    final pane = _focusedPane;
-    if (pane == null) {
-      return;
-    }
-    if (note == null) {
-      _splitWorkspaceController.setPaneNote(pane.paneId, null);
-      return;
-    }
-    _upsertNoteSession(note);
-    _splitWorkspaceController.setPaneNote(pane.paneId, note.id);
-  }
-
-  set _noteMode(NoteMode value) {
-    final pane = _focusedPane;
-    if (pane != null) {
-      _splitWorkspaceController.setPaneMode(pane.paneId, value);
-    }
-  }
-
-  NoteMode get _preferredNoteMode {
-    return _workspacePreferences.defaultNoteMode ==
-            WorkspaceDefaultNoteMode.source
-        ? NoteMode.source
-        : NoteMode.reading;
-  }
-
-  bool _hasDirtySession(NoteDocumentSession session) {
-    return session.isDirty;
-  }
-
-  void _handleSessionMarkdownEdited(NoteDocumentSession session) {
-    if (_reloadRequired || session.isProgrammaticChange) {
-      return;
-    }
-    if (!_hasDirtySession(session)) {
-      _cancelPendingAutoSave(session);
-      return;
-    }
-    _scheduleAutoSave(session);
-  }
-
-  void _handleNoteSaveCoordinatorStateChanged() {
-    if (mounted) {
-      setState(() {});
-    }
-  }
-
-  void _handleNoteSaveFatalError(WorkspaceCommitInvariantError error) {
-    if (_reloadRequired) {
-      return;
-    }
-    _handleWorkspaceCommitInvariant(error);
-  }
-
-  void _replaceEditorMarkdown(String markdown) {
-    final session = _activeSession;
-    if (session == null) {
-      return;
-    }
-    _replaceSessionMarkdown(session, markdown);
-  }
-
-  void _replaceSessionMarkdown(NoteDocumentSession session, String markdown) {
-    _cancelPendingAutoSave(session);
-    session.replaceBodyProgrammatically(_visibleMarkdownBody(markdown));
-  }
-
-  void _cancelPendingAutoSave(NoteDocumentSession session) {
-    _noteSaveCoordinator.cancel(session);
-  }
-
-  void _scheduleAutoSave(NoteDocumentSession session) {
-    if (_reloadRequired) {
-      return;
-    }
-    _noteSaveCoordinator.schedule(session);
-  }
-
-  VaultBackend _requireVault() {
-    return _runtimeManager.current?.vault ?? (throw StateError('请先选择仓库位置'));
-  }
-
-  WorkspaceRuntime _requireRuntime() {
-    return _runtimeManager.current ?? (throw StateError('请先选择仓库位置'));
-  }
-
-  ProposalService _requireProposalService() {
-    return _requireRuntime().proposalService;
-  }
-
-  void _installRuntime({
-    required VaultBackend vault,
-    required String? rootPath,
-    required String label,
-    WorkspaceAiProvider? aiProvider,
-  }) {
-    final provider =
-        aiProvider ??
-        _dependencies.createAiProvider(_providerConfig ?? ProviderConfig.empty);
-    _runtimeManager.installCandidateSync(
-      () => _dependencies.createRuntime(
-        vault: vault,
-        aiProvider: provider,
-        semanticSearchEnabled: _semanticSearchEnabled,
-        rootPath: rootPath,
-        label: label,
-      ),
-    );
-    _workspaceMutationToken = Object();
-  }
-
-  WorkspaceRuntime _createDetachedRuntime(
-    VaultLocation location,
-    SynapseSettings settings,
-  ) {
-    return _dependencies.createRuntime(
-      vault: _dependencies.createVault(location.rootPath),
-      aiProvider: _dependencies.createAiProvider(settings.providerConfig),
-      semanticSearchEnabled: _semanticSearchEnabledFor(settings),
-      rootPath: location.rootPath,
-      label: _dependencies.formatVaultLabel(location.rootPath),
+    return _controller.lockedEditorSessions.any(
+      (session) => identical(session, context.sessionIdentity),
     );
   }
 
-  Future<void> _activateVaultLocation(
-    VaultLocation location, {
-    required String message,
-    Object? startupToken,
-  }) async {
-    WorkspaceRuntime? candidate;
-    try {
-      if (!_canCommitStartup(startupToken)) {
-        return;
-      }
-      final settingsSource = _settingsBaseline;
-      candidate = _createDetachedRuntime(location, settingsSource);
-      final snapshot = await _resourceCoordinator.loadDetachedRuntime(
-        candidate,
-      );
-      if (!_canCommitStartup(startupToken)) {
-        _disposeDetachedRuntime(candidate);
-        candidate = null;
-        return;
-      }
-      final savedSettings = settingsSource.copyWith(vaultLocation: location);
-      await _persistSettings(savedSettings);
-      if (!_canCommitStartup(startupToken)) {
-        _disposeDetachedRuntime(candidate);
-        candidate = null;
-        return;
-      }
-      _noteSaveCoordinator.resetAfterReload();
-      _workspaceMutationBarrier.resetAfterReload();
-      _runtimeManager.install(candidate);
-      candidate = null;
-      _workspaceMutationToken = Object();
-      _applyInstalledRuntimeSnapshot(
-        snapshot,
-        settings: savedSettings,
-        message: message,
-      );
-    } catch (_) {
-      _disposeDetachedRuntime(candidate);
-      if (!_canCommitStartup(startupToken)) {
-        return;
-      }
-      rethrow;
-    }
-  }
-
-  void _disposeDetachedRuntime(WorkspaceRuntime? runtime) {
-    runtime?.dispose(reportCleanupError: _dependencies.cleanupErrorReporter);
-  }
-
-  void _applyInstalledRuntimeSnapshot(
-    WorkspaceResourceSnapshot snapshot, {
-    required SynapseSettings settings,
-    required String message,
-  }) {
-    setState(() {
-      _settings = settings;
-      _loadedSettingsBaseline = settings;
-      _workspacePreferences = settings.preferences;
-      _providerConfig = settings.providerConfig;
-      _splitWorkspaceController.updateDefaultMode(_preferredNoteMode);
-      _resources = snapshot.resources;
-      _selectedResource = snapshot.selectedResource;
-      _searchResults = const [];
-      _resetSplitWorkspace();
-      _activeNote = snapshot.note;
-      _replaceEditorMarkdown(snapshot.note?.markdown ?? '');
-      if (snapshot.note case final note?) {
-        _noteMaterialsRegistry.replaceProposals(note.id, snapshot.proposals);
-      }
-      _leftPaneMode = _LeftPaneMode.resources;
-      _leftPaneCollapsed = false;
-      _rightPaneCollapsed = false;
-      _narrowSection = snapshot.note == null
-          ? _WorkspaceSection.resources
-          : _WorkspaceSection.notes;
-      _reloadRequired = false;
-      _setSelectedPreviewImageSrc(null);
-      _message = message;
-    });
-  }
-
-  Future<VaultLocation?> _pickVaultLocation() async {
-    return _dependencies.pickVaultLocation();
-  }
-
-  Future<VaultLocation> _restoreVaultAccess(VaultLocation location) {
-    return _dependencies.restoreVaultAccess(location);
-  }
-
-  Future<void> _initializeWorkspace() async {
-    final startupToken = Object();
-    _startupOperationToken = startupToken;
-    _startupSettingsLoadError = null;
-    _loadedSettingsBaseline = null;
-    final settingsLoad = _readSettings();
-    _startupSettingsLoadFuture = settingsLoad;
-    final settingsCommit = _loadSettings(startupToken, settingsLoad);
-    _startupSettingsCommitFuture = settingsCommit;
-    try {
-      await settingsCommit;
-      if (_startupSettingsLoadError != null) {
-        return;
-      }
-      if (!_isStartupCurrent(startupToken)) {
-        return;
-      }
-      if (_hasVault) {
-        await _loadResources(startupToken);
-      } else if (_dependencies.supportsDirectoryVault) {
-        await _loadSavedVaultLocation(startupToken);
-      }
-    } finally {
-      if (identical(_startupOperationToken, startupToken)) {
-        _startupOperationToken = null;
-      }
-    }
-  }
-
-  bool _isStartupCurrent(Object token) {
-    return mounted && identical(_startupOperationToken, token);
-  }
-
-  bool _canCommitStartup(Object? token) {
-    return token == null || _isStartupCurrent(token);
-  }
-
-  void _invalidateStartupOperation() {
-    _startupOperationToken = null;
-  }
-
-  Future<bool> _awaitStartupSettingsBaseline() async {
-    final settingsCommit = _startupSettingsCommitFuture;
-    if (settingsCommit != null) {
-      await settingsCommit;
-    } else {
-      final settingsLoad = _startupSettingsLoadFuture;
-      if (settingsLoad != null) {
-        try {
-          await settingsLoad;
-        } catch (_) {
-          return false;
-        }
-      }
-    }
-    return _startupSettingsLoadError == null;
-  }
-
-  Future<SettingsStore> _getSettingsStore() async {
-    return _dependencies.settingsStore();
-  }
-
-  Future<SynapseSettings> _readSettings() async {
-    final store = await _getSettingsStore();
-    return store.load();
-  }
-
-  Future<void> _loadSettings(
-    Object startupToken,
-    Future<SynapseSettings> settingsLoad,
-  ) async {
-    final SynapseSettings settings;
-    try {
-      settings = await settingsLoad;
-      _startupSettingsLoadError = null;
-    } catch (error) {
-      if (_isStartupCurrent(startupToken)) {
-        _startupSettingsLoadError = error;
-        setState(() => _message = '设置读取失败：$error');
-      }
-      return;
-    }
-    if (!_isStartupCurrent(startupToken)) {
-      return;
-    }
-    _loadedSettingsBaseline = settings;
-    final current = _runtimeManager.current;
-    if (current == null) {
-      _applyLoadedSettings(settings);
-      return;
-    }
-    WorkspaceRuntime? candidate;
-    try {
-      candidate = _createSettingsRuntimeCandidate(current, settings);
-      if (!_isStartupCurrent(startupToken)) {
-        _disposeDetachedRuntime(candidate);
-        return;
-      }
-      _runtimeManager.install(candidate);
-      candidate = null;
-      _workspaceMutationToken = Object();
-      _applyLoadedSettings(settings);
-    } catch (_) {
-      _disposeDetachedRuntime(candidate);
-    }
-  }
-
-  void _applyLoadedSettings(SynapseSettings settings) {
-    setState(() {
-      final shouldSetConfigurationMessage = _message.isEmpty;
-      _settings = settings;
-      _loadedSettingsBaseline = settings;
-      _workspacePreferences = settings.preferences;
-      _providerConfig = settings.providerConfig;
-      _splitWorkspaceController.updateDefaultMode(_preferredNoteMode);
-      if (shouldSetConfigurationMessage) {
-        _message = _modelConfigurationMessage();
-      }
-    });
-  }
-
-  Future<void> _persistSettings(SynapseSettings settings) {
-    final operation = _settingsPersistenceTail.catchError((Object _) {}).then((
-      _,
-    ) async {
-      final store = await _getSettingsStore();
-      await store.save(settings);
-    });
-    _settingsPersistenceTail = operation.catchError((Object _) {});
-    return operation;
-  }
-
-  WorkspaceRuntime _createSettingsRuntimeCandidate(
-    WorkspaceRuntime current,
-    SynapseSettings settings,
-  ) {
-    return _dependencies.createRuntime(
-      vault: current.vault,
-      aiProvider: _dependencies.createAiProvider(settings.providerConfig),
-      semanticSearchEnabled: _semanticSearchEnabledFor(settings),
-      rootPath: current.rootPath,
-      label: current.label,
-    );
-  }
-
-  Future<void> _loadSavedVaultLocation(Object startupToken) async {
-    try {
-      final store = await _getSettingsStore();
-      if (!_isStartupCurrent(startupToken)) {
-        return;
-      }
-      var location = _settingsBaseline.vaultLocation;
-      if (location == null) {
-        if (_isStartupCurrent(startupToken)) {
-          setState(() => _message = '请选择仓库位置');
-        }
-        return;
-      }
-      final restoredLocation = await _restoreVaultAccess(location);
-      if (!_isStartupCurrent(startupToken)) {
-        return;
-      }
-      if (!await store.vaultExists(restoredLocation)) {
-        if (_isStartupCurrent(startupToken)) {
-          setState(() => _message = '仓库位置不可用：${restoredLocation.rootPath}');
-        }
-        return;
-      }
-      if (!_isStartupCurrent(startupToken)) {
-        return;
-      }
-      setState(() {
-        _busy = true;
-        _message = '';
-      });
-      try {
-        await _activateVaultLocation(
-          restoredLocation,
-          message: '仓库已打开',
-          startupToken: startupToken,
-        );
-      } catch (error) {
-        if (_isStartupCurrent(startupToken)) {
-          setState(() => _message = '仓库位置读取失败：$error');
-        }
-      } finally {
-        if (_isStartupCurrent(startupToken)) {
-          setState(() => _busy = false);
-        }
-      }
-    } catch (error) {
-      if (_isStartupCurrent(startupToken)) {
-        setState(() => _message = '仓库位置读取失败：$error');
-      }
-    }
-  }
-
-  Future<void> _runBusy(
-    Future<void> Function() action, {
-    bool allowReloadRequired = false,
-  }) async {
-    if (_reloadRequired && !allowReloadRequired) {
-      setState(() => _message = _reloadRequiredMessage);
-      return;
-    }
-    setState(() {
-      _busy = true;
-      _message = '';
-    });
-    try {
-      await action();
-    } on WorkspaceCommitInvariantError {
-      if (mounted) {
-        setState(() => _message = _reloadRequiredMessage);
-      }
-    } catch (error) {
-      if (mounted) {
-        setState(() => _message = error.toString());
-      }
-    } finally {
-      if (mounted) {
-        setState(() => _busy = false);
-      }
-    }
-  }
-
-  Future<PaneEditorCommandOutcome> _runPaneEditorBusy(
-    PaneEditorContext context,
-    Future<PaneEditorCommandOutcome> Function() action,
-  ) async {
-    final resolved = _resolvePaneEditorContext(context);
-    if (resolved == null) {
-      return PaneEditorCommandOutcome.staleTarget;
-    }
-    if (_busy || _reloadRequired) {
-      return PaneEditorCommandOutcome.unchanged;
-    }
-    setState(() {
-      _busy = true;
-      _message = '';
-      _paneEditorCommandLocks.add(resolved.session);
-    });
-    _paneEditorCommandLockRevision.value += 1;
-    try {
-      return await action();
-    } on WorkspaceCommitInvariantError {
-      if (!mounted || _resolvePaneEditorContext(context) == null) {
-        return PaneEditorCommandOutcome.staleTarget;
-      }
-      setState(() => _message = _reloadRequiredMessage);
-      return PaneEditorCommandOutcome.unchanged;
-    } catch (error) {
-      if (!mounted || _resolvePaneEditorContext(context) == null) {
-        return PaneEditorCommandOutcome.staleTarget;
-      }
-      setState(() => _message = error.toString());
-      return PaneEditorCommandOutcome.unchanged;
-    } finally {
-      if (mounted) {
-        setState(() {
-          _paneEditorCommandLocks.remove(resolved.session);
-          _busy = false;
-        });
-        _paneEditorCommandLockRevision.value += 1;
-      }
-    }
-  }
-
-  Future<PaneEditorCommandOutcome> _runPaneEditorCommand(
-    PaneEditorContext context,
-    Future<PaneEditorCommandOutcome> Function() action,
-  ) async {
-    if (_resolvePaneEditorContext(context) == null) {
-      return PaneEditorCommandOutcome.staleTarget;
-    }
-    try {
-      return await action();
-    } catch (error) {
-      if (!mounted || _resolvePaneEditorContext(context) == null) {
-        return PaneEditorCommandOutcome.staleTarget;
-      }
-      setState(() => _message = error.toString());
-      return PaneEditorCommandOutcome.unchanged;
-    }
-  }
-
-  bool _hasUsableAiProvider() {
-    return _dependencies.usesInjectedAiProvider ||
-        (_providerConfig?.isComplete ?? false);
-  }
-
-  String _modelConfigurationMessage() {
-    if (_dependencies.usesInjectedAiProvider) {
-      return '';
-    }
-    final store = _dependencies.resolvedSettingsStore();
-    if (store != null && !store.supportsPersistence) {
-      return store.unavailableMessage;
-    }
-    if (_providerConfig?.isComplete == true) {
-      if (_providerConfig?.hasEmbeddingConfig == true) {
-        return '模型设置已保存';
-      }
-      return '模型设置已保存；未配置 Embedding，语义搜索关闭';
-    }
-    return '请先在设置中配置模型';
-  }
-
-  bool _requireModelConfigured() {
-    if (_hasUsableAiProvider()) {
-      return true;
-    }
-    setState(() => _message = _modelConfigurationMessage());
-    return false;
-  }
-
-  Future<T?> _readResourceSnapshotWithMutationRetry<T>(
-    Future<T> Function(int attempt) read,
-  ) async {
-    for (var attempt = 0; attempt < 2; attempt += 1) {
-      final mutationToken = _workspaceMutationToken;
-      final result = await read(attempt);
-      if (identical(mutationToken, _workspaceMutationToken)) {
-        return result;
-      }
-    }
-    return null;
-  }
-
-  Future<void> _loadResources(Object startupToken) async {
-    if (!_isStartupCurrent(startupToken)) {
-      return;
-    }
-    setState(() {
-      _busy = true;
-      _message = '';
-    });
-    try {
-      await _loadResourcesFromCurrentVault(startupToken: startupToken);
-    } catch (error) {
-      if (_isStartupCurrent(startupToken)) {
-        setState(() => _message = error.toString());
-      }
-    } finally {
-      if (_isStartupCurrent(startupToken)) {
-        setState(() => _busy = false);
-      }
-    }
-  }
-
-  Future<void> _loadResourcesFromCurrentVault({
-    String? message,
-    Object? startupToken,
-  }) async {
-    final result = await _readResourceSnapshotWithMutationRetry(
-      (_) => _resourceCoordinator.loadWorkspace(),
-    );
-    if (result == null) {
-      return;
-    }
-    if (!_canCommitStartup(startupToken)) {
-      return;
-    }
-    if (result is WorkspaceResourceStale) {
-      return;
-    }
-    if (result case WorkspaceResourceMissing(:final resources)) {
-      setState(() {
-        _resources = resources;
-        _selectedResource = null;
-        _activeNote = null;
-        _replaceEditorMarkdown('');
-        _searchResults = const [];
-        if (message != null) {
-          _message = message;
-        }
-      });
-      return;
-    }
-    final snapshot = (result as WorkspaceResourceCurrent).snapshot;
-    setState(() {
-      _resources = snapshot.resources;
-      _selectedResource = snapshot.selectedResource;
-      _activeNote = snapshot.note;
-      _replaceEditorMarkdown(snapshot.note?.markdown ?? '');
-      if (snapshot.note case final note?) {
-        _noteMaterialsRegistry.replaceProposals(note.id, snapshot.proposals);
-      }
-      _searchResults = const [];
-      if (message != null) {
-        _message = message;
-      }
-    });
+  void _setSelectedPreviewImageSrc(String? src) {
+    _selectedPreviewImageSrcNotifier.value = src == null
+        ? null
+        : normalizeImageSrc(src);
   }
 
   Future<void> _selectResource(VaultResourceNode resource) async {
-    if (_busy) {
-      return;
-    }
-    if (resource.isFolder) {
-      setState(() {
-        _selectedResource = resource;
-        _narrowSection = _WorkspaceSection.resources;
-      });
-      return;
-    }
-    _resourceSelectionInProgress = true;
-    try {
-      await _runBusy(() async {
-        if (!await _flushPendingMarkdown()) {
-          return;
-        }
-        final targetSession = _noteSessionRegistry.sessionFor(resource.id);
-        final result = await _readResourceSnapshotWithMutationRetry((attempt) {
-          final noteId = attempt == 0
-              ? resource.id
-              : targetSession?.noteId ?? resource.id;
-          return attempt == 0
-              ? _resourceCoordinator.loadNote(noteId)
-              : _resourceCoordinator.refreshNote(noteId);
-        });
-        if (result == null) {
-          return;
-        }
-        if (result is WorkspaceResourceStale) {
-          return;
-        }
-        if (result case WorkspaceResourceMissing(:final resources)) {
-          setState(() {
-            _resources = resources;
-            _message = '资源已不存在：${resource.title}';
-          });
-          return;
-        }
-        final snapshot = (result as WorkspaceResourceCurrent).snapshot;
-        final loaded = snapshot.note!;
-        setState(() {
-          _resources = snapshot.resources;
-          _selectedResource = snapshot.selectedResource;
-          _activeNote = loaded;
-          _noteMaterialsRegistry.replaceProposals(
-            loaded.id,
-            snapshot.proposals,
-          );
-          _noteMaterialsRegistry.clearSelection(loaded.id);
-          _noteMode = _preferredNoteMode;
-          _narrowSection = _WorkspaceSection.notes;
-        });
-      });
-    } finally {
-      _resourceSelectionInProgress = false;
-    }
+    await _controller.selectResource(resource);
+  }
+
+  Future<void> _chooseVault() async {
+    await _controller.chooseVault();
   }
 
   Future<void> _createFolder({String parentPath = ''}) async {
-    if (_busy) {
-      return;
-    }
     final title = await _promptResourceName(
       title: '新建文件夹',
       placeholder: '文件夹名称',
     );
-    if (title == null) {
-      return;
+    if (title != null) {
+      await _controller.createFolder(parentPath: parentPath, title: title);
     }
-    await _runBusy(() async {
-      final vault = _requireVault();
-      final result = await _workspaceMutationBarrier.run<VaultResourceNode>(
-        WorkspaceMutationPlan<VaultResourceNode>(
-          affectedNoteIds: const {},
-          dirtyDisposition: DirtyDisposition.flush,
-          commitBackend: () async {
-            final folder = await vault.createFolder(
-              parentPath: parentPath,
-              title: title,
-            );
-            return WorkspaceBackendCommit<VaultResourceNode>(
-              postCommitHydrate: () async {
-                final resources = await vault.listResources();
-                return VaultMutationDelta<VaultResourceNode>(
-                  value: folder,
-                  resources: resources,
-                );
-              },
-            );
-          },
-          prepareCommit: (delta) {
-            final resources = delta.resources ?? const [];
-            final collapsedFolderIds = Set<String>.of(_collapsedFolderIds)
-              ..remove(parentPath);
-            return _prepareWorkspaceCommit(
-              delta,
-              workspaceSnapshot: _WorkspaceCommitSnapshot(
-                resources: _WorkspaceSnapshotField.set(resources),
-                selectedResource: _WorkspaceSnapshotField.set(
-                  _findResource(resources, delta.value.id) ?? delta.value,
-                ),
-                narrowSection: const _WorkspaceSnapshotField.set(
-                  _WorkspaceSection.resources,
-                ),
-                collapsedFolderIds: _WorkspaceSnapshotField.set(
-                  collapsedFolderIds,
-                ),
-              ),
-            );
-          },
-        ),
-      );
-      _commitSucceededOrThrow(result);
-    });
   }
 
   Future<void> _createNote({String parentPath = ''}) async {
-    if (_busy) {
-      return;
+    await _controller.createNote(
+      parentPath: parentPath,
+      title: untitledNoteTitle,
+    );
+  }
+
+  Future<void> _createSiblingNote(VaultResourceNode note) {
+    return _createNote(parentPath: _parentFolderPath(note.path));
+  }
+
+  Future<void> _renameFolder(VaultResourceNode folder) async {
+    final name = await _promptResourceName(
+      title: '重命名文件夹',
+      placeholder: '文件夹名称',
+      initialValue: folder.title,
+      actionLabel: '重命名',
+    );
+    if (name != null) {
+      await _controller.renameFolder(folder: folder, newName: name);
     }
-    await _runBusy(() async {
-      if (!await _flushPendingMarkdown()) {
-        return;
-      }
-      final vault = _requireVault();
-      final paneId = _splitWorkspaceController.focusedPaneId;
-      final result = await _workspaceMutationBarrier.run<_NoteMutationPayload>(
-        WorkspaceMutationPlan<_NoteMutationPayload>(
-          affectedNoteIds: const {},
-          dirtyDisposition: DirtyDisposition.flush,
-          commitBackend: () async {
-            final note = await vault.createNote(
-              parentPath: parentPath,
-              title: untitledNoteTitle,
-            );
-            return WorkspaceBackendCommit<_NoteMutationPayload>(
-              postCommitHydrate: () async {
-                final loaded = await vault.readNote(note.id);
-                final resources = await vault.listResources();
-                final proposals = await vault.listProposals(note.id);
-                return VaultMutationDelta<_NoteMutationPayload>(
-                  value: _NoteMutationPayload(
-                    note: loaded,
-                    proposals: proposals,
-                  ),
-                  refreshedNotesByNewId: {loaded.id: loaded},
-                  resources: resources,
-                );
-              },
-            );
-          },
-          prepareCommit: (delta) {
-            final resources = delta.resources ?? const [];
-            final note = delta.value.note;
-            final collapsedFolderIds = Set<String>.of(_collapsedFolderIds)
-              ..remove(parentPath);
-            return _prepareWorkspaceCommit(
-              delta,
-              upsertedNotesById: {note.id: note},
-              replacementProposalsByNoteId: {note.id: delta.value.proposals},
-              paneNoteAssignments: {paneId: note.id},
-              workspaceSnapshot: _WorkspaceCommitSnapshot(
-                resources: _WorkspaceSnapshotField.set(resources),
-                selectedResource: _WorkspaceSnapshotField.set(
-                  _findResource(resources, note.id),
-                ),
-                narrowSection: const _WorkspaceSnapshotField.set(
-                  _WorkspaceSection.notes,
-                ),
-                previewImageSrc: const _WorkspaceSnapshotField.set(null),
-                collapsedFolderIds: _WorkspaceSnapshotField.set(
-                  collapsedFolderIds,
-                ),
-              ),
-            );
-          },
-        ),
-      );
-      _commitSucceededOrThrow(result);
-    });
+  }
+
+  Future<void> _copyNote(VaultResourceNode note) async {
+    await _controller.copyNote(note);
+  }
+
+  Future<void> _moveNote(VaultResourceNode note) async {
+    final target = await _promptMoveNoteTarget(note);
+    if (target != null) {
+      await _controller.moveNote(note: note, parentPath: target);
+    }
+  }
+
+  Future<void> _deleteResource(VaultResourceNode resource) async {
+    final confirmed = await _confirmDelete(
+      title: resource.isFolder ? '删除文件夹' : '删除笔记',
+      message: resource.isFolder
+          ? '将删除文件夹及其全部内容。此操作不可撤销。'
+          : '将删除这篇笔记及其素材。此操作不可撤销。',
+    );
+    if (confirmed) {
+      await _controller.deleteResource(resource);
+    }
+  }
+
+  Future<void> _closeFocusedPane() async {
+    await _controller.closeFocusedPane();
   }
 
   String _newNoteParentPath() {
@@ -1628,7 +307,7 @@ class _SynapseWorkspaceState extends ConsumerState<SynapseWorkspace> {
     String? initialValue,
     String actionLabel = '创建',
   }) async {
-    final controller = TextEditingController(text: initialValue);
+    final textController = TextEditingController(text: initialValue);
     try {
       return await showCupertinoDialog<String>(
         context: context,
@@ -1638,7 +317,7 @@ class _SynapseWorkspaceState extends ConsumerState<SynapseWorkspace> {
             padding: const EdgeInsets.only(top: 12),
             child: CupertinoTextField(
               key: const Key('resource-name-input'),
-              controller: controller,
+              controller: textController,
               autofocus: true,
               placeholder: placeholder,
               onSubmitted: (value) {
@@ -1657,7 +336,7 @@ class _SynapseWorkspaceState extends ConsumerState<SynapseWorkspace> {
             CupertinoDialogAction(
               isDefaultAction: true,
               onPressed: () {
-                final trimmed = controller.text.trim();
+                final trimmed = textController.text.trim();
                 if (trimmed.isNotEmpty) {
                   Navigator.of(context).pop(trimmed);
                 }
@@ -1668,1369 +347,41 @@ class _SynapseWorkspaceState extends ConsumerState<SynapseWorkspace> {
         ),
       );
     } finally {
-      controller.dispose();
+      textController.dispose();
     }
-  }
-
-  Future<void> _chooseVault() async {
-    if (!_dependencies.supportsDirectoryVault) {
-      setState(() => _message = 'H5 预览使用浏览器沙盒库');
-      return;
-    }
-    VaultLocation? pickedLocation;
-    try {
-      pickedLocation = await _pickVaultLocation();
-    } catch (error) {
-      if (mounted) {
-        setState(() => _message = '仓库位置选择失败：$error');
-      }
-      return;
-    }
-    if (pickedLocation == null) {
-      return;
-    }
-    if (!mounted) {
-      return;
-    }
-    if (!await _awaitStartupSettingsBaseline() || !mounted) {
-      return;
-    }
-    _invalidateStartupOperation();
-    final saved = _reloadRequired || await _autoSaveDirtyMarkdownBeforeSwitch();
-    if (!saved || !mounted) {
-      return;
-    }
-    await _runBusy(() async {
-      await _activateVaultLocation(pickedLocation!, message: '仓库已切换');
-    }, allowReloadRequired: true);
-  }
-
-  Future<bool> _autoSaveDirtyMarkdownBeforeSwitch() async {
-    setState(() {
-      _busy = true;
-      _message = '';
-    });
-    try {
-      return await _flushAllPendingMarkdown();
-    } finally {
-      if (mounted) {
-        setState(() => _busy = false);
-      }
-    }
-  }
-
-  Future<bool> _flushAllPendingMarkdown({String? successMessage}) async {
-    if (_reloadRequired) {
-      return false;
-    }
-    final report = await _noteSaveCoordinator.flushAll(
-      successMessage: successMessage,
-    );
-    return report.succeeded;
-  }
-
-  Future<bool> _flushPendingMarkdown({String? successMessage}) async {
-    final session = _activeSession;
-    if (session == null) {
-      return true;
-    }
-    return _flushSessionMarkdown(session, successMessage: successMessage);
-  }
-
-  Future<bool> _flushSessionMarkdown(
-    NoteDocumentSession session, {
-    String? successMessage,
-  }) async {
-    if (_reloadRequired) {
-      return false;
-    }
-    final report = await _noteSaveCoordinator.flush([
-      session,
-    ], successMessage: successMessage);
-    return report.succeeded;
-  }
-
-  Future<bool> _saveSessionMarkdown(
-    NoteDocumentSession session, {
-    required bool automatic,
-    required bool rescheduleIfDirty,
-    String? successMessage,
-  }) async {
-    if (_reloadRequired) {
-      return false;
-    }
-    final result = await _noteSaveCoordinator.save(
-      session,
-      reason: automatic ? NoteSaveReason.debounce : NoteSaveReason.explicit,
-      rescheduleIfStillDirty: rescheduleIfDirty,
-      successMessage: successMessage,
-    );
-    return result.succeeded;
-  }
-
-  Future<PaneEditorCommandOutcome?> _flushPaneEditorSession(
-    PaneEditorContext context,
-    NoteDocumentSession session, {
-    String? successMessage,
-  }) async {
-    final saved = await _runPaneEditorSaveScope(
-      context,
-      session,
-      () => _flushSessionMarkdown(session, successMessage: successMessage),
-    );
-    if (_resolvePaneEditorContext(context) == null) {
-      return PaneEditorCommandOutcome.staleTarget;
-    }
-    return saved ? null : PaneEditorCommandOutcome.unchanged;
-  }
-
-  Future<PaneEditorCommandOutcome?> _savePaneEditorSession(
-    PaneEditorContext context,
-    NoteDocumentSession session, {
-    required bool automatic,
-    required bool rescheduleIfDirty,
-    String? successMessage,
-  }) async {
-    final saved = await _runPaneEditorSaveScope(
-      context,
-      session,
-      () => _saveSessionMarkdown(
-        session,
-        automatic: automatic,
-        rescheduleIfDirty: rescheduleIfDirty,
-        successMessage: successMessage,
-      ),
-    );
-    if (_resolvePaneEditorContext(context) == null) {
-      return PaneEditorCommandOutcome.staleTarget;
-    }
-    return saved ? null : PaneEditorCommandOutcome.unchanged;
-  }
-
-  Future<bool> _runPaneEditorSaveScope(
-    PaneEditorContext context,
-    NoteDocumentSession session,
-    Future<bool> Function() save,
-  ) async {
-    final scope = _PaneEditorSaveScope(
-      session: session,
-      bodySnapshot: session.controller.text,
-      runtimeGeneration: context.runtimeGeneration,
-    );
-    _paneEditorSaveScopes.add(scope);
-    try {
-      return await save();
-    } finally {
-      _paneEditorSaveScopes.remove(scope);
-    }
-  }
-
-  Future<void> _applyNoteSaveResult(
-    NoteSaveResult result,
-    SaveRequest request,
-  ) async {
-    if (!mounted || _reloadRequired) {
-      return;
-    }
-    final session = result.session;
-    if (!_noteSessionRegistryOwnsSaveResult(result)) {
-      return;
-    }
-    final runtimeStale = _paneEditorSaveResultIsRuntimeStale(result);
-    if (!result.succeeded) {
-      if (!runtimeStale) {
-        setState(() => _message = '笔记保存失败：${result.error}');
-      }
-      return;
-    }
-    final savedNote = result.savedNote;
-    if (savedNote == null) {
-      return;
-    }
-    final mutationResult = await _workspaceMutationBarrier.commitPrepared<void>(
-      () async => VaultMutationDelta<void>(
-        value: null,
-        remappedNoteIds: {result.oldNoteId: savedNote.id},
-        refreshedNotesByNewId: {savedNote.id: savedNote},
-        resources: result.idChanged
-            ? await _requireVault().listResources()
-            : null,
-      ),
-      prepareCommit: (delta) {
-        if (!mounted || !_noteSessionRegistryOwnsSaveResult(result)) {
-          return _prepareWorkspaceCommit(delta);
-        }
-        final resources = delta.resources;
-        final nextSelectedResource = resources == null
-            ? _selectedResource
-            : _preparedSelectedResourceAfterMutation(
-                resources: resources,
-                remappedNoteIds: delta.remappedNoteIds,
-              );
-        final clearFocusedPreview =
-            _actualNoteIdRemaps(delta.remappedNoteIds).isNotEmpty &&
-            identical(_activeSession, session);
-        final clearSearchResults = _actualNoteIdRemaps(
-          delta.remappedNoteIds,
-        ).isNotEmpty;
-        final successMessage =
-            !runtimeStale &&
-                !_paneEditorSaveResultIsRuntimeStale(result) &&
-                request.successMessage != null &&
-                !result.stillDirty
-            ? request.successMessage
-            : null;
-        return _prepareWorkspaceCommit(
-          delta,
-          savedNoteCommit: SavedNoteSessionCommit(
-            session: session,
-            oldNoteId: result.oldNoteId,
-            savedNote: savedNote,
-            preserveCurrentBody: result.stillDirty,
-          ),
-          workspaceSnapshot: _WorkspaceCommitSnapshot(
-            resources: resources == null
-                ? const _WorkspaceSnapshotField.unchanged()
-                : _WorkspaceSnapshotField.set(resources),
-            selectedResource: resources == null
-                ? const _WorkspaceSnapshotField.unchanged()
-                : _WorkspaceSnapshotField.set(nextSelectedResource),
-            searchResults: clearSearchResults
-                ? const _WorkspaceSnapshotField.set(<SearchResult>[])
-                : const _WorkspaceSnapshotField.unchanged(),
-            message: successMessage == null
-                ? const _WorkspaceSnapshotField.unchanged()
-                : _WorkspaceSnapshotField.set(successMessage),
-            previewImageSrc: clearFocusedPreview
-                ? const _WorkspaceSnapshotField.set(null)
-                : const _WorkspaceSnapshotField.unchanged(),
-          ),
-        );
-      },
-      originatingSession: session,
-    );
-    if (mutationResult case BackendFailed<void>(
-      :final error,
-      :final stackTrace,
-    )) {
-      Error.throwWithStackTrace(error, stackTrace);
-    }
-  }
-
-  bool _noteSessionRegistryOwnsSaveResult(NoteSaveResult result) {
-    final session = result.session;
-    return noteSessionRegistryOwnsSession(
-      sessions: _noteSessionRegistry,
-      sessionIdentity: session,
-      noteIds: <String>{
-        result.oldNoteId,
-        session.noteId,
-        if (result.savedNote case final savedNote?) savedNote.id,
-      },
-    );
-  }
-
-  bool _paneEditorSaveResultIsRuntimeStale(NoteSaveResult result) {
-    var foundMatch = false;
-    for (final scope in _paneEditorSaveScopes) {
-      if (identical(scope.session, result.session) &&
-          scope.bodySnapshot == result.bodySnapshot) {
-        foundMatch = true;
-        if (scope.runtimeGeneration == _runtimeManager.generation) {
-          return false;
-        }
-      }
-    }
-    return foundMatch;
-  }
-
-  Future<PaneEditorCommandOutcome> _pasteIntoNoteEditor(
-    PaneEditorContext? context,
-  ) async {
-    if (_busy || _autoSaving) {
-      return PaneEditorCommandOutcome.unchanged;
-    }
-    if (context == null) {
-      setState(() => _message = '请先选择或创建笔记');
-      return PaneEditorCommandOutcome.unchanged;
-    }
-    if (_resolvePaneEditorContext(context) == null) {
-      return PaneEditorCommandOutcome.staleTarget;
-    }
-    return _runPaneEditorBusy(context, () async {
-      final image = await _imageInput.pasteImage();
-      if (_resolvePaneEditorContext(context) == null) {
-        return PaneEditorCommandOutcome.staleTarget;
-      }
-      if (image != null) {
-        return _insertPastedImage(context: context, image: image);
-      }
-      final text = (await Clipboard.getData(Clipboard.kTextPlain))?.text;
-      final resolved = _resolvePaneEditorContext(context);
-      if (resolved == null) {
-        return PaneEditorCommandOutcome.staleTarget;
-      }
-      if (text == null || text.isEmpty) {
-        return PaneEditorCommandOutcome.unchanged;
-      }
-      _replaceEditorSelection(resolved.session, text);
-      return PaneEditorCommandOutcome.committed;
-    });
-  }
-
-  Future<NoteEditorPasteAvailability> _noteEditorPasteAvailability(
-    PaneEditorContext? context,
-  ) async {
-    if (_busy ||
-        _autoSaving ||
-        context == null ||
-        _resolvePaneEditorContext(context) == null) {
-      return NoteEditorPasteAvailability.empty;
-    }
-    final results = await Future.wait<bool>([
-      Clipboard.hasStrings(),
-      _imageInput.canPasteImage(),
-    ]);
-    if (_resolvePaneEditorContext(context) == null) {
-      return NoteEditorPasteAvailability.empty;
-    }
-    return NoteEditorPasteAvailability(
-      hasText: results[0],
-      hasImage: results[1],
-    );
-  }
-
-  Future<PaneEditorCommandOutcome> _insertPastedImage({
-    required PaneEditorContext context,
-    required ImportedImage image,
-  }) async {
-    final resolved = _resolvePaneEditorContext(context);
-    if (resolved == null) {
-      return PaneEditorCommandOutcome.staleTarget;
-    }
-    final filename = _noteEditorPastedImageFilename(image.filename);
-    final targetSession = resolved.session;
-    final vault = _requireVault();
-    final result = await _workspaceMutationBarrier.run<_SourceMutationPayload>(
-      WorkspaceMutationPlan<_SourceMutationPayload>(
-        affectedNoteIds: {targetSession.noteId},
-        dirtyDisposition: DirtyDisposition.discard,
-        commitBackend: () async {
-          final oldNoteId = _ownedNoteId(
-            targetSession,
-            fallback: resolved.noteId,
-          );
-          final source = await vault.addImageSource(
-            noteId: oldNoteId,
-            filename: filename,
-            mimeType: image.mimeType,
-            bytes: image.bytes,
-          );
-          final replacement = _blockInsertionForCurrentSelection(
-            targetSession,
-            _imageMarkdownTag(targetSession.note, source),
-          );
-          final value = targetSession.controller.value;
-          final selection = _normalizedSelection(value);
-          final updatedBody = value.text.replaceRange(
-            selection.start,
-            selection.end,
-            replacement,
-          );
-          final saved = await runVaultPostCommit(
-            () => vault.updateMarkdown(
-              noteId: oldNoteId,
-              markdown: _markdownForVisibleBody(
-                targetSession.note,
-                updatedBody,
-              ),
-            ),
-          );
-          var committedNoteId = oldNoteId;
-          if (saved.title != targetSession.note.title) {
-            final renamed = await runVaultPostCommit(
-              () => vault.renameNote(noteId: oldNoteId, title: saved.title),
-            );
-            committedNoteId = renamed.id;
-          }
-          return WorkspaceBackendCommit<_SourceMutationPayload>(
-            postCommitHydrate: () async {
-              final note = await vault.readNote(committedNoteId);
-              final resources = await vault.listResources();
-              return VaultMutationDelta<_SourceMutationPayload>(
-                value: _SourceMutationPayload(note: note, source: source),
-                remappedNoteIds: {oldNoteId: note.id},
-                refreshedNotesByNewId: {note.id: note},
-                resources: resources,
-              );
-            },
-          );
-        },
-        prepareCommit: (delta) {
-          final targetIsCurrent = _resolvePaneEditorContext(context) != null;
-          final sessionStillOwned = noteSessionRegistryOwnsSession(
-            sessions: _noteSessionRegistry,
-            sessionIdentity: targetSession,
-            noteIds: {
-              targetSession.noteId,
-              ...delta.remappedNoteIds.keys,
-              ...delta.remappedNoteIds.values,
-            },
-          );
-          if (!sessionStillOwned) {
-            return _prepareWorkspaceCommit(delta);
-          }
-          final note = delta.value.note;
-          final source = delta.value.source;
-          final resources = delta.resources ?? const [];
-          if (!targetIsCurrent) {
-            final nextSelectedResource = _preparedSelectedResourceAfterMutation(
-              resources: resources,
-              remappedNoteIds: delta.remappedNoteIds,
-            );
-            return _prepareWorkspaceCommit(
-              delta,
-              workspaceSnapshot: _WorkspaceCommitSnapshot(
-                resources: _WorkspaceSnapshotField.set(resources),
-                selectedResource: _WorkspaceSnapshotField.set(
-                  nextSelectedResource,
-                ),
-                searchResults: const _WorkspaceSnapshotField.set(
-                  <SearchResult>[],
-                ),
-              ),
-            );
-          }
-          final selectedSourceIds = Set<String>.of(
-            _noteMaterialsRegistry.snapshotFor(note.id).selectedSourceIds,
-          )..add(source.id);
-          final targetIsFocused =
-              _splitWorkspaceController.focusedPaneId == context.paneId;
-          return _prepareWorkspaceCommit(
-            delta,
-            savedNoteCommit: SavedNoteSessionCommit(
-              session: targetSession,
-              oldNoteId: delta.remappedNoteIds.keys.single,
-              savedNote: note,
-              preserveCurrentBody: false,
-            ),
-            selectedSourceIdsByNoteId: {note.id: selectedSourceIds},
-            workspaceSnapshot: _WorkspaceCommitSnapshot(
-              resources: _WorkspaceSnapshotField.set(resources),
-              selectedResource: targetIsFocused
-                  ? _WorkspaceSnapshotField.set(
-                      _findResource(resources, note.id),
-                    )
-                  : const _WorkspaceSnapshotField.unchanged(),
-              message: _WorkspaceSnapshotField.set('图片已粘贴到笔记：$filename'),
-              previewImageSrc: targetIsFocused
-                  ? _WorkspaceSnapshotField.set(
-                      _markdownAttachmentSrc(note, source),
-                    )
-                  : const _WorkspaceSnapshotField.unchanged(),
-            ),
-          );
-        },
-      ),
-    );
-    if (!_commitSucceededOrThrow(result)) {
-      return PaneEditorCommandOutcome.unchanged;
-    }
-    return _resolvePaneEditorContext(context) == null
-        ? PaneEditorCommandOutcome.staleTarget
-        : PaneEditorCommandOutcome.committed;
-  }
-
-  String _imageMarkdownTag(VaultNoteContent note, SourceItem source) {
-    final src = _markdownAttachmentSrc(note, source);
-    return '<img src="${escapeHtmlAttribute(src)}" '
-        'width="${_workspacePreferences.pastedImageWidth}">';
-  }
-
-  String _noteEditorPastedImageFilename(String filename) {
-    final extension = p.extension(filename).isEmpty
-        ? '.png'
-        : p.extension(filename);
-    final base = p.basenameWithoutExtension(filename);
-    final legacyClipboardMatch = RegExp(
-      r'^clipboard-(\d+)(?:-.+)?$',
-    ).firstMatch(base);
-    if (legacyClipboardMatch != null) {
-      return '${legacyClipboardMatch.group(1)}$extension';
-    }
-    return filename;
-  }
-
-  String _markdownAttachmentSrc(VaultNote note, SourceItem source) {
-    final attachmentPath = source.attachmentPath;
-    if (attachmentPath == null || attachmentPath.trim().isEmpty) {
-      throw StateError('Source has no attachment: ${source.id}');
-    }
-    final assetsDirectory = '${p.basenameWithoutExtension(note.path)}.assets';
-    return '$assetsDirectory/$attachmentPath'.replaceAll('\\', '/');
-  }
-
-  String _blockInsertionForCurrentSelection(
-    NoteDocumentSession session,
-    String block,
-  ) {
-    final value = session.controller.value;
-    final text = value.text;
-    final selection = _normalizedSelection(value);
-    return blockImageInsertion(
-      text: text,
-      start: selection.start,
-      end: selection.end,
-      tag: block,
-    );
-  }
-
-  void _replaceEditorSelection(
-    NoteDocumentSession session,
-    String replacement,
-  ) {
-    final controller = session.controller;
-    final value = controller.value;
-    final selection = _normalizedSelection(value);
-    final text = value.text;
-    final updated = text.replaceRange(
-      selection.start,
-      selection.end,
-      replacement,
-    );
-    final offset = selection.start + replacement.length;
-    controller.value = value.copyWith(
-      text: updated,
-      selection: TextSelection.collapsed(offset: offset),
-      composing: TextRange.empty,
-    );
-  }
-
-  TextSelection _normalizedSelection(TextEditingValue value) {
-    final selection = value.selection;
-    if (!selection.isValid) {
-      return TextSelection.collapsed(offset: value.text.length);
-    }
-    final start = _clampTextOffset(selection.start, value.text.length);
-    final end = _clampTextOffset(selection.end, value.text.length);
-    return TextSelection(baseOffset: start, extentOffset: end);
-  }
-
-  Future<PaneEditorCommandOutcome> _addImageSource(
-    PaneEditorContext? context,
-  ) async {
-    if (context == null) {
-      setState(() => _message = '请先选择或创建笔记');
-      return PaneEditorCommandOutcome.unchanged;
-    }
-    return _runPaneEditorCommand(context, () async {
-      final resolved = _resolvePaneEditorContext(context);
-      if (resolved == null) {
-        return PaneEditorCommandOutcome.staleTarget;
-      }
-      final flushFailure = await _flushPaneEditorSession(
-        context,
-        resolved.session,
-      );
-      if (flushFailure != null) {
-        return flushFailure;
-      }
-      final image = await _imageInput.pickImage();
-      if (_resolvePaneEditorContext(context) == null) {
-        return PaneEditorCommandOutcome.staleTarget;
-      }
-      if (image == null) {
-        setState(() => _message = '未选择图片');
-        return PaneEditorCommandOutcome.unchanged;
-      }
-      return _saveImportedImage(
-        context,
-        image,
-        message: '图片已导入：${image.filename}',
-      );
-    });
-  }
-
-  Future<PaneEditorCommandOutcome> _pasteImageSource(
-    PaneEditorContext? context,
-  ) async {
-    if (context == null) {
-      setState(() => _message = '请先选择或创建笔记');
-      return PaneEditorCommandOutcome.unchanged;
-    }
-    if (_resolvePaneEditorContext(context) == null) {
-      return PaneEditorCommandOutcome.staleTarget;
-    }
-    return _runPaneEditorBusy(context, () async {
-      var resolved = _resolvePaneEditorContext(context);
-      if (resolved == null) {
-        return PaneEditorCommandOutcome.staleTarget;
-      }
-      final flushFailure = await _flushPaneEditorSession(
-        context,
-        resolved.session,
-      );
-      if (flushFailure != null) {
-        return flushFailure;
-      }
-      if (_resolvePaneEditorContext(context) == null) {
-        return PaneEditorCommandOutcome.staleTarget;
-      }
-      final image = await _imageInput.pasteImage();
-      if (_resolvePaneEditorContext(context) == null) {
-        return PaneEditorCommandOutcome.staleTarget;
-      }
-      if (image == null) {
-        setState(() => _message = '剪贴板中没有可导入的图片');
-        return PaneEditorCommandOutcome.unchanged;
-      }
-      return _saveImportedImage(
-        context,
-        image,
-        message: '剪贴板图片已导入：${image.filename}',
-        wrapBusy: false,
-      );
-    });
-  }
-
-  Future<PaneEditorCommandOutcome> _saveImportedImage(
-    PaneEditorContext context,
-    ImportedImage image, {
-    required String message,
-    bool wrapBusy = true,
-  }) async {
-    if (_resolvePaneEditorContext(context) == null) {
-      return PaneEditorCommandOutcome.staleTarget;
-    }
-    Future<PaneEditorCommandOutcome> save() async {
-      final resolved = _resolvePaneEditorContext(context);
-      if (resolved == null) {
-        return PaneEditorCommandOutcome.staleTarget;
-      }
-      final targetSession = resolved.session;
-      final vault = _requireVault();
-      final result = await _workspaceMutationBarrier
-          .run<_SourceMutationPayload>(
-            WorkspaceMutationPlan<_SourceMutationPayload>(
-              affectedNoteIds: {targetSession.noteId},
-              dirtyDisposition: DirtyDisposition.flush,
-              commitBackend: () async {
-                final noteId = _ownedNoteId(
-                  targetSession,
-                  fallback: resolved.noteId,
-                );
-                final source = await vault.addImageSource(
-                  noteId: noteId,
-                  filename: image.filename,
-                  mimeType: image.mimeType,
-                  bytes: image.bytes,
-                );
-                return WorkspaceBackendCommit<_SourceMutationPayload>(
-                  postCommitHydrate: () async {
-                    final note = await vault.readNote(noteId);
-                    final resources = await vault.listResources();
-                    return VaultMutationDelta<_SourceMutationPayload>(
-                      value: _SourceMutationPayload(note: note, source: source),
-                      refreshedNotesByNewId: {note.id: note},
-                      resources: resources,
-                    );
-                  },
-                );
-              },
-              prepareCommit: (delta) {
-                final targetIsCurrent =
-                    _resolvePaneEditorContext(context) != null;
-                if (!targetIsCurrent) {
-                  return _prepareWorkspaceCommit(delta);
-                }
-                final note = delta.value.note;
-                final source = delta.value.source;
-                final resources = delta.resources ?? const [];
-                final selectedSourceIds = Set<String>.of(
-                  _noteMaterialsRegistry.snapshotFor(note.id).selectedSourceIds,
-                )..add(source.id);
-                final targetIsFocused =
-                    _splitWorkspaceController.focusedPaneId == context.paneId;
-                return _prepareWorkspaceCommit(
-                  delta,
-                  upsertedNotesById: {note.id: note},
-                  selectedSourceIdsByNoteId: {note.id: selectedSourceIds},
-                  workspaceSnapshot: _WorkspaceCommitSnapshot(
-                    resources: _WorkspaceSnapshotField.set(resources),
-                    selectedResource: targetIsFocused
-                        ? _WorkspaceSnapshotField.set(
-                            _findResource(resources, note.id),
-                          )
-                        : const _WorkspaceSnapshotField.unchanged(),
-                    narrowSection: targetIsFocused
-                        ? const _WorkspaceSnapshotField.set(
-                            _WorkspaceSection.sources,
-                          )
-                        : const _WorkspaceSnapshotField.unchanged(),
-                    message: _WorkspaceSnapshotField.set(message),
-                  ),
-                );
-              },
-            ),
-          );
-      if (!_commitSucceededOrThrow(result)) {
-        return PaneEditorCommandOutcome.unchanged;
-      }
-      return _resolvePaneEditorContext(context) == null
-          ? PaneEditorCommandOutcome.staleTarget
-          : PaneEditorCommandOutcome.committed;
-    }
-
-    if (!wrapBusy) {
-      return save();
-    }
-    return _runPaneEditorBusy(context, save);
-  }
-
-  Future<PaneEditorCommandOutcome> _generateProposal(
-    PaneEditorContext? context,
-  ) async {
-    if (context == null) {
-      return PaneEditorCommandOutcome.unchanged;
-    }
-    var resolved = _resolvePaneEditorContext(context);
-    if (resolved == null) {
-      return PaneEditorCommandOutcome.staleTarget;
-    }
-    final sourceIds = _noteMaterialsRegistry
-        .snapshotFor(resolved.noteId)
-        .selectedSourceIds
-        .toList();
-    if (sourceIds.isEmpty) {
-      return PaneEditorCommandOutcome.unchanged;
-    }
-    if (!_requireModelConfigured()) {
-      return PaneEditorCommandOutcome.unchanged;
-    }
-    return _runPaneEditorBusy(context, () async {
-      var current = _resolvePaneEditorContext(context);
-      if (current == null) {
-        return PaneEditorCommandOutcome.staleTarget;
-      }
-      final flushFailure = await _flushPaneEditorSession(
-        context,
-        current.session,
-      );
-      if (flushFailure != null) {
-        return flushFailure;
-      }
-      current = _resolvePaneEditorContext(context);
-      if (current == null) {
-        return PaneEditorCommandOutcome.staleTarget;
-      }
-      final vault = _requireVault();
-      final proposalService = _requireProposalService();
-      final mutationBarrier = _workspaceMutationBarrier;
-      final preparedSession = current.session;
-      final prepared = await proposalService.prepareOutlineProposal(
-        noteId: current.noteId,
-        sourceIds: sourceIds,
-      );
-      current = _resolvePaneEditorContext(context);
-      if (current == null) {
-        final sessionIsStillOwned = identical(
-          _noteSessionRegistry.sessionFor(preparedSession.noteId),
-          preparedSession,
-        );
-        await mutationBarrier.run<void>(
-          WorkspaceMutationPlan<void>(
-            affectedNoteIds: sessionIsStillOwned
-                ? <String>{preparedSession.noteId}
-                : const <String>{},
-            dirtyDisposition: DirtyDisposition.flush,
-            commitBackend: () async {
-              await proposalService.commitPreparedOutlineProposal(prepared);
-              return WorkspaceBackendCommit<void>.completed(
-                const VaultMutationDelta<void>(value: null),
-              );
-            },
-          ),
-        );
-        return PaneEditorCommandOutcome.staleTarget;
-      }
-      final targetSession = current.session;
-      final result = await _workspaceMutationBarrier.run<_NoteMutationPayload>(
-        WorkspaceMutationPlan<_NoteMutationPayload>(
-          affectedNoteIds: {targetSession.noteId},
-          dirtyDisposition: DirtyDisposition.flush,
-          commitBackend: () async {
-            final commitTarget = _resolvePaneEditorContext(context);
-            if (commitTarget == null ||
-                !identical(commitTarget.session, targetSession)) {
-              throw StateError('Proposal target became stale before commit.');
-            }
-            final noteId = _ownedNoteId(
-              targetSession,
-              fallback: commitTarget.noteId,
-            );
-            await proposalService.commitPreparedOutlineProposal(prepared);
-            return WorkspaceBackendCommit<_NoteMutationPayload>(
-              postCommitHydrate: () async {
-                final note = await vault.readNote(noteId);
-                final proposals = await vault.listProposals(noteId);
-                final resources = await vault.listResources();
-                return VaultMutationDelta<_NoteMutationPayload>(
-                  value: _NoteMutationPayload(note: note, proposals: proposals),
-                  refreshedNotesByNewId: {note.id: note},
-                  resources: resources,
-                );
-              },
-            );
-          },
-          prepareCommit: (delta) {
-            final targetIsCurrent = _resolvePaneEditorContext(context) != null;
-            if (!targetIsCurrent) {
-              return _prepareWorkspaceCommit(delta);
-            }
-            final note = delta.value.note;
-            final resources = delta.resources ?? const [];
-            final targetIsFocused =
-                _splitWorkspaceController.focusedPaneId == context.paneId;
-            return _prepareWorkspaceCommit(
-              delta,
-              upsertedNotesById: {note.id: note},
-              replacementProposalsByNoteId: {note.id: delta.value.proposals},
-              workspaceSnapshot: _WorkspaceCommitSnapshot(
-                resources: _WorkspaceSnapshotField.set(resources),
-                selectedResource: targetIsFocused
-                    ? _WorkspaceSnapshotField.set(
-                        _findResource(resources, note.id),
-                      )
-                    : const _WorkspaceSnapshotField.unchanged(),
-              ),
-            );
-          },
-        ),
-      );
-      if (!_commitSucceededOrThrow(result)) {
-        return PaneEditorCommandOutcome.unchanged;
-      }
-      return _resolvePaneEditorContext(context) == null
-          ? PaneEditorCommandOutcome.staleTarget
-          : PaneEditorCommandOutcome.committed;
-    });
-  }
-
-  Future<PaneEditorCommandOutcome> _copyProposal(
-    PaneEditorContext context,
-    AiProposal proposal,
-  ) async {
-    if (_resolvePaneEditorContext(context) == null) {
-      return PaneEditorCommandOutcome.staleTarget;
-    }
-    return _runPaneEditorCommand(context, () async {
-      await Clipboard.setData(
-        ClipboardData(text: _normalizeLineBreaks(proposal.proposedMarkdown)),
-      );
-      if (_resolvePaneEditorContext(context) == null) {
-        return PaneEditorCommandOutcome.staleTarget;
-      }
-      setState(() => _message = '建议已复制到剪贴板');
-      return PaneEditorCommandOutcome.committed;
-    });
-  }
-
-  String _normalizeLineBreaks(String value) {
-    return value.replaceAll('\r\n', '\n').replaceAll('\r', '\n');
   }
 
   Future<bool> _confirmDelete({
     required String title,
     required String message,
   }) async {
-    final confirmed = await showCupertinoDialog<bool>(
-      context: context,
-      builder: (context) => CupertinoAlertDialog(
-        title: Text(title),
-        content: Padding(
-          padding: const EdgeInsets.only(top: 8),
-          child: Text(message),
-        ),
-        actions: [
-          CupertinoDialogAction(
-            onPressed: () => Navigator.of(context).pop(false),
-            child: const Text('取消'),
-          ),
-          CupertinoDialogAction(
-            isDestructiveAction: true,
-            onPressed: () => Navigator.of(context).pop(true),
-            child: const Text('删除'),
-          ),
-        ],
-      ),
-    );
-    return confirmed ?? false;
-  }
-
-  Future<void> _deleteResource(VaultResourceNode resource) async {
-    if (_busy || _reloadRequired) {
-      return;
+    FocusManager.instance.primaryFocus?.unfocus();
+    await WidgetsBinding.instance.endOfFrame;
+    if (!mounted) {
+      return false;
     }
-    final paneTarget = _captureFocusedPaneMutationTarget();
-    final affectedSessions =
-        (resource.isFolder
-                ? _noteSessionRegistry.sessionsUnderPath(resource.path)
-                : _noteSessionRegistry.sessionsForIds([resource.id]))
-            .toList(growable: false);
-    final affectedSessionSet = Set<NoteDocumentSession>.identity()
-      ..addAll(affectedSessions);
-    final affectedPaneTargets = <_PaneMutationTarget>[];
-    for (final pane in _splitWorkspaceController.panes) {
-      final noteId = pane.noteId;
-      if (noteId == null) {
-        continue;
-      }
-      final session = _noteSessionRegistry.sessionFor(noteId);
-      if (!(session != null && affectedSessionSet.contains(session)) &&
-          !_resourceContainsNote(resource, noteId)) {
-        continue;
-      }
-      final generation = _splitWorkspaceController.paneGeneration(pane.paneId);
-      if (generation == null) {
-        continue;
-      }
-      affectedPaneTargets.add(
-        _PaneMutationTarget(
-          paneId: pane.paneId,
-          generation: generation,
-          noteId: noteId,
-          session: session,
-        ),
-      );
-    }
-    final confirmed = await _confirmDelete(
-      title: resource.isFolder ? '删除文件夹' : '删除笔记',
-      message: resource.isFolder
-          ? '将递归删除“${resource.title}”及其中所有子文件夹、笔记和素材。此操作不可撤销。'
-          : '将删除“${resource.title}”的 Markdown 文件和对应 assets 目录。此操作不可撤销。',
-    );
-    if (!confirmed) {
-      return;
-    }
-    await _runBusy(() async {
-      final vault = _requireVault();
-      final resourceNoteIds = resource.isNote
-          ? <String>{resource.id}
-          : _flattenNoteResources([resource]).map((note) => note.id).toSet();
-      final affectedNoteIds = <String>{
-        ...resourceNoteIds,
-        for (final session in affectedSessions) session.noteId,
-      };
-      final result = await _workspaceMutationBarrier
-          .run<_DeleteMutationPayload>(
-            WorkspaceMutationPlan<_DeleteMutationPayload>(
-              affectedNoteIds: affectedNoteIds,
-              dirtyDisposition: DirtyDisposition.discard,
-              commitBackend: () async {
-                final removedNoteIds = <String>{
-                  ...resourceNoteIds,
-                  for (final session in affectedSessions) session.noteId,
-                };
-                if (resource.isFolder) {
-                  await vault.deleteFolder(resource.path);
-                } else {
-                  await vault.deleteNote(
-                    _ownedNoteId(
-                      affectedSessions.isEmpty ? null : affectedSessions.first,
-                      fallback: resource.id,
-                    ),
-                  );
-                }
-                return WorkspaceBackendCommit<_DeleteMutationPayload>(
-                  postCommitHydrate: () async {
-                    final resources = await vault.listResources();
-                    final firstNote = _firstNote(resources);
-                    VaultNoteContent? fallbackNote;
-                    List<AiProposal> fallbackProposals = const [];
-                    if (firstNote != null) {
-                      fallbackNote = await vault.readNote(firstNote.id);
-                      fallbackProposals = await vault.listProposals(
-                        firstNote.id,
-                      );
-                    }
-                    return VaultMutationDelta<_DeleteMutationPayload>(
-                      value: _DeleteMutationPayload(
-                        fallbackNote: fallbackNote,
-                        fallbackProposals: fallbackProposals,
-                      ),
-                      removedNoteIds: removedNoteIds,
-                      resources: resources,
-                    );
-                  },
-                );
-              },
-              prepareCommit: (delta) {
-                final resources = delta.resources ?? const [];
-                final fallbackNote = delta.value.fallbackNote;
-                final removedNoteIds = delta.removedNoteIds;
-                bool paneWillBeEmpty(_PaneMutationTarget target) {
-                  if (!_paneMutationTargetHasCurrentGeneration(target)) {
-                    return false;
-                  }
-                  final noteId = _splitWorkspaceController
-                      .pane(target.paneId)
-                      ?.noteId;
-                  return noteId == null || removedNoteIds.contains(noteId);
-                }
-
-                _PaneMutationTarget? fallbackPaneTarget;
-                final focusedPaneId = _splitWorkspaceController.focusedPaneId;
-                for (final target in affectedPaneTargets) {
-                  if (target.paneId == focusedPaneId &&
-                      paneWillBeEmpty(target)) {
-                    fallbackPaneTarget = target;
-                    break;
-                  }
-                }
-                if (fallbackPaneTarget == null &&
-                    paneTarget != null &&
-                    paneWillBeEmpty(paneTarget)) {
-                  fallbackPaneTarget = paneTarget;
-                }
-                final paneAssignments =
-                    fallbackNote != null && fallbackPaneTarget != null
-                    ? <String, String?>{
-                        fallbackPaneTarget.paneId: fallbackNote.id,
-                      }
-                    : const <String, String?>{};
-                final upsertedNotes =
-                    fallbackNote != null && fallbackPaneTarget != null
-                    ? <String, VaultNoteContent>{fallbackNote.id: fallbackNote}
-                    : const <String, VaultNoteContent>{};
-                final replacementProposals =
-                    fallbackNote != null && fallbackPaneTarget != null
-                    ? <String, List<AiProposal>>{
-                        fallbackNote.id: delta.value.fallbackProposals,
-                      }
-                    : const <String, List<AiProposal>>{};
-                final focusedNoteId =
-                    fallbackPaneTarget?.paneId == focusedPaneId
-                    ? fallbackNote?.id
-                    : _splitWorkspaceController.focusedPane?.noteId;
-                final committedFocusedNoteId =
-                    focusedNoteId != null &&
-                        removedNoteIds.contains(focusedNoteId)
-                    ? null
-                    : focusedNoteId;
-                final nextSelectedResource = committedFocusedNoteId == null
-                    ? null
-                    : _findResource(resources, committedFocusedNoteId);
-                final nextNarrowSection =
-                    fallbackPaneTarget?.paneId == focusedPaneId
-                    ? (fallbackNote == null
-                          ? _WorkspaceSection.resources
-                          : _WorkspaceSection.notes)
-                    : _narrowSection;
-                return _prepareWorkspaceCommit(
-                  delta,
-                  upsertedNotesById: upsertedNotes,
-                  replacementProposalsByNoteId: replacementProposals,
-                  paneNoteAssignments: paneAssignments,
-                  workspaceSnapshot: _WorkspaceCommitSnapshot(
-                    resources: _WorkspaceSnapshotField.set(resources),
-                    selectedResource: _WorkspaceSnapshotField.set(
-                      nextSelectedResource,
-                    ),
-                    searchResults: const _WorkspaceSnapshotField.set(
-                      <SearchResult>[],
-                    ),
-                    narrowSection: _WorkspaceSnapshotField.set(
-                      nextNarrowSection,
-                    ),
-                    message: _WorkspaceSnapshotField.set(
-                      resource.isFolder ? '文件夹已删除' : '笔记已删除',
-                    ),
-                  ),
-                );
-              },
+    return await showCupertinoDialog<bool>(
+          context: context,
+          builder: (context) => CupertinoAlertDialog(
+            title: Text(title),
+            content: Padding(
+              padding: const EdgeInsets.only(top: 8),
+              child: Text(message),
             ),
-          );
-      _commitSucceededOrThrow(result);
-    });
-  }
-
-  Future<void> _renameFolder(VaultResourceNode folder) async {
-    if (_busy || _reloadRequired || !folder.isFolder) {
-      return;
-    }
-    final affectedSessions = _noteSessionRegistry
-        .sessionsUnderPath(folder.path)
-        .toList(growable: false);
-    final title = await _promptResourceName(
-      title: '重命名文件夹',
-      placeholder: '文件夹名称',
-      initialValue: folder.title,
-      actionLabel: '重命名',
-    );
-    if (title == null) {
-      return;
-    }
-    await _runBusy(() async {
-      final vault = _requireVault();
-      final affectedNoteIds = <String>{
-        for (final session in affectedSessions) session.noteId,
-      };
-      final result = await _workspaceMutationBarrier.run<VaultResourceNode>(
-        WorkspaceMutationPlan<VaultResourceNode>(
-          affectedNoteIds: affectedNoteIds,
-          dirtyDisposition: DirtyDisposition.flush,
-          commitBackend: () async {
-            final renamed = await vault.renameFolder(
-              folderPath: folder.path,
-              title: title,
-            );
-            return WorkspaceBackendCommit<VaultResourceNode>(
-              postCommitHydrate: () async {
-                final remappedNoteIds = <String, String>{};
-                final refreshedNotes = <String, VaultNoteContent>{};
-                for (final session in affectedSessions) {
-                  final oldId = session.noteId;
-                  if (!_pathIsInside(oldId, folder.path)) {
-                    continue;
-                  }
-                  final newId = _replacePathPrefix(
-                    oldId,
-                    folder.path,
-                    renamed.path,
-                  );
-                  remappedNoteIds[oldId] = newId;
-                  refreshedNotes[newId] = await vault.readNote(newId);
-                }
-                final resources = await vault.listResources();
-                return VaultMutationDelta<VaultResourceNode>(
-                  value: renamed,
-                  remappedNoteIds: remappedNoteIds,
-                  refreshedNotesByNewId: refreshedNotes,
-                  resources: resources,
-                );
-              },
-            );
-          },
-          prepareCommit: (delta) {
-            final resources = delta.resources ?? const [];
-            final nextSelectedResource = _preparedSelectedResourceAfterMutation(
-              resources: resources,
-              remappedNoteIds: delta.remappedNoteIds,
-              oldFolderPath: folder.path,
-              newFolderPath: delta.value.path,
-            );
-            final clearSearch = folder.path != delta.value.path;
-            final collapsedFolderIds = Set<String>.of(_collapsedFolderIds)
-              ..remove(folder.id)
-              ..remove(delta.value.id);
-            return _prepareWorkspaceCommit(
-              delta,
-              workspaceSnapshot: _WorkspaceCommitSnapshot(
-                resources: _WorkspaceSnapshotField.set(resources),
-                selectedResource: _WorkspaceSnapshotField.set(
-                  nextSelectedResource,
-                ),
-                searchResults: clearSearch
-                    ? const _WorkspaceSnapshotField.set(<SearchResult>[])
-                    : const _WorkspaceSnapshotField.unchanged(),
-                message: const _WorkspaceSnapshotField.set('文件夹已重命名'),
-                collapsedFolderIds: _WorkspaceSnapshotField.set(
-                  collapsedFolderIds,
-                ),
+            actions: [
+              CupertinoDialogAction(
+                onPressed: () => Navigator.of(context).pop(false),
+                child: const Text('取消'),
               ),
-            );
-          },
-        ),
-      );
-      _commitSucceededOrThrow(result);
-    });
-  }
-
-  Future<void> _createSiblingNote(VaultResourceNode note) async {
-    if (_busy || !note.isNote) {
-      return;
-    }
-    await _createNote(parentPath: _parentFolderPath(note.path));
-  }
-
-  Future<void> _copyNote(VaultResourceNode note) async {
-    if (_busy || _reloadRequired || !note.isNote) {
-      return;
-    }
-    final sourceSession = _noteSessionRegistry.sessionFor(note.id);
-    final paneTarget = _captureFocusedPaneMutationTarget();
-    await _runBusy(() async {
-      final vault = _requireVault();
-      final affectedNoteId = _ownedNoteId(sourceSession, fallback: note.id);
-      final result = await _workspaceMutationBarrier.run<_NoteMutationPayload>(
-        WorkspaceMutationPlan<_NoteMutationPayload>(
-          affectedNoteIds: {affectedNoteId},
-          dirtyDisposition: DirtyDisposition.flush,
-          commitBackend: () async {
-            final copied = await vault.copyNote(
-              noteId: _ownedNoteId(sourceSession, fallback: note.id),
-            );
-            return WorkspaceBackendCommit<_NoteMutationPayload>(
-              postCommitHydrate: () async {
-                final loaded = await vault.readNote(copied.id);
-                final resources = await vault.listResources();
-                final proposals = await vault.listProposals(copied.id);
-                return VaultMutationDelta<_NoteMutationPayload>(
-                  value: _NoteMutationPayload(
-                    note: loaded,
-                    proposals: proposals,
-                  ),
-                  resources: resources,
-                );
-              },
-            );
-          },
-          prepareCommit: (delta) {
-            final targetIsCurrent =
-                paneTarget != null &&
-                _paneMutationTargetStillOwnsSession(paneTarget);
-            final resources = delta.resources ?? const [];
-            final copiedNote = delta.value.note;
-            final targetIsFocused =
-                targetIsCurrent &&
-                _splitWorkspaceController.focusedPaneId == paneTarget.paneId;
-            final nextSelectedResource = targetIsFocused
-                ? _findResource(resources, copiedNote.id)
-                : _selectedResource;
-            final collapsedFolderIds = Set<String>.of(_collapsedFolderIds)
-              ..remove(_parentFolderPath(copiedNote.path));
-            return _prepareWorkspaceCommit(
-              delta,
-              upsertedNotesById: targetIsCurrent
-                  ? {copiedNote.id: copiedNote}
-                  : const {},
-              replacementProposalsByNoteId: targetIsCurrent
-                  ? {copiedNote.id: delta.value.proposals}
-                  : const {},
-              paneNoteAssignments: targetIsCurrent
-                  ? {paneTarget.paneId: copiedNote.id}
-                  : const {},
-              workspaceSnapshot: _WorkspaceCommitSnapshot(
-                resources: _WorkspaceSnapshotField.set(resources),
-                selectedResource: targetIsFocused
-                    ? _WorkspaceSnapshotField.set(nextSelectedResource)
-                    : const _WorkspaceSnapshotField.unchanged(),
-                searchResults: const _WorkspaceSnapshotField.set(
-                  <SearchResult>[],
-                ),
-                narrowSection: targetIsFocused
-                    ? const _WorkspaceSnapshotField.set(_WorkspaceSection.notes)
-                    : const _WorkspaceSnapshotField.unchanged(),
-                message: const _WorkspaceSnapshotField.set('笔记已复制'),
-                collapsedFolderIds: _WorkspaceSnapshotField.set(
-                  collapsedFolderIds,
-                ),
+              CupertinoDialogAction(
+                isDestructiveAction: true,
+                onPressed: () => Navigator.of(context).pop(true),
+                child: const Text('删除'),
               ),
-            );
-          },
-        ),
-      );
-      _commitSucceededOrThrow(result);
-    });
-  }
-
-  Future<void> _moveNote(VaultResourceNode note) async {
-    if (_busy || _reloadRequired || !note.isNote) {
-      return;
-    }
-    final sourceSession = _noteSessionRegistry.sessionFor(note.id);
-    final paneTarget = _captureFocusedPaneMutationTarget();
-    final parentPath = await _promptMoveNoteTarget(note);
-    if (parentPath == null) {
-      return;
-    }
-    await _runBusy(() async {
-      final vault = _requireVault();
-      final affectedNoteId = _ownedNoteId(sourceSession, fallback: note.id);
-      final result = await _workspaceMutationBarrier.run<_NoteMutationPayload>(
-        WorkspaceMutationPlan<_NoteMutationPayload>(
-          affectedNoteIds: {affectedNoteId},
-          dirtyDisposition: DirtyDisposition.flush,
-          commitBackend: () async {
-            final sourceNoteId = _ownedNoteId(sourceSession, fallback: note.id);
-            final moved = await vault.moveNote(
-              noteId: sourceNoteId,
-              parentPath: parentPath,
-            );
-            return WorkspaceBackendCommit<_NoteMutationPayload>(
-              postCommitHydrate: () async {
-                final loaded = await vault.readNote(moved.id);
-                final resources = await vault.listResources();
-                final proposals = await vault.listProposals(moved.id);
-                return VaultMutationDelta<_NoteMutationPayload>(
-                  value: _NoteMutationPayload(
-                    note: loaded,
-                    proposals: proposals,
-                  ),
-                  remappedNoteIds: {sourceNoteId: moved.id},
-                  refreshedNotesByNewId: {moved.id: loaded},
-                  resources: resources,
-                );
-              },
-            );
-          },
-          prepareCommit: (delta) {
-            final targetIsCurrent =
-                paneTarget != null &&
-                _paneMutationTargetStillOwnsSession(paneTarget);
-            final movedNote = delta.value.note;
-            final resources = delta.resources ?? const [];
-            final sourceSessionWillRemap =
-                sourceSession != null &&
-                delta.remappedNoteIds.keys.any(
-                  (oldId) => identical(
-                    _noteSessionRegistry.sessionFor(oldId),
-                    sourceSession,
-                  ),
-                );
-            final targetIsFocused =
-                targetIsCurrent &&
-                _splitWorkspaceController.focusedPaneId == paneTarget.paneId;
-            final nextSelectedResource = _preparedSelectedResourceAfterMutation(
-              resources: resources,
-              remappedNoteIds: delta.remappedNoteIds,
-            );
-            final collapsedFolderIds = Set<String>.of(_collapsedFolderIds)
-              ..remove(parentPath);
-            return _prepareWorkspaceCommit(
-              delta,
-              upsertedNotesById: sourceSessionWillRemap
-                  ? const {}
-                  : {movedNote.id: movedNote},
-              replacementProposalsByNoteId: {
-                movedNote.id: delta.value.proposals,
-              },
-              paneNoteAssignments: targetIsCurrent
-                  ? {paneTarget.paneId: movedNote.id}
-                  : const {},
-              workspaceSnapshot: _WorkspaceCommitSnapshot(
-                resources: _WorkspaceSnapshotField.set(resources),
-                selectedResource: _WorkspaceSnapshotField.set(
-                  nextSelectedResource,
-                ),
-                searchResults:
-                    _actualNoteIdRemaps(delta.remappedNoteIds).isNotEmpty
-                    ? const _WorkspaceSnapshotField.set(<SearchResult>[])
-                    : const _WorkspaceSnapshotField.unchanged(),
-                narrowSection: targetIsFocused
-                    ? const _WorkspaceSnapshotField.set(_WorkspaceSection.notes)
-                    : const _WorkspaceSnapshotField.unchanged(),
-                message: const _WorkspaceSnapshotField.set('笔记已移动'),
-                collapsedFolderIds: _WorkspaceSnapshotField.set(
-                  collapsedFolderIds,
-                ),
-              ),
-            );
-          },
-        ),
-      );
-      _commitSucceededOrThrow(result);
-    });
+            ],
+          ),
+        ) ??
+        false;
   }
 
   Future<String?> _promptMoveNoteTarget(VaultResourceNode note) {
@@ -3043,319 +394,146 @@ class _SynapseWorkspaceState extends ConsumerState<SynapseWorkspace> {
     );
   }
 
-  Future<PaneEditorCommandOutcome> _deleteSource(
-    PaneEditorContext context,
-    SourceItem source,
-  ) async {
-    if (_reloadRequired) {
-      return PaneEditorCommandOutcome.unchanged;
-    }
-    final confirmed = await _confirmDelete(
-      title: '删除图片素材',
-      message: '将删除这条图片素材和对应附件文件。此操作不可撤销。',
-    );
-    if (_resolvePaneEditorContext(context) == null) {
-      return PaneEditorCommandOutcome.staleTarget;
-    }
-    if (!confirmed) {
-      return PaneEditorCommandOutcome.unchanged;
-    }
-    return _runPaneEditorBusy(context, () async {
-      final resolved = _resolvePaneEditorContext(context);
-      if (resolved == null) {
-        return PaneEditorCommandOutcome.staleTarget;
-      }
-      final targetSession = resolved.session;
-      final vault = _requireVault();
-      String? deletedPreviewSrc;
-      final result = await _workspaceMutationBarrier.run<_NoteMutationPayload>(
-        WorkspaceMutationPlan<_NoteMutationPayload>(
-          affectedNoteIds: {targetSession.noteId},
-          dirtyDisposition: DirtyDisposition.flush,
-          commitBackend: () async {
-            SourceItem? currentSource;
-            for (final candidate in targetSession.note.sources) {
-              if (candidate.id == source.id) {
-                currentSource = candidate;
-                break;
-              }
-            }
-            if (currentSource == null) {
-              throw StateError('Source not found: ${source.id}');
-            }
-            final noteId = _ownedNoteId(
-              targetSession,
-              fallback: resolved.noteId,
-            );
-            deletedPreviewSrc = _markdownAttachmentSrc(
-              targetSession.note,
-              currentSource,
-            );
-            await vault.deleteSource(currentSource);
-            return WorkspaceBackendCommit<_NoteMutationPayload>(
-              postCommitHydrate: () async {
-                final resources = await vault.listResources();
-                final note = await vault.readNote(noteId);
-                return VaultMutationDelta<_NoteMutationPayload>(
-                  value: _NoteMutationPayload(note: note, proposals: const []),
-                  refreshedNotesByNewId: {note.id: note},
-                  resources: resources,
-                );
-              },
-            );
-          },
-          prepareCommit: (delta) {
-            final targetIsCurrent = _resolvePaneEditorContext(context) != null;
-            final targetIsFocused =
-                targetIsCurrent &&
-                _splitWorkspaceController.focusedPaneId == context.paneId;
-            final resources = delta.resources ?? const [];
-            final clearPreview =
-                targetIsFocused &&
-                deletedPreviewSrc != null &&
-                normalizeImageSrc(_selectedPreviewImageSrcNotifier.value) ==
-                    normalizeImageSrc(deletedPreviewSrc!);
-            return _prepareWorkspaceCommit(
-              delta,
-              upsertedNotesById: {delta.value.note.id: delta.value.note},
-              workspaceSnapshot: _WorkspaceCommitSnapshot(
-                resources: _WorkspaceSnapshotField.set(resources),
-                selectedResource: targetIsFocused
-                    ? _WorkspaceSnapshotField.set(
-                        _findResource(resources, delta.value.note.id),
-                      )
-                    : const _WorkspaceSnapshotField.unchanged(),
-                message: targetIsCurrent
-                    ? const _WorkspaceSnapshotField.set('图片素材已删除')
-                    : const _WorkspaceSnapshotField.unchanged(),
-                previewImageSrc: clearPreview
-                    ? const _WorkspaceSnapshotField.set(null)
-                    : const _WorkspaceSnapshotField.unchanged(),
-              ),
-            );
-          },
-        ),
-      );
-      if (!_commitSucceededOrThrow(result)) {
-        return PaneEditorCommandOutcome.unchanged;
-      }
-      return _resolvePaneEditorContext(context) == null
-          ? PaneEditorCommandOutcome.staleTarget
-          : PaneEditorCommandOutcome.committed;
-    });
-  }
-
-  Future<PaneEditorCommandOutcome> _deleteProposal(
-    PaneEditorContext context,
-    AiProposal proposal,
-  ) async {
-    if (_reloadRequired) {
-      return PaneEditorCommandOutcome.unchanged;
-    }
-    final confirmed = await _confirmDelete(
-      title: '删除 AI 建议',
-      message: '将删除这条 AI 建议缓存。已经手动写入笔记的内容不会受影响。',
-    );
-    if (_resolvePaneEditorContext(context) == null) {
-      return PaneEditorCommandOutcome.staleTarget;
-    }
-    if (!confirmed) {
-      return PaneEditorCommandOutcome.unchanged;
-    }
-    return _runPaneEditorBusy(context, () async {
-      final resolved = _resolvePaneEditorContext(context);
-      if (resolved == null) {
-        return PaneEditorCommandOutcome.staleTarget;
-      }
-      final targetSession = resolved.session;
-      final vault = _requireVault();
-      final result = await _workspaceMutationBarrier.run<_NoteMutationPayload>(
-        WorkspaceMutationPlan<_NoteMutationPayload>(
-          affectedNoteIds: {targetSession.noteId},
-          dirtyDisposition: DirtyDisposition.flush,
-          commitBackend: () async {
-            final noteId = _ownedNoteId(
-              targetSession,
-              fallback: resolved.noteId,
-            );
-            await vault.deleteProposal(proposal.id);
-            return WorkspaceBackendCommit<_NoteMutationPayload>(
-              postCommitHydrate: () async {
-                final note = await vault.readNote(noteId);
-                final proposals = await vault.listProposals(noteId);
-                return VaultMutationDelta<_NoteMutationPayload>(
-                  value: _NoteMutationPayload(note: note, proposals: proposals),
-                  refreshedNotesByNewId: {note.id: note},
-                );
-              },
-            );
-          },
-          prepareCommit: (delta) {
-            final targetIsCurrent = _resolvePaneEditorContext(context) != null;
-            return _prepareWorkspaceCommit(
-              delta,
-              upsertedNotesById: {delta.value.note.id: delta.value.note},
-              replacementProposalsByNoteId: {
-                delta.value.note.id: delta.value.proposals,
-              },
-              workspaceSnapshot: _WorkspaceCommitSnapshot(
-                message: targetIsCurrent
-                    ? const _WorkspaceSnapshotField.set('AI 建议已删除')
-                    : const _WorkspaceSnapshotField.unchanged(),
-              ),
-            );
-          },
-        ),
-      );
-      if (!_commitSucceededOrThrow(result)) {
-        return PaneEditorCommandOutcome.unchanged;
-      }
-      return _resolvePaneEditorContext(context) == null
-          ? PaneEditorCommandOutcome.staleTarget
-          : PaneEditorCommandOutcome.committed;
-    });
-  }
-
   Future<void> _search() async {
-    final query = _searchController.text.trim();
-    if (!_hasVault || query.isEmpty) {
-      return;
-    }
-    await _runBusy(() async {
-      final capture = _runtimeManager.capture();
-      if (capture == null) {
-        return;
-      }
-      final results = await capture.runtime.searchCoordinator.searchVault(
-        query: query,
-        vault: capture.runtime.vault,
-      );
-      if (results == null || !_runtimeManager.isCurrent(capture)) {
-        return;
-      }
-      setState(() {
-        _leftPaneMode = _LeftPaneMode.search;
-        _searchResults = results;
-        if (!_semanticSearchEnabled) {
-          _message = _semanticSearchFallbackMessage;
-        }
-      });
-    });
+    await _controller.search(_searchController.text);
   }
 
   Future<void> _openSearchResult(SearchResult result) async {
-    if (_busy) {
-      return;
-    }
-    await _runBusy(() async {
-      if (!await _flushPendingMarkdown()) {
-        return;
-      }
-      final targetSession = _noteSessionRegistry.sessionFor(result.noteId);
-      final opened = await _readResourceSnapshotWithMutationRetry((attempt) {
-        if (attempt == 0) {
-          return _resourceCoordinator.openSearchResult(
-            result,
-            resources: _resources,
-          );
-        }
-        return _resourceCoordinator.refreshNote(
-          targetSession?.noteId ?? result.noteId,
-        );
-      });
-      if (opened == null) {
-        return;
-      }
-      if (opened is WorkspaceResourceStale) {
-        return;
-      }
-      if (opened case WorkspaceResourceMissing(:final resources)) {
-        setState(() {
-          _resources = resources;
-          _message = '搜索结果已失效：${result.title}';
-        });
-        return;
-      }
-      final snapshot = (opened as WorkspaceResourceCurrent).snapshot;
-      final note = snapshot.note;
-      if (snapshot.selectedResource == null || note == null) {
-        setState(() => _message = '搜索结果已失效：${result.title}');
-        return;
-      }
-      setState(() {
-        _resources = snapshot.resources;
-        _selectedResource = snapshot.selectedResource;
-        _activeNote = note;
-        _noteMaterialsRegistry.replaceProposals(note.id, snapshot.proposals);
-        _noteMaterialsRegistry.clearSelection(note.id);
-        _noteMode = _preferredNoteMode;
-        _narrowSection = _WorkspaceSection.notes;
-      });
-    });
+    await _controller.openSearchResult(result);
   }
 
   Future<void> _openSettings() async {
-    if (!await _awaitStartupSettingsBaseline() || !mounted) {
+    final controller = _controller;
+    final initialSettings = controller.hasLoadedSettingsBaseline
+        ? controller.settingsForEditing
+        : await controller.awaitSettingsForEditing();
+    if (initialSettings == null || !mounted) {
       return;
     }
-    final store = await _getSettingsStore();
-    final initialSettings = _settingsBaseline;
+    final dependencies = ref.read(workspaceDependenciesProvider);
+    final store =
+        dependencies.resolvedSettingsStore() ??
+        await dependencies.settingsStore();
     if (!mounted) {
       return;
     }
-    final savedSettings = await showCupertinoDialog<SynapseSettings>(
+    final currentBusy =
+        ref.read(workspaceControllerProvider).value?.isBusy ?? _busy;
+    if (!currentBusy) {
+      FocusManager.instance.primaryFocus?.unfocus();
+      await WidgetsBinding.instance.endOfFrame;
+      if (!mounted) {
+        return;
+      }
+    }
+    final saved = await showCupertinoDialog<SynapseSettings>(
       context: context,
       builder: (context) => WorkspaceSettingsSheet(
         initialSettings: initialSettings,
         currentVaultLabel: _vaultRootPath ?? _vaultLabel,
         canSave: store.supportsPersistence,
         unavailableMessage: store.unavailableMessage,
-        onTestConfig: _dependencies.testProviderConfig,
+        onTestConfig: dependencies.testProviderConfig,
       ),
     );
-    if (savedSettings == null) {
-      return;
-    }
-    _invalidateStartupOperation();
-    await _runBusy(() async {
-      final current = _runtimeManager.current;
-      WorkspaceRuntime? candidate;
-      try {
-        if (current != null) {
-          candidate = _createSettingsRuntimeCandidate(current, savedSettings);
-        }
-        await _persistSettings(savedSettings);
-        if (candidate != null) {
-          _runtimeManager.install(candidate);
-          candidate = null;
-          _workspaceMutationToken = Object();
-        }
-        _startupSettingsLoadError = null;
-        setState(() {
-          _settings = savedSettings;
-          _loadedSettingsBaseline = savedSettings;
-          _workspacePreferences = savedSettings.preferences;
-          _providerConfig = savedSettings.providerConfig;
-          _splitWorkspaceController.updateDefaultMode(_preferredNoteMode);
-          _message = _modelConfigurationMessage();
-        });
-      } catch (_) {
-        _disposeDetachedRuntime(candidate);
-        rethrow;
+    if (saved != null) {
+      if (!mounted) {
+        return;
       }
-    });
+      await _controller.updateSettings(saved);
+    }
   }
 
-  SynapseSettings get _settingsBaseline => _loadedSettingsBaseline ?? _settings;
+  Future<PaneEditorCommandOutcome> _addImageSource(
+    PaneEditorContext? editorContext,
+  ) => _controller.importImage(editorContext);
 
-  bool _semanticSearchEnabledFor(SynapseSettings settings) {
-    return settings.preferences.semanticSearchEnabled &&
-        (_dependencies.usesInjectedAiProvider ||
-            settings.providerConfig.hasEmbeddingConfig);
+  Future<PaneEditorCommandOutcome> _pasteImageSource(
+    PaneEditorContext? editorContext,
+  ) => _controller.pasteImage(editorContext);
+
+  Future<PaneEditorCommandOutcome> _pasteIntoNoteEditor(
+    PaneEditorContext? editorContext,
+  ) => _controller.pasteIntoNote(editorContext);
+
+  Future<NoteEditorPasteAvailability> _noteEditorPasteAvailability(
+    PaneEditorContext? editorContext,
+  ) => _controller.notePasteAvailability(editorContext);
+
+  Future<PaneEditorCommandOutcome> _generateProposal(
+    PaneEditorContext? editorContext,
+  ) => _controller.generateProposal(editorContext);
+
+  Future<PaneEditorCommandOutcome> _copyProposal(
+    PaneEditorContext editorContext,
+    AiProposal proposal,
+  ) => _controller.copyProposal(editorContext, proposal);
+
+  Future<PaneEditorCommandOutcome> _deleteSource(
+    PaneEditorContext editorContext,
+    SourceItem source,
+  ) async {
+    final confirmed = await _confirmDelete(
+      title: '删除图片素材',
+      message: '将删除这条图片素材和对应附件文件。此操作不可撤销。',
+    );
+    return confirmed
+        ? _controller.deleteSource(editorContext, source)
+        : PaneEditorCommandOutcome.unchanged;
   }
 
-  @override
-  Widget build(BuildContext context) {
+  Future<PaneEditorCommandOutcome> _deleteProposal(
+    PaneEditorContext editorContext,
+    AiProposal proposal,
+  ) async {
+    final confirmed = await _confirmDelete(
+      title: '删除 AI 建议',
+      message: '将删除这条 AI 建议缓存。已经手动写入笔记的内容不会受影响。',
+    );
+    if (!_controller.isPaneEditorContextCurrent(editorContext)) {
+      return PaneEditorCommandOutcome.staleTarget;
+    }
+    return confirmed
+        ? _controller.deleteProposal(editorContext, proposal)
+        : PaneEditorCommandOutcome.unchanged;
+  }
+
+  Future<PaneEditorCommandOutcome?> _savePaneEditorSession(
+    PaneEditorContext context,
+    NoteDocumentSession session, {
+    String? successMessage,
+    required bool automatic,
+    required bool rescheduleIfDirty,
+  }) async {
+    final outcome = await _controller.saveEditorSession(
+      context,
+      session,
+      automatic: automatic,
+      rescheduleIfDirty: rescheduleIfDirty,
+      successMessage: successMessage,
+    );
+    return outcome == PaneEditorCommandOutcome.committed ? null : outcome;
+  }
+
+  void _replaceSessionMarkdown(NoteDocumentSession session, String markdown) {
+    session.replaceBodyProgrammatically(
+      MarkdownDocument.parse(markdown).body.trimLeft(),
+    );
+  }
+
+  String _markdownAttachmentSrc(VaultNote note, SourceItem source) {
+    final attachmentPath = source.attachmentPath;
+    if (attachmentPath == null || attachmentPath.trim().isEmpty) {
+      throw StateError('Source has no attachment: ${source.id}');
+    }
+    final assetsDirectory = '${p.basenameWithoutExtension(note.path)}.assets';
+    return '$assetsDirectory/$attachmentPath'.replaceAll('\\', '/');
+  }
+
+  _VaultReadView get _vaultView => _VaultReadView(_controller);
+
+  _VaultReadView _requireVault() => _vaultView;
+  Widget _buildWorkspace(BuildContext context) {
     return WorkspaceAppearanceScope(
       appearance: _workspaceAppearance,
       child: CupertinoPageScaffold(
@@ -3712,15 +890,8 @@ class _SynapseWorkspaceState extends ConsumerState<SynapseWorkspace> {
               selectedId: _selectedResource?.id,
               collapsedFolderIds: _collapsedFolderIds,
               onSelect: _selectResource,
-              onToggleFolder: (folder) {
-                setState(() {
-                  if (_collapsedFolderIds.contains(folder.id)) {
-                    _collapsedFolderIds.remove(folder.id);
-                  } else {
-                    _collapsedFolderIds.add(folder.id);
-                  }
-                });
-              },
+              onToggleFolder: (folder) =>
+                  _controller.toggleFolderCollapsed(folder.id),
               onCreateFolder: (folder) =>
                   _createFolder(parentPath: folder.path),
               onCreateNote: (folder) => _createNote(parentPath: folder.path),
@@ -3973,14 +1144,14 @@ class _SynapseWorkspaceState extends ConsumerState<SynapseWorkspace> {
       session: session,
     );
     final accentColor = _workspaceAppearance.accentColor;
-    return ListenableBuilder(
-      listenable: session ?? _splitWorkspaceController,
-      builder: (context, child) {
-        return GestureDetector(
-          key: Key('split-pane-${pane.paneId}'),
-          behavior: HitTestBehavior.opaque,
-          onTap: () => setState(() => _focusPane(pane.paneId)),
-          child: DecoratedBox(
+    return GestureDetector(
+      key: Key('split-pane-${pane.paneId}'),
+      behavior: HitTestBehavior.opaque,
+      onTap: () => setState(() => _focusPane(pane.paneId)),
+      child: ListenableBuilder(
+        listenable: session ?? _controller.editorLockRevision,
+        builder: (context, child) {
+          return DecoratedBox(
             decoration: BoxDecoration(
               color: workspaceSurfaceColor,
               border: Border.all(
@@ -4015,9 +1186,9 @@ class _SynapseWorkspaceState extends ConsumerState<SynapseWorkspace> {
                 ],
               ),
             ),
-          ),
-        );
-      },
+          );
+        },
+      ),
     );
   }
 
@@ -4309,7 +1480,7 @@ class _SynapseWorkspaceState extends ConsumerState<SynapseWorkspace> {
       (config.width ?? defaultMarkdownImageWidth.toDouble()).round(),
     ).toDouble();
     return ValueListenableBuilder<int>(
-      valueListenable: _paneEditorCommandLockRevision,
+      valueListenable: _controller.editorLockRevision,
       builder: (context, revision, child) => PreviewImageBlock(
         key: Key('preview-image-${source.id}'),
         source: source,
@@ -4914,4 +2085,71 @@ final class _PaneEditorSaveScope {
   final NoteDocumentSession session;
   final String bodySnapshot;
   final int runtimeGeneration;
+}
+
+final class _SplitWorkspaceView {
+  const _SplitWorkspaceView(this.state, this.controller);
+
+  final WorkspaceState state;
+  final WorkspaceController controller;
+
+  SplitNode get root => state.splitRoot;
+  String get focusedPaneId => state.focusedPaneId;
+  SplitLeaf? get focusedPane => pane(focusedPaneId);
+  List<SplitLeaf> get panes => _splitLeaves(root);
+  SplitLeaf? pane(String paneId) => _findSplitLeaf(root, paneId);
+  void setPaneMode(String paneId, NoteMode mode) =>
+      controller.setPaneMode(paneId, mode);
+}
+
+final class _SessionRegistryView {
+  const _SessionRegistryView(this.ref, this.controller);
+
+  final WidgetRef ref;
+  final WorkspaceController controller;
+
+  NoteDocumentSession? sessionFor(String noteId) {
+    return ref.watch(workspaceSessionProvider(noteId));
+  }
+}
+
+final class _MaterialsRegistryView {
+  const _MaterialsRegistryView(this.state, this.controller);
+
+  final WorkspaceState state;
+  final WorkspaceController controller;
+
+  NoteMaterialsSnapshot snapshotFor(String noteId) =>
+      state.materialsFor(noteId);
+
+  void toggleSource(String noteId, String sourceId) =>
+      controller.toggleSourceSelection(noteId, sourceId);
+}
+
+final class _VaultReadView {
+  const _VaultReadView(this.controller);
+
+  final WorkspaceController controller;
+
+  Future<List<int>> readSourceAttachment(SourceItem source) =>
+      controller.readSourceAttachment(source);
+}
+
+SplitLeaf? _findSplitLeaf(SplitNode node, String paneId) {
+  return switch (node) {
+    final SplitLeaf leaf => leaf.paneId == paneId ? leaf : null,
+    final SplitBranch branch =>
+      _findSplitLeaf(branch.first, paneId) ??
+          _findSplitLeaf(branch.second, paneId),
+  };
+}
+
+List<SplitLeaf> _splitLeaves(SplitNode node) {
+  return switch (node) {
+    final SplitLeaf leaf => [leaf],
+    final SplitBranch branch => [
+      ..._splitLeaves(branch.first),
+      ..._splitLeaves(branch.second),
+    ],
+  };
 }
