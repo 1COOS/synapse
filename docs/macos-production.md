@@ -8,7 +8,7 @@ macOS 是 Synapse 当前唯一生产目标。本页记录签名 entitlement、AP
 
 ## 2. Entitlements
 
-执行 `xcodebuild test`、签名构建和最终 entitlement production gate 前，本机必须安装有效 Apple Development signing certificate，并在 Xcode 中为 Runner 配置可用 Team。证书、Team 或签名权限缺失属于外部门禁阻塞，不表示 Dart/Flutter 代码失败；可以单独报告代码测试结果，但不能据此声称完整 macOS production gate 已通过。
+执行 `xcodebuild test` 和带 entitlements 的 Debug/Release 签名构建前，本机必须安装有效 Apple Development signing certificate，并在 Xcode 中为 Runner 配置可用 Team。`codesign -d` 检查本身不需要证书，但需要前一步成功生成可检查的 app。当前缺失证书、Team 或签名权限时属于外部门禁阻塞，不表示 Dart/Flutter 代码失败；可以单独报告代码测试结果，但不能据此声称完整 macOS production gate 已通过。
 
 Debug/Profile 与 Release 都必须启用：
 
@@ -103,7 +103,7 @@ candidate 获取、验证、settings 保存或 commit 前失败时，释放 cand
 
 ## 7. 本地 Production Gate
 
-以下 gate 的前置条件是有效 Apple Development signing certificate 和可用 Xcode Team。若前置条件缺失，应把 `xcodebuild test`、签名 build 或 entitlement 检查标记为外部 blocked，并保留已经完成的 Dart/Flutter 验证结果；不得把阻塞描述为代码失败，也不得声称本机已通过完整 gate。
+以下 gate 中，`xcodebuild test` 和带 entitlements 的 Debug/Release 签名构建要求有效 Apple Development signing certificate 与可用 Xcode Team；`codesign -d` 本身不需要证书，但只有前一步成功生成 app 后才有可检查对象。若签名前置条件缺失，应把原生测试或签名 build 标记为外部 blocked，并保留已经完成的 Dart/Flutter 验证结果；不得把阻塞描述为代码失败，也不得声称本机已通过完整 gate。
 
 必须顺序执行，不并行运行 Flutter tests/builds：
 
