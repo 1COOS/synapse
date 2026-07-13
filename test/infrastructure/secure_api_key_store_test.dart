@@ -474,6 +474,114 @@ void main() {
       );
     },
   );
+
+  test('load cleans legacy plaintext when directory locking fails', () async {
+    final legacyFile = _FakeLegacyPlaintextApiKeyFile(
+      contents: '{"apiKey":"legacy-key"}',
+    );
+    final secureStore = _FakeSecureValueStore()
+      ..values[SecureApiKeyStore.storageKey] = 'secure-key';
+    final store = SecureApiKeyStore(
+      configDirectory: root,
+      secureStore: secureStore,
+      legacyPlaintextFile: legacyFile,
+      directoryLock: _FailingApiKeyStoreLock(StateError('lock acquire failed')),
+    );
+
+    await expectLater(
+      store.load(),
+      throwsA(
+        isA<StateError>().having(
+          (error) => error.message,
+          'message',
+          contains('加锁失败'),
+        ),
+      ),
+    );
+
+    expect(legacyFile.events, ['exists', 'delete']);
+    expect(legacyFile.stillExists, isFalse);
+    expect(secureStore.events, ['delete:synapse.provider.apiKey']);
+  });
+
+  test(
+    'stageSave cleans legacy plaintext when directory locking fails',
+    () async {
+      final legacyFile = _FakeLegacyPlaintextApiKeyFile(
+        contents: '{"apiKey":"legacy-key"}',
+      );
+      final secureStore = _FakeSecureValueStore()
+        ..values[SecureApiKeyStore.storageKey] = 'secure-key';
+      final store = SecureApiKeyStore(
+        configDirectory: root,
+        secureStore: secureStore,
+        legacyPlaintextFile: legacyFile,
+        directoryLock: _FailingApiKeyStoreLock(
+          StateError('lock acquire failed'),
+        ),
+      );
+
+      await expectLater(
+        store.stageSave('new-key'),
+        throwsA(
+          isA<StateError>().having(
+            (error) => error.message,
+            'message',
+            contains('加锁失败'),
+          ),
+        ),
+      );
+
+      expect(legacyFile.events, ['exists', 'delete']);
+      expect(legacyFile.stillExists, isFalse);
+      expect(secureStore.events, ['delete:synapse.provider.apiKey']);
+    },
+  );
+
+  test(
+    'locking and legacy cleanup failures are both reported without returning a key',
+    () async {
+      final legacyFile = _FakeLegacyPlaintextApiKeyFile(
+        contents: '{"apiKey":"legacy-key"}',
+        deleteFailure: StateError('legacy delete failed'),
+      );
+      final secureStore = _FakeSecureValueStore();
+      final store = SecureApiKeyStore(
+        configDirectory: root,
+        secureStore: secureStore,
+        legacyPlaintextFile: legacyFile,
+        directoryLock: _FailingApiKeyStoreLock(
+          StateError('lock acquire failed'),
+        ),
+      );
+
+      await expectLater(
+        store.load(),
+        throwsA(
+          isA<StateError>().having(
+            (error) => error.message,
+            'message',
+            allOf(contains('旧 API Key 删除失败'), contains('lock acquire failed')),
+          ),
+        ),
+      );
+
+      expect(legacyFile.events, ['exists', 'delete']);
+      expect(legacyFile.stillExists, isTrue);
+      expect(secureStore.events, ['delete:synapse.provider.apiKey']);
+    },
+  );
+}
+
+final class _FailingApiKeyStoreLock implements ApiKeyStoreLock {
+  _FailingApiKeyStoreLock(this.failure);
+
+  final Object failure;
+
+  @override
+  Future<ApiKeyStoreLockLease> acquire() {
+    throw failure;
+  }
 }
 
 final class _FakeLegacyPlaintextApiKeyFile

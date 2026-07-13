@@ -61,7 +61,15 @@ final class _FileApiKeyQuarantineMarker implements ApiKeyQuarantineMarker {
   }
 }
 
-final class _ApiKeyDirectoryLock {
+abstract interface class ApiKeyStoreLock {
+  Future<ApiKeyStoreLockLease> acquire();
+}
+
+abstract interface class ApiKeyStoreLockLease {
+  Future<void> release();
+}
+
+final class _ApiKeyDirectoryLock implements ApiKeyStoreLock {
   _ApiKeyDirectoryLock(Directory configDirectory)
     : _lockFile = File(p.join(configDirectory.path, 'provider_api_key.lock')),
       _mutex = _mutexes.putIfAbsent(
@@ -75,6 +83,7 @@ final class _ApiKeyDirectoryLock {
   final File _lockFile;
   final _InProcessMutex _mutex;
 
+  @override
   Future<_ApiKeyLockLease> acquire() async {
     final inProcessLease = await _mutex.acquire();
     RandomAccessFile? file;
@@ -115,13 +124,14 @@ final class _InProcessLockLease {
   }
 }
 
-final class _ApiKeyLockLease {
+final class _ApiKeyLockLease implements ApiKeyStoreLockLease {
   _ApiKeyLockLease(this._file, this._inProcessLease);
 
   final RandomAccessFile _file;
   final _InProcessLockLease _inProcessLease;
   bool _released = false;
 
+  @override
   Future<void> release() async {
     if (_released) {
       return;
@@ -156,7 +166,7 @@ final class SecureApiKeySaveTransaction {
   SecureApiKeySaveTransaction._(this._store, this._lockLease);
 
   final SecureApiKeyStore _store;
-  final _ApiKeyLockLease _lockLease;
+  final ApiKeyStoreLockLease _lockLease;
   _SecureApiKeySaveState _state = _SecureApiKeySaveState.active;
 
   Future<void> commit() async {
@@ -194,6 +204,7 @@ final class SecureApiKeyStore {
     required SecureValueStore secureStore,
     LegacyPlaintextApiKeyFile? legacyPlaintextFile,
     ApiKeyQuarantineMarker? quarantineMarker,
+    ApiKeyStoreLock? directoryLock,
   }) : _legacyPlaintextFile =
            legacyPlaintextFile ??
            _FileLegacyPlaintextApiKeyFile(
@@ -209,7 +220,7 @@ final class SecureApiKeyStore {
                ),
              ),
            ),
-       _directoryLock = _ApiKeyDirectoryLock(configDirectory),
+       _directoryLock = directoryLock ?? _ApiKeyDirectoryLock(configDirectory),
        _secureStore = secureStore;
 
   static const storageKey = 'synapse.provider.apiKey';
@@ -217,11 +228,11 @@ final class SecureApiKeyStore {
 
   final LegacyPlaintextApiKeyFile _legacyPlaintextFile;
   final ApiKeyQuarantineMarker _quarantineMarker;
-  final _ApiKeyDirectoryLock _directoryLock;
+  final ApiKeyStoreLock _directoryLock;
   final SecureValueStore _secureStore;
 
   Future<SecureApiKeyLoadResult> load() async {
-    final lockLease = await _directoryLock.acquire();
+    final lockLease = await _acquireOrFailClosed();
     try {
       return await _loadLocked();
     } finally {
@@ -269,7 +280,7 @@ final class SecureApiKeyStore {
   }
 
   Future<SecureApiKeySaveTransaction> stageSave(String apiKey) async {
-    final lockLease = await _directoryLock.acquire();
+    final lockLease = await _acquireOrFailClosed();
     try {
       await _markQuarantine();
       await _deleteLegacyPlaintext();
@@ -295,6 +306,23 @@ final class SecureApiKeyStore {
   Future<void> _abortStagedSave() async {
     await _bestEffortDeleteLegacyPlaintext();
     await _discardUnverifiedSecureApiKey();
+  }
+
+  Future<ApiKeyStoreLockLease> _acquireOrFailClosed() async {
+    try {
+      return await _directoryLock.acquire();
+    } catch (error) {
+      await _bestEffortMarkQuarantine();
+      final deletionError = await _tryDeleteLegacyPlaintext();
+      await _discardUnverifiedSecureApiKey();
+      final lockingError = StateError('API Key 存储加锁失败：$error');
+      if (deletionError != null) {
+        throw StateError(
+          _legacyDeletionErrorMessage(deletionError, lockingError),
+        );
+      }
+      throw StateError('API Key 存储加锁失败，未加载或修改任何 API Key：$error');
+    }
   }
 
   Future<SecureApiKeyLoadResult> _migrateLegacyPlaintext() async {
