@@ -2,7 +2,6 @@ import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 
 import '../../application/proposals/proposal_service.dart';
-import '../../domain/vault/vault_resource.dart';
 import '../../presentation/workspace/controller/workspace_dependencies.dart';
 import '../../presentation/workspace/controller/workspace_runtime.dart';
 import '../../presentation/workspace/controller/workspace_search_coordinator.dart';

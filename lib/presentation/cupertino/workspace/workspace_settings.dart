@@ -1,6 +1,5 @@
 import 'package:flutter/cupertino.dart';
 
-import '../../../domain/vault/vault_resource.dart';
 import '../../../infrastructure/config/synapse_settings.dart';
 import 'workspace_controls.dart';
 import 'workspace_theme.dart';

@@ -48,7 +48,7 @@ final class WorkspaceState {
     this.leftPaneCollapsed = false,
     this.rightPaneCollapsed = false,
     this.usesNativeMacTitlebar = false,
-    this.settings = SynapseSettings.defaults,
+    SynapseSettings settings = SynapseSettings.defaults,
     this.vaultLabel = '',
     this.vaultRoot,
     this.migrationRequirement,
@@ -60,7 +60,8 @@ final class WorkspaceState {
     this.reloadRequired = false,
     Set<String> collapsedFolderIds = const {},
     this.selectedPreviewImageSrc,
-  }) : resources = List<VaultResourceNode>.unmodifiable(
+  }) : settings = settings.withoutApiKey(),
+       resources = List<VaultResourceNode>.unmodifiable(
          resources.map(_freezeResource),
        ),
        searchResults = List<SearchResult>.unmodifiable(

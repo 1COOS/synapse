@@ -3,7 +3,6 @@ import 'dart:io';
 
 import 'package:path/path.dart' as p;
 
-import '../../domain/vault/vault_resource.dart';
 import 'atomic_config_file_writer.dart';
 import 'provider_config_store.dart';
 import 'secure_api_key_store.dart';

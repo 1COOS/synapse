@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:synapse/application/search/search_index.dart';
+import 'package:synapse/application/settings/provider_config.dart';
 import 'package:synapse/domain/vault/vault_resource.dart';
 import 'package:synapse/infrastructure/ai/ai_provider.dart';
 import 'package:synapse/infrastructure/ai/openai_compatible_provider.dart';

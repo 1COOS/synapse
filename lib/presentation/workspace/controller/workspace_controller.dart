@@ -233,14 +233,7 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
   NoteDocumentSession? sessionFor(String noteId) =>
       _sessions.sessionFor(noteId);
 
-  SynapseSettings get settingsForEditing => _startup.settingsForEditing;
-
-  bool get hasLoadedSettingsBaseline => _startup.hasLoadedSettingsBaseline;
-
   bool get isBusy => state.value?.isBusy ?? true;
-
-  Future<SynapseSettings?> awaitSettingsForEditing() =>
-      _startup.awaitSettingsForEditing();
 
   Future<WorkspaceSettingsDialogModel?> settingsDialogModel() =>
       _startup.settingsDialogModel();

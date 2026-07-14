@@ -1,7 +1,6 @@
 import 'dart:async';
 
 import '../../../domain/vault/vault_migration.dart';
-import '../../../domain/vault/vault_resource.dart';
 import '../../../infrastructure/config/settings_store.dart';
 import '../../../infrastructure/config/synapse_settings.dart';
 import '../../../infrastructure/config/vault_access_gateway.dart';
@@ -71,10 +70,10 @@ final class WorkspaceStartupCoordinator {
 
   SynapseSettings get settings => _settings;
 
-  SynapseSettings get settingsForEditing =>
+  SynapseSettings get _settingsForEditing =>
       _loadedSettingsBaseline ?? _settings;
 
-  bool get hasLoadedSettingsBaseline => _loadedSettingsBaseline != null;
+  bool get _hasLoadedSettingsBaseline => _loadedSettingsBaseline != null;
 
   NoteMode get preferredNoteMode =>
       _settings.preferences.defaultNoteMode == WorkspaceDefaultNoteMode.source
@@ -182,22 +181,22 @@ final class WorkspaceStartupCoordinator {
     return message;
   }
 
-  Future<SynapseSettings?> awaitSettingsForEditing() async {
+  Future<SynapseSettings?> _awaitSettingsForEditing() async {
     final loaded = await _awaitStartupSettings();
     if (loaded == null) {
       return null;
     }
     if (_startupSettingsError == null) {
       _loadedSettingsBaseline ??= loaded;
-      return settingsForEditing;
+      return _settingsForEditing;
     }
     return _settings;
   }
 
   Future<WorkspaceSettingsDialogModel?> settingsDialogModel() async {
-    final initialSettings = hasLoadedSettingsBaseline
-        ? settingsForEditing
-        : await awaitSettingsForEditing();
+    final initialSettings = _hasLoadedSettingsBaseline
+        ? _settingsForEditing
+        : await _awaitSettingsForEditing();
     if (initialSettings == null || isDisposed()) {
       return null;
     }
@@ -364,7 +363,7 @@ final class WorkspaceStartupCoordinator {
       }
       final apiKeyChanged =
           settings.providerConfig.apiKey.trim() !=
-          settingsForEditing.providerConfig.apiKey.trim();
+          _settingsForEditing.providerConfig.apiKey.trim();
       await _persistSettings(settings, preserveApiKey: !apiKeyChanged);
       if (candidate != null) {
         runtimes.install(candidate);

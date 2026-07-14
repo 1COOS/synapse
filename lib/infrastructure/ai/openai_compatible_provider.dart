@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:http/http.dart' as http;
 
+import '../../application/settings/provider_config.dart';
 import '../../domain/vault/vault_resource.dart';
 import 'ai_provider.dart';
 

@@ -373,10 +373,13 @@ void main() {
           workspaceControllerProvider.future,
         );
         final controller = container.read(workspaceControllerProvider.notifier);
+        final dialogModel = await controller.settingsDialogModel();
 
         expect(runtimeBuilds, 2);
         expect(workspace.settings, SynapseSettings.defaults);
-        expect(controller.settingsForEditing, persistedSettings);
+        expect(dialogModel, isNotNull);
+        expect(dialogModel!.initialSettings, persistedSettings);
+        expect(dialogModel.initialSettings.providerConfig.apiKey, 'loaded-key');
 
         final result = await controller.updateSettings(
           persistedSettings.copyWith(
@@ -419,13 +422,17 @@ void main() {
         ],
       );
       addTearDown(container.dispose);
-      await container.read(workspaceControllerProvider.future);
+      final workspace = await container.read(
+        workspaceControllerProvider.future,
+      );
       final controller = container.read(workspaceControllerProvider.notifier);
 
       final model = await controller.settingsDialogModel();
 
+      expect(workspace.providerConfig.apiKey, isEmpty);
       expect(model, isNotNull);
       expect(model!.initialSettings, settings);
+      expect(model.initialSettings.providerConfig.apiKey, 'secret');
       expect(model.canSave, isFalse);
       expect(model.unavailableMessage, '当前平台不支持保存设置');
       expect(

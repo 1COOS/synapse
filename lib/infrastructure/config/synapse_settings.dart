@@ -1,5 +1,7 @@
-import '../../domain/vault/vault_resource.dart';
+import '../../application/settings/provider_config.dart';
 import 'vault_location_store.dart';
+
+export '../../application/settings/provider_config.dart';
 
 enum WorkspaceDefaultNoteMode { reading, source }
 
@@ -152,6 +154,14 @@ class SynapseSettings {
           : vaultLocation ?? this.vaultLocation,
       preferences: preferences ?? this.preferences,
     );
+  }
+
+  SynapseSettings withoutApiKey() {
+    final redactedProviderConfig = providerConfig.withoutApiKey();
+    if (identical(redactedProviderConfig, providerConfig)) {
+      return this;
+    }
+    return copyWith(providerConfig: redactedProviderConfig);
   }
 
   Map<String, Object?> toJson() => {

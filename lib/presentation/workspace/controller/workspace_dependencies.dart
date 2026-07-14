@@ -1,5 +1,5 @@
 import '../../../application/search/search_index.dart';
-import '../../../domain/vault/vault_resource.dart';
+import '../../../application/settings/provider_config.dart';
 import '../../../infrastructure/ai/ai_provider.dart';
 import '../../../infrastructure/config/settings_store.dart';
 import '../../../infrastructure/config/vault_access_gateway.dart';

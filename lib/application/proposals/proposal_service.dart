@@ -1,9 +1,9 @@
 import 'package:uuid/uuid.dart';
 
 import '../../domain/vault/vault_resource.dart';
-import '../../infrastructure/ai/ai_provider.dart';
-import '../../infrastructure/vault/vault_backend.dart';
-import '../../infrastructure/vault/vault_post_commit_error.dart';
+import '../ports/ai_provider.dart';
+import '../ports/vault_backend.dart';
+import '../ports/vault_post_commit_error.dart';
 
 final class PreparedOutlineProposal {
   const PreparedOutlineProposal({

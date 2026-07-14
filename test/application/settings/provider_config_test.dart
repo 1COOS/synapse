@@ -1,5 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:synapse/domain/vault/vault_resource.dart';
+import 'package:synapse/application/settings/provider_config.dart';
 
 void main() {
   test('serializes provider config and keeps api key optional', () {
@@ -50,5 +50,30 @@ void main() {
 
     expect(config.isComplete, isTrue);
     expect(config.hasEmbeddingConfig, isFalse);
+  });
+
+  test('creates an equal non-secret copy without mutating public fields', () {
+    const config = ProviderConfig(
+      baseUrl: 'https://api.example.com/v1',
+      apiKey: 'secret-key',
+      chatModel: 'chat-model',
+      visionModel: 'vision-model',
+      embeddingModel: 'embedding-model',
+    );
+
+    final redacted = config.withoutApiKey();
+
+    expect(redacted.apiKey, isEmpty);
+    expect(
+      redacted,
+      const ProviderConfig(
+        baseUrl: 'https://api.example.com/v1',
+        apiKey: '',
+        chatModel: 'chat-model',
+        visionModel: 'vision-model',
+        embeddingModel: 'embedding-model',
+      ),
+    );
+    expect(config.apiKey, 'secret-key');
   });
 }

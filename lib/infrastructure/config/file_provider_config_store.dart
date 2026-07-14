@@ -4,7 +4,7 @@ import 'dart:io';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:path/path.dart' as p;
 
-import '../../domain/vault/vault_resource.dart';
+import '../../application/settings/provider_config.dart';
 import 'atomic_config_file_writer.dart';
 import 'provider_config_store.dart';
 import 'secure_api_key_store.dart';

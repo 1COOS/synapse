@@ -264,6 +264,35 @@ void main() {
       expect(() => state.collapsedFolderIds.clear(), throwsUnsupportedError);
     });
 
+    test('redacts provider api keys from observable WorkspaceState', () {
+      const settings = SynapseSettings(
+        providerConfig: ProviderConfig(
+          baseUrl: 'https://api.example.com/v1',
+          apiKey: 'workspace-secret',
+          chatModel: 'chat-model',
+          visionModel: 'vision-model',
+          embeddingModel: 'embedding-model',
+        ),
+      );
+      final state = WorkspaceState(
+        phase: WorkspacePhase.ready,
+        resources: const [],
+        selectedResourceId: null,
+        searchResults: const [],
+        materials: const {},
+        splitRoot: const SplitLeaf(paneId: 'pane-1'),
+        focusedPaneId: 'pane-1',
+        sessionNoteIds: const {},
+        settings: settings,
+      );
+
+      expect(state.providerConfig.apiKey, isEmpty);
+      expect(state.providerConfig.baseUrl, settings.providerConfig.baseUrl);
+
+      final copied = state.copyWith(settings: settings);
+      expect(copied.providerConfig.apiKey, isEmpty);
+    });
+
     test(
       'publishes editor locks and autosave through WorkspaceState',
       () async {
