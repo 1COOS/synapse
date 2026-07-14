@@ -186,10 +186,12 @@ final class FileVaultNoteStore {
     }
 
     return runVaultPostCommit(() async {
-      await operations.writeFileString(
-        target,
+      final copiedMarkdown = rewriteNoteAssetReferences(
         retitleVaultMarkdown(markdown, newTitle: copiedTitle, updatedAt: now),
+        oldAssetsDirectory: p.basename(assets.path),
+        newAssetsDirectory: p.basename(copiedAssets.path),
       );
+      await operations.writeFileString(target, copiedMarkdown);
       if (hasAssets) {
         await _copyDirectory(assets, copiedAssets);
       } else {
@@ -419,15 +421,15 @@ final class FileVaultNoteStore {
     await paths.ensureSafePath(target.path);
     final movedId = paths.relativePath(target.path);
     final movedTitle = p.basenameWithoutExtension(target.path);
-    final updatedMarkdown = retitleVaultMarkdown(
-      markdown,
-      newTitle: movedTitle,
-      updatedAt: now,
-    );
     final assets = Directory(paths.assetsDirectoryPathForFile(file));
     final movedAssets = Directory(paths.assetsDirectoryPathForFile(target));
     await paths.ensureSafePath(assets.path);
     await paths.ensureSafePath(movedAssets.path);
+    final updatedMarkdown = rewriteNoteAssetReferences(
+      retitleVaultMarkdown(markdown, newTitle: movedTitle, updatedAt: now),
+      oldAssetsDirectory: p.basename(assets.path),
+      newAssetsDirectory: p.basename(movedAssets.path),
+    );
 
     return runVaultPostCommit(() async {
       if (p.equals(p.normalize(file.path), p.normalize(target.path))) {

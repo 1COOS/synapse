@@ -535,9 +535,16 @@ updatedAt: 2026-07-03 12:00
         parentPath: folder.path,
         title: '心经',
       );
+      final source = await backend.addImageSource(
+        noteId: note.id,
+        filename: 'screen.png',
+        mimeType: 'image/png',
+        bytes: [137, 80, 78, 71],
+      );
       await backend.updateMarkdown(
         noteId: note.id,
-        markdown: '''---
+        markdown:
+            '''---
 title: 心经
 createdAt: 2026-01-01 00:00
 updatedAt: 2026-01-01 00:00
@@ -545,14 +552,10 @@ updatedAt: 2026-01-01 00:00
 
 # 心经
 
-正文
+<img src="心经.assets/${source.attachmentPath}" width="480">
+
+![截图](<心经.assets/${source.attachmentPath}>)
 ''',
-      );
-      final source = await backend.addImageSource(
-        noteId: note.id,
-        filename: 'screen.png',
-        mimeType: 'image/png',
-        bytes: [137, 80, 78, 71],
       );
       await backend.saveProposal(
         AiProposal(
@@ -585,6 +588,18 @@ updatedAt: 2026-01-01 00:00
       expect(loaded.title, '金刚经');
       expect(loaded.markdown, contains('title: 金刚经'));
       expect(loaded.markdown, contains('# 金刚经'));
+      expect(
+        loaded.markdown,
+        contains('src="金刚经.assets/${source.attachmentPath}"'),
+      );
+      expect(
+        loaded.markdown,
+        contains('(<金刚经.assets/${source.attachmentPath}>)'),
+      );
+      expect(
+        loaded.markdown,
+        isNot(contains('src="心经.assets/${source.attachmentPath}"')),
+      );
       final sources = await backend.listSources(renamed.id);
       expect(sources.single.noteId, renamed.id);
       expect(await backend.readSourceAttachment(sources.single), [
@@ -609,6 +624,16 @@ updatedAt: 2026-01-01 00:00
       filename: 'screen.png',
       mimeType: 'image/png',
       bytes: [137, 80, 78, 71],
+    );
+    await backend.updateMarkdown(
+      noteId: note.id,
+      markdown:
+          '''# 心经
+
+<img src="心经.assets/${source.attachmentPath}" width="480">
+
+![截图](<心经.assets/${source.attachmentPath}>)
+''',
     );
     final proposal = await backend.saveProposal(
       AiProposal(
@@ -635,6 +660,18 @@ updatedAt: 2026-01-01 00:00
     expect(original.title, '心经');
     expect(copied.title, '心经 2');
     expect(copied.markdown, contains('title: 心经 2'));
+    expect(
+      copied.markdown,
+      contains('src="心经 2.assets/${source.attachmentPath}"'),
+    );
+    expect(
+      copied.markdown,
+      contains('(<心经 2.assets/${source.attachmentPath}>)'),
+    );
+    expect(
+      original.markdown,
+      contains('src="心经.assets/${source.attachmentPath}"'),
+    );
     final copiedSources = await backend.listSources(copy.id);
     expect(copiedSources.single.id, isNot(source.id));
     expect(copiedSources.single.noteId, copy.id);
@@ -674,6 +711,16 @@ updatedAt: 2026-01-01 00:00
         mimeType: 'image/png',
         bytes: [137, 80, 78, 71],
       );
+      await backend.updateMarkdown(
+        noteId: note.id,
+        markdown:
+            '''# 心经
+
+<img src="心经.assets/${source.attachmentPath}" width="480">
+
+![截图](<心经.assets/${source.attachmentPath}>)
+''',
+      );
       await backend.saveProposal(
         AiProposal(
           id: 'proposal-1',
@@ -700,6 +747,15 @@ updatedAt: 2026-01-01 00:00
         isTrue,
       );
       expect(() => backend.readNote(note.id), throwsA(isA<StateError>()));
+      final movedNote = await backend.readNote(moved.id);
+      expect(
+        movedNote.markdown,
+        contains('src="心经 2.assets/${source.attachmentPath}"'),
+      );
+      expect(
+        movedNote.markdown,
+        contains('(<心经 2.assets/${source.attachmentPath}>)'),
+      );
       expect((await backend.listSources(moved.id)).single.noteId, moved.id);
       expect((await backend.listProposals(moved.id)).single.noteId, moved.id);
 

@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import '../../domain/vault/vault_resource.dart';
+import 'atomic_vault_file_writer.dart';
 import 'file_vault_note_store.dart';
 import 'file_vault_operations.dart';
 import 'file_vault_paths.dart';
@@ -47,16 +48,17 @@ class FileVaultBackend implements VaultBackend {
   }
 
   final Directory root;
+  final AtomicVaultFileWriter _atomicWriter = AtomicVaultFileWriter();
   late final FileVaultNoteStore _notes;
   late final FileVaultSourceStore _sources;
   late final FileVaultProposalStore _proposals;
 
   Future<void> writeFileString(File file, String contents) async {
-    await file.writeAsString(contents);
+    await _atomicWriter.writeString(file, contents);
   }
 
   Future<void> writeFileBytes(File file, List<int> bytes) async {
-    await file.writeAsBytes(bytes);
+    await _atomicWriter.writeBytes(file, bytes);
   }
 
   Future<void> deleteFile(File file) async {
