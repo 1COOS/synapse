@@ -1,5 +1,7 @@
 # Synapse macOS 生产化与状态层重写设计
 
+> 历史执行记录：本文保留 2026-07-10 状态层重写当时的范围和 checkpoint。后续架构批次已引入稳定 UUID note identity、File Vault WAL、API Key observable redaction 和后台 SQLite 索引；当前实现与约束以 [架构文档](../../architecture.md) 为准。
+
 **日期：** 2026-07-10
 **状态：** 代码阶段全部完成；本地运行、Debug build 与原生测试通过，最终 macOS production gate blocked/pending Release signing
 **目标分支：** `codex/state-layer-rewrite`

@@ -1,5 +1,7 @@
 # Synapse 状态层重写实现计划
 
+> 历史执行记录：本文保留 2026-07-10 执行计划和当时的验证基线。后续架构批次已引入稳定 UUID note identity、File Vault WAL、API Key observable redaction 和后台 SQLite 索引；当前实现、测试基线与生产门禁以 [架构文档](../../architecture.md) 和 [开发文档](../../development.md) 为准。
+
 **分支：** `codex/state-layer-rewrite`
 **Foundation implementation baseline：** `3cc85d9c9b3e54920a98b91e8d1fc69b76b08ac9`
 **Initial documentation checkpoint：** `92d5576`
