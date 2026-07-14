@@ -293,6 +293,31 @@ void main() {
       expect(copied.providerConfig.apiKey, isEmpty);
     });
 
+    test('starts persistent search indexing after workspace startup', () async {
+      final vault = MemoryVaultBackend(seedExampleData: false);
+      final note = await vault.createNote(parentPath: '', title: 'Indexed');
+      final searchIndex = _BackgroundPersistentSearchIndex();
+      final container = ProviderContainer(
+        overrides: [
+          workspaceDependenciesProvider.overrideWithValue(
+            createWorkspaceDependencies(
+              initialVault: vault,
+              settingsStore: FakeSettingsStore(),
+              searchIndexFactory: (_, _) => searchIndex,
+            ),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      await container.read(workspaceControllerProvider.future);
+      await searchIndex.indexStarted.future.timeout(
+        const Duration(milliseconds: 500),
+      );
+
+      expect(searchIndex.indexedIds, [note.id]);
+    });
+
     test(
       'publishes editor locks and autosave through WorkspaceState',
       () async {
@@ -841,6 +866,62 @@ final class _RecordingSearchIndex implements SearchIndex {
   void dispose() {
     disposeCalls += 1;
   }
+}
+
+final class _BackgroundPersistentSearchIndex implements PersistentSearchIndex {
+  final Completer<void> indexStarted = Completer<void>();
+  final List<String> indexedIds = [];
+  final Map<String, String> _fingerprints = {};
+
+  @override
+  Future<Map<String, String>> documentFingerprints() async =>
+      Map<String, String>.of(_fingerprints);
+
+  @override
+  Future<Set<String>> documentIds() async => _fingerprints.keys.toSet();
+
+  @override
+  Future<void> indexDocument({
+    required String id,
+    required String noteId,
+    required String title,
+    required String text,
+  }) {
+    return indexDocumentWithFingerprint(
+      id: id,
+      noteId: noteId,
+      title: title,
+      text: text,
+      fingerprint: '',
+    );
+  }
+
+  @override
+  Future<void> indexDocumentWithFingerprint({
+    required String id,
+    required String noteId,
+    required String title,
+    required String text,
+    required String fingerprint,
+  }) async {
+    indexedIds.add(id);
+    _fingerprints[id] = fingerprint;
+    if (!indexStarted.isCompleted) {
+      indexStarted.complete();
+    }
+  }
+
+  @override
+  Future<void> removeDocument(String id) async {
+    _fingerprints.remove(id);
+  }
+
+  @override
+  Future<List<SearchResult>> search(String query, {String? noteId}) async =>
+      const [];
+
+  @override
+  void dispose() {}
 }
 
 final class _NoopAiProvider implements AiProvider {

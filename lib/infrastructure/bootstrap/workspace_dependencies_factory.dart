@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 
 import '../../application/proposals/proposal_service.dart';
+import '../../application/search/search_index.dart';
 import '../../presentation/workspace/controller/workspace_dependencies.dart';
 import '../../presentation/workspace/controller/workspace_runtime.dart';
 import '../../presentation/workspace/controller/workspace_search_coordinator.dart';
@@ -9,7 +10,7 @@ import '../../presentation/workspace/state/workspace_mutation_barrier.dart';
 import '../ai/ai_provider.dart';
 import '../ai/missing_config_ai_provider.dart';
 import '../ai/openai_compatible_provider.dart';
-import '../cache/memory_search_cache.dart';
+import '../cache/default_search_index.dart';
 import '../config/default_settings_store.dart';
 import '../config/provider_config_store.dart';
 import '../config/settings_store.dart';
@@ -44,6 +45,7 @@ WorkspaceDependencies createWorkspaceDependencies({
   WorkspaceCommitPhase? workspaceCommitFailureForTesting,
   void Function()? runtimeSnapshotPublishHookForTesting,
   WorkspaceRuntimeCleanupErrorReporter? cleanupErrorReporter,
+  WorkspaceRuntimeCleanupErrorReporter? searchCacheErrorReporter,
 }) {
   SettingsStore? resolvedSettingsStore =
       settingsStore ??
@@ -53,7 +55,7 @@ WorkspaceDependencies createWorkspaceDependencies({
       );
   final supportsDirectoryVault =
       supportsDirectoryVaultOverride ?? platform_vault.supportsDirectoryVault;
-  final createSearchIndex = searchIndexFactory ?? _createSearchIndex;
+  final customSearchIndexFactory = searchIndexFactory;
   final createPlatformAiProvider = aiProviderFactory ?? _createAiProvider;
   final reportCleanupError = cleanupErrorReporter ?? _reportCleanupError;
   final supportsNativeVaultAccess =
@@ -97,7 +99,17 @@ WorkspaceDependencies createWorkspaceDependencies({
           WorkspaceSearchCoordinator? searchCoordinator;
           try {
             searchCoordinator = WorkspaceSearchCoordinator(
-              createSearchIndex(aiProvider.provider, semanticSearchEnabled),
+              customSearchIndexFactory != null
+                  ? customSearchIndexFactory(
+                      aiProvider.provider,
+                      semanticSearchEnabled,
+                    )
+                  : _createSearchIndex(
+                      aiProvider.provider,
+                      semanticSearchEnabled,
+                      rootPath: rootPath,
+                      reportError: searchCacheErrorReporter,
+                    ),
             );
             return WorkspaceRuntime(
               vault: vault,
@@ -183,12 +195,29 @@ void _reportCleanupError(Object error, StackTrace stackTrace) {
 
 SearchIndex _createSearchIndex(
   AiProvider provider,
-  bool semanticSearchEnabled,
-) {
-  return MemorySearchCache(
-    provider,
+  bool semanticSearchEnabled, {
+  required String? rootPath,
+  WorkspaceRuntimeCleanupErrorReporter? reportError,
+}) {
+  return createDefaultSearchIndex(
+    provider: provider,
     semanticSearchEnabled: semanticSearchEnabled,
+    rootPath: rootPath,
+    indexProfile: _searchIndexProfile(provider, semanticSearchEnabled),
+    onPersistentCacheError: reportError,
   );
+}
+
+String _searchIndexProfile(AiProvider provider, bool semanticSearchEnabled) {
+  if (!semanticSearchEnabled) {
+    return 'full-text-v2';
+  }
+  if (provider is OpenAICompatibleProvider) {
+    final config = provider.config;
+    return 'semantic-v2:${config.normalizedBaseUrl}:'
+        '${config.embeddingModel.trim()}';
+  }
+  return 'semantic-v2:${provider.runtimeType}';
 }
 
 AiProvider _createAiProvider(ProviderConfig config) {

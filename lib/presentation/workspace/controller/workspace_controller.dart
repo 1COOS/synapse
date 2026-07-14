@@ -155,6 +155,7 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
       publishState: _publish,
       setMessage: _setMessage,
       replaceRuntimeSnapshot: _replaceRuntimeSnapshot,
+      scheduleBackgroundSearchIndex: _scheduleBackgroundSearchIndex,
       postCommitFailure: (error, stackTrace) {
         _enterReloadRequired(
           WorkspaceCommitInvariantError(
@@ -220,7 +221,7 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
       _materials.replaceProposals(note.id, snapshot.proposals);
       _splits.setPaneNote(_splits.focusedPaneId, note.id);
     }
-    return _snapshot(
+    final ready = _snapshot(
       phase: _dependencies.supportsDirectoryVault
           ? WorkspacePhase.ready
           : WorkspacePhase.webPreview,
@@ -228,6 +229,8 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
       selectedResourceId: snapshot.selectedResource?.id,
       message: message,
     );
+    _scheduleBackgroundSearchIndex();
+    return ready;
   }
 
   NoteDocumentSession? sessionFor(String noteId) =>
@@ -976,6 +979,36 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
     );
     _dependencies.runtimeSnapshotPublishHookForTesting?.call();
     _publishCommittedState(next);
+    if (migrationRequirement == null) {
+      _scheduleBackgroundSearchIndex();
+    }
+  }
+
+  void _scheduleBackgroundSearchIndex() {
+    if (_isDisposed) {
+      return;
+    }
+    final runtime = _runtimeManager.current;
+    if (runtime == null ||
+        runtime.isDisposed ||
+        !runtime.searchCoordinator.supportsBackgroundIndexing) {
+      return;
+    }
+    final indexing = runtime.searchCoordinator.indexVaultInBackground(
+      vault: runtime.vault,
+    );
+    unawaited(
+      indexing.then<void>(
+        (_) {},
+        onError: (Object error, StackTrace stackTrace) {
+          try {
+            _dependencies.cleanupErrorReporter(error, stackTrace);
+          } catch (_) {
+            // Background cache errors cannot change workspace availability.
+          }
+        },
+      ),
+    );
   }
 
   Future<VaultMigrationRequirement?> _inspectMigration(VaultBackend backend) {

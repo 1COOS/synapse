@@ -36,6 +36,7 @@ final class WorkspaceStartupCoordinator {
     required this.publishState,
     required this.setMessage,
     required this.replaceRuntimeSnapshot,
+    required this.scheduleBackgroundSearchIndex,
     required this.postCommitFailure,
     required this.beginOperation,
     required this.replaceOperation,
@@ -53,6 +54,7 @@ final class WorkspaceStartupCoordinator {
   final void Function(WorkspaceState state) publishState;
   final void Function(String message) setMessage;
   final RuntimeSnapshotInstaller replaceRuntimeSnapshot;
+  final void Function() scheduleBackgroundSearchIndex;
   final WorkspacePostCommitFailureHandler postCommitFailure;
   final bool Function(WorkspaceOperation operation) beginOperation;
   final void Function(WorkspaceOperation operation) replaceOperation;
@@ -382,6 +384,9 @@ final class WorkspaceStartupCoordinator {
           message: modelConfigurationMessage(),
         ),
       );
+      if (!currentState.requiresMigration) {
+        scheduleBackgroundSearchIndex();
+      }
       return WorkspaceActionResult.committed;
     } catch (error) {
       candidate?.dispose(reportCleanupError: dependencies.cleanupErrorReporter);

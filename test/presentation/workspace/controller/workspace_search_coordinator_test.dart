@@ -161,6 +161,40 @@ void main() {
       },
     );
 
+    test(
+      'reuses persisted SQLite fingerprints after coordinator restart',
+      () async {
+        final root = await Directory.systemTemp.createTemp(
+          'synapse-search-fingerprint-restart-',
+        );
+        addTearDown(() async {
+          if (await root.exists()) {
+            await root.delete(recursive: true);
+          }
+        });
+        final vault = MemoryVaultBackend(seedExampleData: false);
+        await vault.createNote(parentPath: '', title: 'Persisted');
+        final firstProvider = _CountingAiProvider();
+        final first = WorkspaceSearchCoordinator(
+          SqliteSearchCache(rootPath: root.path, aiProvider: firstProvider),
+        );
+
+        await first.indexVault(vault: vault);
+        first.dispose();
+        expect(firstProvider.embeddingCalls, 1);
+
+        final secondProvider = _CountingAiProvider();
+        final second = WorkspaceSearchCoordinator(
+          SqliteSearchCache(rootPath: root.path, aiProvider: secondProvider),
+        );
+        addTearDown(second.dispose);
+
+        await second.indexVault(vault: vault);
+
+        expect(secondProvider.embeddingCalls, 0);
+      },
+    );
+
     test('does not reindex an unchanged note', () async {
       final vault = MemoryVaultBackend(seedExampleData: false);
       final note = await vault.createNote(parentPath: '', title: 'Alpha');
@@ -309,6 +343,16 @@ final class _SameIdReadFailureVault extends MemoryVaultBackend {
   @override
   Future<VaultNoteContent> readNote(String noteId) async {
     throw error;
+  }
+}
+
+final class _CountingAiProvider extends MockAiProvider {
+  int embeddingCalls = 0;
+
+  @override
+  Future<List<double>> createEmbedding(String text) {
+    embeddingCalls += 1;
+    return super.createEmbedding(text);
   }
 }
 

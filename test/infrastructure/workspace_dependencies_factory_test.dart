@@ -1,10 +1,12 @@
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:path/path.dart' as p;
 import 'package:synapse/application/search/search_index.dart';
 import 'package:synapse/application/settings/provider_config.dart';
 import 'package:synapse/domain/vault/vault_resource.dart';
 import 'package:synapse/infrastructure/ai/ai_provider.dart';
+import 'package:synapse/infrastructure/ai/mock_ai_provider.dart';
 import 'package:synapse/infrastructure/ai/openai_compatible_provider.dart';
 import 'package:synapse/infrastructure/bootstrap/workspace_dependencies_factory.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
@@ -99,6 +101,65 @@ void main() {
     );
     expect(provider.disposeCalls, 1);
     expect(cleanupErrors, hasLength(1));
+  });
+
+  test(
+    'rooted runtimes use a persistent SQLite search cache by default',
+    () async {
+      final root = await Directory.systemTemp.createTemp(
+        'synapse-default-search-',
+      );
+      addTearDown(() async {
+        if (await root.exists()) {
+          await root.delete(recursive: true);
+        }
+      });
+      final provider = MockAiProvider();
+      final dependencies = createWorkspaceDependencies(aiProvider: provider);
+      final runtime = dependencies.createRuntime(
+        vault: MemoryVaultBackend(seedExampleData: false),
+        aiProvider: dependencies.createAiProvider(ProviderConfig.empty),
+        semanticSearchEnabled: false,
+        rootPath: root.path,
+        label: 'Persistent Vault',
+      );
+      addTearDown(runtime.dispose);
+
+      expect(
+        File(p.join(root.path, '.synapse-cache', 'search.sqlite')).existsSync(),
+        isTrue,
+      );
+    },
+  );
+
+  test('persistent search cache failure falls back to memory', () async {
+    final root = await Directory.systemTemp.createTemp(
+      'synapse-search-fallback-',
+    );
+    addTearDown(() async {
+      if (await root.exists()) {
+        await root.delete(recursive: true);
+      }
+    });
+    final invalidRoot = File(p.join(root.path, 'not-a-directory'));
+    await invalidRoot.writeAsString('blocked');
+    final cacheErrors = <Object>[];
+    final dependencies = createWorkspaceDependencies(
+      aiProvider: MockAiProvider(),
+      searchCacheErrorReporter: (error, _) => cacheErrors.add(error),
+    );
+
+    final runtime = dependencies.createRuntime(
+      vault: MemoryVaultBackend(seedExampleData: false),
+      aiProvider: dependencies.createAiProvider(ProviderConfig.empty),
+      semanticSearchEnabled: false,
+      rootPath: invalidRoot.path,
+      label: 'Fallback Vault',
+    );
+    addTearDown(runtime.dispose);
+
+    expect(runtime.searchCoordinator.supportsBackgroundIndexing, isFalse);
+    expect(cacheErrors, hasLength(1));
   });
 
   test('presentation dependency bundle has no concrete adapter selection', () {

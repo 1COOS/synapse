@@ -34,3 +34,15 @@ abstract interface class SearchIndex {
 
   void dispose();
 }
+
+abstract interface class PersistentSearchIndex implements SearchIndex {
+  Future<Map<String, String>> documentFingerprints();
+
+  Future<void> indexDocumentWithFingerprint({
+    required String id,
+    required String noteId,
+    required String title,
+    required String text,
+    required String fingerprint,
+  });
+}

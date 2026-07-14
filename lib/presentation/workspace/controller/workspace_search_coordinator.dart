@@ -1,3 +1,7 @@
+import 'dart:convert';
+
+import 'package:crypto/crypto.dart';
+
 import '../../../application/search/search_index.dart';
 import '../../../domain/markdown/markdown_document.dart';
 import '../../../domain/vault/vault_resource.dart';
@@ -9,8 +13,34 @@ final class WorkspaceSearchCoordinator {
   SearchIndex _index;
   final Map<String, String> _fingerprints = <String, String>{};
   Future<void> _tail = Future<void>.value();
+  Future<bool>? _backgroundIndex;
   int _generation = 0;
   bool _isDisposed = false;
+
+  bool get supportsBackgroundIndexing => _index is PersistentSearchIndex;
+
+  Future<bool> indexVaultInBackground({required VaultBackend vault}) {
+    _ensureActive();
+    final active = _backgroundIndex;
+    if (active != null) {
+      return active;
+    }
+    final operation = indexVault(vault: vault);
+    _backgroundIndex = operation;
+    operation.then<void>(
+      (_) {
+        if (identical(_backgroundIndex, operation)) {
+          _backgroundIndex = null;
+        }
+      },
+      onError: (Object _, StackTrace _) {
+        if (identical(_backgroundIndex, operation)) {
+          _backgroundIndex = null;
+        }
+      },
+    );
+    return operation;
+  }
 
   Future<bool> indexVault({required VaultBackend vault}) {
     _ensureActive();
@@ -64,6 +94,7 @@ final class WorkspaceSearchCoordinator {
     }
     final previous = _index;
     _generation += 1;
+    _backgroundIndex = null;
     _index = replacement;
     _fingerprints.clear();
     previous.dispose();
@@ -75,6 +106,7 @@ final class WorkspaceSearchCoordinator {
     }
     _isDisposed = true;
     _generation += 1;
+    _backgroundIndex = null;
     _fingerprints.clear();
     _index.dispose();
   }
@@ -125,8 +157,15 @@ final class WorkspaceSearchCoordinator {
     final notes = _flattenNoteResources(resources).toList();
     final liveIds = notes.map((note) => note.id).toSet();
     final Set<String> indexedIds;
+    final Map<String, String>? persistedFingerprints;
     try {
-      indexedIds = await index.documentIds();
+      if (index is PersistentSearchIndex) {
+        persistedFingerprints = await index.documentFingerprints();
+        indexedIds = persistedFingerprints.keys.toSet();
+      } else {
+        persistedFingerprints = null;
+        indexedIds = await index.documentIds();
+      }
     } catch (_) {
       if (!_isCurrent(generation, index)) {
         return _IndexVaultOutcome.invalidated;
@@ -154,6 +193,7 @@ final class WorkspaceSearchCoordinator {
         return _IndexVaultOutcome.invalidated;
       }
       _fingerprints.remove(id);
+      persistedFingerprints?.remove(id);
       indexedIds.remove(id);
     }
 
@@ -203,18 +243,31 @@ final class WorkspaceSearchCoordinator {
         return _IndexVaultOutcome.invalidated;
       }
 
-      final fingerprint = _searchFingerprint(loaded);
-      if (_fingerprints[loaded.id] == fingerprint &&
-          indexedIds.contains(loaded.id)) {
+      final body = MarkdownDocument.parse(loaded.markdown).body;
+      final fingerprint = _searchFingerprint(title: loaded.title, body: body);
+      final knownFingerprint =
+          persistedFingerprints?[loaded.id] ?? _fingerprints[loaded.id];
+      if (knownFingerprint == fingerprint && indexedIds.contains(loaded.id)) {
+        _fingerprints[loaded.id] = fingerprint;
         continue;
       }
       try {
-        await index.indexDocument(
-          id: loaded.id,
-          noteId: loaded.id,
-          title: loaded.title,
-          text: MarkdownDocument.parse(loaded.markdown).body,
-        );
+        if (index is PersistentSearchIndex) {
+          await index.indexDocumentWithFingerprint(
+            id: loaded.id,
+            noteId: loaded.id,
+            title: loaded.title,
+            text: body,
+            fingerprint: fingerprint,
+          );
+        } else {
+          await index.indexDocument(
+            id: loaded.id,
+            noteId: loaded.id,
+            title: loaded.title,
+            text: body,
+          );
+        }
       } catch (_) {
         if (!_isCurrent(generation, index)) {
           return _IndexVaultOutcome.invalidated;
@@ -225,6 +278,7 @@ final class WorkspaceSearchCoordinator {
         return _IndexVaultOutcome.invalidated;
       }
       _fingerprints[loaded.id] = fingerprint;
+      persistedFingerprints?[loaded.id] = fingerprint;
       indexedIds.add(loaded.id);
     }
     return _IndexVaultOutcome.completed;
@@ -271,9 +325,8 @@ final class WorkspaceSearchCoordinator {
 
 enum _IndexVaultOutcome { completed, restart, invalidated }
 
-String _searchFingerprint(VaultNoteContent note) {
-  return '${note.updatedAt.microsecondsSinceEpoch}:'
-      '${note.markdown.length}:${note.markdown.hashCode}';
+String _searchFingerprint({required String title, required String body}) {
+  return sha256.convert(utf8.encode('$title\u0000$body')).toString();
 }
 
 Iterable<VaultResourceNode> _flattenNoteResources(
