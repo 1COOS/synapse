@@ -4,11 +4,14 @@ import 'package:path/path.dart' as p;
 
 import '../../domain/markdown/markdown_document.dart';
 import '../../domain/vault/vault_resource.dart';
+import 'file_vault_catalog.dart';
 
 final class FileVaultPaths {
-  FileVaultPaths(this.root);
+  FileVaultPaths(this.root, {FileVaultCatalog? catalog})
+    : catalog = catalog ?? FileVaultCatalog();
 
   final Directory root;
+  final FileVaultCatalog catalog;
   String? _pinnedResolvedRoot;
   Future<String>? _rootResolution;
 
@@ -35,7 +38,7 @@ final class FileVaultPaths {
   }
 
   File fileForNoteId(String noteId) {
-    final relative = normalizeNotePath(noteId);
+    final relative = normalizeNotePath(catalog.pathForIdentifier(noteId));
     final file = File(p.joinAll([root.path, ...relative.split('/')]));
     _ensureWithinRoot(file.path, 'Note path escapes vault root: $noteId');
     return file;
@@ -72,6 +75,13 @@ final class FileVaultPaths {
   }
 
   File proposalsFile(String noteId) {
+    final cacheKey = Uri.encodeComponent(noteId);
+    return File(
+      p.join(root.path, '.synapse-cache', 'proposals', '$cacheKey.json'),
+    );
+  }
+
+  File legacyProposalsFile(String noteId) {
     return File(p.join(assetsDirectoryFor(noteId).path, 'proposals.json'));
   }
 

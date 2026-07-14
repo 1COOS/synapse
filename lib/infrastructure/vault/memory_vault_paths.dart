@@ -61,7 +61,7 @@ final class MemoryVaultPaths {
     var suffix = 2;
     while (candidate != excludePath &&
         (state.folders.contains(candidate) ||
-            state.notes.containsKey(candidate))) {
+            state.notes.values.any((note) => note.path == candidate))) {
       candidate = '$base $suffix';
       suffix += 1;
     }
@@ -78,7 +78,7 @@ final class MemoryVaultPaths {
     var candidate = base;
     var suffix = 2;
     while (candidate != excludePath &&
-        (state.notes.containsKey(candidate) ||
+        (state.notes.values.any((note) => note.path == candidate) ||
             state.folders.contains(candidate))) {
       candidate = '$stem $suffix.md';
       suffix += 1;

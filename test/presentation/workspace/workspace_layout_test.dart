@@ -118,8 +118,8 @@ void main() {
     await tester.tap(find.byKey(const Key('workspace-search-submit-button')));
     await tester.pumpAndSettle();
 
-    expect(find.byKey(const Key('search-result-Beta.md')), findsOneWidget);
-    await tester.tap(find.byKey(const Key('search-result-Beta.md')));
+    expect(find.byKey(Key('search-result-${beta.id}')), findsOneWidget);
+    await tester.tap(find.byKey(Key('search-result-${beta.id}')));
     await tester.pumpAndSettle();
 
     expect(find.textContaining('独特问题线索'), findsOneWidget);
@@ -149,13 +149,10 @@ void main() {
       await tester.tap(find.byKey(const Key('workspace-search-submit-button')));
       await tester.pumpAndSettle();
 
-      expect(
-        find.byKey(const Key('search-result-External.md')),
-        findsOneWidget,
-      );
+      expect(find.byKey(Key('search-result-${external.id}')), findsOneWidget);
       await tester.tap(find.byKey(const Key('left-pane-mode-resources')));
       await tester.pump();
-      expect(find.byKey(const Key('resource-row-External.md')), findsNothing);
+      expect(find.byKey(Key('resource-row-${external.id}')), findsNothing);
     },
   );
 
@@ -177,16 +174,16 @@ void main() {
       );
       await tester.tap(find.byKey(const Key('workspace-search-submit-button')));
       await tester.pumpAndSettle();
-      expect(find.byKey(const Key('search-result-Deleted.md')), findsOneWidget);
+      expect(find.byKey(Key('search-result-${deleted.id}')), findsOneWidget);
       await vault.deleteNote(deleted.id);
 
       await tester.tap(find.byKey(const Key('workspace-search-submit-button')));
       await tester.pumpAndSettle();
 
-      expect(find.byKey(const Key('search-result-Deleted.md')), findsNothing);
+      expect(find.byKey(Key('search-result-${deleted.id}')), findsNothing);
       await tester.tap(find.byKey(const Key('left-pane-mode-resources')));
       await tester.pump();
-      expect(find.byKey(const Key('resource-row-Deleted.md')), findsOneWidget);
+      expect(find.byKey(Key('resource-row-${deleted.id}')), findsOneWidget);
     },
   );
 
@@ -214,8 +211,8 @@ void main() {
     vault.releaseRead();
     await tester.pumpAndSettle();
 
-    expect(find.byKey(const Key('search-result-Newer.md')), findsOneWidget);
-    expect(find.byKey(const Key('search-result-Older.md')), findsNothing);
+    expect(find.byKey(Key('search-result-${newer.id}')), findsOneWidget);
+    expect(find.byKey(Key('search-result-${older.id}')), findsNothing);
   });
 
   testWidgets('uses Cupertino section navigation in narrow windows', (

@@ -104,7 +104,7 @@ void main() {
     'startup settings runtime failure keeps the installed runtime and UI state',
     (tester) async {
       final vault = MemoryVaultBackend(seedExampleData: false);
-      await vault.createNote(parentPath: '', title: 'Alpha');
+      final note = await vault.createNote(parentPath: '', title: 'Alpha');
       final providers = <_TrackingAiProvider>[];
       final indexes = <_ProviderSearchIndex>[];
       var runtimeBuilds = 0;
@@ -148,7 +148,7 @@ void main() {
       expect(providers.last.embeddingCalls, 0);
       await tester.tap(find.byKey(const Key('left-pane-mode-resources')));
       await tester.pump();
-      await tester.tap(find.byKey(const Key('resource-row-Alpha.md')));
+      await tester.tap(find.byKey(Key('resource-row-${note.id}')));
       await tester.pump(const Duration(milliseconds: 250));
       expect(find.text('Alpha'), findsWidgets);
     },

@@ -112,6 +112,9 @@ $text
   }
 
   Future<List<SourceItem>> listSources(String noteId) async {
+    if (paths.catalog.isDeleted(noteId)) {
+      return const [];
+    }
     final file = paths.sourcesFile(noteId);
     if (!await operations.fileExists(file)) {
       return const [];

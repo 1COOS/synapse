@@ -53,7 +53,7 @@ void main() {
       parentPath: '',
       title: 'Pinned',
     );
-    await File(p.join(outside.path, note.id)).writeAsString('# Outside');
+    await File(p.join(outside.path, note.path)).writeAsString('# Outside');
 
     await rootLink.delete();
     await rootLink.create(outside.path);
@@ -66,9 +66,9 @@ void main() {
       ),
       outside,
     );
-    expect(await File(p.join(root.path, note.id)).exists(), isTrue);
+    expect(await File(p.join(root.path, note.path)).exists(), isTrue);
     expect(
-      await File(p.join(outside.path, note.id)).readAsString(),
+      await File(p.join(outside.path, note.path)).readAsString(),
       '# Outside',
     );
     expect(
@@ -299,25 +299,35 @@ void main() {
     },
   );
 
-  for (final metadata in ['sources.json', 'proposals.json']) {
-    test('rejects $metadata through a linked assets ancestor', () async {
-      final note = await backend.createNote(parentPath: '', title: 'Note');
-      final assets = Directory(p.join(root.path, 'Note.assets'));
-      await assets.delete(recursive: true);
-      await File(p.join(outside.path, metadata)).writeAsString('[]');
-      await Link(assets.path).create(outside.path);
+  test('rejects sources.json through a linked assets ancestor', () async {
+    const metadata = 'sources.json';
+    final note = await backend.createNote(parentPath: '', title: 'Note');
+    final assets = Directory(p.join(root.path, 'Note.assets'));
+    await assets.delete(recursive: true);
+    await File(p.join(outside.path, metadata)).writeAsString('[]');
+    await Link(assets.path).create(outside.path);
 
-      final read = metadata == 'sources.json'
-          ? () async {
-              await backend.listSources(note.id);
-            }
-          : () async {
-              await backend.listProposals(note.id);
-            };
+    Future<void> read() async {
+      await backend.listSources(note.id);
+    }
 
-      await _expectPathRejected(read, outside);
-    });
-  }
+    await _expectPathRejected(read, outside);
+  });
+
+  test('rejects proposal cache through a linked cache ancestor', () async {
+    final note = await backend.createNote(parentPath: '', title: 'Note');
+    final cacheRoot = await Directory(
+      p.join(root.path, '.synapse-cache'),
+    ).create();
+    final proposalsDirectory = Directory(p.join(cacheRoot.path, 'proposals'));
+    await proposalsDirectory.delete(recursive: true);
+    await Link(proposalsDirectory.path).create(outside.path);
+    await File(
+      p.join(outside.path, '${Uri.encodeComponent(note.id)}.json'),
+    ).writeAsString('[]');
+
+    await _expectPathRejected(() => backend.listProposals(note.id), outside);
+  });
 
   test('rejects legacy folder metadata through a linked ancestor', () async {
     final project = await Directory(p.join(root.path, 'project')).create();
@@ -335,7 +345,15 @@ void main() {
 
   test('rejects proposal metadata writes through a linked file', () async {
     final note = await backend.createNote(parentPath: '', title: 'Note');
-    final proposals = File(p.join(root.path, 'Note.assets', 'proposals.json'));
+    final proposals = File(
+      p.join(
+        root.path,
+        '.synapse-cache',
+        'proposals',
+        '${Uri.encodeComponent(note.id)}.json',
+      ),
+    );
+    await proposals.parent.create(recursive: true);
     await proposals.delete();
     final outsideFile = File(p.join(outside.path, 'proposals.json'));
     await outsideFile.writeAsString('[]');

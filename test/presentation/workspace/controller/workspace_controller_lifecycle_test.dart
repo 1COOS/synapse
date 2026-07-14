@@ -139,7 +139,7 @@ void main() {
       'uses Provider overrides as the only dependency injection path',
       () async {
         final vault = MemoryVaultBackend();
-        await vault.createNote(parentPath: '', title: 'Override');
+        final note = await vault.createNote(parentPath: '', title: 'Override');
         final container = ProviderContainer(
           overrides: [
             workspaceDependenciesProvider.overrideWithValue(
@@ -161,13 +161,13 @@ void main() {
         expect(workspace.vaultLabel, 'Override Vault');
         expect(workspace.usesNativeMacTitlebar, isTrue);
         expect(workspace.resources, isNotEmpty);
-        expect(workspace.selectedResourceId, 'Override.md');
+        expect(workspace.selectedResourceId, note.id);
       },
     );
 
     test('keeps session identity outside immutable state snapshots', () async {
       final vault = MemoryVaultBackend();
-      await vault.createNote(parentPath: '', title: 'Stable');
+      final note = await vault.createNote(parentPath: '', title: 'Stable');
       final container = ProviderContainer(
         overrides: [
           workspaceDependenciesProvider.overrideWithValue(
@@ -182,9 +182,9 @@ void main() {
 
       final initial = await container.read(workspaceControllerProvider.future);
       final controller = container.read(workspaceControllerProvider.notifier);
-      final session = controller.sessionFor('Stable.md');
+      final session = controller.sessionFor(note.id);
       expect(session, isNotNull);
-      expect(initial.sessionNoteIds, contains('Stable.md'));
+      expect(initial.sessionNoteIds, contains(note.id));
 
       var notifications = 0;
       session!.addListener(() => notifications += 1);
@@ -192,11 +192,11 @@ void main() {
       final updated = container.read(workspaceControllerProvider).requireValue;
 
       expect(updated, isNot(same(initial)));
-      expect(controller.sessionFor('Stable.md'), same(session));
+      expect(controller.sessionFor(note.id), same(session));
 
       session.controller.text = '# Stable\nchanged';
       expect(notifications, greaterThan(0));
-      expect(controller.sessionFor('Stable.md'), same(session));
+      expect(controller.sessionFor(note.id), same(session));
     });
 
     test('deeply freezes every collection in WorkspaceState', () async {
@@ -268,7 +268,10 @@ void main() {
       'publishes editor locks and autosave through WorkspaceState',
       () async {
         final vault = GatedSuccessfulUpdateVaultBackend(seedExampleData: false);
-        await vault.createNote(parentPath: '', title: 'Observable');
+        final note = await vault.createNote(
+          parentPath: '',
+          title: 'Observable',
+        );
         final imageInput = GatedImageInputService();
         final container = ProviderContainer(
           overrides: [
@@ -299,7 +302,7 @@ void main() {
         final pasting = controller.pasteImage(context);
         await imageInput.pasteStarted.future;
         final locked = container.read(workspaceControllerProvider).requireValue;
-        expect(locked.lockedSessionNoteIds, {'Observable.md'});
+        expect(locked.lockedSessionNoteIds, {note.id});
 
         imageInput.releasePaste();
         expect(await pasting, PaneEditorCommandOutcome.unchanged);
@@ -312,12 +315,12 @@ void main() {
         );
 
         vault.gateUpdates = true;
-        controller.sessionFor('Observable.md')!.controller.text =
+        controller.sessionFor(note.id)!.controller.text =
             '# Observable\nchanged';
         await vault.updateStarted.future;
         final saving = container.read(workspaceControllerProvider).requireValue;
         expect(saving.isAutoSaving, isTrue);
-        expect(saving.savingNoteIds, {'Observable.md'});
+        expect(saving.savingNoteIds, {note.id});
 
         vault.releaseUpdate();
         await Future<void>.delayed(const Duration(milliseconds: 40));
@@ -463,7 +466,7 @@ void main() {
         final oldVault = MemoryVaultBackend(seedExampleData: false);
         await oldVault.createNote(parentPath: '', title: 'Old');
         final newVault = _RecordingPostCommitVault();
-        await newVault.createNote(parentPath: '', title: 'New');
+        final newNote = await newVault.createNote(parentPath: '', title: 'New');
         final access = FakeVaultAccessGateway(
           onRestore: (_) async => oldLease,
           onPick: () async => newLease,
@@ -525,7 +528,7 @@ void main() {
         expect(access.releaseAttempts, isNot(contains(newLease)));
 
         newVault.resetOperationCounts();
-        final session = controller.sessionFor('New.md')!;
+        final session = controller.sessionFor(newNote.id)!;
         final context = controller.capturePaneEditorContext(
           failedState.focusedPaneId,
         )!;

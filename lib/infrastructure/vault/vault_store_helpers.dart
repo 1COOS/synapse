@@ -1,9 +1,11 @@
 import '../../domain/markdown/markdown_document.dart';
+import '../../domain/vault/note_id.dart';
 import '../../domain/vault/vault_resource.dart';
 
 String initialVaultMarkdown(VaultNote note) {
   return MarkdownDocument(
     frontmatter: {
+      if (NoteId.tryParse(note.id) != null) 'synapseId': note.id,
       'title': note.title,
       'createdAt': formatMarkdownTimestamp(note.createdAt),
       'updatedAt': formatMarkdownTimestamp(note.updatedAt),

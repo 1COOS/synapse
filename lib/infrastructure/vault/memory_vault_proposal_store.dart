@@ -14,9 +14,10 @@ final class MemoryVaultProposalStore {
   }
 
   Future<List<AiProposal>> listProposals(String noteId) async {
+    final resolvedNoteId = state.resolveNoteId(noteId) ?? noteId;
     final proposals =
         state.proposals.values
-            .where((proposal) => proposal.noteId == noteId)
+            .where((proposal) => proposal.noteId == resolvedNoteId)
             .toList()
           ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
     return proposals;

@@ -104,19 +104,12 @@ void main() {
       await tester.pump(const Duration(milliseconds: 1000));
       await vault.renameCompleted.future;
       await tester.pump();
-      expect(
-        find.byKey(const Key('resource-row-Renamed Alpha.md')),
-        findsOneWidget,
-      );
+      expect(find.byKey(Key('resource-row-${alpha.id}')), findsOneWidget);
 
       vault.releaseRead();
       await tester.pumpAndSettle();
 
-      expect(
-        find.byKey(const Key('resource-row-Renamed Alpha.md')),
-        findsOneWidget,
-      );
-      expect(find.byKey(Key('resource-row-${alpha.id}')), findsNothing);
+      expect(find.byKey(Key('resource-row-${alpha.id}')), findsOneWidget);
       expect(
         find.descendant(
           of: find.byKey(const Key('split-pane-title-pane-2')),
@@ -165,12 +158,8 @@ void main() {
     vault.releaseRead();
     await tester.pumpAndSettle();
 
-    expect(vault.readNoteIdsAfterRelease, contains('Renamed Alpha.md'));
-    expect(find.byKey(Key('resource-row-${alpha.id}')), findsNothing);
-    expect(
-      find.byKey(const Key('resource-row-Renamed Alpha.md')),
-      findsOneWidget,
-    );
+    expect(vault.readNoteIdsAfterRelease, contains(alpha.id));
+    expect(find.byKey(Key('resource-row-${alpha.id}')), findsOneWidget);
     expect(
       find.descendant(
         of: find.byKey(const Key('split-pane-title-pane-2')),
@@ -267,7 +256,7 @@ void main() {
   ) async {
     final vault = MemoryVaultBackend(seedExampleData: false);
     await vault.createNote(parentPath: '', title: 'Alpha');
-    await vault.createNote(parentPath: '', title: 'Beta');
+    final beta = await vault.createNote(parentPath: '', title: 'Beta');
 
     await pumpWorkspace(tester, vault: vault);
 
@@ -295,7 +284,7 @@ void main() {
     );
     expect(find.textContaining('Alpha'), findsWidgets);
 
-    await tester.tap(find.byKey(const Key('resource-row-Beta.md')));
+    await tester.tap(find.byKey(Key('resource-row-${beta.id}')));
     await tester.pump(const Duration(milliseconds: 250));
 
     expect(find.textContaining('Alpha'), findsWidgets);
@@ -333,12 +322,12 @@ void main() {
   ) async {
     final vault = FailingUpdateVaultBackend(seedExampleData: false);
     await vault.createNote(parentPath: '', title: 'Alpha');
-    await vault.createNote(parentPath: '', title: 'Beta');
+    final beta = await vault.createNote(parentPath: '', title: 'Beta');
 
     await pumpWorkspace(tester, vault: vault);
     await tester.tap(find.byKey(const Key('split-pane-right-button')));
     await tester.pump(const Duration(milliseconds: 250));
-    await tester.tap(find.byKey(const Key('resource-row-Beta.md')));
+    await tester.tap(find.byKey(Key('resource-row-${beta.id}')));
     await tester.pump(const Duration(milliseconds: 250));
     await tester.tap(find.byKey(const Key('note-mode-source-pane-2')));
     await tester.pump(const Duration(milliseconds: 250));
@@ -463,11 +452,11 @@ void main() {
       );
       addTearDown(vault.releaseBlockedUpdate);
 
-      await runQueuedLastReferenceCloseRace(tester, vault);
+      final race = await runQueuedLastReferenceCloseRace(tester, vault);
 
-      expect(vault.updatedNoteIds, contains('Alpha.md'));
+      expect(vault.updatedNoteIds, contains(race.alphaId));
       expect(
-        (await vault.readNote('Alpha.md')).markdown,
+        (await vault.readNote(race.alphaId)).markdown,
         contains('dirty Alpha session'),
       );
       expect(find.byKey(const Key('split-pane-pane-1')), findsNothing);
@@ -486,15 +475,12 @@ void main() {
       );
       addTearDown(vault.releaseBlockedUpdate);
 
-      final alphaController = await runQueuedLastReferenceCloseRace(
-        tester,
-        vault,
-      );
+      final race = await runQueuedLastReferenceCloseRace(tester, vault);
 
-      expect(vault.updatedNoteIds, contains('Alpha.md'));
+      expect(vault.updatedNoteIds, contains(race.alphaId));
       expect(find.byKey(const Key('split-pane-pane-1')), findsOneWidget);
       expect(find.byKey(const Key('split-pane-pane-2')), findsOneWidget);
-      expect(alphaController.text, contains('dirty Alpha session'));
+      expect(race.controller.text, contains('dirty Alpha session'));
       expect(find.textContaining('save failed for Alpha.md'), findsOneWidget);
     },
   );

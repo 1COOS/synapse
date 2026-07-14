@@ -19,7 +19,7 @@ void main() {
     expect(resources.single.type, VaultResourceType.folder);
     expect(resources.single.children.single.title, '佛学');
     expect(resources.single.children.single.children.single.title, '心经');
-    expect(loaded.id, '读书/佛学/心经.md');
+    expect(loaded.id, note.id);
     expect(loaded.path, '读书/佛学/心经.md');
     expect(loaded.markdown, isNot(contains('id:')));
     expect(loaded.markdown, isNot(contains('template:')));
@@ -195,8 +195,7 @@ updatedAt: 2026-07-03 12:00
     );
 
     expect(renamed.path, '课程');
-    expect(() => backend.readNote(note.id), throwsA(isA<StateError>()));
-    final loaded = await backend.readNote('课程/佛学/心经.md');
+    final loaded = await backend.readNote(note.id);
     expect(loaded.title, '心经');
     expect(loaded.sources.single.noteId, loaded.id);
     expect(await backend.readSourceAttachment(loaded.sources.single), [
@@ -204,8 +203,6 @@ updatedAt: 2026-07-03 12:00
       2,
       3,
     ]);
-    expect(await backend.listSources(note.id), isEmpty);
-    expect(await backend.listProposals(note.id), isEmpty);
     final proposals = await backend.listProposals(loaded.id);
     expect(proposals.single.id, proposal.id);
     expect(proposals.single.noteId, loaded.id);
@@ -241,8 +238,8 @@ updatedAt: 2026-07-03 12:00
 
       final renamed = await backend.renameNote(noteId: note.id, title: '金刚经');
 
-      expect(renamed.id, '读书/金刚经.md');
-      expect(() => backend.readNote(note.id), throwsA(isA<StateError>()));
+      expect(renamed.id, note.id);
+      expect(renamed.path, '读书/金刚经.md');
       final loaded = await backend.readNote(renamed.id);
       expect(loaded.title, '金刚经');
       expect(loaded.markdown, contains('title: 金刚经'));
@@ -256,7 +253,7 @@ updatedAt: 2026-07-03 12:00
       final proposals = await backend.listProposals(renamed.id);
       expect(proposals.single.noteId, renamed.id);
       expect(proposals.single.sourceIds, [source.id]);
-      expect(await backend.listProposals(note.id), isEmpty);
+      expect((await backend.listProposals(note.id)).single.noteId, note.id);
     },
   );
 
@@ -286,7 +283,8 @@ updatedAt: 2026-07-03 12:00
 
       final copy = await backend.copyNote(noteId: note.id);
 
-      expect(copy.id, '心经 2.md');
+      expect(copy.id, isNot(note.id));
+      expect(copy.path, '心经 2.md');
       expect((await backend.readNote(note.id)).title, '心经');
       final copied = await backend.readNote(copy.id);
       expect(copied.title, '心经 2');
@@ -348,8 +346,8 @@ updatedAt: 2026-07-03 12:00
         parentPath: targetFolder.path,
       );
 
-      expect(moved.id, '目标/心经 2.md');
-      expect(() => backend.readNote(note.id), throwsA(isA<StateError>()));
+      expect(moved.id, note.id);
+      expect(moved.path, '目标/心经 2.md');
       expect(
         (await backend.readNote(moved.id)).sources.single.noteId,
         moved.id,
@@ -361,7 +359,8 @@ updatedAt: 2026-07-03 12:00
         parentPath: '',
       );
 
-      expect(movedToRoot.id, '心经 2.md');
+      expect(movedToRoot.id, note.id);
+      expect(movedToRoot.path, '心经 2.md');
       expect((await backend.readNote(movedToRoot.id)).title, '心经 2');
     },
   );

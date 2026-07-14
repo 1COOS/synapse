@@ -250,6 +250,7 @@ void main() {
       bytes: tinyPng,
     );
     const originalSrc = 'Alpha.assets/attachments/width.png';
+    const remappedSrc = 'Remapped.assets/attachments/width.png';
     await vault.updateMarkdown(
       noteId: note.id,
       markdown: '# Alpha\n\n<img src="$originalSrc" width="320">',
@@ -271,15 +272,15 @@ void main() {
     final rebuiltImageFinder = find.byKey(Key('preview-image-${source.id}'));
     expect(rebuiltImageFinder, findsOneWidget);
     final rebuiltImage = tester.widget<PreviewImageBlock>(rebuiltImageFinder);
-    expect(rebuiltImage.source.noteId, 'Remapped.md');
-    expect(rebuiltImage.src, originalSrc);
+    expect(rebuiltImage.source.noteId, note.id);
+    expect(rebuiltImage.src, remappedSrc);
 
     rebuiltImage.onWidthChanged(480);
     await tester.pumpAndSettle();
 
-    final remapped = await vault.readNote('Remapped.md');
-    expect(remapped.markdown, contains('src="$originalSrc" width="480"'));
-    expect(vault.updatedNoteIds.last, 'Remapped.md');
+    final remapped = await vault.readNote(note.id);
+    expect(remapped.markdown, contains('src="$remappedSrc" width="480"'));
+    expect(vault.updatedNoteIds.last, note.id);
   });
 
   testWidgets(
@@ -300,6 +301,7 @@ void main() {
         bytes: tinyPng,
       );
       const originalSrc = 'Alpha.assets/attachments/shared.png';
+      const remappedSrc = 'Remapped.assets/attachments/shared.png';
       await vault.updateMarkdown(
         noteId: note.id,
         markdown: '# Alpha\n\n<img src="$originalSrc" width="320">',
@@ -324,10 +326,10 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(
-        (await vault.readNote('Remapped.md')).markdown,
-        contains('src="$originalSrc" width="480"'),
+        (await vault.readNote(note.id)).markdown,
+        contains('src="$remappedSrc" width="480"'),
       );
-      expect(vault.updatedNoteIds.last, 'Remapped.md');
+      expect(vault.updatedNoteIds.last, note.id);
     },
   );
 
@@ -350,6 +352,8 @@ void main() {
     );
     const firstSrc = 'Alpha.assets/attachments/first.png';
     const secondSrc = 'Alpha.assets/attachments/second.png';
+    const remappedFirstSrc = 'Remapped.assets/attachments/first.png';
+    const remappedSecondSrc = 'Remapped.assets/attachments/second.png';
     const firstTag = '<img src="$firstSrc" width="320">';
     const secondTag = '<img src="$secondSrc" width="320">';
     await vault.updateMarkdown(
@@ -375,18 +379,24 @@ void main() {
     expect(rebuiltFirstFinder, findsOneWidget);
     expect(rebuiltSecondFinder, findsOneWidget);
     final rebuiltTarget = tester.widget<PreviewImageBlock>(rebuiltSecondFinder);
-    expect(rebuiltTarget.source.noteId, 'Remapped.md');
-    expect(rebuiltTarget.src, secondSrc);
+    expect(rebuiltTarget.source.noteId, note.id);
+    expect(rebuiltTarget.src, remappedSecondSrc);
 
     rebuiltTarget.onImageDropped(
-      PreviewImageDragData(sourceId: first.id, src: firstSrc),
-      PreviewImageDragData(sourceId: second.id, src: secondSrc),
+      PreviewImageDragData(sourceId: first.id, src: remappedFirstSrc),
+      PreviewImageDragData(sourceId: second.id, src: remappedSecondSrc),
       ImageDropSide.after,
     );
     await tester.pumpAndSettle();
 
-    final remapped = await vault.readNote('Remapped.md');
-    expect(remapped.markdown, contains('$secondTag $firstTag'));
-    expect(vault.updatedNoteIds.last, 'Remapped.md');
+    final remapped = await vault.readNote(note.id);
+    expect(
+      remapped.markdown,
+      contains(
+        '<img src="$remappedSecondSrc" width="320"> '
+        '<img src="$remappedFirstSrc" width="320">',
+      ),
+    );
+    expect(vault.updatedNoteIds.last, note.id);
   });
 }

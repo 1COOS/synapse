@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:synapse/domain/vault/note_id.dart';
 import 'package:synapse/domain/vault/vault_resource.dart';
 import 'package:synapse/infrastructure/vault/file_vault_backend.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
@@ -64,8 +65,11 @@ void _vaultBackendContract(
 
       expect(folder.path, '课程');
       expect(duplicateFolder.path, '课程 2');
-      expect(note.id, '课程/章节/导论.md');
-      expect(duplicateNote.id, '课程/章节/导论 2.md');
+      expect(NoteId.tryParse(note.id), isNotNull);
+      expect(NoteId.tryParse(duplicateNote.id), isNotNull);
+      expect(duplicateNote.id, isNot(note.id));
+      expect(note.path, '课程/章节/导论.md');
+      expect(duplicateNote.path, '课程/章节/导论 2.md');
 
       final updated = await backend.updateMarkdown(
         noteId: note.id,
@@ -88,6 +92,8 @@ updatedAt: 2026-07-13 10:01
       );
 
       expect(updated.title, '可见标题');
+      expect(updated.id, note.id);
+      expect(updated.markdown, contains('synapseId: ${note.id}'));
       expect(updated.outline.single.title, '可见标题');
       expect(updated.outline.single.children.single.title, '第一节');
       expect(appended.markdown, contains('## 第二节'));
@@ -99,9 +105,13 @@ updatedAt: 2026-07-13 10:01
       );
       final copied = await backend.copyNote(noteId: moved.id);
 
-      expect(renamed.id, '课程/章节/新导论.md');
-      expect(moved.id, '课程 2/新导论.md');
-      expect(copied.id, '课程 2/新导论 2.md');
+      expect(renamed.id, note.id);
+      expect(moved.id, note.id);
+      expect(copied.id, isNot(note.id));
+      expect(NoteId.tryParse(copied.id), isNotNull);
+      expect(renamed.path, '课程/章节/新导论.md');
+      expect(moved.path, '课程 2/新导论.md');
+      expect(copied.path, '课程 2/新导论 2.md');
       expect((await backend.readNote(copied.id)).title, '新导论 2');
 
       final resources = await backend.listResources();
@@ -304,18 +314,15 @@ updatedAt: 2026-07-13 10:01
         folderPath: folder.path,
         title: '新目录',
       );
-      final movedNoteId = '${renamed.path}/笔记.md';
-      final movedSource = (await backend.listSources(movedNoteId)).single;
+      final moved = await backend.readNote(note.id);
+      final movedSource = (await backend.listSources(note.id)).single;
 
-      expect(movedSource.noteId, movedNoteId);
+      expect(moved.id, note.id);
+      expect(moved.path, '${renamed.path}/笔记.md');
+      expect(movedSource.noteId, note.id);
       expect(movedSource.attachmentPath, 'attachments/page.png');
-      expect(
-        (await backend.listProposals(movedNoteId)).single.noteId,
-        movedNoteId,
-      );
+      expect((await backend.listProposals(note.id)).single.noteId, note.id);
       expect(await backend.readSourceAttachment(movedSource), [7, 8, 9]);
-      expect(await backend.listSources(note.id), isEmpty);
-      expect(await backend.listProposals(note.id), isEmpty);
     });
   });
 }

@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:synapse/domain/markdown/markdown_document.dart';
 import 'package:synapse/domain/vault/vault_resource.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
 import 'package:synapse/infrastructure/vault/vault_post_commit_error.dart';
@@ -252,7 +253,10 @@ void main() {
       expect(firstResult.succeeded, isTrue);
       expect(firstResult.stillDirty, isTrue);
       expect(session.controller.text, '# Alpha\nnewer edit');
-      expect(session.note.markdown, '# Alpha\nfirst snapshot');
+      expect(
+        MarkdownDocument.parse(session.note.markdown).body.trimLeft(),
+        '# Alpha\nfirst snapshot',
+      );
       expect(session.isDirty, isTrue);
 
       final report = await harness.coordinator.flush([session]);
@@ -277,7 +281,8 @@ final class _Harness {
     afterCommit,
   }) {
     registry = NoteSessionRegistry(
-      visibleBody: (markdown) => markdown,
+      visibleBody: (markdown) =>
+          MarkdownDocument.parse(markdown).body.trimLeft(),
       onEdited: (session) {
         if (scheduleEdits) {
           coordinator.schedule(session);

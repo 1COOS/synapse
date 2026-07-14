@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:synapse/domain/markdown/markdown_document.dart';
 import 'package:synapse/domain/vault/vault_resource.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
 import 'package:synapse/presentation/workspace/state/note_materials_registry.dart';
@@ -234,10 +235,11 @@ void main() {
         final vault = MemoryVaultBackend(seedExampleData: false);
         final created = await vault.createNote(parentPath: '', title: 'A');
         final registry = NoteSessionRegistry(
-          visibleBody: (markdown) => markdown,
+          visibleBody: (markdown) =>
+              MarkdownDocument.parse(markdown).body.trimLeft(),
           onEdited: (_) {},
         );
-        final splits = SplitWorkspaceController(initialNoteId: 'A.md');
+        final splits = SplitWorkspaceController(initialNoteId: created.id);
         final materials = NoteMaterialsRegistry();
         late final WorkspaceMutationBarrier barrier;
         final coordinator = NoteSaveCoordinator(
@@ -279,7 +281,7 @@ void main() {
         final result = await barrier
             .run<void>(
               WorkspaceMutationPlan<void>(
-                affectedNoteIds: const {'A.md'},
+                affectedNoteIds: {created.id},
                 dirtyDisposition: DirtyDisposition.flush,
                 commitBackend: () => _backendCommit(
                   () async => const VaultMutationDelta<void>(value: null),
@@ -289,13 +291,17 @@ void main() {
             .timeout(const Duration(seconds: 1));
 
         expect(result, isA<Committed<void>>());
-        expect(registry.sessionFor('A.md'), isNull);
-        expect(registry.sessionFor('B.md'), same(session));
-        expect(splits.focusedPane?.noteId, 'B.md');
+        expect(registry.sessionFor(created.id), same(session));
+        expect(splits.focusedPane?.noteId, created.id);
+        expect(session.note.path, 'B.md');
         expect(session.controller.text, '# B\ndirty');
         expect(session.isDirty, isFalse);
-        expect(() => vault.readNote('A.md'), throwsA(isA<StateError>()));
-        expect((await vault.readNote('B.md')).markdown, '# B\ndirty');
+        expect(
+          MarkdownDocument.parse(
+            (await vault.readNote(created.id)).markdown,
+          ).body.trimLeft(),
+          '# B\ndirty',
+        );
       },
     );
 
@@ -304,7 +310,8 @@ void main() {
       () async {
         final vault = _DelayedUpdateVault();
         final registry = NoteSessionRegistry(
-          visibleBody: (markdown) => markdown,
+          visibleBody: (markdown) =>
+              MarkdownDocument.parse(markdown).body.trimLeft(),
           onEdited: (_) {},
         );
         final splits = SplitWorkspaceController(initialNoteId: 'A.md');

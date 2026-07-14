@@ -47,12 +47,18 @@ void main() {
   );
 
   test(
-    'workspaceSessionProvider replaces a disposed same-id session after Vault switch',
+    'workspaceSessionProvider exposes the replacement Vault session after switch',
     () async {
       final firstVault = MemoryVaultBackend(seedExampleData: false);
       final secondVault = MemoryVaultBackend(seedExampleData: false);
-      await firstVault.createNote(parentPath: '', title: 'Shared');
-      await secondVault.createNote(parentPath: '', title: 'Shared');
+      final firstNote = await firstVault.createNote(
+        parentPath: '',
+        title: 'Shared',
+      );
+      final secondNote = await secondVault.createNote(
+        parentPath: '',
+        title: 'Shared',
+      );
       final container = ProviderContainer(
         overrides: [
           workspaceDependenciesProvider.overrideWithValue(
@@ -70,13 +76,15 @@ void main() {
       addTearDown(container.dispose);
 
       await container.read(workspaceControllerProvider.future);
-      final oldSession = container.read(workspaceSessionProvider('Shared.md'));
+      final oldSession = container.read(workspaceSessionProvider(firstNote.id));
       expect(oldSession, isNotNull);
 
       final result = await container
           .read(workspaceControllerProvider.notifier)
           .chooseVault();
-      final newSession = container.read(workspaceSessionProvider('Shared.md'));
+      final newSession = container.read(
+        workspaceSessionProvider(secondNote.id),
+      );
 
       expect(result, WorkspaceActionResult.committed);
       expect(oldSession!.savePhase, NoteSavePhase.disposed);
@@ -91,7 +99,10 @@ void main() {
     (tester) async {
       await _useDesktopSurface(tester);
       final vault = MemoryVaultBackend();
-      await vault.createNote(parentPath: '', title: 'Provider Note');
+      final note = await vault.createNote(
+        parentPath: '',
+        title: 'Provider Note',
+      );
       final dependencies = createWorkspaceDependencies(
         initialVault: vault,
         settingsStore: FakeSettingsStore(),
@@ -109,10 +120,7 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('Provider Vault'), findsOneWidget);
-      expect(
-        find.byKey(const Key('resource-row-Provider Note.md')),
-        findsOneWidget,
-      );
+      expect(find.byKey(Key('resource-row-${note.id}')), findsOneWidget);
     },
   );
 
@@ -121,7 +129,7 @@ void main() {
   ) async {
     await _useDesktopSurface(tester);
     final vault = MemoryVaultBackend();
-    await vault.createNote(parentPath: '', title: 'App Override');
+    final note = await vault.createNote(parentPath: '', title: 'App Override');
     final dependencies = createWorkspaceDependencies(
       initialVault: vault,
       settingsStore: FakeSettingsStore(),
@@ -139,10 +147,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('App Provider Vault'), findsOneWidget);
-    expect(
-      find.byKey(const Key('resource-row-App Override.md')),
-      findsOneWidget,
-    );
+    expect(find.byKey(Key('resource-row-${note.id}')), findsOneWidget);
   });
 
   testWidgets('note panes listen to stable sessions with ListenableBuilder', (

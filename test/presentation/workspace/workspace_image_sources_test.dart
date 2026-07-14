@@ -447,14 +447,12 @@ void main() {
     await tester.pump(const Duration(milliseconds: 1000));
     await tester.pump();
 
-    expect(
-      find.byKey(const Key('resource-row-Remapped Study.md')),
-      findsOneWidget,
-    );
+    expect(find.byKey(Key('resource-row-${note.id}')), findsOneWidget);
+    expect((await vault.readNote(note.id)).path, 'Remapped Study.md');
     await tester.tap(find.text('删除'));
     await tester.pumpAndSettle();
 
-    expect(await vault.listSources('Remapped Study.md'), isEmpty);
+    expect(await vault.listSources(note.id), isEmpty);
     expect(find.textContaining('Source not found'), findsNothing);
   });
 }

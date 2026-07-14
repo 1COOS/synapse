@@ -57,7 +57,7 @@ void main() {
     tester,
   ) async {
     final vault = CountingUpdateVaultBackend(seedExampleData: false);
-    await vault.createNote(parentPath: '', title: '心经');
+    final note = await vault.createNote(parentPath: '', title: '心经');
 
     await pumpWorkspace(tester, vault: vault);
     await switchToSourceMode(tester);
@@ -67,13 +67,12 @@ void main() {
     await tester.pump();
 
     expect(vault.updateCalls, 1);
-    expect(() => vault.readNote('心经.md'), throwsA(isA<StateError>()));
-    final renamed = await vault.readNote('金刚经.md');
+    final renamed = await vault.readNote(note.id);
+    expect(renamed.path, '金刚经.md');
     expect(renamed.title, '金刚经');
     expect(renamed.markdown, contains('title: 金刚经'));
     expect(renamed.markdown, contains('# 金刚经'));
-    expect(find.byKey(const Key('resource-row-心经.md')), findsNothing);
-    expect(find.byKey(const Key('resource-row-金刚经.md')), findsOneWidget);
+    expect(find.byKey(Key('resource-row-${note.id}')), findsOneWidget);
     expect(
       find.descendant(
         of: find.byKey(const Key('split-pane-title-pane-1')),
@@ -87,14 +86,16 @@ void main() {
     'rename readback failure requires reload and suppresses later saves',
     (tester) async {
       final vault = _RenameReadbackFailureVault();
-      await vault.createNote(parentPath: '', title: '心经');
-      await vault.createNote(parentPath: '', title: '其他');
+      final note = await vault.createNote(parentPath: '', title: '心经');
+      final other = await vault.createNote(parentPath: '', title: '其他');
       final reportedErrors = <FlutterErrorDetails>[];
       final previousOnError = FlutterError.onError;
       FlutterError.onError = reportedErrors.add;
       addTearDown(() => FlutterError.onError = previousOnError);
 
       await pumpWorkspace(tester, vault: vault);
+      await tester.tap(find.byKey(Key('resource-row-${note.id}')));
+      await tester.pump(const Duration(milliseconds: 250));
       await switchToSourceMode(tester);
       vault.failRenameReadback = true;
       await enterTextInLiveMarkdownBlock(tester, '# 金刚经\n正文');
@@ -116,13 +117,13 @@ void main() {
       liveMarkdownDocumentController(tester, paneId: 1).text =
           '# 金刚经\nlater edit';
       await tester.pump(const Duration(milliseconds: 10000));
-      await tester.tap(find.byKey(const Key('resource-row-其他.md')));
+      await tester.tap(find.byKey(Key('resource-row-${other.id}')));
       await tester.pump(const Duration(milliseconds: 250));
 
       expect(vault.updateCalls, 1);
       expect(vault.renameCalls, 1);
       vault.failRenameReadback = false;
-      expect((await vault.readNote('金刚经.md')).markdown, contains('正文'));
+      expect((await vault.readNote(note.id)).markdown, contains('正文'));
     },
   );
 
@@ -130,7 +131,7 @@ void main() {
     'save commit invariant requires reload and suppresses later saves',
     (tester) async {
       final vault = CountingUpdateVaultBackend(seedExampleData: false);
-      await vault.createNote(parentPath: '', title: '心经');
+      final note = await vault.createNote(parentPath: '', title: '心经');
       final reportedErrors = <FlutterErrorDetails>[];
       final previousOnError = FlutterError.onError;
       FlutterError.onError = reportedErrors.add;
@@ -156,7 +157,7 @@ void main() {
       await tester.pump(const Duration(milliseconds: 10000));
 
       expect(vault.updateCalls, 1);
-      expect((await vault.readNote('心经.md')).markdown, contains('正文已保存'));
+      expect((await vault.readNote(note.id)).markdown, contains('正文已保存'));
     },
   );
 
@@ -169,7 +170,7 @@ void main() {
         parentPath: '',
         title: 'Old Folder',
       );
-      await vault.createNote(parentPath: '', title: 'Alpha');
+      final note = await vault.createNote(parentPath: '', title: 'Alpha');
 
       await pumpWorkspace(
         tester,
@@ -212,10 +213,7 @@ void main() {
 
       expect(find.byKey(const Key('resource-row-New Folder')), findsOneWidget);
       expect(find.byKey(Key('resource-row-${folder.id}')), findsNothing);
-      expect(
-        find.byKey(const Key('resource-row-Renamed Alpha.md')),
-        findsOneWidget,
-      );
+      expect(find.byKey(Key('resource-row-${note.id}')), findsOneWidget);
       expect(
         resourceRowBackgroundColor(tester, 'New Folder'),
         isNot(const Color(0x00000000)),
@@ -258,7 +256,7 @@ void main() {
       );
       await tester.tap(find.byKey(const Key('workspace-search-submit-button')));
       await tester.pumpAndSettle();
-      expect(find.byKey(const Key('search-result-心经.md')), findsOneWidget);
+      expect(find.byKey(Key('search-result-${note.id}')), findsOneWidget);
 
       await tester.tap(find.byType(Image).first);
       await tester.pump();
@@ -275,13 +273,9 @@ void main() {
       await tester.pump(const Duration(milliseconds: 1000));
       await tester.pump();
 
-      expect(find.byKey(const Key('search-result-心经.md')), findsNothing);
+      expect(find.byKey(Key('search-result-${note.id}')), findsNothing);
       expect(
-        find.byKey(const Key('proposal-心经.md-title-rename-proposal')),
-        findsNothing,
-      );
-      expect(
-        find.byKey(const Key('proposal-金刚经.md-title-rename-proposal')),
+        find.byKey(Key('proposal-${note.id}-title-rename-proposal')),
         findsOneWidget,
       );
       final generateButtonAfterRename = tester.widget<CupertinoButton>(
@@ -298,7 +292,7 @@ void main() {
     tester,
   ) async {
     final vault = CountingUpdateVaultBackend(seedExampleData: false);
-    await vault.createNote(parentPath: '', title: '心经');
+    final note = await vault.createNote(parentPath: '', title: '心经');
 
     await pumpWorkspace(tester, vault: vault);
     await tester.tap(find.byKey(const Key('split-pane-right-button')));
@@ -309,8 +303,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 1000));
     await tester.pump();
 
-    expect(() => vault.readNote('心经.md'), throwsA(isA<StateError>()));
-    expect((await vault.readNote('金刚经.md')).markdown, contains('共享正文'));
+    expect((await vault.readNote(note.id)).markdown, contains('共享正文'));
     expect(
       find.descendant(
         of: find.byKey(const Key('split-pane-title-pane-1')),
@@ -332,14 +325,14 @@ void main() {
   testWidgets('does not switch notes when auto-save fails', (tester) async {
     final vault = FailingUpdateVaultBackend(seedExampleData: false);
     await vault.createNote(parentPath: '', title: 'First');
-    await vault.createNote(parentPath: '', title: 'Second');
+    final second = await vault.createNote(parentPath: '', title: 'Second');
 
     await pumpWorkspace(tester, vault: vault);
     await switchToSourceMode(tester);
     await enterTextInLiveMarkdownBlock(tester, '# First\nchanged');
     vault.failUpdates = true;
 
-    await tester.tap(find.byKey(const Key('resource-row-Second.md')));
+    await tester.tap(find.byKey(Key('resource-row-${second.id}')));
     await tester.pump(const Duration(milliseconds: 250));
 
     final noteEditor = activeLiveMarkdownTextField(tester);
@@ -350,8 +343,8 @@ void main() {
 
   testWidgets('switches notes after saving dirty markdown', (tester) async {
     final vault = CountingUpdateVaultBackend(seedExampleData: false);
-    await vault.createNote(parentPath: '', title: 'First');
-    await vault.createNote(parentPath: '', title: 'Second');
+    final first = await vault.createNote(parentPath: '', title: 'First');
+    final second = await vault.createNote(parentPath: '', title: 'Second');
 
     await pumpWorkspace(tester, vault: vault);
     await switchToSourceMode(tester);
@@ -360,12 +353,12 @@ void main() {
       '# First\nchanged before switch',
     );
 
-    await tester.tap(find.byKey(const Key('resource-row-Second.md')));
+    await tester.tap(find.byKey(Key('resource-row-${second.id}')));
     await tester.pump(const Duration(milliseconds: 250));
 
     expect(vault.updateCalls, 1);
     expect(
-      (await vault.readNote('First.md')).markdown,
+      (await vault.readNote(first.id)).markdown,
       contains('changed before switch'),
     );
     await activateLiveMarkdownBlock(tester);

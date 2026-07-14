@@ -151,7 +151,10 @@ final class WorkspaceChromeTitlebar extends StatelessWidget {
 
   Widget _buildCenterTitlebar() {
     final controlsDisabled =
-        workspace.isBusy || workspace.isAutoSaving || !workspace.hasVault;
+        workspace.isBusy ||
+        workspace.isAutoSaving ||
+        !workspace.hasVault ||
+        workspace.requiresMigration;
     return WorkspaceTitlebarStrip(
       child: Row(
         mainAxisAlignment: MainAxisAlignment.end,

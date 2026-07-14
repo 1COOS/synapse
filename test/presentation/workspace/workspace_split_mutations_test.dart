@@ -8,7 +8,9 @@ import '../../support/workspace_fakes.dart';
 import '../../support/workspace_harness.dart';
 
 void main() {
-  testWidgets('folder rename remaps every open note session', (tester) async {
+  testWidgets('folder rename refreshes every open note session', (
+    tester,
+  ) async {
     final vault = MemoryVaultBackend(seedExampleData: false);
     final folder = await vault.createFolder(parentPath: '', title: '读书');
     final alpha = await vault.createNote(
@@ -76,16 +78,12 @@ void main() {
       liveMarkdownDocumentController(tester, paneId: 2),
       same(betaController),
     );
-    expect(find.byKey(Key('resource-row-${alpha.id}')), findsNothing);
-    expect(find.byKey(Key('resource-row-${beta.id}')), findsNothing);
-    expect(find.byKey(const Key('resource-row-课程/Alpha.md')), findsOneWidget);
-    expect(find.byKey(const Key('resource-row-课程/Beta.md')), findsOneWidget);
+    expect(find.byKey(Key('resource-row-${alpha.id}')), findsOneWidget);
+    expect(find.byKey(Key('resource-row-${beta.id}')), findsOneWidget);
+    expect((await vault.readNote(alpha.id)).path, '课程/Alpha.md');
+    expect((await vault.readNote(beta.id)).path, '课程/Beta.md');
     expect(
-      find.byKey(const Key('proposal-读书/Beta.md-beta-folder-rename-proposal')),
-      findsNothing,
-    );
-    expect(
-      find.byKey(const Key('proposal-课程/Beta.md-beta-folder-rename-proposal')),
+      find.byKey(Key('proposal-${beta.id}-beta-folder-rename-proposal')),
       findsOneWidget,
     );
 
@@ -93,15 +91,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 250));
 
     expect(
-      find.byKey(
-        const Key('proposal-读书/Alpha.md-alpha-folder-rename-proposal'),
-      ),
-      findsNothing,
-    );
-    expect(
-      find.byKey(
-        const Key('proposal-课程/Alpha.md-alpha-folder-rename-proposal'),
-      ),
+      find.byKey(Key('proposal-${alpha.id}-alpha-folder-rename-proposal')),
       findsOneWidget,
     );
   });
@@ -137,10 +127,7 @@ void main() {
     );
     await tester.tap(find.byKey(const Key('workspace-search-submit-button')));
     await tester.pumpAndSettle();
-    expect(
-      find.byKey(const Key('search-result-Z-target/Hidden.md')),
-      findsOneWidget,
-    );
+    expect(find.byKey(Key('search-result-${hidden.id}')), findsOneWidget);
 
     await tester.tap(find.byKey(const Key('left-pane-mode-resources')));
     await tester.pump(const Duration(milliseconds: 250));
@@ -160,10 +147,7 @@ void main() {
     await tester.tap(find.byKey(const Key('left-pane-mode-search')));
     await tester.pump();
 
-    expect(
-      find.byKey(const Key('search-result-Z-target/Hidden.md')),
-      findsNothing,
-    );
+    expect(find.byKey(Key('search-result-${hidden.id}')), findsNothing);
   });
 
   testWidgets(
@@ -210,12 +194,10 @@ void main() {
       vault.completeRename();
       await tester.pumpAndSettle();
 
-      expect(find.byKey(Key('resource-row-${alpha.id}')), findsNothing);
-      expect(find.byKey(Key('resource-row-${beta.id}')), findsNothing);
-      expect(find.byKey(const Key('resource-row-课程/Alpha.md')), findsOneWidget);
-      expect(find.byKey(const Key('resource-row-课程/Beta.md')), findsOneWidget);
+      expect(find.byKey(Key('resource-row-${alpha.id}')), findsOneWidget);
+      expect(find.byKey(Key('resource-row-${beta.id}')), findsOneWidget);
       expect(
-        resourceRowBackgroundColor(tester, '课程/Alpha.md'),
+        resourceRowBackgroundColor(tester, alpha.id),
         isNot(const Color(0x00000000)),
       );
     },
@@ -262,8 +244,8 @@ void main() {
       liveMarkdownDocumentController(tester, paneId: 2),
       same(sharedController),
     );
-    expect(find.byKey(Key('resource-row-${note.id}')), findsNothing);
-    expect(find.byKey(const Key('resource-row-课程/心经.md')), findsOneWidget);
+    expect(find.byKey(Key('resource-row-${note.id}')), findsOneWidget);
+    expect((await vault.readNote(note.id)).path, '课程/心经.md');
   });
 
   testWidgets(
@@ -300,10 +282,9 @@ void main() {
       vault.completeMove();
       await tester.pumpAndSettle();
 
-      expect(find.byKey(Key('resource-row-${note.id}')), findsNothing);
-      expect(find.byKey(const Key('resource-row-课程/心经.md')), findsOneWidget);
+      expect(find.byKey(Key('resource-row-${note.id}')), findsOneWidget);
       expect(
-        resourceRowBackgroundColor(tester, '课程/心经.md'),
+        resourceRowBackgroundColor(tester, note.id),
         isNot(const Color(0x00000000)),
       );
     },

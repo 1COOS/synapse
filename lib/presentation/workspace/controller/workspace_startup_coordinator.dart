@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import '../../../domain/vault/vault_migration.dart';
 import '../../../domain/vault/vault_resource.dart';
 import '../../../infrastructure/config/settings_store.dart';
 import '../../../infrastructure/config/synapse_settings.dart';
@@ -19,6 +20,7 @@ typedef RuntimeSnapshotInstaller =
     void Function(
       WorkspaceResourceSnapshot snapshot, {
       required String message,
+      VaultMigrationRequirement? migrationRequirement,
     });
 typedef WorkspacePostCommitFailureHandler =
     void Function(Object error, StackTrace stackTrace);
@@ -279,7 +281,7 @@ final class WorkspaceStartupCoordinator {
         label: dependencies.formatVaultLabel(location.rootPath),
         settings: nextSettings,
       );
-      final snapshot = await resources.loadDetachedRuntime(candidate);
+      final prepared = await _prepareRuntime(candidate);
       if (!_isVaultIntentCurrent(intent)) {
         return WorkspaceActionResult.aborted;
       }
@@ -303,7 +305,13 @@ final class WorkspaceStartupCoordinator {
       }
       _settings = nextSettings;
       _loadedSettingsBaseline = nextSettings;
-      replaceRuntimeSnapshot(snapshot, message: '仓库已打开');
+      replaceRuntimeSnapshot(
+        prepared.snapshot,
+        message: prepared.migrationRequirement == null
+            ? '仓库已打开'
+            : '检测到旧版笔记标识，请确认迁移后继续编辑',
+        migrationRequirement: prepared.migrationRequirement,
+      );
       return WorkspaceActionResult.committed;
     } catch (error, stackTrace) {
       if (runtimeCommitted) {
@@ -493,7 +501,7 @@ final class WorkspaceStartupCoordinator {
         label: dependencies.formatVaultLabel(restored.rootPath),
         settings: settings,
       );
-      final snapshot = await resources.loadDetachedRuntime(candidate);
+      final prepared = await _prepareRuntime(candidate);
       if (!_isStartupCurrent(startupToken)) {
         candidate.dispose(
           reportCleanupError: dependencies.cleanupErrorReporter,
@@ -524,8 +532,14 @@ final class WorkspaceStartupCoordinator {
       _settings = restoredSettings;
       _loadedSettingsBaseline = restoredSettings;
       replaceRuntimeSnapshot(
-        snapshot,
-        message: _startupMessage(recoveryMessage, fallback: '仓库已打开'),
+        prepared.snapshot,
+        message: prepared.migrationRequirement == null
+            ? _startupMessage(recoveryMessage, fallback: '仓库已打开')
+            : _startupMessage(
+                recoveryMessage,
+                fallback: '检测到旧版笔记标识，请确认迁移后继续编辑',
+              ),
+        migrationRequirement: prepared.migrationRequirement,
       );
     } catch (error, stackTrace) {
       if (runtimeCommitted) {
@@ -553,6 +567,31 @@ final class WorkspaceStartupCoordinator {
         _startupToken = null;
       }
     }
+  }
+
+  Future<_PreparedRuntimeSnapshot> _prepareRuntime(
+    WorkspaceRuntime runtime,
+  ) async {
+    final vault = runtime.vault;
+    if (vault is VaultMigrationBackend) {
+      final requirement = await (vault as VaultMigrationBackend)
+          .inspectMigration();
+      if (requirement != null) {
+        return _PreparedRuntimeSnapshot(
+          snapshot: WorkspaceResourceSnapshot(
+            resources: requirement.previewResources,
+            selectedResource: null,
+            note: null,
+            proposals: const [],
+          ),
+          migrationRequirement: requirement,
+        );
+      }
+    }
+    return _PreparedRuntimeSnapshot(
+      snapshot: await resources.loadDetachedRuntime(runtime),
+      migrationRequirement: null,
+    );
   }
 
   bool _isStartupCurrent(Object token) {
@@ -683,6 +722,16 @@ final class WorkspaceStartupCoordinator {
     }
     return '$recoveryMessage；$fallback';
   }
+}
+
+final class _PreparedRuntimeSnapshot {
+  const _PreparedRuntimeSnapshot({
+    required this.snapshot,
+    required this.migrationRequirement,
+  });
+
+  final WorkspaceResourceSnapshot snapshot;
+  final VaultMigrationRequirement? migrationRequirement;
 }
 
 final class _VaultAccessCandidate {

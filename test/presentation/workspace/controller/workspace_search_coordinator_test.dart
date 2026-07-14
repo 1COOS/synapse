@@ -57,7 +57,7 @@ void main() {
       'restarts once when a note is renamed between list and read',
       () async {
         final vault = _RenameOnReadVault();
-        await vault.createNote(parentPath: '', title: 'Alpha');
+        final note = await vault.createNote(parentPath: '', title: 'Alpha');
         final index = _RecordingSearchIndex();
         final coordinator = WorkspaceSearchCoordinator(index);
         addTearDown(coordinator.dispose);
@@ -70,9 +70,9 @@ void main() {
           vault: vault,
         );
 
-        expect(index.removedIds, ['Alpha.md']);
-        expect(index.indexedIds, ['Alpha.md', 'Beta.md']);
-        expect(results!.single.id, 'Beta.md');
+        expect(index.removedIds, isEmpty);
+        expect(index.indexedIds, [note.id, note.id]);
+        expect(results!.single.id, note.id);
       },
     );
 
@@ -102,11 +102,11 @@ void main() {
         await coordinator.searchVault(query: 'external', vault: vault),
         isEmpty,
       );
-      await vault.createNote(parentPath: '', title: 'external');
+      final note = await vault.createNote(parentPath: '', title: 'external');
 
       await coordinator.searchVault(query: 'external', vault: vault);
 
-      expect(index.indexedIds, ['external.md']);
+      expect(index.indexedIds, [note.id]);
     });
 
     test('refresh removes externally deleted notes before reading', () async {
@@ -121,7 +121,7 @@ void main() {
 
       await coordinator.searchVault(query: 'Alpha', vault: vault);
 
-      expect(index.removedIds, ['Alpha.md']);
+      expect(index.removedIds, [note.id]);
     });
 
     test(
@@ -163,7 +163,7 @@ void main() {
 
     test('does not reindex an unchanged note', () async {
       final vault = MemoryVaultBackend(seedExampleData: false);
-      await vault.createNote(parentPath: '', title: 'Alpha');
+      final note = await vault.createNote(parentPath: '', title: 'Alpha');
       final index = _RecordingSearchIndex();
       final coordinator = WorkspaceSearchCoordinator(index);
       addTearDown(coordinator.dispose);
@@ -171,7 +171,7 @@ void main() {
       await coordinator.indexVault(vault: vault);
       await coordinator.indexVault(vault: vault);
 
-      expect(index.indexedIds, ['Alpha.md']);
+      expect(index.indexedIds, [note.id]);
     });
 
     test('reindexes a changed note', () async {
@@ -188,7 +188,7 @@ void main() {
       );
       await coordinator.indexVault(vault: vault);
 
-      expect(index.indexedIds, ['Alpha.md', 'Alpha.md']);
+      expect(index.indexedIds, [note.id, note.id]);
       expect(index.indexedTexts.last, contains('changed'));
     });
 
@@ -205,7 +205,7 @@ void main() {
         await vault.deleteNote(note.id);
         await coordinator.indexVault(vault: vault);
 
-        expect(index.removedIds, ['Alpha.md']);
+        expect(index.removedIds, [note.id]);
       },
     );
 
@@ -213,7 +213,7 @@ void main() {
       'replaceIndex disposes the previous index once and clears fingerprints',
       () async {
         final vault = MemoryVaultBackend(seedExampleData: false);
-        await vault.createNote(parentPath: '', title: 'Alpha');
+        final note = await vault.createNote(parentPath: '', title: 'Alpha');
         final oldIndex = _RecordingSearchIndex();
         final replacement = _RecordingSearchIndex();
         final coordinator = WorkspaceSearchCoordinator(oldIndex);
@@ -223,7 +223,7 @@ void main() {
         await coordinator.indexVault(vault: vault);
 
         expect(oldIndex.disposeCalls, 1);
-        expect(replacement.indexedIds, ['Alpha.md']);
+        expect(replacement.indexedIds, [note.id]);
       },
     );
 

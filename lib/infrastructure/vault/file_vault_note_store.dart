@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:path/path.dart' as p;
 
 import '../../domain/markdown/markdown_document.dart';
+import '../../domain/vault/note_id.dart';
 import '../../domain/vault/vault_resource.dart';
 import 'file_vault_operations.dart';
 import 'file_vault_paths.dart';
@@ -60,32 +61,43 @@ final class FileVaultNoteStore {
     await paths.ensureSafePath(parent.path);
     final file = await paths.uniqueNoteFile(parent, title);
     final assets = Directory(paths.assetsDirectoryPathForFile(file));
+    final noteId = NoteId.generate().value;
     await paths.ensureSafePath(file.path);
     await paths.ensureSafePath(assets.path);
-    await paths.ensureSafePath(
-      paths.sourcesFile(paths.relativePath(file.path)).path,
-    );
-    await paths.ensureSafePath(
-      paths.proposalsFile(paths.relativePath(file.path)).path,
-    );
+    await paths.ensureSafePath(p.join(assets.path, 'sources.json'));
+    await paths.ensureSafePath(p.join(assets.path, 'proposals.json'));
     return runVaultPostCommit(() async {
       await operations.createDirectory(parent, recursive: true);
       final now = DateTime.now().toUtc();
-      final note = _noteFromFile(file, createdAt: now, updatedAt: now);
-      await operations.writeFileString(file, initialVaultMarkdown(note));
-      await operations.createDirectory(
-        Directory(note.assetsPath),
-        recursive: true,
+      final note = _noteFromFile(
+        file,
+        id: noteId,
+        createdAt: now,
+        updatedAt: now,
       );
-      await sources.writeSources(note.id, const []);
-      await proposals.writeProposals(note.id, const []);
-      return note;
+      paths.catalog.register(note.id, note.path);
+      try {
+        await operations.writeFileString(file, initialVaultMarkdown(note));
+        await operations.createDirectory(
+          Directory(note.assetsPath),
+          recursive: true,
+        );
+        await sources.writeSources(note.id, const []);
+        await proposals.writeProposals(note.id, const []);
+        return note;
+      } catch (_) {
+        paths.catalog.markDeleted(note.id);
+        rethrow;
+      }
     });
   }
 
   Future<List<VaultResourceNode>> listResources() async {
     await operations.ensureRoot();
-    return _listChildren(paths.root);
+    final catalog = <String, String>{};
+    final resources = await _listChildren(paths.root, catalog);
+    paths.catalog.replace(catalog);
+    return resources;
   }
 
   Future<VaultNoteContent> readNote(String noteId) async {
@@ -116,8 +128,19 @@ final class FileVaultNoteStore {
   }) async {
     final file = paths.fileForNoteId(noteId);
     await paths.ensureSafePath(file.path);
+    final current = await operations.readFileString(file);
+    final stableId = NoteId.tryParse(
+      readMarkdownFrontmatterScalar(current, 'synapseId'),
+    );
+    final persistedMarkdown = stableId == null
+        ? markdown
+        : patchMarkdownFrontmatterScalar(
+            markdown,
+            key: 'synapseId',
+            value: stableId.value,
+          );
     return runVaultPostCommit(() async {
-      await operations.writeFileString(file, markdown);
+      await operations.writeFileString(file, persistedMarkdown);
       return readNoteCallback(noteId);
     });
   }
@@ -143,12 +166,20 @@ final class FileVaultNoteStore {
       throw StateError('Note not found: $noteId');
     }
     final assets = Directory(paths.assetsDirectoryPathForFile(file));
+    final markdown = await operations.readFileString(file);
+    final stableId =
+        NoteId.tryParse(
+          readMarkdownFrontmatterScalar(markdown, 'synapseId'),
+        )?.value ??
+        noteId;
     await paths.ensureSafePath(assets.path);
     await runVaultPostCommit(() async {
       await operations.deleteFile(file);
+      await proposals.deleteForNote(stableId);
       if (await operations.directoryExists(assets)) {
         await operations.deleteDirectory(assets, recursive: true);
       }
+      paths.catalog.markDeleted(stableId);
     });
   }
 
@@ -174,7 +205,7 @@ final class FileVaultNoteStore {
     final now = DateTime.now().toUtc();
     final target = await paths.uniqueNoteFile(file.parent, note.title);
     await paths.ensureSafePath(target.path);
-    final copiedId = paths.relativePath(target.path);
+    final copiedId = NoteId.generate().value;
     final copiedTitle = p.basenameWithoutExtension(target.path);
     final assets = Directory(paths.assetsDirectoryPathForFile(file));
     final copiedAssets = Directory(paths.assetsDirectoryPathForFile(target));
@@ -187,19 +218,29 @@ final class FileVaultNoteStore {
 
     return runVaultPostCommit(() async {
       final copiedMarkdown = rewriteNoteAssetReferences(
-        retitleVaultMarkdown(markdown, newTitle: copiedTitle, updatedAt: now),
+        patchMarkdownFrontmatterScalar(
+          retitleVaultMarkdown(markdown, newTitle: copiedTitle, updatedAt: now),
+          key: 'synapseId',
+          value: copiedId,
+        ),
         oldAssetsDirectory: p.basename(assets.path),
         newAssetsDirectory: p.basename(copiedAssets.path),
       );
-      await operations.writeFileString(target, copiedMarkdown);
-      if (hasAssets) {
-        await _copyDirectory(assets, copiedAssets);
-      } else {
-        await operations.createDirectory(copiedAssets, recursive: true);
+      paths.catalog.register(copiedId, paths.relativePath(target.path));
+      try {
+        await operations.writeFileString(target, copiedMarkdown);
+        if (hasAssets) {
+          await _copyDirectory(assets, copiedAssets);
+        } else {
+          await operations.createDirectory(copiedAssets, recursive: true);
+        }
+        final sourceIdMap = await sources.rewriteCopied(copiedId, now);
+        await proposals.rewriteCopied(note.id, copiedId, sourceIdMap, now);
+        return (await readNoteCallback(copiedId)).note;
+      } catch (_) {
+        paths.catalog.markDeleted(copiedId);
+        rethrow;
       }
-      final sourceIdMap = await sources.rewriteCopied(copiedId, now);
-      await proposals.rewriteCopied(copiedId, sourceIdMap, now);
-      return (await readNoteCallback(copiedId)).note;
     });
   }
 
@@ -229,9 +270,13 @@ final class FileVaultNoteStore {
     if (!await operations.directoryExists(directory)) {
       throw StateError('Folder not found: $folderPath');
     }
-    await runVaultPostCommit(
-      () => operations.deleteDirectory(directory, recursive: true),
-    );
+    final noteIds = await noteIdsInsideFolder(relative);
+    await runVaultPostCommit(() async {
+      await operations.deleteDirectory(directory, recursive: true);
+      for (final noteId in noteIds) {
+        await proposals.deleteForNote(noteId);
+      }
+    });
   }
 
   Future<VaultResourceNode> renameFolder({
@@ -263,13 +308,15 @@ final class FileVaultNoteStore {
 
     final noteIds = await noteIdsInsideFolder(relative);
     final targetRelative = paths.relativePath(target.path);
-    final movedNoteIds = [
+    final movedLegacyIds = {
       for (final noteId in noteIds)
-        replaceVaultPathPrefix(noteId, relative, targetRelative),
-    ];
+        if (NoteId.tryParse(noteId) == null)
+          noteId: replaceVaultPathPrefix(noteId, relative, targetRelative),
+    };
     return runVaultPostCommit(() async {
       final moved = await operations.renameDirectory(directory, target.path);
-      for (final noteId in movedNoteIds) {
+      await listResources();
+      for (final noteId in movedLegacyIds.values) {
         await sources.rewriteMoved(noteId);
         await proposals.rewriteMoved(noteId);
       }
@@ -302,7 +349,7 @@ final class FileVaultNoteStore {
     final noteIds = <String>[];
     void collect(List<VaultResourceNode> nodes) {
       for (final node in nodes) {
-        if (node.isNote && isVaultPathInside(node.id, folderPath)) {
+        if (node.isNote && isVaultPathInside(node.path, folderPath)) {
           noteIds.add(node.id);
         }
         collect(node.children);
@@ -313,7 +360,10 @@ final class FileVaultNoteStore {
     return noteIds;
   }
 
-  Future<List<VaultResourceNode>> _listChildren(Directory directory) async {
+  Future<List<VaultResourceNode>> _listChildren(
+    Directory directory,
+    Map<String, String> catalog,
+  ) async {
     final nodes = <VaultResourceNode>[];
     for (final entity in await operations.listDirectory(directory)) {
       if (entity is Link) {
@@ -333,7 +383,7 @@ final class FileVaultNoteStore {
             title: name,
             path: paths.relativePath(entity.path),
             type: VaultResourceType.folder,
-            children: await _listChildren(entity),
+            children: await _listChildren(entity, catalog),
           ),
         );
       } else if (entity is File && p.extension(entity.path) == '.md') {
@@ -341,6 +391,14 @@ final class FileVaultNoteStore {
           await operations.readFileString(entity),
         );
         final note = await _noteFromExistingFile(entity, doc);
+        final previous = catalog[note.id];
+        if (previous != null && previous != note.path) {
+          throw StateError(
+            'Duplicate Synapse note id "${note.id}" at '
+            '"$previous" and "${note.path}".',
+          );
+        }
+        catalog[note.id] = note.path;
         nodes.add(
           VaultResourceNode(
             id: note.id,
@@ -378,6 +436,14 @@ final class FileVaultNoteStore {
         stat.modified.toUtc();
     return _noteFromFile(
       file,
+      id:
+          NoteId.tryParse(
+            readMarkdownFrontmatterScalar(
+              await operations.readFileString(file),
+              'synapseId',
+            ),
+          )?.value ??
+          paths.relativePath(file.path),
       createdAt: createdAt,
       updatedAt: updatedAt,
       title: doc.visibleTitle,
@@ -386,15 +452,16 @@ final class FileVaultNoteStore {
 
   VaultNote _noteFromFile(
     File file, {
+    required String id,
     required DateTime createdAt,
     required DateTime updatedAt,
     String? title,
   }) {
-    final id = paths.relativePath(file.path);
+    final path = paths.relativePath(file.path);
     return VaultNote(
       id: id,
       title: title ?? _titleFromFile(file),
-      path: id,
+      path: path,
       markdownPath: file.path,
       assetsPath: paths.assetsDirectoryPathForFile(file),
       createdAt: createdAt,
@@ -412,6 +479,8 @@ final class FileVaultNoteStore {
     required String title,
   }) async {
     final markdown = await operations.readFileString(file);
+    final document = MarkdownDocument.parse(markdown);
+    final note = await _noteFromExistingFile(file, document);
     final now = DateTime.now().toUtc();
     final target = await paths.uniqueNoteFile(
       parent,
@@ -419,7 +488,7 @@ final class FileVaultNoteStore {
       excludePath: file.path,
     );
     await paths.ensureSafePath(target.path);
-    final movedId = paths.relativePath(target.path);
+    final movedPath = paths.relativePath(target.path);
     final movedTitle = p.basenameWithoutExtension(target.path);
     final assets = Directory(paths.assetsDirectoryPathForFile(file));
     final movedAssets = Directory(paths.assetsDirectoryPathForFile(target));
@@ -444,9 +513,10 @@ final class FileVaultNoteStore {
           await operations.createDirectory(movedAssets, recursive: true);
         }
       }
-      await sources.rewriteMoved(movedId);
-      await proposals.rewriteMoved(movedId);
-      return (await readNoteCallback(movedId)).note;
+      paths.catalog.move(note.id, movedPath);
+      await sources.rewriteMoved(note.id);
+      await proposals.rewriteMoved(note.id);
+      return (await readNoteCallback(note.id)).note;
     });
   }
 

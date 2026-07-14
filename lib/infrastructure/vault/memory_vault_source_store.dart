@@ -16,11 +16,11 @@ final class MemoryVaultSourceStore {
     required String title,
     required String text,
   }) async {
-    state.note(noteId);
+    final resolvedNoteId = state.note(noteId).id;
     final now = DateTime.now().toUtc();
     final source = SourceItem(
       id: const Uuid().v4(),
-      noteId: noteId,
+      noteId: resolvedNoteId,
       type: SourceType.text,
       title: title.trim().isEmpty ? '摘录' : title.trim(),
       text: text,
@@ -28,7 +28,7 @@ final class MemoryVaultSourceStore {
       createdAt: now,
       updatedAt: now,
     );
-    state.sources.putIfAbsent(noteId, () => <SourceItem>[]).add(source);
+    state.sources.putIfAbsent(resolvedNoteId, () => <SourceItem>[]).add(source);
     return source;
   }
 
@@ -38,26 +38,27 @@ final class MemoryVaultSourceStore {
     required String mimeType,
     required List<int> bytes,
   }) async {
-    state.note(noteId);
+    final resolvedNoteId = state.note(noteId).id;
     final now = DateTime.now().toUtc();
     final source = SourceItem(
       id: const Uuid().v4(),
-      noteId: noteId,
+      noteId: resolvedNoteId,
       type: SourceType.image,
       title: filename,
       state: SourceState.pending,
       createdAt: now,
       updatedAt: now,
-      attachmentPath: paths.uniqueAttachmentPath(noteId, filename),
+      attachmentPath: paths.uniqueAttachmentPath(resolvedNoteId, filename),
       mimeType: mimeType,
     );
-    state.sources.putIfAbsent(noteId, () => <SourceItem>[]).add(source);
+    state.sources.putIfAbsent(resolvedNoteId, () => <SourceItem>[]).add(source);
     state.attachmentBytes[source.id] = List<int>.unmodifiable(bytes);
     return source;
   }
 
   Future<List<SourceItem>> listSources(String noteId) async {
-    return List.unmodifiable(state.sources[noteId] ?? const []);
+    final resolvedNoteId = state.resolveNoteId(noteId) ?? noteId;
+    return List.unmodifiable(state.sources[resolvedNoteId] ?? const []);
   }
 
   Future<List<SourceItem>> getSources(
@@ -65,7 +66,8 @@ final class MemoryVaultSourceStore {
     List<String> sourceIds,
   ) async {
     final wanted = sourceIds.toSet();
-    return (state.sources[noteId] ?? const [])
+    final resolvedNoteId = state.resolveNoteId(noteId) ?? noteId;
+    return (state.sources[resolvedNoteId] ?? const [])
         .where((source) => wanted.contains(source.id))
         .toList();
   }

@@ -183,7 +183,7 @@ final class WorkspaceEditorOperationCoordinator {
         value: null,
         remappedNoteIds: {result.oldNoteId: savedNote.id},
         refreshedNotesByNewId: {savedNote.id: savedNote},
-        resources: result.idChanged
+        resources: result.pathChanged
             ? await _requireVault().listResources()
             : null,
       ),
@@ -193,6 +193,7 @@ final class WorkspaceEditorOperationCoordinator {
         }
         final current = readState();
         final idChanged = result.oldNoteId != savedNote.id;
+        final pathChanged = result.pathChanged;
         final selected =
             idChanged && current.selectedResourceId == result.oldNoteId
             ? savedNote.id
@@ -211,7 +212,7 @@ final class WorkspaceEditorOperationCoordinator {
           patch: WorkspaceStatePatch(
             resources: delta.resources,
             selectedResourceId: selected,
-            searchResults: idChanged ? const [] : null,
+            searchResults: pathChanged ? const [] : null,
             message:
                 !runtimeStale &&
                     request.successMessage != null &&
@@ -219,7 +220,7 @@ final class WorkspaceEditorOperationCoordinator {
                 ? request.successMessage
                 : null,
             selectedPreviewImageSrc:
-                idChanged && identical(focusedSession, result.session)
+                pathChanged && identical(focusedSession, result.session)
                 ? null
                 : current.selectedPreviewImageSrc,
           ),

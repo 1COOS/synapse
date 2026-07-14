@@ -124,6 +124,7 @@ final class WorkspaceDocumentCoordinator {
     final vault = _runtimes.requireCurrent().vault;
     final oldPath = folder.path;
     final affectedIds = {
+      for (final note in _notesUnder(folder)) note.id,
       for (final session in _sessions.sessionsUnderPath(oldPath))
         session.noteId,
     };
@@ -138,13 +139,10 @@ final class WorkspaceDocumentCoordinator {
           );
           return WorkspaceBackendCommit(
             postCommitHydrate: () async {
-              final remaps = {
-                for (final oldId in affectedIds)
-                  oldId: _replacePathPrefix(oldId, oldPath, renamed.path),
-              };
+              final remaps = {for (final noteId in affectedIds) noteId: noteId};
               final refreshed = <String, VaultNoteContent>{};
-              for (final newId in remaps.values) {
-                refreshed[newId] = await vault.readNote(newId);
+              for (final noteId in affectedIds) {
+                refreshed[noteId] = await vault.readNote(noteId);
               }
               return VaultMutationDelta(
                 value: renamed,
@@ -333,7 +331,7 @@ final class WorkspaceDocumentCoordinator {
     final affectedIds = {
       for (final note in _notesUnder(resource)) note.id,
       for (final session in _sessions.sessions)
-        if (_resourceContainsNote(resource, session.noteId)) session.noteId,
+        if (_resourceContainsNote(resource, session)) session.noteId,
     };
     final result = await _mutations.run<_DeleteHydration>(
       WorkspaceMutationPlan<_DeleteHydration>(
@@ -489,10 +487,13 @@ VaultResourceNode? _firstNote(List<VaultResourceNode> resources) {
   return null;
 }
 
-bool _resourceContainsNote(VaultResourceNode resource, String noteId) {
+bool _resourceContainsNote(
+  VaultResourceNode resource,
+  NoteDocumentSession session,
+) {
   return resource.isNote
-      ? resource.id == noteId
-      : _pathIsInside(noteId, resource.path);
+      ? resource.id == session.noteId
+      : _pathIsInside(session.note.path, resource.path);
 }
 
 bool _pathIsInside(String path, String folder) {

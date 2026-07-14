@@ -456,7 +456,7 @@ void main() {
       vault.releaseUpdate();
       await aiProvider.extractionStarted.future;
       await tester.pump();
-      expect(find.byKey(const Key('resource-row-Remapped.md')), findsOneWidget);
+      expect(find.byKey(Key('resource-row-${alpha.id}')), findsOneWidget);
       expect(betaController.text, betaMarkdownBeforeCommand);
       expect(vault.updateCalls, updatesBeforeCommand + 1);
 
@@ -511,12 +511,12 @@ void main() {
       );
 
       expect(
-        (await vault.listProposals('Remapped.md')).single.proposedMarkdown,
+        (await vault.listProposals(alpha.id)).single.proposedMarkdown,
         'Locked OCR',
       );
       expect(
         (await vault.listSources(
-          'Remapped.md',
+          alpha.id,
         )).firstWhere((source) => source.id == lockedSource.id).state,
         SourceState.processed,
       );
@@ -526,14 +526,19 @@ void main() {
       tester
           .widget<GestureDetector>(find.byKey(const Key('split-pane-pane-1')))
           .onTap!();
-      await tester.pump();
+      await tester.pumpAndSettle();
+      final refreshedLockedPreview = tester.widget<PreviewImageBlock>(
+        inNotePane(find.byKey(Key('preview-image-${lockedSource.id}')), 1),
+      );
       final updatesBeforeUnlockedResize = vault.updateCalls;
-      capturedLockedPreview.onWidthChanged(480);
+      refreshedLockedPreview.onWidthChanged(480);
       await tester.pumpAndSettle();
       expect(vault.updateCalls, updatesBeforeUnlockedResize + 1);
       expect(
-        (await vault.readNote('Remapped.md')).markdown,
-        contains('src="$lockedSrc" width="480"'),
+        (await vault.readNote(alpha.id)).markdown,
+        contains(
+          'src="Remapped.assets/attachments/locked-ocr.png" width="480"',
+        ),
       );
     },
   );

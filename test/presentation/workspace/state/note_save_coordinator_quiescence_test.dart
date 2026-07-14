@@ -74,7 +74,7 @@ void main() {
       addTearDown(lease.release);
 
       expect(lease.report.succeeded, isTrue);
-      expect(vault.savedNoteIds, ['Alpha.md']);
+      expect(vault.savedNoteIds, [session.noteId]);
       expect(session.isDirty, isFalse);
     });
 

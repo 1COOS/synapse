@@ -1,12 +1,19 @@
 import 'package:flutter/foundation.dart';
 
 import '../../../application/search/search_index.dart';
+import '../../../domain/vault/vault_migration.dart';
 import '../../../domain/vault/vault_resource.dart';
 import '../../../infrastructure/config/synapse_settings.dart';
 import '../state/note_materials_registry.dart';
 import '../state/split_workspace_controller.dart';
 
-enum WorkspacePhase { needsVault, ready, webPreview, unsupported }
+enum WorkspacePhase {
+  needsVault,
+  migrationRequired,
+  ready,
+  webPreview,
+  unsupported,
+}
 
 enum WorkspaceSection { resources, notes, sources }
 
@@ -15,6 +22,7 @@ enum WorkspaceLeftMode { resources, search }
 enum WorkspaceOperation {
   startup,
   vaultSwitch,
+  vaultMigration,
   settings,
   resourceMutation,
   search,
@@ -43,6 +51,7 @@ final class WorkspaceState {
     this.settings = SynapseSettings.defaults,
     this.vaultLabel = '',
     this.vaultRoot,
+    this.migrationRequirement,
     Set<String> savingNoteIds = const {},
     Set<String> lockedSessionNoteIds = const {},
     this.isAutoSaving = false,
@@ -81,6 +90,7 @@ final class WorkspaceState {
   ProviderConfig get providerConfig => settings.providerConfig;
   final String vaultLabel;
   final String? vaultRoot;
+  final VaultMigrationRequirement? migrationRequirement;
   final Set<String> savingNoteIds;
   final Set<String> lockedSessionNoteIds;
   final bool isAutoSaving;
@@ -91,7 +101,11 @@ final class WorkspaceState {
   final String? selectedPreviewImageSrc;
 
   bool get hasVault =>
-      phase == WorkspacePhase.ready || phase == WorkspacePhase.webPreview;
+      phase == WorkspacePhase.migrationRequired ||
+      phase == WorkspacePhase.ready ||
+      phase == WorkspacePhase.webPreview;
+
+  bool get requiresMigration => phase == WorkspacePhase.migrationRequired;
 
   bool get isBusy => activeOperation != null;
 
@@ -118,6 +132,7 @@ final class WorkspaceState {
     SynapseSettings? settings,
     String? vaultLabel,
     Object? vaultRoot = _unset,
+    Object? migrationRequirement = _unset,
     Set<String>? savingNoteIds,
     Set<String>? lockedSessionNoteIds,
     bool? isAutoSaving,
@@ -149,6 +164,9 @@ final class WorkspaceState {
       vaultRoot: identical(vaultRoot, _unset)
           ? this.vaultRoot
           : vaultRoot as String?,
+      migrationRequirement: identical(migrationRequirement, _unset)
+          ? this.migrationRequirement
+          : migrationRequirement as VaultMigrationRequirement?,
       savingNoteIds: savingNoteIds ?? this.savingNoteIds,
       lockedSessionNoteIds: lockedSessionNoteIds ?? this.lockedSessionNoteIds,
       isAutoSaving: isAutoSaving ?? this.isAutoSaving,

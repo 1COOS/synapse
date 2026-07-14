@@ -16,7 +16,7 @@ void main() {
     test('selects resources and retains previously opened sessions', () async {
       final vault = MemoryVaultBackend();
       await vault.createNote(parentPath: '', title: 'Alpha');
-      await vault.createNote(parentPath: '', title: 'Beta');
+      final betaNote = await vault.createNote(parentPath: '', title: 'Beta');
       final container = ProviderContainer(
         overrides: [
           workspaceDependenciesProvider.overrideWithValue(
@@ -31,25 +31,25 @@ void main() {
       final initial = await container.read(workspaceControllerProvider.future);
       final controller = container.read(workspaceControllerProvider.notifier);
       final initialSession = controller.sessionFor(initial.selectedResourceId!);
-      final beta = _findResource(initial.resources, 'Beta.md');
+      final beta = _findResource(initial.resources, betaNote.id);
 
       final result = await controller.selectResource(beta!);
       final selected = container.read(workspaceControllerProvider).requireValue;
 
       expect(result, WorkspaceActionResult.committed);
-      expect(selected.selectedResourceId, 'Beta.md');
-      expect((selected.splitRoot as SplitLeaf).noteId, 'Beta.md');
+      expect(selected.selectedResourceId, betaNote.id);
+      expect((selected.splitRoot as SplitLeaf).noteId, betaNote.id);
       expect(selected.narrowSection, WorkspaceSection.notes);
       expect(
         controller.sessionFor(initialSession!.noteId),
         same(initialSession),
       );
-      expect(controller.sessionFor('Beta.md'), isNotNull);
+      expect(controller.sessionFor(betaNote.id), isNotNull);
     });
 
     test('publishes navigation and immutable split tree updates', () async {
       final vault = MemoryVaultBackend();
-      await vault.createNote(parentPath: '', title: 'Split');
+      final note = await vault.createNote(parentPath: '', title: 'Split');
       final container = ProviderContainer(
         overrides: [
           workspaceDependenciesProvider.overrideWithValue(
@@ -81,7 +81,7 @@ void main() {
       expect(updated.splitRoot, isA<SplitBranch>());
       expect(
         (updated.splitRoot as SplitBranch).second,
-        isA<SplitLeaf>().having((pane) => pane.noteId, 'noteId', 'Split.md'),
+        isA<SplitLeaf>().having((pane) => pane.noteId, 'noteId', note.id),
       );
     });
 
@@ -151,18 +151,21 @@ void main() {
         WorkspaceActionResult.committed,
       );
       final created = container.read(workspaceControllerProvider).requireValue;
+      final createdResource = _findResourceByPath(
+        created.resources,
+        'Created.md',
+      )!;
 
-      expect(created.selectedResourceId, 'Created.md');
-      expect(_findResource(created.resources, 'Created.md'), isNotNull);
-      expect(created.sessionNoteIds, contains('Created.md'));
-      expect((created.splitRoot as SplitLeaf).noteId, 'Created.md');
-      expect(controller.sessionFor('Created.md'), isNotNull);
+      expect(created.selectedResourceId, createdResource.id);
+      expect(created.sessionNoteIds, contains(createdResource.id));
+      expect((created.splitRoot as SplitLeaf).noteId, createdResource.id);
+      expect(controller.sessionFor(createdResource.id), isNotNull);
     });
 
     test('atomically remaps open state when a folder is renamed', () async {
       final vault = MemoryVaultBackend();
       await vault.createFolder(parentPath: '', title: 'Old');
-      await vault.createNote(parentPath: 'Old', title: 'Open');
+      final note = await vault.createNote(parentPath: 'Old', title: 'Open');
       final container = ProviderContainer(
         overrides: [
           workspaceDependenciesProvider.overrideWithValue(
@@ -176,7 +179,7 @@ void main() {
       addTearDown(container.dispose);
       final initial = await container.read(workspaceControllerProvider.future);
       final controller = container.read(workspaceControllerProvider.notifier);
-      final session = controller.sessionFor('Old/Open.md');
+      final session = controller.sessionFor(note.id);
       final folder = _findResource(initial.resources, 'Old')!;
 
       expect(
@@ -185,20 +188,24 @@ void main() {
       );
       final renamed = container.read(workspaceControllerProvider).requireValue;
 
-      expect(renamed.selectedResourceId, 'New/Open.md');
+      expect(renamed.selectedResourceId, note.id);
       expect(_findResource(renamed.resources, 'Old'), isNull);
-      expect(_findResource(renamed.resources, 'New/Open.md'), isNotNull);
-      expect(renamed.sessionNoteIds, {'New/Open.md'});
-      expect(controller.sessionFor('New/Open.md'), same(session));
-      expect((renamed.splitRoot as SplitLeaf).noteId, 'New/Open.md');
+      expect(_findResourceByPath(renamed.resources, 'New/Open.md'), isNotNull);
+      expect(renamed.sessionNoteIds, {note.id});
+      expect(controller.sessionFor(note.id), same(session));
+      expect(session?.note.path, 'New/Open.md');
+      expect((renamed.splitRoot as SplitLeaf).noteId, note.id);
     });
 
     test(
       'removes deleted notes from state and chooses a stable fallback',
       () async {
         final vault = MemoryVaultBackend();
-        await vault.createNote(parentPath: '', title: 'Alpha');
-        await vault.createNote(parentPath: '', title: 'Beta');
+        final alphaNote = await vault.createNote(
+          parentPath: '',
+          title: 'Alpha',
+        );
+        final betaNote = await vault.createNote(parentPath: '', title: 'Beta');
         final container = ProviderContainer(
           overrides: [
             workspaceDependenciesProvider.overrideWithValue(
@@ -214,7 +221,7 @@ void main() {
           workspaceControllerProvider.future,
         );
         final controller = container.read(workspaceControllerProvider.notifier);
-        final alpha = _findResource(initial.resources, 'Alpha.md')!;
+        final alpha = _findResource(initial.resources, alphaNote.id)!;
 
         expect(
           await controller.deleteResource(alpha),
@@ -224,11 +231,11 @@ void main() {
             .read(workspaceControllerProvider)
             .requireValue;
 
-        expect(_findResource(deleted.resources, 'Alpha.md'), isNull);
-        expect(deleted.selectedResourceId, 'Beta.md');
-        expect(deleted.sessionNoteIds, {'Beta.md'});
-        expect(controller.sessionFor('Alpha.md'), isNull);
-        expect((deleted.splitRoot as SplitLeaf).noteId, 'Beta.md');
+        expect(_findResource(deleted.resources, alphaNote.id), isNull);
+        expect(deleted.selectedResourceId, betaNote.id);
+        expect(deleted.sessionNoteIds, {betaNote.id});
+        expect(controller.sessionFor(alphaNote.id), isNull);
+        expect((deleted.splitRoot as SplitLeaf).noteId, betaNote.id);
       },
     );
 
@@ -237,7 +244,10 @@ void main() {
       () async {
         final vault = MemoryVaultBackend();
         await vault.createFolder(parentPath: '', title: 'Target');
-        await vault.createNote(parentPath: '', title: 'Move');
+        final createdNote = await vault.createNote(
+          parentPath: '',
+          title: 'Move',
+        );
         final container = ProviderContainer(
           overrides: [
             workspaceDependenciesProvider.overrideWithValue(
@@ -253,9 +263,9 @@ void main() {
           workspaceControllerProvider.future,
         );
         final controller = container.read(workspaceControllerProvider.notifier);
-        final note = _findResource(initial.resources, 'Move.md')!;
+        final note = _findResource(initial.resources, createdNote.id)!;
         await controller.selectResource(note);
-        final session = controller.sessionFor('Move.md');
+        final session = controller.sessionFor(createdNote.id);
 
         expect(
           await controller.moveNote(note: note, parentPath: 'Target'),
@@ -263,16 +273,23 @@ void main() {
         );
         final moved = container.read(workspaceControllerProvider).requireValue;
 
-        expect(moved.selectedResourceId, 'Target/Move.md');
-        expect(controller.sessionFor('Target/Move.md'), same(session));
-        expect(controller.sessionFor('Move.md'), isNull);
-        expect((moved.splitRoot as SplitLeaf).noteId, 'Target/Move.md');
+        expect(moved.selectedResourceId, createdNote.id);
+        expect(controller.sessionFor(createdNote.id), same(session));
+        expect(session?.note.path, 'Target/Move.md');
+        expect(
+          _findResourceByPath(moved.resources, 'Target/Move.md')?.id,
+          createdNote.id,
+        );
+        expect((moved.splitRoot as SplitLeaf).noteId, createdNote.id);
       },
     );
 
     test('copies a note into a new session and opens it', () async {
       final vault = MemoryVaultBackend();
-      await vault.createNote(parentPath: '', title: 'Copy');
+      final originalNote = await vault.createNote(
+        parentPath: '',
+        title: 'Copy',
+      );
       final container = ProviderContainer(
         overrides: [
           workspaceDependenciesProvider.overrideWithValue(
@@ -286,15 +303,15 @@ void main() {
       addTearDown(container.dispose);
       final initial = await container.read(workspaceControllerProvider.future);
       final controller = container.read(workspaceControllerProvider.notifier);
-      final note = _findResource(initial.resources, 'Copy.md')!;
+      final note = _findResource(initial.resources, originalNote.id)!;
       await controller.selectResource(note);
-      final originalSession = controller.sessionFor('Copy.md');
+      final originalSession = controller.sessionFor(originalNote.id);
 
       expect(await controller.copyNote(note), WorkspaceActionResult.committed);
       final copied = container.read(workspaceControllerProvider).requireValue;
 
-      expect(copied.selectedResourceId, isNot('Copy.md'));
-      expect(controller.sessionFor('Copy.md'), same(originalSession));
+      expect(copied.selectedResourceId, isNot(originalNote.id));
+      expect(controller.sessionFor(originalNote.id), same(originalSession));
       expect(controller.sessionFor(copied.selectedResourceId!), isNotNull);
       expect((copied.splitRoot as SplitLeaf).noteId, copied.selectedResourceId);
     });
@@ -381,7 +398,7 @@ void main() {
       () async {
         final vault = MemoryVaultBackend();
         await vault.createNote(parentPath: '', title: 'Alpha');
-        await vault.createNote(parentPath: '', title: 'Beta');
+        final betaNote = await vault.createNote(parentPath: '', title: 'Beta');
         final container = ProviderContainer(
           overrides: [
             workspaceDependenciesProvider.overrideWithValue(
@@ -407,7 +424,7 @@ void main() {
         controller.focusPane(secondPaneId);
         final beta = _findResource(
           container.read(workspaceControllerProvider).requireValue.resources,
-          'Beta.md',
+          betaNote.id,
         )!;
         await controller.selectResource(beta);
         expect(controller.isPaneEditorContextCurrent(context), isTrue);
@@ -480,7 +497,7 @@ void main() {
 
     test('autosave title changes remap the full workspace snapshot', () async {
       final vault = MemoryVaultBackend(seedExampleData: false);
-      await vault.createNote(parentPath: '', title: 'Alpha');
+      final note = await vault.createNote(parentPath: '', title: 'Alpha');
       final container = ProviderContainer(
         overrides: [
           workspaceDependenciesProvider.overrideWithValue(
@@ -500,25 +517,28 @@ void main() {
       addTearDown(container.dispose);
       final initial = await container.read(workspaceControllerProvider.future);
       final controller = container.read(workspaceControllerProvider.notifier);
-      final session = controller.sessionFor('Alpha.md')!;
+      final session = controller.sessionFor(note.id)!;
 
       session.controller.text = '# Renamed Alpha\nbody';
       await Future<void>.delayed(const Duration(milliseconds: 80));
       final renamed = container.read(workspaceControllerProvider).requireValue;
 
-      expect(_findResource(renamed.resources, 'Renamed Alpha.md'), isNotNull);
-      expect(renamed.selectedResourceId, 'Renamed Alpha.md');
-      expect((renamed.splitRoot as SplitLeaf).noteId, 'Renamed Alpha.md');
-      expect(controller.sessionFor('Renamed Alpha.md'), same(session));
-      expect(controller.sessionFor('Alpha.md'), isNull);
-      expect(initial.selectedResourceId, 'Alpha.md');
+      expect(
+        _findResourceByPath(renamed.resources, 'Renamed Alpha.md')?.id,
+        note.id,
+      );
+      expect(renamed.selectedResourceId, note.id);
+      expect((renamed.splitRoot as SplitLeaf).noteId, note.id);
+      expect(controller.sessionFor(note.id), same(session));
+      expect(session.note.path, 'Renamed Alpha.md');
+      expect(initial.selectedResourceId, note.id);
     });
 
     test(
       'close flush failures keep the pane and publish the save error',
       () async {
         final vault = FailingUpdateVaultBackend(seedExampleData: false);
-        await vault.createNote(parentPath: '', title: 'Alpha');
+        final note = await vault.createNote(parentPath: '', title: 'Alpha');
         final container = ProviderContainer(
           overrides: [
             workspaceDependenciesProvider.overrideWithValue(
@@ -541,7 +561,7 @@ void main() {
         );
         final controller = container.read(workspaceControllerProvider.notifier);
         controller.splitFocused(SplitDirection.right);
-        final session = controller.sessionFor('Alpha.md')!;
+        final session = controller.sessionFor(note.id)!;
         session.controller.text = '# Alpha\ndirty';
         vault.failUpdates = true;
 
@@ -553,7 +573,7 @@ void main() {
 
         expect(failed.message, contains('save failed'));
         expect(failed.splitRoot, isA<SplitBranch>());
-        expect(initial.selectedResourceId, 'Alpha.md');
+        expect(initial.selectedResourceId, note.id);
       },
     );
   });
@@ -565,6 +585,22 @@ VaultResourceNode? _findResource(List<VaultResourceNode> resources, String id) {
       return resource;
     }
     final nested = _findResource(resource.children, id);
+    if (nested != null) {
+      return nested;
+    }
+  }
+  return null;
+}
+
+VaultResourceNode? _findResourceByPath(
+  List<VaultResourceNode> resources,
+  String path,
+) {
+  for (final resource in resources) {
+    if (resource.path == path) {
+      return resource;
+    }
+    final nested = _findResourceByPath(resource.children, path);
     if (nested != null) {
       return nested;
     }

@@ -79,4 +79,77 @@ updatedAt: 2026-07-03 12:00
     expect(synced.frontmatter['updatedAt'], '2026-07-05 08:30');
     expect(synced.body, '# 新标题\n\n新的正文');
   });
+
+  test(
+    'patches a scalar frontmatter field without reserializing user yaml',
+    () {
+      const markdown = '''---
+# user comment
+aliases:
+  - Alpha
+  - Beta
+custom: "quoted: value"
+title: Existing
+---
+
+# Existing
+''';
+
+      final patched = patchMarkdownFrontmatterScalar(
+        markdown,
+        key: 'synapseId',
+        value: '550e8400-e29b-41d4-a716-446655440000',
+      );
+
+      expect(patched, contains('# user comment'));
+      expect(patched, contains('aliases:\n  - Alpha\n  - Beta'));
+      expect(patched, contains('custom: "quoted: value"'));
+      expect(
+        patched,
+        contains('synapseId: 550e8400-e29b-41d4-a716-446655440000\n---'),
+      );
+    },
+  );
+
+  test('replaces an existing scalar and preserves CRLF line endings', () {
+    const markdown =
+        '---\r\n'
+        'title: Existing\r\n'
+        'synapseId: invalid\r\n'
+        '---\r\n\r\n'
+        '# Existing\r\n';
+
+    final patched = patchMarkdownFrontmatterScalar(
+      markdown,
+      key: 'synapseId',
+      value: '550e8400-e29b-41d4-a716-446655440000',
+    );
+
+    expect(
+      patched,
+      '---\r\n'
+      'title: Existing\r\n'
+      'synapseId: 550e8400-e29b-41d4-a716-446655440000\r\n'
+      '---\r\n\r\n'
+      '# Existing\r\n',
+    );
+  });
+
+  test('adds frontmatter without changing the original markdown body', () {
+    const markdown = '# Existing\n\nBody\n';
+
+    final patched = patchMarkdownFrontmatterScalar(
+      markdown,
+      key: 'synapseId',
+      value: '550e8400-e29b-41d4-a716-446655440000',
+    );
+
+    expect(
+      patched,
+      '---\n'
+      'synapseId: 550e8400-e29b-41d4-a716-446655440000\n'
+      '---\n\n'
+      '# Existing\n\nBody\n',
+    );
+  });
 }

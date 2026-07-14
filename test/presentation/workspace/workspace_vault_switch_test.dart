@@ -22,7 +22,10 @@ void main() {
     const firstPath = '/vault/first';
     const secondPath = '/vault/second';
     final firstVault = MemoryVaultBackend(seedExampleData: false);
-    await firstVault.createNote(parentPath: '', title: 'First');
+    final firstNote = await firstVault.createNote(
+      parentPath: '',
+      title: 'First',
+    );
     final secondVault = MemoryVaultBackend(seedExampleData: false);
     await secondVault.createNote(parentPath: '', title: 'Second');
     final locationStore = FakeVaultLocationStore(
@@ -45,7 +48,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 500));
 
     expect(
-      (await firstVault.readNote('First.md')).markdown,
+      (await firstVault.readNote(firstNote.id)).markdown,
       contains('changed'),
     );
     expect(locationStore.savedLocations.last.rootPath, secondPath);
@@ -67,7 +70,10 @@ void main() {
       );
       final secondVault = _GatedListVault();
       addTearDown(secondVault.releaseList);
-      await secondVault.createNote(parentPath: '', title: 'Second');
+      final secondNote = await secondVault.createNote(
+        parentPath: '',
+        title: 'Second',
+      );
 
       await pumpWorkspace(
         tester,
@@ -107,7 +113,7 @@ void main() {
       expect(find.text('Second'), findsWidgets);
       expect(find.text('First'), findsNothing);
       expect(
-        (await secondVault.readNote('Second.md')).markdown,
+        (await secondVault.readNote(secondNote.id)).markdown,
         isNot(contains('x')),
       );
     },
@@ -135,7 +141,10 @@ void main() {
         token: 'second-token',
       );
       final firstVault = MemoryVaultBackend(seedExampleData: false);
-      await firstVault.createNote(parentPath: '', title: 'First');
+      final firstNote = await firstVault.createNote(
+        parentPath: '',
+        title: 'First',
+      );
       final secondVault = MemoryVaultBackend(seedExampleData: false);
       await secondVault.createNote(parentPath: '', title: 'Second');
       var failRuntimeConstruction = false;
@@ -179,7 +188,7 @@ void main() {
         find.textContaining('runtime construction failed'),
         findsOneWidget,
       );
-      await tester.tap(find.byKey(const Key('resource-row-First.md')));
+      await tester.tap(find.byKey(Key('resource-row-${firstNote.id}')));
       await tester.pump(const Duration(milliseconds: 250));
       expect(find.text('First'), findsWidgets);
     },
@@ -261,7 +270,10 @@ void main() {
         token: 'second-token',
       );
       final firstVault = MemoryVaultBackend(seedExampleData: false);
-      await firstVault.createNote(parentPath: '', title: 'First');
+      final firstNote = await firstVault.createNote(
+        parentPath: '',
+        title: 'First',
+      );
       final candidateVault = _UnreadableListVault();
       final settingsStore = FakeSettingsStore(
         initialSettings: const SynapseSettings(vaultLocation: firstLocation),
@@ -304,7 +316,7 @@ void main() {
       expect(find.textContaining('candidate unreadable'), findsOneWidget);
       expect(access.releaseAttempts, [secondLease]);
       expect(access.releaseAttempts, isNot(contains(firstLease)));
-      await tester.tap(find.byKey(const Key('resource-row-First.md')));
+      await tester.tap(find.byKey(Key('resource-row-${firstNote.id}')));
       await tester.pump(const Duration(milliseconds: 250));
       expect(find.text('First'), findsWidgets);
     },
@@ -492,8 +504,8 @@ void main() {
       events: events,
       seedExampleData: false,
     );
-    await firstVault.createNote(parentPath: '', title: 'Alpha');
-    await firstVault.createNote(parentPath: '', title: 'Beta');
+    final alpha = await firstVault.createNote(parentPath: '', title: 'Alpha');
+    final beta = await firstVault.createNote(parentPath: '', title: 'Beta');
     final secondVault = MemoryVaultBackend(seedExampleData: false);
     await secondVault.createNote(parentPath: '', title: 'Second');
     final locationStore = FakeVaultLocationStore(
@@ -515,7 +527,7 @@ void main() {
     );
     await tester.tap(find.byKey(const Key('split-pane-right-button')));
     await tester.pump(const Duration(milliseconds: 250));
-    await tester.tap(find.byKey(const Key('resource-row-Beta.md')));
+    await tester.tap(find.byKey(Key('resource-row-${beta.id}')));
     await tester.pump(const Duration(milliseconds: 250));
     await tester.tap(find.byKey(const Key('note-mode-source-pane-1')));
     await tester.pump(const Duration(milliseconds: 250));
@@ -535,15 +547,15 @@ void main() {
 
     expect(
       events.where((event) => event.startsWith('save:')),
-      unorderedEquals(['save:Alpha.md', 'save:Beta.md']),
+      unorderedEquals(['save:${alpha.id}', 'save:${beta.id}']),
     );
     expect(events.first, 'picker');
     expect(
-      (await firstVault.readNote('Gamma.md')).markdown,
+      (await firstVault.readNote(alpha.id)).markdown,
       contains('alpha dirty'),
     );
     expect(
-      (await firstVault.readNote('Beta.md')).markdown,
+      (await firstVault.readNote(beta.id)).markdown,
       contains('beta dirty'),
     );
     expect(locationStore.savedLocations.last.rootPath, secondPath);
@@ -632,8 +644,8 @@ void main() {
         failingNoteId: 'Alpha.md',
         seedExampleData: false,
       );
-      await firstVault.createNote(parentPath: '', title: 'Alpha');
-      await firstVault.createNote(parentPath: '', title: 'Beta');
+      final alpha = await firstVault.createNote(parentPath: '', title: 'Alpha');
+      final beta = await firstVault.createNote(parentPath: '', title: 'Beta');
       final secondVault = MemoryVaultBackend(seedExampleData: false);
       await secondVault.createNote(parentPath: '', title: 'Second');
       final locationStore = FakeVaultLocationStore(
@@ -657,7 +669,7 @@ void main() {
       locationStore.savedLocations.clear();
       await tester.tap(find.byKey(const Key('split-pane-right-button')));
       await tester.pump(const Duration(milliseconds: 250));
-      await tester.tap(find.byKey(const Key('resource-row-Beta.md')));
+      await tester.tap(find.byKey(Key('resource-row-${beta.id}')));
       await tester.pump(const Duration(milliseconds: 250));
       await tester.tap(find.byKey(const Key('note-mode-source-pane-1')));
       await tester.pump(const Duration(milliseconds: 250));
@@ -682,7 +694,7 @@ void main() {
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 250));
 
-      final failedSaveIndex = events.indexOf('save:Alpha.md');
+      final failedSaveIndex = events.indexOf('save:${alpha.id}');
       expect(failedSaveIndex, greaterThanOrEqualTo(0));
       expect(
         events
@@ -724,7 +736,7 @@ void main() {
       expect(retainedAlphaController.text, contains('alpha dirty'));
       expect(retainedBetaController.text, contains('beta dirty'));
       expect(
-        (await firstVault.readNote('Alpha.md')).markdown,
+        (await firstVault.readNote(alpha.id)).markdown,
         isNot(contains('alpha dirty')),
       );
       expect(find.text('Second'), findsNothing);

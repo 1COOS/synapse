@@ -33,6 +33,9 @@ final class FileVaultProposalStore {
   }
 
   Future<List<AiProposal>> listProposals(String noteId) async {
+    if (paths.catalog.isDeleted(noteId)) {
+      return const [];
+    }
     final proposals =
         (await readProposalsFile(
             noteId,
@@ -74,7 +77,13 @@ final class FileVaultProposalStore {
   }
 
   Future<List<AiProposal>> readProposalsFile(String noteId) async {
-    final file = paths.proposalsFile(noteId);
+    var file = paths.proposalsFile(noteId);
+    if (!await operations.fileExists(file)) {
+      final legacy = paths.legacyProposalsFile(noteId);
+      if (await operations.fileExists(legacy)) {
+        file = legacy;
+      }
+    }
     if (!await operations.fileExists(file)) {
       return const [];
     }
@@ -108,18 +117,18 @@ final class FileVaultProposalStore {
   }
 
   Future<void> rewriteCopied(
-    String noteId,
+    String sourceNoteId,
+    String copiedNoteId,
     Map<String, String> sourceIdMap,
     DateTime now,
   ) async {
-    final proposals = await readProposalsFile(noteId);
-    if (proposals.isNotEmpty ||
-        await operations.fileExists(paths.proposalsFile(noteId))) {
-      await writeProposals(noteId, [
+    final proposals = await readProposalsFile(sourceNoteId);
+    if (proposals.isNotEmpty) {
+      await writeProposals(copiedNoteId, [
         for (final proposal in proposals)
           AiProposal(
             id: const Uuid().v4(),
-            noteId: noteId,
+            noteId: copiedNoteId,
             sourceIds: [
               for (final sourceId in proposal.sourceIds)
                 sourceIdMap[sourceId] ?? sourceId,
@@ -131,6 +140,17 @@ final class FileVaultProposalStore {
             updatedAt: now,
           ),
       ]);
+    }
+  }
+
+  Future<void> deleteForNote(String noteId) async {
+    for (final file in [
+      paths.proposalsFile(noteId),
+      paths.legacyProposalsFile(noteId),
+    ]) {
+      if (await operations.fileExists(file)) {
+        await operations.deleteFile(file);
+      }
     }
   }
 

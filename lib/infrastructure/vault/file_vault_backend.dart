@@ -1,7 +1,10 @@
 import 'dart:io';
 
 import '../../domain/vault/vault_resource.dart';
+import '../../domain/vault/vault_migration.dart';
 import 'atomic_vault_file_writer.dart';
+import 'file_vault_catalog.dart';
+import 'file_vault_identity_migrator.dart';
 import 'file_vault_note_store.dart';
 import 'file_vault_operations.dart';
 import 'file_vault_paths.dart';
@@ -9,9 +12,10 @@ import 'file_vault_proposal_store.dart';
 import 'file_vault_source_store.dart';
 import 'vault_backend.dart';
 
-class FileVaultBackend implements VaultBackend {
+class FileVaultBackend implements VaultBackend, VaultMigrationBackend {
   FileVaultBackend(String rootPath) : root = Directory(rootPath) {
-    final paths = FileVaultPaths(root);
+    _identityMigrator = FileVaultIdentityMigrator(rootPath: rootPath);
+    final paths = FileVaultPaths(root, catalog: FileVaultCatalog());
     final operations = FileVaultOperations(
       paths: paths,
       writeFileString: (file, contents) => writeFileString(file, contents),
@@ -52,6 +56,30 @@ class FileVaultBackend implements VaultBackend {
   late final FileVaultNoteStore _notes;
   late final FileVaultSourceStore _sources;
   late final FileVaultProposalStore _proposals;
+  late final FileVaultIdentityMigrator _identityMigrator;
+  VaultIdentityMigrationReport? _pendingMigration;
+
+  @override
+  Future<VaultMigrationRequirement?> inspectMigration() async {
+    final report = await _identityMigrator.scan();
+    if (!report.requiresMigration) {
+      _pendingMigration = null;
+      return null;
+    }
+    _pendingMigration = report;
+    return VaultMigrationRequirement(
+      noteCount: report.noteCount,
+      affectedNoteCount: report.entries.length,
+      previewResources: await _identityMigrator.previewResources(),
+    );
+  }
+
+  @override
+  Future<void> applyMigration() async {
+    final report = _pendingMigration ?? await _identityMigrator.scan();
+    await _identityMigrator.apply(report);
+    _pendingMigration = null;
+  }
 
   Future<void> writeFileString(File file, String contents) async {
     await _atomicWriter.writeString(file, contents);

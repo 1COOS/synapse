@@ -23,13 +23,14 @@ import 'package:synapse/presentation/workspace/editor/live_markdown_editor.dart'
 
 import 'workspace_fakes.dart';
 
-Future<TextEditingController> runQueuedLastReferenceCloseRace(
+Future<({TextEditingController controller, String alphaId})>
+runQueuedLastReferenceCloseRace(
   WidgetTester tester,
   GatedCloseVaultBackend vault,
 ) async {
-  await vault.createNote(parentPath: '', title: 'Alpha');
-  await vault.createNote(parentPath: '', title: 'Blocker');
-  await vault.createNote(parentPath: '', title: 'Keeper');
+  final alpha = await vault.createNote(parentPath: '', title: 'Alpha');
+  final blocker = await vault.createNote(parentPath: '', title: 'Blocker');
+  final keeper = await vault.createNote(parentPath: '', title: 'Keeper');
 
   await pumpWorkspace(
     tester,
@@ -50,11 +51,11 @@ Future<TextEditingController> runQueuedLastReferenceCloseRace(
   await tester.pump(const Duration(milliseconds: 250));
   await tester.tap(find.byKey(const Key('split-pane-right-button')));
   await tester.pump(const Duration(milliseconds: 250));
-  await tester.tap(find.byKey(const Key('resource-row-Blocker.md')));
+  await tester.tap(find.byKey(Key('resource-row-${blocker.id}')));
   await tester.pump(const Duration(milliseconds: 250));
   await tester.tap(find.byKey(const Key('split-pane-right-button')));
   await tester.pump(const Duration(milliseconds: 250));
-  await tester.tap(find.byKey(const Key('resource-row-Keeper.md')));
+  await tester.tap(find.byKey(Key('resource-row-${keeper.id}')));
   await tester.pump(const Duration(milliseconds: 250));
 
   await tester.tap(find.byKey(const Key('note-mode-source-pane-1')));
@@ -103,7 +104,7 @@ Future<TextEditingController> runQueuedLastReferenceCloseRace(
 
   vault.releaseBlockedUpdate();
   await tester.pumpAndSettle();
-  return alphaController;
+  return (controller: alphaController, alphaId: alpha.id);
 }
 
 Future<void> pumpWorkspace(

@@ -49,6 +49,118 @@ class MarkdownDocument {
   }
 }
 
+String? readMarkdownFrontmatterScalar(String markdown, String key) {
+  final frontmatter = _rawFrontmatter(markdown);
+  if (frontmatter == null) {
+    return null;
+  }
+  final pattern = RegExp('^${RegExp.escape(key)}\\s*:\\s*(.*)\$');
+  String? value;
+  for (final line in frontmatter.contents.split(frontmatter.lineEnding)) {
+    final match = pattern.firstMatch(line);
+    if (match == null) {
+      continue;
+    }
+    if (value != null) {
+      return null;
+    }
+    value = _unquoteYamlScalar(match.group(1)!.trim());
+  }
+  return value;
+}
+
+String patchMarkdownFrontmatterScalar(
+  String markdown, {
+  required String key,
+  required String value,
+}) {
+  final frontmatter = _rawFrontmatter(markdown);
+  if (frontmatter == null) {
+    final lineEnding = markdown.contains('\r\n') ? '\r\n' : '\n';
+    return '---$lineEnding'
+        '$key: $value$lineEnding'
+        '---$lineEnding$lineEnding'
+        '$markdown';
+  }
+  final pattern = RegExp('^${RegExp.escape(key)}\\s*:');
+  final lines = frontmatter.contents.split(frontmatter.lineEnding);
+  var replaced = false;
+  final patched = <String>[];
+  for (final line in lines) {
+    if (pattern.hasMatch(line)) {
+      if (!replaced) {
+        patched.add('$key: $value');
+        replaced = true;
+      }
+      continue;
+    }
+    patched.add(line);
+  }
+  if (!replaced) {
+    patched.add('$key: $value');
+  }
+  return '${frontmatter.opening}'
+      '${patched.join(frontmatter.lineEnding)}'
+      '${frontmatter.lineEnding}'
+      '${markdown.substring(frontmatter.closingDelimiterStart)}';
+}
+
+_RawFrontmatter? _rawFrontmatter(String markdown) {
+  final lineEnding = markdown.startsWith('---\r\n')
+      ? '\r\n'
+      : markdown.startsWith('---\n')
+      ? '\n'
+      : null;
+  if (lineEnding == null) {
+    return null;
+  }
+  final closingPattern = RegExp(
+    '${RegExp.escape(lineEnding)}---(?:${RegExp.escape(lineEnding)}|\$)',
+  );
+  RegExpMatch? closing;
+  for (final match in closingPattern.allMatches(
+    markdown,
+    3 + lineEnding.length,
+  )) {
+    closing = match;
+    break;
+  }
+  if (closing == null) {
+    return null;
+  }
+  final contentsStart = 3 + lineEnding.length;
+  final closingDelimiterStart = closing.start + lineEnding.length;
+  return _RawFrontmatter(
+    opening: markdown.substring(0, contentsStart),
+    contents: markdown.substring(contentsStart, closing.start),
+    closingDelimiterStart: closingDelimiterStart,
+    lineEnding: lineEnding,
+  );
+}
+
+String _unquoteYamlScalar(String value) {
+  if (value.length >= 2 &&
+      ((value.startsWith('"') && value.endsWith('"')) ||
+          (value.startsWith("'") && value.endsWith("'")))) {
+    return value.substring(1, value.length - 1);
+  }
+  return value;
+}
+
+final class _RawFrontmatter {
+  const _RawFrontmatter({
+    required this.opening,
+    required this.contents,
+    required this.closingDelimiterStart,
+    required this.lineEnding,
+  });
+
+  final String opening;
+  final String contents;
+  final int closingDelimiterStart;
+  final String lineEnding;
+}
+
 const untitledNoteTitle = '未命名';
 
 String formatMarkdownTimestamp(DateTime value) {

@@ -1,4 +1,11 @@
+import '../../domain/vault/vault_migration.dart';
 import '../../domain/vault/vault_resource.dart';
+
+abstract interface class VaultMigrationBackend {
+  Future<VaultMigrationRequirement?> inspectMigration();
+
+  Future<void> applyMigration();
+}
 
 abstract class VaultBackend {
   Future<List<VaultResourceNode>> listResources();

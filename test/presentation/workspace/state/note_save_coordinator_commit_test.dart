@@ -26,8 +26,11 @@ void main() {
       final result = await harness.coordinator.save(session);
 
       expect(result.succeeded, isTrue);
-      expect(result.idChanged, isTrue);
-      expect(harness.registry.sessionFor(oldNoteId), isNull);
+      expect(result.idChanged, isFalse);
+      expect(result.pathChanged, isTrue);
+      expect(result.savedNote!.id, oldNoteId);
+      expect(result.savedNote!.path, 'New Title.md');
+      expect(harness.registry.sessionFor(oldNoteId), same(session));
       expect(harness.registry.sessionFor(result.savedNote!.id), same(session));
       expect(session.controller, same(controller));
       expect(session.noteId, result.savedNote!.id);
@@ -297,6 +300,7 @@ void main() {
         );
         addTearDown(harness.dispose);
         final session = await harness.createSession('Old Title');
+        final noteId = session.noteId;
         vault.resetTracking();
         vault.gateNextUpdate();
         session.controller.text = '# New Title\nbody';
@@ -323,7 +327,7 @@ void main() {
         expect(vault.renameCalls, 0);
         expect(vault.readCalls, readsAtFatal);
         expect(commitCalls, 0);
-        expect(session.noteId, 'Old Title.md');
+        expect(session.noteId, noteId);
       },
     );
 

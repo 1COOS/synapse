@@ -129,7 +129,7 @@ void main() {
       sourceCalls = backend.listSourcesCalls;
       await backend.renameFolder(folderPath: targetFolder.path, title: '归档');
       expect(backend.listResourcesCalls, greaterThan(resourceCalls));
-      expect(backend.listSourcesCalls, greaterThan(sourceCalls));
+      expect(backend.listSourcesCalls, sourceCalls);
 
       proposalCalls = backend.listProposalsCalls;
       resourceCalls = backend.listResourcesCalls;

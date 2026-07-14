@@ -67,6 +67,7 @@ class _SynapseWorkspaceState extends ConsumerState<SynapseWorkspace> {
   bool get _autoSaving => _workspace.isAutoSaving;
   bool get _reloadRequired => _workspace.reloadRequired;
   bool get _hasVault => _workspace.hasVault;
+  bool get _migrationRequired => _workspace.requiresMigration;
   String get _message => _workspace.message;
   String get _vaultLabel => _workspace.vaultLabel;
   String? get _vaultRootPath => _workspace.vaultRoot;
@@ -163,6 +164,33 @@ class _SynapseWorkspaceState extends ConsumerState<SynapseWorkspace> {
 
   Future<void> _chooseVault() async {
     await _controller.chooseVault();
+  }
+
+  Future<void> _confirmVaultMigration() async {
+    final confirmed = await showCupertinoDialog<bool>(
+      context: context,
+      builder: (context) => CupertinoAlertDialog(
+        title: const Text('迁移仓库笔记标识'),
+        content: const Text(
+          'Synapse 会先在 .synapse/migrations 中备份受影响文件，再为旧笔记补齐稳定 UUID。迁移完成前仓库保持只读。',
+        ),
+        actions: [
+          CupertinoDialogAction(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('取消'),
+          ),
+          CupertinoDialogAction(
+            key: const Key('confirm-vault-migration-button'),
+            isDefaultAction: true,
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('备份并迁移'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true && mounted) {
+      await _controller.migrateVaultIdentity();
+    }
   }
 
   Future<void> _createFolder({String parentPath = ''}) async {
@@ -512,7 +540,8 @@ class _SynapseWorkspaceState extends ConsumerState<SynapseWorkspace> {
               key: const Key('new-folder-button'),
               label: '新建文件夹',
               icon: CupertinoIcons.folder_badge_plus,
-              onPressed: _busy || _reloadRequired || !_hasVault
+              onPressed:
+                  _busy || _reloadRequired || !_hasVault || _migrationRequired
                   ? null
                   : () => _createFolder(),
             ),
@@ -521,7 +550,8 @@ class _SynapseWorkspaceState extends ConsumerState<SynapseWorkspace> {
               key: const Key('new-note-button'),
               label: '新建笔记',
               icon: CupertinoIcons.square_pencil,
-              onPressed: _busy || _reloadRequired || !_hasVault
+              onPressed:
+                  _busy || _reloadRequired || !_hasVault || _migrationRequired
                   ? null
                   : () => _createNote(parentPath: _newNoteParentPath()),
             ),
@@ -537,21 +567,24 @@ class _SynapseWorkspaceState extends ConsumerState<SynapseWorkspace> {
         else ...[
           Expanded(
             flex: 2,
-            child: ResourceTree(
-              nodes: _resources,
-              selectedId: _selectedResource?.id,
-              collapsedFolderIds: _collapsedFolderIds,
-              onSelect: _selectResource,
-              onToggleFolder: (folder) =>
-                  _controller.toggleFolderCollapsed(folder.id),
-              onCreateFolder: (folder) =>
-                  _createFolder(parentPath: folder.path),
-              onCreateNote: (folder) => _createNote(parentPath: folder.path),
-              onCreateSiblingNote: _createSiblingNote,
-              onRenameFolder: _renameFolder,
-              onCopyNote: _copyNote,
-              onMoveNote: _moveNote,
-              onDelete: _deleteResource,
+            child: IgnorePointer(
+              ignoring: _migrationRequired,
+              child: ResourceTree(
+                nodes: _resources,
+                selectedId: _selectedResource?.id,
+                collapsedFolderIds: _collapsedFolderIds,
+                onSelect: _selectResource,
+                onToggleFolder: (folder) =>
+                    _controller.toggleFolderCollapsed(folder.id),
+                onCreateFolder: (folder) =>
+                    _createFolder(parentPath: folder.path),
+                onCreateNote: (folder) => _createNote(parentPath: folder.path),
+                onCreateSiblingNote: _createSiblingNote,
+                onRenameFolder: _renameFolder,
+                onCopyNote: _copyNote,
+                onMoveNote: _moveNote,
+                onDelete: _deleteResource,
+              ),
             ),
           ),
           const SectionDivider(),
@@ -574,7 +607,7 @@ class _SynapseWorkspaceState extends ConsumerState<SynapseWorkspace> {
           textFieldKey: const Key('workspace-search-field'),
           submitButtonKey: const Key('workspace-search-submit-button'),
           controller: _searchController,
-          busy: _busy || _autoSaving || !_hasVault,
+          busy: _busy || _autoSaving || !_hasVault || _migrationRequired,
           onSearch: _search,
         ),
         const SizedBox(height: 12),
@@ -727,10 +760,55 @@ class _SynapseWorkspaceState extends ConsumerState<SynapseWorkspace> {
   }
 
   Widget _buildEditorPane() {
+    if (_migrationRequired) {
+      final requirement = _workspace.migrationRequirement!;
+      return WorkspacePane(
+        key: const Key('vault-migration-required'),
+        child: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 480),
+            child: Padding(
+              padding: const EdgeInsets.all(32),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(
+                    CupertinoIcons.arrow_2_circlepath,
+                    size: 44,
+                    color: workspaceMutedColor,
+                  ),
+                  const SizedBox(height: 16),
+                  const Text(
+                    '需要迁移笔记标识',
+                    style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700),
+                  ),
+                  const SizedBox(height: 10),
+                  Text(
+                    '共检测到 ${requirement.noteCount} 篇笔记，其中 '
+                    '${requirement.affectedNoteCount} 篇需要补齐或修复 UUID。迁移前仓库保持只读。',
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(color: workspaceMutedColor),
+                  ),
+                  const SizedBox(height: 20),
+                  CupertinoButton.filled(
+                    key: const Key('vault-migration-button'),
+                    onPressed: _busy ? null : _confirmVaultMigration,
+                    child: const Text('备份并迁移'),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+    }
     return WorkspaceNotePane(workspace: _workspace, controller: _controller);
   }
 
   Widget _buildSourcePane() {
+    if (_migrationRequired) {
+      return const WorkspacePane(child: EmptyState(text: '迁移完成后可继续管理素材与建议'));
+    }
     return WorkspaceSourcesPane(
       workspace: _workspace,
       controller: _controller,

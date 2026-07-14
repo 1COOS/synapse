@@ -258,10 +258,10 @@ class RecordingUpdateVaultBackend extends MemoryVaultBackend {
   Future<VaultNoteContent> updateMarkdown({
     required String noteId,
     required String markdown,
-  }) {
+  }) async {
     events.add('save:$noteId');
-    if (noteId == failingNoteId) {
-      throw StateError('save failed for $noteId');
+    if (await _matchesNoteIdentifier(this, noteId, failingNoteId)) {
+      throw StateError('save failed for $failingNoteId');
     }
     return super.updateMarkdown(noteId: noteId, markdown: markdown);
   }
@@ -386,14 +386,15 @@ class GatedCloseVaultBackend extends MemoryVaultBackend {
     required String markdown,
   }) async {
     updatedNoteIds.add(noteId);
-    if (noteId == blockedNoteId && !_blockedUpdateRelease.isCompleted) {
+    if (await _matchesNoteIdentifier(this, noteId, blockedNoteId) &&
+        !_blockedUpdateRelease.isCompleted) {
       if (!blockedUpdateStarted.isCompleted) {
         blockedUpdateStarted.complete();
       }
       await _blockedUpdateRelease.future;
     }
-    if (noteId == failingNoteId) {
-      throw StateError('save failed for $noteId');
+    if (await _matchesNoteIdentifier(this, noteId, failingNoteId)) {
+      throw StateError('save failed for $failingNoteId');
     }
     return super.updateMarkdown(noteId: noteId, markdown: markdown);
   }
@@ -417,8 +418,9 @@ class TitleSaveStructuralRaceVaultBackend extends MemoryVaultBackend {
     required String noteId,
     required String title,
   }) async {
+    final isAlpha = await _matchesNoteIdentifier(this, noteId, 'Alpha.md');
     final renamed = await super.renameNote(noteId: noteId, title: title);
-    if (noteId == 'Alpha.md' && !titleRenameCompleted.isCompleted) {
+    if (isAlpha && !titleRenameCompleted.isCompleted) {
       titleRenameCompleted.complete();
     }
     return renamed;
@@ -528,6 +530,24 @@ class ListingFailureVaultBackend extends MemoryVaultBackend {
       'Directory listing failed',
       '/vault/locked',
     );
+  }
+}
+
+Future<bool> _matchesNoteIdentifier(
+  MemoryVaultBackend vault,
+  String actualNoteId,
+  String? configuredIdentifier,
+) async {
+  if (configuredIdentifier == null) {
+    return false;
+  }
+  if (actualNoteId == configuredIdentifier) {
+    return true;
+  }
+  try {
+    return (await vault.readNote(configuredIdentifier)).id == actualNoteId;
+  } on StateError {
+    return false;
   }
 }
 

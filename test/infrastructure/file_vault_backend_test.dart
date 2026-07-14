@@ -99,8 +99,8 @@ updatedAt: 2026-07-03 12:00
     );
 
     expect(
-      await File(p.join(root.path, note.id)).readAsString(),
-      '# Alpha\nchanged',
+      await File(p.join(root.path, note.path)).readAsString(),
+      contains('# Alpha\nchanged'),
     );
   });
 
@@ -119,7 +119,7 @@ updatedAt: 2026-07-03 12:00
     );
 
     expect(
-      await File(p.join(root.path, note.id)).readAsString(),
+      await File(p.join(root.path, note.path)).readAsString(),
       contains('appended'),
     );
   });
@@ -128,7 +128,7 @@ updatedAt: 2026-07-03 12:00
     test('classifies uncertain $operation markdown write failure', () async {
       final backend = _FaultInjectingFileVaultBackend(root.path);
       final note = await backend.createNote(parentPath: '', title: 'Alpha');
-      backend.failStringWriteSuffix = note.id;
+      backend.failStringWriteSuffix = note.path;
       backend.failStringWriteAfterCommit = true;
 
       final write = operation == 'update'
@@ -139,10 +139,12 @@ updatedAt: 2026-07-03 12:00
           : backend.appendMarkdown(noteId: note.id, markdown: 'appended');
 
       await expectLater(write, throwsA(isA<VaultPostCommitError>()));
-      final contents = await File(p.join(root.path, note.id)).readAsString();
+      final contents = await File(p.join(root.path, note.path)).readAsString();
       expect(
         contents,
-        operation == 'update' ? '# Alpha\nupdated' : contains('appended'),
+        operation == 'update'
+            ? contains('# Alpha\nupdated')
+            : contains('appended'),
       );
     });
   }
@@ -176,7 +178,7 @@ updatedAt: 2026-07-03 12:00
       throwsA(isA<VaultPostCommitError>()),
     );
 
-    expect(File(p.join(root.path, note.id)).existsSync(), isFalse);
+    expect(File(p.join(root.path, note.path)).existsSync(), isFalse);
   });
 
   test(
@@ -219,7 +221,7 @@ updatedAt: 2026-07-03 12:00
       createdAt: now,
       updatedAt: now,
     );
-    backend.failStringWriteSuffix = 'proposals.json';
+    backend.failStringWriteSuffix = '${note.id}.json';
     backend.failStringWriteAfterCommit = true;
 
     await expectLater(
@@ -508,8 +510,7 @@ updatedAt: 2026-07-03 12:00
         await Directory(p.join(root.path, '课程', '佛学', '心经.assets')).exists(),
         isTrue,
       );
-      expect(() => backend.readNote(note.id), throwsA(isA<StateError>()));
-      final loaded = await backend.readNote('课程/佛学/心经.md');
+      final loaded = await backend.readNote(note.id);
       final sources = await backend.listSources(loaded.id);
       expect(sources.single.noteId, loaded.id);
       expect(await backend.readSourceAttachment(sources.single), [
@@ -518,8 +519,6 @@ updatedAt: 2026-07-03 12:00
         78,
         71,
       ]);
-      expect(await backend.listSources(note.id), isEmpty);
-      expect(await backend.listProposals(note.id), isEmpty);
       final proposals = await backend.listProposals(loaded.id);
       expect(proposals.single.id, proposal.id);
       expect(proposals.single.noteId, loaded.id);
@@ -572,7 +571,8 @@ updatedAt: 2026-01-01 00:00
 
       final renamed = await backend.renameNote(noteId: note.id, title: '金刚经');
 
-      expect(renamed.id, '读书/金刚经.md');
+      expect(renamed.id, note.id);
+      expect(renamed.path, '读书/金刚经.md');
       expect(await File(p.join(root.path, '读书', '心经.md')).exists(), isFalse);
       expect(
         await Directory(p.join(root.path, '读书', '心经.assets')).exists(),
@@ -583,7 +583,6 @@ updatedAt: 2026-01-01 00:00
         await Directory(p.join(root.path, '读书', '金刚经.assets')).exists(),
         isTrue,
       );
-      expect(() => backend.readNote(note.id), throwsA(isA<StateError>()));
       final loaded = await backend.readNote(renamed.id);
       expect(loaded.title, '金刚经');
       expect(loaded.markdown, contains('title: 金刚经'));
@@ -608,11 +607,11 @@ updatedAt: 2026-01-01 00:00
         78,
         71,
       ]);
-      expect(await backend.listSources(note.id), isEmpty);
+      expect((await backend.listSources(note.id)).single.noteId, note.id);
       final proposals = await backend.listProposals(renamed.id);
       expect(proposals.single.noteId, renamed.id);
       expect(proposals.single.sourceIds, [source.id]);
-      expect(await backend.listProposals(note.id), isEmpty);
+      expect((await backend.listProposals(note.id)).single.noteId, note.id);
     },
   );
 
@@ -650,7 +649,8 @@ updatedAt: 2026-01-01 00:00
 
     final copy = await backend.copyNote(noteId: note.id);
 
-    expect(copy.id, '心经 2.md');
+    expect(copy.id, isNot(note.id));
+    expect(copy.path, '心经 2.md');
     expect(await File(p.join(root.path, '心经.md')).exists(), isTrue);
     expect(await File(p.join(root.path, '心经 2.md')).exists(), isTrue);
     expect(await Directory(p.join(root.path, '心经.assets')).exists(), isTrue);
@@ -739,14 +739,14 @@ updatedAt: 2026-01-01 00:00
         parentPath: targetFolder.path,
       );
 
-      expect(moved.id, '目标/心经 2.md');
+      expect(moved.id, note.id);
+      expect(moved.path, '目标/心经 2.md');
       expect(await File(p.join(root.path, '源', '心经.md')).exists(), isFalse);
       expect(await File(p.join(root.path, '目标', '心经 2.md')).exists(), isTrue);
       expect(
         await Directory(p.join(root.path, '目标', '心经 2.assets')).exists(),
         isTrue,
       );
-      expect(() => backend.readNote(note.id), throwsA(isA<StateError>()));
       final movedNote = await backend.readNote(moved.id);
       expect(
         movedNote.markdown,
@@ -764,7 +764,8 @@ updatedAt: 2026-01-01 00:00
         parentPath: '',
       );
 
-      expect(movedToRoot.id, '心经 2.md');
+      expect(movedToRoot.id, note.id);
+      expect(movedToRoot.path, '心经 2.md');
       expect(await File(p.join(root.path, '心经 2.md')).exists(), isTrue);
       expect(
         await Directory(p.join(root.path, '心经 2.assets')).exists(),

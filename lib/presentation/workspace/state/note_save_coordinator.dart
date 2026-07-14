@@ -50,6 +50,7 @@ final class NoteSaveResult {
   const NoteSaveResult({
     required this.session,
     required this.oldNoteId,
+    required this.oldNotePath,
     required this.bodySnapshot,
     required this.savedNote,
     required this.error,
@@ -60,6 +61,7 @@ final class NoteSaveResult {
 
   final NoteDocumentSession session;
   final String oldNoteId;
+  final String oldNotePath;
   final String bodySnapshot;
   final VaultNoteContent? savedNote;
   final Object? error;
@@ -72,6 +74,8 @@ final class NoteSaveResult {
   bool get requiresReload => fatalError != null;
 
   bool get idChanged => savedNote != null && savedNote!.id != oldNoteId;
+
+  bool get pathChanged => savedNote != null && savedNote!.path != oldNotePath;
 }
 
 final class FlushReport {
@@ -552,6 +556,7 @@ final class NoteSaveCoordinator {
       return NoteSaveResult(
         session: session,
         oldNoteId: oldNoteId,
+        oldNotePath: noteSnapshot.path,
         bodySnapshot: bodySnapshot,
         savedNote: savedNote,
         error: null,
@@ -597,6 +602,7 @@ final class NoteSaveCoordinator {
       return NoteSaveResult(
         session: session,
         oldNoteId: oldNoteId,
+        oldNotePath: noteSnapshot.path,
         bodySnapshot: bodySnapshot,
         savedNote: null,
         error: error,
@@ -759,6 +765,7 @@ final class NoteSaveCoordinator {
     return NoteSaveResult(
       session: session,
       oldNoteId: session.noteId,
+      oldNotePath: session.note.path,
       bodySnapshot: session.controller.text,
       savedNote: null,
       error: null,
@@ -771,6 +778,7 @@ final class NoteSaveCoordinator {
     return NoteSaveResult(
       session: session,
       oldNoteId: session.noteId,
+      oldNotePath: session.note.path,
       bodySnapshot: session.controller.text,
       savedNote: null,
       error: null,
@@ -787,6 +795,7 @@ final class NoteSaveCoordinator {
     return NoteSaveResult(
       session: session,
       oldNoteId: session.noteId,
+      oldNotePath: session.note.path,
       bodySnapshot: session.controller.text,
       savedNote: null,
       error: error,
@@ -802,6 +811,7 @@ final class NoteSaveCoordinator {
     return NoteSaveResult(
       session: session,
       oldNoteId: session.noteId,
+      oldNotePath: session.note.path,
       bodySnapshot: '',
       savedNote: null,
       error: error,
@@ -819,6 +829,7 @@ final class NoteSaveCoordinator {
     return NoteSaveResult(
       session: session,
       oldNoteId: oldNoteId ?? session.noteId,
+      oldNotePath: session.note.path,
       bodySnapshot: bodySnapshot ?? session.controller.text,
       savedNote: null,
       error: null,
@@ -984,6 +995,7 @@ NoteSaveResult _copyResult(
   return NoteSaveResult(
     session: result.session,
     oldNoteId: result.oldNoteId,
+    oldNotePath: result.oldNotePath,
     bodySnapshot: result.bodySnapshot,
     savedNote: result.savedNote,
     error: error ?? result.error,

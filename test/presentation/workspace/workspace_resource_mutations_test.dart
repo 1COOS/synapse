@@ -57,7 +57,7 @@ void main() {
       final vault = DelayedDeleteNoteVaultBackend(seedExampleData: false);
       addTearDown(vault.completeDelete);
       final alpha = await vault.createNote(parentPath: '', title: 'Alpha');
-      await vault.createNote(parentPath: '', title: 'Beta');
+      final beta = await vault.createNote(parentPath: '', title: 'Beta');
 
       await pumpWorkspace(tester, vault: vault);
       await tester.tap(find.byKey(const Key('split-pane-right-button')));
@@ -91,7 +91,7 @@ void main() {
         findsOneWidget,
       );
       expect(
-        resourceRowBackgroundColor(tester, 'Beta.md'),
+        resourceRowBackgroundColor(tester, beta.id),
         isNot(const Color(0x00000000)),
       );
     },
@@ -299,20 +299,21 @@ void main() {
     await tester.tap(find.text('移动'));
     await tester.pumpAndSettle();
 
-    expect(() => vault.readNote(note.id), throwsA(isA<StateError>()));
-    expect((await vault.readNote('课程/心经.md')).title, '心经');
+    final moved = await vault.readNote(note.id);
+    expect(moved.title, '心经');
+    expect(moved.path, '课程/心经.md');
 
     await tester.tap(
-      find.byKey(const Key('resource-row-课程/心经.md')),
+      find.byKey(Key('resource-row-${note.id}')),
       buttons: kSecondaryMouseButton,
     );
     await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const Key('note-menu-delete-课程/心经.md')));
+    await tester.tap(find.byKey(Key('note-menu-delete-${note.id}')));
     await tester.pumpAndSettle();
     await tester.tap(find.text('删除'));
     await tester.pumpAndSettle();
 
-    expect(() => vault.readNote('课程/心经.md'), throwsA(isA<StateError>()));
+    await expectLater(vault.readNote(note.id), throwsA(isA<StateError>()));
   });
 
   testWidgets(

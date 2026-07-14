@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../application/search/search_index.dart';
 import '../../../domain/markdown/markdown_document.dart';
+import '../../../domain/vault/vault_migration.dart';
 import '../../../domain/vault/vault_resource.dart';
 import '../../../infrastructure/config/synapse_settings.dart';
 import '../../../infrastructure/vault/vault_backend.dart';
@@ -190,6 +191,16 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
       );
     }
 
+    final migrationRequirement = await _inspectMigration(runtime.vault);
+    if (migrationRequirement != null) {
+      return _snapshot(
+        phase: WorkspacePhase.migrationRequired,
+        resources: migrationRequirement.previewResources,
+        migrationRequirement: migrationRequirement,
+        message: '检测到旧版笔记标识，请确认迁移后继续编辑',
+      );
+    }
+
     final result = await _resourceCoordinator.loadWorkspace();
     final snapshot = switch (result) {
       WorkspaceResourceCurrent(:final snapshot) => snapshot,
@@ -315,6 +326,9 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
   Future<WorkspaceActionResult> selectResource(
     VaultResourceNode resource,
   ) async {
+    if (_requireState().requiresMigration) {
+      return WorkspaceActionResult.aborted;
+    }
     final currentOperation = _requireState().activeOperation;
     if (currentOperation != null &&
         currentOperation != WorkspaceOperation.editorCommand) {
@@ -367,6 +381,9 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
   }
 
   Future<WorkspaceActionResult> search(String query) async {
+    if (_requireState().requiresMigration) {
+      return WorkspaceActionResult.aborted;
+    }
     final normalized = query.trim();
     if (normalized.isEmpty || _runtimeManager.current == null) {
       return WorkspaceActionResult.cancelled;
@@ -717,6 +734,9 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
   Future<WorkspaceActionResult> _runDocumentOperation(
     Future<WorkspaceActionResult> Function() operation,
   ) async {
+    if (_requireState().requiresMigration) {
+      return WorkspaceActionResult.aborted;
+    }
     final currentOperation = _requireState().activeOperation;
     if (currentOperation != null &&
         currentOperation != WorkspaceOperation.editorCommand) {
@@ -745,6 +765,44 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
       return Future.value(WorkspaceActionResult.aborted);
     }
     return _startup.chooseVault();
+  }
+
+  Future<WorkspaceActionResult> migrateVaultIdentity() async {
+    final current = _requireState();
+    if (!current.requiresMigration) {
+      return WorkspaceActionResult.cancelled;
+    }
+    final backend = _runtimeManager.requireCurrent().vault;
+    if (backend is! VaultMigrationBackend) {
+      return WorkspaceActionResult.failed;
+    }
+    final migrationBackend = backend as VaultMigrationBackend;
+    if (!_beginOperation(WorkspaceOperation.vaultMigration)) {
+      return WorkspaceActionResult.busy;
+    }
+    try {
+      await migrationBackend.applyMigration();
+      final result = await _resourceCoordinator.loadWorkspace();
+      final snapshot = switch (result) {
+        WorkspaceResourceCurrent(:final snapshot) => snapshot,
+        WorkspaceResourceMissing(:final resources) => WorkspaceResourceSnapshot(
+          resources: resources,
+          selectedResource: null,
+          note: null,
+          proposals: const [],
+        ),
+        WorkspaceResourceStale() => throw StateError(
+          'Workspace runtime changed during identity migration.',
+        ),
+      };
+      _replaceRuntimeSnapshot(snapshot, message: '仓库迁移完成');
+      return WorkspaceActionResult.committed;
+    } catch (error) {
+      _setMessage('仓库迁移失败：$error');
+      return WorkspaceActionResult.failed;
+    } finally {
+      _endOperation(WorkspaceOperation.vaultMigration);
+    }
   }
 
   Future<WorkspaceActionResult> updateSettings(SynapseSettings settings) =>
@@ -812,6 +870,7 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
     required WorkspacePhase phase,
     List<VaultResourceNode> resources = const [],
     String? selectedResourceId,
+    VaultMigrationRequirement? migrationRequirement,
     String message = '',
   }) {
     final runtime = _runtimeManager.current;
@@ -828,6 +887,7 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
       settings: _startup.settings,
       vaultLabel: runtime?.label ?? _dependencies.emptyVaultLabel,
       vaultRoot: runtime?.rootPath,
+      migrationRequirement: migrationRequirement,
       savingNoteIds: {
         for (final session in _sessions.sessions)
           if (session.savePhase == NoteSavePhase.saving) session.noteId,
@@ -865,6 +925,7 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
         settings: _startup.settings,
         vaultLabel: current.vaultLabel,
         vaultRoot: current.vaultRoot,
+        migrationRequirement: current.migrationRequirement,
         savingNoteIds: {
           for (final session in _sessions.sessions)
             if (session.savePhase == NoteSavePhase.saving) session.noteId,
@@ -883,6 +944,7 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
   void _replaceRuntimeSnapshot(
     WorkspaceResourceSnapshot snapshot, {
     required String message,
+    VaultMigrationRequirement? migrationRequirement,
   }) {
     _sessions.clear();
     _materials.clear();
@@ -895,7 +957,9 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
     final current = _requireState();
     final runtime = _runtimeManager.requireCurrent();
     final next = WorkspaceState(
-      phase: _dependencies.supportsDirectoryVault
+      phase: migrationRequirement != null
+          ? WorkspacePhase.migrationRequired
+          : _dependencies.supportsDirectoryVault
           ? WorkspacePhase.ready
           : WorkspacePhase.webPreview,
       resources: snapshot.resources,
@@ -913,11 +977,19 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
       settings: _startup.settings,
       vaultLabel: runtime.label,
       vaultRoot: runtime.rootPath,
+      migrationRequirement: migrationRequirement,
       activeOperation: current.activeOperation,
       message: message,
     );
     _dependencies.runtimeSnapshotPublishHookForTesting?.call();
     _publishCommittedState(next);
+  }
+
+  Future<VaultMigrationRequirement?> _inspectMigration(VaultBackend backend) {
+    if (backend is! VaultMigrationBackend) {
+      return Future.value(null);
+    }
+    return (backend as VaultMigrationBackend).inspectMigration();
   }
 
   bool _beginOperation(WorkspaceOperation operation) {

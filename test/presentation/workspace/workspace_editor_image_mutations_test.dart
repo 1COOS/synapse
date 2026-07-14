@@ -246,11 +246,10 @@ void main() {
       expect(await paste, PaneEditorCommandOutcome.staleTarget);
       await tester.pumpAndSettle();
 
-      expect(() => vault.readNote('Alpha.md'), throwsA(isA<StateError>()));
-      final saved = await vault.readNote('Remapped.md');
+      final saved = await vault.readNote(note.id);
+      expect(saved.path, 'Remapped.md');
       expect(saved.markdown, contains('runtime-success.png'));
-      expect(find.byKey(const Key('resource-row-Alpha.md')), findsNothing);
-      expect(find.byKey(const Key('resource-row-Remapped.md')), findsOneWidget);
+      expect(find.byKey(Key('resource-row-${note.id}')), findsOneWidget);
       expect(
         find.descendant(
           of: find.byKey(const Key('split-pane-title-pane-1')),
@@ -259,7 +258,7 @@ void main() {
         findsOneWidget,
       );
       expect(
-        find.byKey(const Key('proposal-Remapped.md-runtime-title-proposal')),
+        find.byKey(Key('proposal-${note.id}-runtime-title-proposal')),
         findsOneWidget,
       );
       expect(find.textContaining('图片已粘贴到笔记'), findsNothing);

@@ -415,26 +415,32 @@ void main() {
       parentPath: folder.path,
       title: '佛学',
     );
-    await vault.createNote(parentPath: folder.path, title: '心经');
-    await vault.createNote(parentPath: nested.path, title: '金刚经');
+    final directNote = await vault.createNote(
+      parentPath: folder.path,
+      title: '心经',
+    );
+    final nestedNote = await vault.createNote(
+      parentPath: nested.path,
+      title: '金刚经',
+    );
 
     await pumpWorkspace(tester, vault: vault);
 
     expect(find.byKey(const Key('resource-count-读书')), findsOneWidget);
-    expect(find.byKey(const Key('resource-row-读书/心经.md')), findsOneWidget);
-    expect(find.byKey(const Key('resource-row-读书/佛学/金刚经.md')), findsOneWidget);
+    expect(find.byKey(Key('resource-row-${directNote.id}')), findsOneWidget);
+    expect(find.byKey(Key('resource-row-${nestedNote.id}')), findsOneWidget);
 
     await tester.tap(find.byKey(const Key('resource-toggle-读书')));
     await tester.pumpAndSettle();
 
-    expect(find.byKey(const Key('resource-row-读书/心经.md')), findsNothing);
-    expect(find.byKey(const Key('resource-row-读书/佛学/金刚经.md')), findsNothing);
+    expect(find.byKey(Key('resource-row-${directNote.id}')), findsNothing);
+    expect(find.byKey(Key('resource-row-${nestedNote.id}')), findsNothing);
 
     await tester.tap(find.byKey(const Key('resource-toggle-读书')));
     await tester.pumpAndSettle();
 
-    expect(find.byKey(const Key('resource-row-读书/心经.md')), findsOneWidget);
-    expect(find.byKey(const Key('resource-row-读书/佛学/金刚经.md')), findsOneWidget);
+    expect(find.byKey(Key('resource-row-${directNote.id}')), findsOneWidget);
+    expect(find.byKey(Key('resource-row-${nestedNote.id}')), findsOneWidget);
   });
 
   testWidgets(

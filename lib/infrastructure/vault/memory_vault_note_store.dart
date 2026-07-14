@@ -1,4 +1,5 @@
 import '../../domain/markdown/markdown_document.dart';
+import '../../domain/vault/note_id.dart';
 import '../../domain/vault/vault_resource.dart';
 import 'memory_vault_paths.dart';
 import 'memory_vault_proposal_store.dart';
@@ -45,8 +46,9 @@ final class MemoryVaultNoteStore {
     final parent = paths.normalizeFolderPath(parentPath);
     final now = DateTime.now().toUtc();
     final path = paths.uniqueNotePath(parent, title);
+    final id = NoteId.generate().value;
     final note = VaultNote(
-      id: path,
+      id: id,
       title: paths.basenameWithoutExtension(path),
       path: path,
       markdownPath: 'memory/$path',
@@ -130,19 +132,25 @@ final class MemoryVaultNoteStore {
     required String noteId,
     required String markdown,
   }) async {
-    state.markdown[noteId] = markdown;
-    _touch(noteId);
-    return readNoteCallback(noteId);
+    final note = state.note(noteId);
+    state.markdown[note.id] = patchMarkdownFrontmatterScalar(
+      markdown,
+      key: 'synapseId',
+      value: note.id,
+    );
+    _touch(note.id);
+    return readNoteCallback(note.id);
   }
 
   Future<VaultNoteContent> appendMarkdown({
     required String noteId,
     required String markdown,
   }) async {
-    final current = state.markdown[noteId] ?? '';
-    state.markdown[noteId] = '${current.trimRight()}\n\n${markdown.trim()}\n';
-    _touch(noteId);
-    return readNoteCallback(noteId);
+    final note = state.note(noteId);
+    final current = state.markdown[note.id] ?? '';
+    state.markdown[note.id] = '${current.trimRight()}\n\n${markdown.trim()}\n';
+    _touch(note.id);
+    return readNoteCallback(note.id);
   }
 
   Future<void> deleteNote(String noteId) async {
@@ -172,7 +180,7 @@ final class MemoryVaultNoteStore {
     final target = paths.uniqueNotePath(paths.dirname(note.path), note.title);
     final title = paths.basenameWithoutExtension(target);
     final copied = VaultNote(
-      id: target,
+      id: NoteId.generate().value,
       title: title,
       path: target,
       markdownPath: 'memory/$target',
@@ -181,10 +189,18 @@ final class MemoryVaultNoteStore {
       updatedAt: now,
     );
     state.notes[copied.id] = copied;
-    state.markdown[copied.id] = retitleVaultMarkdown(
-      state.markdown[note.id] ?? initialVaultMarkdown(note),
-      newTitle: title,
-      updatedAt: now,
+    state.markdown[copied.id] = patchMarkdownFrontmatterScalar(
+      rewriteNoteAssetReferences(
+        retitleVaultMarkdown(
+          state.markdown[note.id] ?? initialVaultMarkdown(note),
+          newTitle: title,
+          updatedAt: now,
+        ),
+        oldAssetsDirectory: paths.basename(note.assetsPath),
+        newAssetsDirectory: paths.basename(copied.assetsPath),
+      ),
+      key: 'synapseId',
+      value: copied.id,
     );
     final sourceIdMap = sources.copyForNote(note.id, copied.id, now);
     proposals.copyForNote(note.id, copied.id, sourceIdMap, now);
@@ -214,8 +230,9 @@ final class MemoryVaultNoteStore {
     if (!state.folders.contains(folder)) {
       throw StateError('Folder not found: $folderPath');
     }
-    final noteIds = state.notes.keys
-        .where((noteId) => isVaultPathInside(noteId, folder))
+    final noteIds = state.notes.values
+        .where((note) => isVaultPathInside(note.path, folder))
+        .map((note) => note.id)
         .toList();
     for (final noteId in noteIds) {
       await deleteNoteCallback(noteId);
@@ -251,39 +268,24 @@ final class MemoryVaultNoteStore {
     final movedFolders = state.folders
         .where((path) => isVaultPathInside(path, folder))
         .toList();
-    final movedNotes = state.notes.keys
-        .where((noteId) => isVaultPathInside(noteId, folder))
+    final movedNotes = state.notes.values
+        .where((note) => isVaultPathInside(note.path, folder))
+        .map((note) => note.id)
         .toList();
-    final noteIdMap = {
-      for (final noteId in movedNotes)
-        noteId: replaceVaultPathPrefix(noteId, folder, target),
-    };
     state.folders.removeWhere((path) => isVaultPathInside(path, folder));
     state.folders.addAll(
       movedFolders.map((path) => replaceVaultPathPrefix(path, folder, target)),
     );
 
-    for (final oldId in movedNotes) {
-      final newId = noteIdMap[oldId]!;
-      final note = state.notes.remove(oldId)!;
-      state.notes[newId] = note.copyWith(
-        id: newId,
-        path: newId,
-        markdownPath: 'memory/$newId',
-        assetsPath: 'memory/${paths.assetsPathFor(newId)}',
+    for (final noteId in movedNotes) {
+      final note = state.notes[noteId]!;
+      final newPath = replaceVaultPathPrefix(note.path, folder, target);
+      state.notes[noteId] = note.copyWith(
+        path: newPath,
+        markdownPath: 'memory/$newPath',
+        assetsPath: 'memory/${paths.assetsPathFor(newPath)}',
       );
-      final markdown = state.markdown.remove(oldId);
-      if (markdown != null) {
-        state.markdown[newId] = markdown;
-      }
-      final noteSources = state.sources.remove(oldId);
-      if (noteSources != null) {
-        state.sources[newId] = [
-          for (final source in noteSources) source.copyWith(noteId: newId),
-        ];
-      }
     }
-    proposals.moveNotes(noteIdMap);
     return VaultResourceNode(
       id: target,
       title: paths.basename(target),
@@ -297,12 +299,13 @@ final class MemoryVaultNoteStore {
       return;
     }
     final now = DateTime.now().toUtc();
-    const id = 'preview-note.md';
+    const id = '00000000-0000-4000-8000-000000000001';
+    const path = 'preview-note.md';
     final note = VaultNote(
       id: id,
       title: '心经学习',
-      path: id,
-      markdownPath: 'memory/$id',
+      path: path,
+      markdownPath: 'memory/$path',
       assetsPath: 'memory/preview-note.assets',
       createdAt: now,
       updatedAt: now,
@@ -369,24 +372,19 @@ final class MemoryVaultNoteStore {
     final now = DateTime.now().toUtc();
     final title = paths.basenameWithoutExtension(targetPath);
     final moved = note.copyWith(
-      id: targetPath,
       title: title,
       path: targetPath,
       markdownPath: 'memory/$targetPath',
       assetsPath: 'memory/${paths.assetsPathFor(targetPath)}',
       updatedAt: now,
     );
-    state.notes.remove(note.id);
-    state.notes[moved.id] = moved;
-    final markdown =
-        state.markdown.remove(note.id) ?? initialVaultMarkdown(note);
-    state.markdown[moved.id] = retitleVaultMarkdown(
-      markdown,
-      newTitle: title,
-      updatedAt: now,
+    state.notes[note.id] = moved;
+    final markdown = state.markdown[note.id] ?? initialVaultMarkdown(note);
+    state.markdown[note.id] = rewriteNoteAssetReferences(
+      retitleVaultMarkdown(markdown, newTitle: title, updatedAt: now),
+      oldAssetsDirectory: paths.basename(note.assetsPath),
+      newAssetsDirectory: paths.basename(moved.assetsPath),
     );
-    sources.moveForNote(note.id, moved.id, now);
-    proposals.moveForNote(note.id, moved.id, now);
     return moved;
   }
 }

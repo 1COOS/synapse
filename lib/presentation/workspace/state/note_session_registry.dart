@@ -83,8 +83,8 @@ final class NoteSessionRegistry extends ChangeNotifier {
     }
     final prefix = '$normalizedFolder/';
     return <NoteDocumentSession>[
-      for (final entry in _sessions.entries)
-        if (_normalizePath(entry.key).startsWith(prefix)) entry.value,
+      for (final session in _sessions.values)
+        if (_normalizePath(session.note.path).startsWith(prefix)) session,
     ];
   }
 

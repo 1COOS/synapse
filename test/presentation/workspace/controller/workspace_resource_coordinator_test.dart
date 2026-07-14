@@ -330,7 +330,7 @@ void main() {
     });
 
     test(
-      'retries once when the first listed note is externally renamed',
+      'keeps the stable id when the first listed note is externally renamed',
       () async {
         final vault = _RenameOnReadVault();
         final note = await vault.createNote(parentPath: '', title: 'Alpha');
@@ -340,8 +340,9 @@ void main() {
         final result = await coordinator.loadWorkspace();
 
         final snapshot = (result as WorkspaceResourceCurrent).snapshot;
-        expect(snapshot.note?.id, isNot(note.id));
+        expect(snapshot.note?.id, note.id);
         expect(snapshot.note?.title, 'Beta');
+        expect(snapshot.note?.path, 'Beta.md');
       },
     );
 

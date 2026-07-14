@@ -23,7 +23,10 @@ void main() {
       'ProviderContainer dispose aborts an in-flight mutation before hydration',
       () async {
         final vault = _HydrationRecordingDelayedDeleteVault();
-        await vault.createNote(parentPath: '', title: 'Alpha');
+        final alphaNote = await vault.createNote(
+          parentPath: '',
+          title: 'Alpha',
+        );
         await vault.createNote(parentPath: '', title: 'Beta');
         final container = ProviderContainer(
           overrides: [
@@ -39,8 +42,8 @@ void main() {
           workspaceControllerProvider.future,
         );
         final controller = container.read(workspaceControllerProvider.notifier);
-        final session = controller.sessionFor('Alpha.md')!;
-        final alpha = _findResource(initial.resources, 'Alpha.md')!;
+        final session = controller.sessionFor(alphaNote.id)!;
+        final alpha = _findResource(initial.resources, alphaNote.id)!;
         final deleting = controller.deleteResource(alpha);
         await vault.deleteStarted.future;
         final listCallsBeforeDispose = vault.listResourcesCalls;
@@ -56,7 +59,7 @@ void main() {
 
     test('opens a selected Vault with one immutable state commit', () async {
       final vault = MemoryVaultBackend();
-      await vault.createNote(parentPath: '', title: 'Chosen');
+      final chosen = await vault.createNote(parentPath: '', title: 'Chosen');
       final settingsStore = FakeSettingsStore();
       final container = ProviderContainer(
         overrides: [
@@ -84,8 +87,8 @@ void main() {
       expect(result, WorkspaceActionResult.committed);
       expect(opened.phase, WorkspacePhase.ready);
       expect(opened.vaultRoot, '/chosen');
-      expect(opened.selectedResourceId, 'Chosen.md');
-      expect(opened.sessionNoteIds, {'Chosen.md'});
+      expect(opened.selectedResourceId, chosen.id);
+      expect(opened.sessionNoteIds, {chosen.id});
       expect(
         settingsStore.savedSettings.single.vaultLocation?.rootPath,
         '/chosen',
@@ -100,8 +103,8 @@ void main() {
       () async {
         final oldVault = _GatedAddImageVaultBackend();
         final newVault = MemoryVaultBackend(seedExampleData: false);
-        await oldVault.createNote(parentPath: '', title: 'Old');
-        await newVault.createNote(parentPath: '', title: 'New');
+        final oldNote = await oldVault.createNote(parentPath: '', title: 'Old');
+        final newNote = await newVault.createNote(parentPath: '', title: 'New');
         final container = ProviderContainer(
           overrides: [
             workspaceDependenciesProvider.overrideWithValue(
@@ -160,11 +163,11 @@ void main() {
             .read(workspaceControllerProvider)
             .requireValue;
         expect(switched.vaultRoot, '/new-vault');
-        expect(switched.selectedResourceId, 'New.md');
-        expect(switched.sessionNoteIds, {'New.md'});
+        expect(switched.selectedResourceId, newNote.id);
+        expect(switched.sessionNoteIds, {newNote.id});
         expect(oldVault.addImageCalls, 1);
-        expect((await oldVault.readNote('Old.md')).sources, hasLength(1));
-        expect((await newVault.readNote('New.md')).sources, isEmpty);
+        expect((await oldVault.readNote(oldNote.id)).sources, hasLength(1));
+        expect((await newVault.readNote(newNote.id)).sources, isEmpty);
       },
     );
 
@@ -219,7 +222,7 @@ void main() {
       'updates settings without replacing stable document sessions',
       () async {
         final vault = MemoryVaultBackend();
-        await vault.createNote(parentPath: '', title: 'Settings');
+        final note = await vault.createNote(parentPath: '', title: 'Settings');
         final settingsStore = FakeSettingsStore();
         final container = ProviderContainer(
           overrides: [
@@ -236,7 +239,7 @@ void main() {
           workspaceControllerProvider.future,
         );
         final controller = container.read(workspaceControllerProvider.notifier);
-        final session = controller.sessionFor('Settings.md');
+        final session = controller.sessionFor(note.id);
         final updatedSettings = initial.settings.copyWith(
           preferences: initial.preferences.copyWith(noteFontSize: 18),
         );
@@ -249,7 +252,7 @@ void main() {
         expect(result, WorkspaceActionResult.committed);
         expect(updated.settings, updatedSettings);
         expect(updated.preferences.noteFontSize, 18);
-        expect(controller.sessionFor('Settings.md'), same(session));
+        expect(controller.sessionFor(note.id), same(session));
         expect(settingsStore.savedSettings, [updatedSettings]);
         expect(settingsStore.apiKeyUpdatingSaveCount, 0);
         expect(settingsStore.preservingApiKeySaveCount, 1);
@@ -260,7 +263,7 @@ void main() {
       'settings runtime replacement waits for an entered editor mutation',
       () async {
         final vault = _GatedAddImageVaultBackend();
-        await vault.createNote(parentPath: '', title: 'Settings');
+        final note = await vault.createNote(parentPath: '', title: 'Settings');
         final settingsStore = FakeSettingsStore();
         final container = ProviderContainer(
           overrides: [
@@ -285,7 +288,7 @@ void main() {
           workspaceControllerProvider.future,
         );
         final controller = container.read(workspaceControllerProvider.notifier);
-        final session = controller.sessionFor('Settings.md')!;
+        final session = controller.sessionFor(note.id)!;
         final context = controller.capturePaneEditorContext(
           initial.focusedPaneId,
         )!;
@@ -317,7 +320,7 @@ void main() {
             .read(workspaceControllerProvider)
             .requireValue;
         expect(updated.settings, nextSettings);
-        expect(controller.sessionFor('Settings.md'), same(session));
+        expect(controller.sessionFor(note.id), same(session));
         expect(session.note.sources, hasLength(1));
         expect(settingsStore.savedSettings, [nextSettings]);
       },
