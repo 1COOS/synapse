@@ -341,6 +341,41 @@ void main() {
   });
 
   test(
+    'vault-only save preserves api key without accessing unavailable Keychain',
+    () async {
+      final unavailable = PlatformException(
+        code: '-34018',
+        message: "A required entitlement isn't present.",
+      );
+      secureStore = _FakeSecureValueStore(
+        readFailure: unavailable,
+        deleteFailure: unavailable,
+      );
+      final store = FileSettingsStore(
+        configDirectory: root,
+        secureStore: secureStore,
+      );
+
+      await store.savePreservingApiKey(
+        SynapseSettings.defaults.copyWith(
+          vaultLocation: const VaultLocation(rootPath: '/vault/notes'),
+        ),
+      );
+
+      expect(secureStore.events, isEmpty);
+      final json =
+          jsonDecode(
+                await File(p.join(root.path, 'settings.json')).readAsString(),
+              )
+              as Map<String, Object?>;
+      expect(
+        (json['vaultLocation'] as Map<String, Object?>)['rootPath'],
+        p.normalize('/vault/notes'),
+      );
+    },
+  );
+
+  test(
     'unsupported settings store returns defaults and refuses persistence',
     () async {
       const store = UnsupportedSettingsStore();
@@ -403,11 +438,13 @@ class _FakeSecureValueStore implements SecureValueStore {
   _FakeSecureValueStore({
     this.readFailure,
     this.writeFailure,
+    this.deleteFailure,
     List<String?> readResults = const [],
   }) : _readResults = [...readResults];
 
   final Object? readFailure;
   final Object? writeFailure;
+  final Object? deleteFailure;
   final List<String?> _readResults;
   final values = <String, String>{};
   final events = <String>[];
@@ -415,6 +452,10 @@ class _FakeSecureValueStore implements SecureValueStore {
   @override
   Future<void> delete({required String key}) async {
     events.add('delete:$key');
+    final failure = deleteFailure;
+    if (failure != null) {
+      throw failure;
+    }
     values.remove(key);
   }
 

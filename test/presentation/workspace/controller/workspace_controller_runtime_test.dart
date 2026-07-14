@@ -90,6 +90,8 @@ void main() {
         settingsStore.savedSettings.single.vaultLocation?.rootPath,
         '/chosen',
       );
+      expect(settingsStore.apiKeyUpdatingSaveCount, 0);
+      expect(settingsStore.preservingApiKeySaveCount, 1);
       expect(opened.activeOperation, isNull);
     });
 
@@ -249,6 +251,8 @@ void main() {
         expect(updated.preferences.noteFontSize, 18);
         expect(controller.sessionFor('Settings.md'), same(session));
         expect(settingsStore.savedSettings, [updatedSettings]);
+        expect(settingsStore.apiKeyUpdatingSaveCount, 0);
+        expect(settingsStore.preservingApiKeySaveCount, 1);
       },
     );
 
@@ -339,14 +343,15 @@ void main() {
           ),
         );
         var runtimeBuilds = 0;
+        final settingsStore = FakeSettingsStore(
+          initialSettings: persistedSettings,
+        );
         final container = ProviderContainer(
           overrides: [
             workspaceDependenciesProvider.overrideWithValue(
               createWorkspaceDependencies(
                 initialVault: MemoryVaultBackend(),
-                settingsStore: FakeSettingsStore(
-                  initialSettings: persistedSettings,
-                ),
+                settingsStore: settingsStore,
                 aiProviderFactory: (_) => const _NoopAiProvider(),
                 searchIndexFactory: (_, _) {
                   runtimeBuilds += 1;
@@ -369,6 +374,18 @@ void main() {
         expect(runtimeBuilds, 2);
         expect(workspace.settings, SynapseSettings.defaults);
         expect(controller.settingsForEditing, persistedSettings);
+
+        final result = await controller.updateSettings(
+          persistedSettings.copyWith(
+            preferences: persistedSettings.preferences.copyWith(
+              noteFontSize: 18,
+            ),
+          ),
+        );
+
+        expect(result, WorkspaceActionResult.committed);
+        expect(settingsStore.apiKeyUpdatingSaveCount, 0);
+        expect(settingsStore.preservingApiKeySaveCount, 1);
       },
     );
 

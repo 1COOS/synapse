@@ -72,19 +72,31 @@ class FileSettingsStore extends SettingsStore {
 
   @override
   Future<void> save(SynapseSettings settings) async {
+    await _save(settings, updateApiKey: true);
+  }
+
+  @override
+  Future<void> savePreservingApiKey(SynapseSettings settings) async {
+    await _save(settings, updateApiKey: false);
+  }
+
+  Future<void> _save(
+    SynapseSettings settings, {
+    required bool updateApiKey,
+  }) async {
     await _configDirectory.create(recursive: true);
     final normalized = _normalizeSettings(settings);
-    final transaction = await _apiKeys.stageSave(
-      normalized.providerConfig.apiKey,
-    );
+    final transaction = updateApiKey
+        ? await _apiKeys.stageSave(normalized.providerConfig.apiKey)
+        : null;
     try {
       await _configFileWriter.write(
         _settingsFile,
         const JsonEncoder.withIndent('  ').convert(normalized.toJson()),
       );
-      await transaction.commit();
+      await transaction?.commit();
     } catch (_) {
-      await transaction.abort();
+      await transaction?.abort();
       rethrow;
     }
   }

@@ -262,6 +262,16 @@ final class _LegacySettingsStore extends SettingsStore {
   Future<void> save(SynapseSettings settings) async {
     _preferences = settings.preferences;
     await providerConfigStore?.save(settings.providerConfig);
+    await _saveVaultLocation(settings);
+  }
+
+  @override
+  Future<void> savePreservingApiKey(SynapseSettings settings) async {
+    _preferences = settings.preferences;
+    await _saveVaultLocation(settings);
+  }
+
+  Future<void> _saveVaultLocation(SynapseSettings settings) async {
     final location = settings.vaultLocation;
     if (location != null) {
       await vaultLocationStore?.save(location);

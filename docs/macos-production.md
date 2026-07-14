@@ -67,6 +67,8 @@ read legacy
 5. JSON 提交失败时 abort staged secret；
 6. 所有路径最终释放 lock。
 
+Vault 位置、界面偏好等非密钥设置不属于 Keychain transaction。API Key 未变化时必须使用 `savePreservingApiKey`，只原子写入不含 secret 的 `settings.json`，不得读取、写入或清空 Keychain。只有用户明确新增、替换或清空 API Key 时才执行上述 secure transaction；因此 Local Debug 即使无法访问 Keychain，也仍可选择 Vault 和保存普通偏好。
+
 file lock 用于多进程/多实例串行化，不能改成只覆盖单 isolate 的内存锁。排障日志只能记录阶段和错误类型，不能输出 key。
 
 ## 6. Vault Access Lease

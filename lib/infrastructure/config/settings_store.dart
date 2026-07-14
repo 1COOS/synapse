@@ -23,6 +23,10 @@ abstract class SettingsStore {
 
   Future<void> save(SynapseSettings settings);
 
+  Future<void> savePreservingApiKey(SynapseSettings settings) {
+    return save(settings);
+  }
+
   Future<bool> vaultExists(VaultLocation location);
 }
 

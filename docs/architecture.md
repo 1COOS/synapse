@@ -250,6 +250,7 @@ macOS 目录选择或 bookmark 恢复通过 Dart MethodChannel 和 Swift token m
 - 任一步失败都删除 legacy 文件、不返回旧 key，并要求用户重新输入；
 - 持久 quarantine marker 只记录“需要重新输入”，不包含 secret；
 - settings/provider 配置写入与 Keychain 更新使用 transaction，提交失败会清理 staged secret；
+- Vault 位置和普通偏好在 API Key 未变化时走 `savePreservingApiKey`，只更新非 secret JSON，不访问或清空 Keychain；
 - 同进程 mutex 与 blocking file lock 串行化 key 读取、迁移和写入，避免多实例竞态。
 
 Keychain、签名或 entitlement 异常必须明确报错并 fail-closed。Local Debug 遇到 `-34018` 时应切换到正确签名的 Profile/Release 构建并重新输入 key，不能把 secret 写入本地 JSON 绕过问题。
@@ -276,7 +277,7 @@ Keychain、签名或 entitlement 异常必须明确报错并 fail-closed。Local
 
 ## 12. 测试与质量边界
 
-当前基线为 `flutter test --no-pub` 633/633、`flutter analyze --no-pub` 无 issue。9 个超长测试文件已拆成 25 个，保留 248 tests 等价覆盖，当前最大测试文件 869 行。
+当前基线为 `flutter test --no-pub` 634/634、`flutter analyze --no-pub` 无 issue。9 个超长测试文件已拆成 25 个，保留 248 tests 等价覆盖，当前最大测试文件 869 行。
 
 重点测试面包括：
 

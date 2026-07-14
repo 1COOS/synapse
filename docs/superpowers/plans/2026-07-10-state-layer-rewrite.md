@@ -27,7 +27,7 @@
 
 **Final local gate checkpoint（2026-07-14）：** `dart format` 165 files、0 changed，`flutter test --no-pub` 630/630，`flutter analyze --no-pub` 无 issue，`git diff --check` PASS，执行前后 worktree clean。原始 `xcodebuild test`、Debug build 与 Release build 均因 Runner entitlements 需要 Apple Development certificate 而失败；Release app 未生成，因此无法完成 codesign entitlement inspection。关闭签名的辅助 `xcodebuild test` 通过 RunnerTests 3/3，但不能替代 production gate。代码与 unsigned native tests 已通过；strict final local production gate 仍被外部 Apple Development certificate/Team 阻塞。
 
-**Local Debug signing remediation（2026-07-14）：** 新增 `LocalDebug.entitlements`，Debug 使用 ad-hoc `Sign to Run Locally`，不声明 Keychain Sharing；Profile/Release 继续使用带空 `keychain-access-groups` 的签名 entitlement。`flutter run -d macos` PASS、Debug build PASS、原始 `xcodebuild test` PASS（RunnerTests 3/3）、全量 Flutter tests 633/633、analyze 无 issue。当前只剩 Release build 与 Release codesign entitlement inspection 被 Apple Development certificate/Team 阻塞。
+**Local Debug signing remediation（2026-07-14）：** 新增 `LocalDebug.entitlements`，Debug 使用 ad-hoc `Sign to Run Locally`，不声明 Keychain Sharing；Profile/Release 继续使用带空 `keychain-access-groups` 的签名 entitlement。后续修复将 Vault/普通偏好保存与 API Key transaction 解耦，未修改密钥时使用 `savePreservingApiKey`，不会读取或清空 Keychain。`flutter run -d macos` PASS、Debug build PASS、原始 `xcodebuild test` PASS（RunnerTests 3/3）、全量 Flutter tests 634/634、analyze 无 issue。当前只剩 Release build 与 Release codesign entitlement inspection 被 Apple Development certificate/Team 阻塞。
 
 **目标：** 在已完成的 session/save/split/mutation foundation 上，拆分长文件、收敛状态所有权、绑定异步编辑目标，并完成 macOS 生产安全与本地发布门禁。
 
@@ -231,7 +231,7 @@ Commit：`fix: bind pane async mutations to stable context`。
 | 检查 | 结果 |
 |---|---|
 | `dart format --output=none --set-exit-if-changed lib test` | PASS：165 files，0 changed |
-| `flutter test --no-pub` | PASS：633/633 |
+| `flutter test --no-pub` | PASS：634/634 |
 | `flutter analyze --no-pub` | PASS：No issues |
 | `xcodebuild test -project macos/Runner.xcodeproj -scheme Runner -destination 'platform=macOS'` | PASS：Local Debug ad-hoc signing；RunnerTests 3/3 |
 | `flutter build macos --debug --no-pub` | PASS：生成 Debug `synapse.app` |

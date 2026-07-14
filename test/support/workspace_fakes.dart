@@ -155,6 +155,9 @@ class FakeSettingsStore extends SettingsStore {
   SynapseSettings currentSettings;
   final String recoveryMessage;
   final savedSettings = <SynapseSettings>[];
+  int apiKeyUpdatingSaveCount = 0;
+  int preservingApiKeySaveCount = 0;
+  bool _isPreservingApiKey = false;
 
   @override
   bool get supportsPersistence => true;
@@ -177,8 +180,26 @@ class FakeSettingsStore extends SettingsStore {
 
   @override
   Future<void> save(SynapseSettings settings) async {
+    if (!_isPreservingApiKey) {
+      apiKeyUpdatingSaveCount += 1;
+    }
+    _recordSave(settings);
+  }
+
+  void _recordSave(SynapseSettings settings) {
     currentSettings = settings;
     savedSettings.add(settings);
+  }
+
+  @override
+  Future<void> savePreservingApiKey(SynapseSettings settings) async {
+    preservingApiKeySaveCount += 1;
+    _isPreservingApiKey = true;
+    try {
+      await save(settings);
+    } finally {
+      _isPreservingApiKey = false;
+    }
   }
 
   @override

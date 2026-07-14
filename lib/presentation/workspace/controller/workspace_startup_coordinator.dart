@@ -283,7 +283,7 @@ final class WorkspaceStartupCoordinator {
       if (!_isVaultIntentCurrent(intent)) {
         return WorkspaceActionResult.aborted;
       }
-      await _persistSettings(nextSettings);
+      await _persistSettings(nextSettings, preserveApiKey: true);
       if (!_isVaultIntentCurrent(intent)) {
         return WorkspaceActionResult.aborted;
       }
@@ -354,7 +354,10 @@ final class WorkspaceStartupCoordinator {
           settings: settings,
         );
       }
-      await _persistSettings(settings);
+      final apiKeyChanged =
+          settings.providerConfig.apiKey.trim() !=
+          settingsForEditing.providerConfig.apiKey.trim();
+      await _persistSettings(settings, preserveApiKey: !apiKeyChanged);
       if (candidate != null) {
         runtimes.install(candidate);
         candidate = null;
@@ -499,7 +502,7 @@ final class WorkspaceStartupCoordinator {
         return;
       }
       final restoredSettings = settings.copyWith(vaultLocation: restored);
-      await _persistSettings(restoredSettings);
+      await _persistSettings(restoredSettings, preserveApiKey: true);
       if (!_isStartupCurrent(startupToken)) {
         candidate.dispose(
           reportCleanupError: dependencies.cleanupErrorReporter,
@@ -642,12 +645,19 @@ final class WorkspaceStartupCoordinator {
     );
   }
 
-  Future<void> _persistSettings(SynapseSettings settings) {
+  Future<void> _persistSettings(
+    SynapseSettings settings, {
+    bool preserveApiKey = false,
+  }) {
     final operation = _settingsPersistenceTail.catchError((Object _) {}).then((
       _,
     ) async {
       final store = await dependencies.settingsStore();
-      await store.save(settings);
+      if (preserveApiKey) {
+        await store.savePreservingApiKey(settings);
+      } else {
+        await store.save(settings);
+      }
     });
     _settingsPersistenceTail = operation.catchError((Object _) {});
     return operation;
