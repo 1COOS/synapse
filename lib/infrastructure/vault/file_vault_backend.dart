@@ -10,14 +10,17 @@ import 'file_vault_operations.dart';
 import 'file_vault_paths.dart';
 import 'file_vault_proposal_store.dart';
 import 'file_vault_source_store.dart';
+import 'file_vault_transaction_journal.dart';
 import 'vault_backend.dart';
 
 class FileVaultBackend implements VaultBackend, VaultMigrationBackend {
   FileVaultBackend(String rootPath) : root = Directory(rootPath) {
     _identityMigrator = FileVaultIdentityMigrator(rootPath: rootPath);
     final paths = FileVaultPaths(root, catalog: FileVaultCatalog());
-    final operations = FileVaultOperations(
+    final journal = FileVaultTransactionJournal(paths: paths);
+    final operations = _operations = FileVaultOperations(
       paths: paths,
+      journal: journal,
       writeFileString: (file, contents) => writeFileString(file, contents),
       writeFileBytes: (file, bytes) => writeFileBytes(file, bytes),
       deleteFile: (file) => deleteFile(file),
@@ -57,10 +60,13 @@ class FileVaultBackend implements VaultBackend, VaultMigrationBackend {
   late final FileVaultSourceStore _sources;
   late final FileVaultProposalStore _proposals;
   late final FileVaultIdentityMigrator _identityMigrator;
+  late final FileVaultOperations _operations;
   VaultIdentityMigrationReport? _pendingMigration;
 
   @override
   Future<VaultMigrationRequirement?> inspectMigration() async {
+    await _operations.ensureRoot();
+    await _operations.recoverPendingTransactions();
     final report = await _identityMigrator.scan();
     if (!report.requiresMigration) {
       _pendingMigration = null;
@@ -76,6 +82,8 @@ class FileVaultBackend implements VaultBackend, VaultMigrationBackend {
 
   @override
   Future<void> applyMigration() async {
+    await _operations.ensureRoot();
+    await _operations.recoverPendingTransactions();
     final report = _pendingMigration ?? await _identityMigrator.scan();
     await _identityMigrator.apply(report);
     _pendingMigration = null;
@@ -107,6 +115,14 @@ class FileVaultBackend implements VaultBackend, VaultMigrationBackend {
   }
 
   Future<File> copyFile(File file, String newPath) => file.copy(newPath);
+
+  @override
+  Future<T> runMutationTransaction<T>({
+    required String label,
+    required Future<T> Function() action,
+  }) {
+    return _operations.transaction(label, action);
+  }
 
   @override
   Future<List<VaultResourceNode>> listResources() => _notes.listResources();

@@ -84,10 +84,15 @@ class ProposalService {
   Future<AiProposal> commitPreparedOutlineProposal(
     PreparedOutlineProposal prepared,
   ) async {
-    for (final source in prepared.sourceUpdates) {
-      await runVaultPostCommit(() => vault.updateSource(source));
-    }
-    return runVaultPostCommit(() => vault.saveProposal(prepared.proposal));
+    return vault.runMutationTransaction(
+      label: 'commit-outline-proposal',
+      action: () async {
+        for (final source in prepared.sourceUpdates) {
+          await runVaultPostCommit(() => vault.updateSource(source));
+        }
+        return runVaultPostCommit(() => vault.saveProposal(prepared.proposal));
+      },
+    );
   }
 
   String _imageOcrMarkdown(List<SourceItem> sources) {
@@ -117,16 +122,19 @@ class ProposalService {
     if (proposal.status != ProposalStatus.pending) {
       return proposal;
     }
-    return runVaultPostCommit(() async {
-      await vault.appendMarkdown(
-        noteId: proposal.noteId,
-        markdown: proposal.proposedMarkdown,
-      );
-      final updated = proposal.copyWith(
-        status: ProposalStatus.applied,
-        updatedAt: DateTime.now().toUtc(),
-      );
-      return vault.updateProposal(updated);
-    });
+    return vault.runMutationTransaction(
+      label: 'apply-proposal',
+      action: () => runVaultPostCommit(() async {
+        await vault.appendMarkdown(
+          noteId: proposal.noteId,
+          markdown: proposal.proposedMarkdown,
+        );
+        final updated = proposal.copyWith(
+          status: ProposalStatus.applied,
+          updatedAt: DateTime.now().toUtc(),
+        );
+        return vault.updateProposal(updated);
+      }),
+    );
   }
 }

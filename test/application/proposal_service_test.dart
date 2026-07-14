@@ -4,6 +4,7 @@ import 'package:synapse/domain/vault/vault_resource.dart';
 import 'package:synapse/infrastructure/ai/ai_provider.dart';
 import 'package:synapse/infrastructure/ai/mock_ai_provider.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
+import 'package:synapse/infrastructure/vault/vault_post_commit_error.dart';
 
 void main() {
   test('creates a proposal and applies it only after confirmation', () async {
@@ -92,6 +93,88 @@ void main() {
     );
     expect((await vault.listProposals(note.id)).single.id, proposal.id);
   });
+
+  test('rolls back source updates when proposal persistence fails', () async {
+    final vault = _FailingProposalVault();
+    final note = await vault.createNote(parentPath: '', title: 'Image Study');
+    final source = await vault.addImageSource(
+      noteId: note.id,
+      filename: 'screen.png',
+      mimeType: 'image/png',
+      bytes: [1, 2, 3],
+    );
+    final service = ProposalService(
+      vault: vault,
+      aiProvider: _RecordingAiProvider(),
+    );
+    final prepared = await service.prepareOutlineProposal(
+      noteId: note.id,
+      sourceIds: [source.id],
+    );
+    vault.failProposalSave = true;
+
+    await expectLater(
+      service.commitPreparedOutlineProposal(prepared),
+      throwsA(isA<VaultPostCommitError>()),
+    );
+
+    expect(
+      (await vault.getSources(note.id, [source.id])).single.state,
+      SourceState.pending,
+    );
+    expect(await vault.listProposals(note.id), isEmpty);
+  });
+
+  test('rolls back markdown when proposal status persistence fails', () async {
+    final vault = _FailingProposalVault();
+    final note = await vault.createNote(parentPath: '', title: 'Study');
+    final source = await vault.addTextSource(
+      noteId: note.id,
+      title: 'fragment',
+      text: '核心概念：注意力。',
+    );
+    final service = ProposalService(vault: vault, aiProvider: MockAiProvider());
+    final proposal = await service.createOutlineProposal(
+      noteId: note.id,
+      sourceIds: [source.id],
+    );
+    final before = (await vault.readNote(note.id)).markdown;
+    vault.failProposalUpdate = true;
+
+    await expectLater(
+      service.applyProposal(proposal.id),
+      throwsA(isA<VaultPostCommitError>()),
+    );
+
+    expect((await vault.readNote(note.id)).markdown, before);
+    expect(
+      (await vault.getProposal(proposal.id)).status,
+      ProposalStatus.pending,
+    );
+  });
+}
+
+final class _FailingProposalVault extends MemoryVaultBackend {
+  _FailingProposalVault() : super(seedExampleData: false);
+
+  bool failProposalSave = false;
+  bool failProposalUpdate = false;
+
+  @override
+  Future<AiProposal> saveProposal(AiProposal proposal) {
+    if (failProposalSave) {
+      throw StateError('proposal save failed');
+    }
+    return super.saveProposal(proposal);
+  }
+
+  @override
+  Future<AiProposal> updateProposal(AiProposal proposal) {
+    if (failProposalUpdate) {
+      throw StateError('proposal update failed');
+    }
+    return super.updateProposal(proposal);
+  }
 }
 
 class _RecordingAiProvider implements AiProvider {

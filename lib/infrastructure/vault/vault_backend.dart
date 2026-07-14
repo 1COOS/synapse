@@ -8,6 +8,11 @@ abstract interface class VaultMigrationBackend {
 }
 
 abstract class VaultBackend {
+  Future<T> runMutationTransaction<T>({
+    required String label,
+    required Future<T> Function() action,
+  });
+
   Future<List<VaultResourceNode>> listResources();
 
   Future<VaultResourceNode> createFolder({

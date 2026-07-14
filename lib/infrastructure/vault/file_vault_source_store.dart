@@ -51,9 +51,11 @@ final class FileVaultSourceStore {
     await paths.ensureSafePath(sourceFile.path);
     await paths.ensureSafePath(paths.sourcesFile(note.id).path);
 
-    return runVaultPostCommit(() async {
-      await operations.createDirectory(sourceFile.parent, recursive: true);
-      await operations.writeFileString(sourceFile, '''---
+    return operations.transaction(
+      'add-text-source',
+      () => runVaultPostCommit(() async {
+        await operations.createDirectory(sourceFile.parent, recursive: true);
+        await operations.writeFileString(sourceFile, '''---
 id: ${source.id}
 type: text
 title: ${source.title}
@@ -64,10 +66,11 @@ createdAt: ${source.createdAt.toIso8601String()}
 
 $text
 ''');
-      final sources = await listSourcesCallback(note.id);
-      await writeSources(note.id, [...sources, source]);
-      return source;
-    });
+        final sources = await listSourcesCallback(note.id);
+        await writeSources(note.id, [...sources, source]);
+        return source;
+      }),
+    );
   }
 
   Future<SourceItem> addImageSource({
@@ -102,13 +105,16 @@ $text
     await paths.ensureSafePath(file.path);
     await paths.ensureSafePath(paths.sourcesFile(note.id).path);
 
-    return runVaultPostCommit(() async {
-      await operations.createDirectory(file.parent, recursive: true);
-      await operations.writeFileBytes(file, bytes);
-      final sources = await listSourcesCallback(note.id);
-      await writeSources(note.id, [...sources, source]);
-      return source;
-    });
+    return operations.transaction(
+      'add-image-source',
+      () => runVaultPostCommit(() async {
+        await operations.createDirectory(file.parent, recursive: true);
+        await operations.writeFileBytes(file, bytes);
+        final sources = await listSourcesCallback(note.id);
+        await writeSources(note.id, [...sources, source]);
+        return source;
+      }),
+    );
   }
 
   Future<List<SourceItem>> listSources(String noteId) async {
@@ -179,12 +185,15 @@ $text
       attachment = paths.attachmentFileFor(source);
     }
     final updated = [...sources]..removeAt(index);
-    await runVaultPostCommit(() async {
-      if (attachment != null && await operations.fileExists(attachment)) {
-        await operations.deleteFile(attachment);
-      }
-      await writeSources(source.noteId, updated);
-    });
+    await operations.transaction(
+      'delete-source',
+      () => runVaultPostCommit(() async {
+        if (attachment != null && await operations.fileExists(attachment)) {
+          await operations.deleteFile(attachment);
+        }
+        await writeSources(source.noteId, updated);
+      }),
+    );
   }
 
   Future<void> writeSources(String noteId, List<SourceItem> sources) async {

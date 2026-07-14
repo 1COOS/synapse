@@ -8,12 +8,12 @@ import 'vault_backend.dart';
 
 class MemoryVaultBackend implements VaultBackend {
   MemoryVaultBackend({bool seedExampleData = true}) {
-    final state = MemoryVaultState();
-    final paths = MemoryVaultPaths(state);
-    _sources = MemoryVaultSourceStore(state: state, paths: paths);
-    _proposals = MemoryVaultProposalStore(state);
+    _state = MemoryVaultState();
+    final paths = MemoryVaultPaths(_state);
+    _sources = MemoryVaultSourceStore(state: _state, paths: paths);
+    _proposals = MemoryVaultProposalStore(_state);
     _notes = MemoryVaultNoteStore(
-      state: state,
+      state: _state,
       paths: paths,
       sources: _sources,
       proposals: _proposals,
@@ -28,6 +28,21 @@ class MemoryVaultBackend implements VaultBackend {
   late final MemoryVaultNoteStore _notes;
   late final MemoryVaultSourceStore _sources;
   late final MemoryVaultProposalStore _proposals;
+  late final MemoryVaultState _state;
+
+  @override
+  Future<T> runMutationTransaction<T>({
+    required String label,
+    required Future<T> Function() action,
+  }) async {
+    final snapshot = _state.snapshot();
+    try {
+      return await action();
+    } catch (_) {
+      _state.restore(snapshot);
+      rethrow;
+    }
+  }
 
   @override
   Future<List<VaultResourceNode>> listResources() => _notes.listResources();

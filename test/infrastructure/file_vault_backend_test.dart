@@ -150,7 +150,7 @@ updatedAt: 2026-07-03 12:00
   }
 
   test(
-    'classifies a write failure after creating a missing parent directory',
+    'rolls back a failed note create with a missing parent directory',
     () async {
       final backend = _FaultInjectingFileVaultBackend(root.path);
       backend.failStringWriteSuffix = p.join('Parent', 'Alpha.md');
@@ -160,7 +160,7 @@ updatedAt: 2026-07-03 12:00
         throwsA(isA<VaultPostCommitError>()),
       );
 
-      expect(await Directory(p.join(root.path, 'Parent')).exists(), isTrue);
+      expect(await Directory(p.join(root.path, 'Parent')).exists(), isFalse);
       expect(
         await File(p.join(root.path, 'Parent', 'Alpha.md')).exists(),
         isFalse,
@@ -168,21 +168,23 @@ updatedAt: 2026-07-03 12:00
     },
   );
 
-  test('classifies note delete cleanup failure after file removal', () async {
+  test('rolls back note deletion when assets staging fails', () async {
     final backend = _FaultInjectingFileVaultBackend(root.path);
     final note = await backend.createNote(parentPath: '', title: 'Alpha');
-    backend.failDirectoryDeleteSuffix = 'Alpha.assets';
+    backend.failDirectoryRenameSuffix = 'Alpha.assets';
 
     await expectLater(
       backend.deleteNote(note.id),
       throwsA(isA<VaultPostCommitError>()),
     );
 
-    expect(File(p.join(root.path, note.path)).existsSync(), isFalse);
+    expect(File(p.join(root.path, note.path)).existsSync(), isTrue);
+    expect(Directory(p.join(root.path, 'Alpha.assets')).existsSync(), isTrue);
+    expect((await backend.listResources()).single.id, note.id);
   });
 
   test(
-    'classifies source metadata failure after attachment deletion',
+    'rolls back attachment deletion when source metadata write fails',
     () async {
       final backend = _FaultInjectingFileVaultBackend(root.path);
       final note = await backend.createNote(parentPath: '', title: 'Alpha');
@@ -200,12 +202,34 @@ updatedAt: 2026-07-03 12:00
         throwsA(isA<VaultPostCommitError>()),
       );
 
-      await expectLater(
-        backend.readSourceAttachment(source),
-        throwsA(isA<StateError>()),
-      );
+      expect(await backend.readSourceAttachment(source), const [1, 2, 3]);
+      expect((await backend.listSources(note.id)).single.id, source.id);
     },
   );
+
+  test('rolls back a partial note copy', () async {
+    final backend = _FaultInjectingFileVaultBackend(root.path);
+    final note = await backend.createNote(parentPath: '', title: 'Alpha');
+    await backend.addImageSource(
+      noteId: note.id,
+      filename: 'alpha.png',
+      mimeType: 'image/png',
+      bytes: const [1, 2, 3],
+    );
+    backend.failCopyFileSuffix = 'alpha.png';
+
+    await expectLater(
+      backend.copyNote(noteId: note.id),
+      throwsA(isA<VaultPostCommitError>()),
+    );
+
+    expect(await File(p.join(root.path, 'Alpha 2.md')).exists(), isFalse);
+    expect(
+      await Directory(p.join(root.path, 'Alpha 2.assets')).exists(),
+      isFalse,
+    );
+    expect((await backend.listResources()).single.id, note.id);
+  });
 
   test('classifies uncertain proposal metadata write failure', () async {
     final backend = _FaultInjectingFileVaultBackend(root.path);
@@ -848,7 +872,8 @@ final class _FaultInjectingFileVaultBackend extends FileVaultBackend {
 
   String? failStringWriteSuffix;
   bool failStringWriteAfterCommit = false;
-  String? failDirectoryDeleteSuffix;
+  String? failDirectoryRenameSuffix;
+  String? failCopyFileSuffix;
 
   @override
   Future<void> writeFileString(File file, String contents) async {
@@ -863,17 +888,22 @@ final class _FaultInjectingFileVaultBackend extends FileVaultBackend {
   }
 
   @override
-  Future<void> deleteDirectory(
-    Directory directory, {
-    required bool recursive,
-  }) async {
-    if (failDirectoryDeleteSuffix case final suffix?
+  Future<Directory> renameDirectory(Directory directory, String newPath) {
+    if (failDirectoryRenameSuffix case final suffix?
         when directory.path.endsWith(suffix)) {
       throw FileSystemException(
-        'Injected directory delete failure',
+        'Injected directory rename failure',
         directory.path,
       );
     }
-    await super.deleteDirectory(directory, recursive: recursive);
+    return super.renameDirectory(directory, newPath);
+  }
+
+  @override
+  Future<File> copyFile(File file, String newPath) {
+    if (failCopyFileSuffix case final suffix? when file.path.endsWith(suffix)) {
+      throw FileSystemException('Injected file copy failure', file.path);
+    }
+    return super.copyFile(file, newPath);
   }
 }
