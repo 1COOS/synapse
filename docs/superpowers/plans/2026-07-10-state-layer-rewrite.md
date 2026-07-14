@@ -5,7 +5,7 @@
 **Initial documentation checkpoint：** `92d5576`
 **Review clarification commit：** `d4c5310`
 
-**Latest completed code checkpoint：** file Vault path transaction hardening `a88fd18`；全部代码阶段与最终代码审查已完成，Final local gate blocked/pending external signing
+**Latest completed code checkpoint：** Local Debug ad-hoc signing remediation（2026-07-14）；本地运行、Debug build 与原生测试已恢复，Final local gate 仅 blocked/pending Release signing
 
 > Foundation baseline 捕获时，分支相对 `main` 有 15 个实现提交。该数字只描述 baseline 捕获时点，不声明后续分支的固定提交总数。
 
@@ -15,7 +15,7 @@
 
 **阶段 7 checkpoint：** implementation commits `dad7164..f1628e6`；controller/provider `76 tests pass`、workspace `410 tests pass`、全量 `512 tests pass`，`flutter analyze --no-pub` 0 issues。`workspace.dart` 756 行，`WorkspaceController` 1004 行；新增 production files 均低于约 800 行 review threshold。
 
-**阶段 8 Keychain checkpoint：** commits `34725ad..a50f229`；strict fail-closed、legacy read → secure write → secure read verify → delete、持久 quarantine、配置 + Keychain transaction、blocking file lock 与 Debug/Release 空 `keychain-access-groups` 已完成。
+**阶段 8 Keychain checkpoint：** commits `34725ad..a50f229`；strict fail-closed、legacy read → secure write → secure read verify → delete、持久 quarantine、配置 + Keychain transaction、blocking file lock 与 Profile/Release 空 `keychain-access-groups` 已完成。
 
 **阶段 9 Vault lease checkpoint：** commits `1bf1d51..7b0e822`；`VaultAccessLease` token、gateway、Dart MethodChannel、Swift token manager、candidate/active ownership、stale/dispose release、terminate `releaseAll` 和 post-commit `reloadRequired` 已完成。
 
@@ -26,6 +26,8 @@
 **Post-gate remediation checkpoint：** commits `12b0e09..a88fd18`；live editor clipboard/paste 命令绑定稳定编辑目标，普通粘贴保持当前 selection；File Vault 拒绝 symlink escape，并在事务 I/O 前固定 root realpath、预检目标和临近复验。最终整分支代码审查 `APPROVED`，无剩余 Critical/Important finding。
 
 **Final local gate checkpoint（2026-07-14）：** `dart format` 165 files、0 changed，`flutter test --no-pub` 630/630，`flutter analyze --no-pub` 无 issue，`git diff --check` PASS，执行前后 worktree clean。原始 `xcodebuild test`、Debug build 与 Release build 均因 Runner entitlements 需要 Apple Development certificate 而失败；Release app 未生成，因此无法完成 codesign entitlement inspection。关闭签名的辅助 `xcodebuild test` 通过 RunnerTests 3/3，但不能替代 production gate。代码与 unsigned native tests 已通过；strict final local production gate 仍被外部 Apple Development certificate/Team 阻塞。
+
+**Local Debug signing remediation（2026-07-14）：** 新增 `LocalDebug.entitlements`，Debug 使用 ad-hoc `Sign to Run Locally`，不声明 Keychain Sharing；Profile/Release 继续使用带空 `keychain-access-groups` 的签名 entitlement。`flutter run -d macos` PASS、Debug build PASS、原始 `xcodebuild test` PASS（RunnerTests 3/3）、全量 Flutter tests 633/633、analyze 无 issue。当前只剩 Release build 与 Release codesign entitlement inspection 被 Apple Development certificate/Team 阻塞。
 
 **目标：** 在已完成的 session/save/split/mutation foundation 上，拆分长文件、收敛状态所有权、绑定异步编辑目标，并完成 macOS 生产安全与本地发布门禁。
 
@@ -179,7 +181,7 @@ Commit：`fix: bind pane async mutations to stable context`。
 
 **状态：已完成。** 提交范围 `34725ad..a50f229`，规格与代码质量审查 PASS。
 
-- Debug/Release entitlement 均加入插件要求的空 `keychain-access-groups`。
+- Profile/Release entitlement 均加入插件要求的空 `keychain-access-groups`；Local Debug 使用不含 Keychain Sharing 的独立 entitlement，以支持无证书 ad-hoc 运行，密钥操作保持 fail-closed。
 - `settings.json` 永不包含 API key；secure store 写入失败立即报错，不创建明文 key 文件。
 - legacy plaintext migration 固定为 read → secure write → secure read verify → delete。
 - 任一步失败都立即删除旧明文、不返回旧 key，并要求用户重新输入。
@@ -222,40 +224,31 @@ Commit：`fix: bind pane async mutations to stable context`。
 
 ### 阶段 11：Final local gate
 
-**状态：blocked/pending external signing。** 2026-07-14 已执行本机门禁；代码验证和 unsigned native tests 通过，但 strict production gate 因本机缺少有效 Apple Development certificate/Team 而未通过。不得宣称 complete、merge-ready 或 mergeable。
+**状态：blocked/pending Release signing。** 2026-07-14 已执行本机门禁；代码验证、本地运行、Debug build 和原始 native tests 均通过，但 Release production gate 因本机缺少有效 Apple Development certificate/Team 而未通过。不得宣称 complete、merge-ready 或 mergeable。
 
 实测结果：
 
 | 检查 | 结果 |
 |---|---|
 | `dart format --output=none --set-exit-if-changed lib test` | PASS：165 files，0 changed |
-| `flutter test --no-pub` | PASS：630/630 |
+| `flutter test --no-pub` | PASS：633/633 |
 | `flutter analyze --no-pub` | PASS：No issues |
-| `xcodebuild test -project macos/Runner.xcodeproj -scheme Runner -destination 'platform=macOS'` | FAIL：exit 65；Runner entitlements require signing with a development certificate |
-| `flutter build macos --debug --no-pub` | FAIL：同一 signing error |
-| `flutter build macos --release --no-pub` | FAIL：同一 signing error |
+| `xcodebuild test -project macos/Runner.xcodeproj -scheme Runner -destination 'platform=macOS'` | PASS：Local Debug ad-hoc signing；RunnerTests 3/3 |
+| `flutter build macos --debug --no-pub` | PASS：生成 Debug `synapse.app` |
+| `flutter run -d macos` | PASS：应用启动并暴露 Dart VM Service |
+| `flutter build macos --release --no-pub` | FAIL：需要 Apple Development certificate/Team |
 | `codesign -d --entitlements :- build/macos/Build/Products/Release/synapse.app` | BLOCKED：Release app 不存在，未能执行 inspection |
 | `git diff --check` | PASS |
 | `git status --short --branch` | clean |
 
-辅助验证：
+在 Xcode 配置有效 certificate/team 后，必须完成以下 Release 检查，并最终重跑完整顺序 gate：
 
 ```bash
-xcodebuild test -project macos/Runner.xcodeproj -scheme Runner -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO
-```
-
-该命令 PASS，RunnerTests 3/3；它只证明 unsigned native tests 通过，不能替代 production gate，也不能消除原始签名命令的失败。
-
-在 Xcode 配置有效 certificate/team 后，必须重跑以下四项原始检查：
-
-```bash
-xcodebuild test -project macos/Runner.xcodeproj -scheme Runner -destination 'platform=macOS'
-flutter build macos --debug --no-pub
 flutter build macos --release --no-pub
 codesign -d --entitlements :- build/macos/Build/Products/Release/synapse.app
 ```
 
-仅当这四项均通过并记录 Release entitlement 后，才能把分支状态更新为 mergeable。
+仅当 Release build 通过并记录实际 entitlement，且完整顺序 gate 复跑无回归后，才能把分支状态更新为 mergeable。
 
 最终审查：
 

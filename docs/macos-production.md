@@ -8,13 +8,14 @@ macOS 是 Synapse 当前唯一生产目标。本页记录签名 entitlement、AP
 
 ## 2. Entitlements
 
-执行 `xcodebuild test` 和带 entitlements 的 Debug/Release 签名构建前，本机必须安装有效 Apple Development signing certificate，并在 Xcode 中为 Runner 配置可用 Team。`codesign -d` 检查本身不需要证书，但需要前一步成功生成可检查的 app。当前缺失证书、Team 或签名权限时属于外部门禁阻塞，不表示 Dart/Flutter 代码失败；可以单独报告代码测试结果，但不能据此声称完整 macOS production gate 已通过。
+本地 Debug 使用 `macos/Runner/LocalDebug.entitlements` 和 ad-hoc signing，不要求 Apple Development certificate，可直接执行 `flutter run -d macos`、`xcodebuild test` 和 Debug build。Local Debug 不声明 Keychain Sharing，因此只用于界面、Vault 和非密钥流程开发；API Key 安全存储会 fail-closed。
 
-Debug/Profile 与 Release 都必须启用：
+Profile/Release 使用 `DebugProfile.entitlements` / `Release.entitlements`，必须安装有效 Apple Development signing certificate，并在 Xcode 中为 Runner 配置可用 Team。所有配置必须启用：
 
 - App Sandbox；
-- user-selected file read/write；
-- 插件要求的空 `keychain-access-groups`。
+- user-selected file read/write。
+
+Profile/Release 还必须包含插件要求的空 `keychain-access-groups`。`codesign -d` 检查本身不需要证书，但需要 Release build 成功生成可检查的 app。
 
 Release 不应包含只为 Debug/JIT 或本地调试准备的额外能力。源码检查不能替代最终 app 的 codesign 输出；production gate 必须检查构建产物实际 entitlement。
 
@@ -32,7 +33,7 @@ API Key 只允许保存到 macOS Keychain：
 - Keychain 写入、读取验证或清理失败时，不继续返回或使用未验证 key；
 - 用户必须在安全存储恢复后重新输入 key。
 
-Debug 构建遇到 `-34018` 时也不例外。正确处理是修复签名和 entitlement、重新构建并重新输入，不是把 secret 写入应用支持目录。
+Local Debug 遇到 `-34018` 是预期的 fail-closed 行为。需要保存或使用 API Key 时，应改用配置了有效 Team/certificate 的 Profile/Release 构建并重新输入 key，不得把 secret 写入应用支持目录。
 
 ## 4. Legacy Migration 与 Quarantine
 
@@ -103,7 +104,7 @@ candidate 获取、验证、settings 保存或 commit 前失败时，释放 cand
 
 ## 7. 本地 Production Gate
 
-以下 gate 中，`xcodebuild test` 和带 entitlements 的 Debug/Release 签名构建要求有效 Apple Development signing certificate 与可用 Xcode Team；`codesign -d` 本身不需要证书，但只有前一步成功生成 app 后才有可检查对象。若签名前置条件缺失，应把原生测试或签名 build 标记为外部 blocked，并保留已经完成的 Dart/Flutter 验证结果；不得把阻塞描述为代码失败，也不得声称本机已通过完整 gate。
+`xcodebuild test` 和 Debug build 使用 Local Debug entitlement，可在没有开发证书时执行。Release build 及其实际 entitlement inspection 仍要求有效 Apple Development certificate 与可用 Xcode Team。若此前置条件缺失，应只把 Release production signing 标记为外部 blocked，不得把它描述为代码或本地 Debug 失败。
 
 必须顺序执行，不并行运行 Flutter tests/builds：
 
@@ -125,7 +126,7 @@ git status --short --branch
 
 ### Keychain 返回错误
 
-- 检查 Debug/Release entitlement 源文件；
+- 检查当前配置使用的是 Local Debug 还是 Profile/Release entitlement；
 - 检查实际 app codesign entitlement；
 - 清理并重新构建正确签名的 app；
 - 重新输入 API Key；
