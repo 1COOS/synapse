@@ -98,11 +98,7 @@ void main() {
         find.byType(LiveMarkdownEditor),
       );
       expect(busyEditor.enabled, isFalse);
-      final editableText = tester.widget<EditableText>(
-        activeLiveMarkdownEditableText(),
-      );
-      editableText.focusNode.requestFocus();
-      await tester.pump();
+      expect(find.byKey(const Key('note-editor')), findsNothing);
       await tester.sendKeyEvent(LogicalKeyboardKey.keyX);
       await tester.pump();
       expect(oldController.text, oldText);

@@ -7,6 +7,7 @@ import 'markdown_context_menu.dart';
 List<Widget> buildLiveMarkdownContextMenuItems({
   required LiveMarkdownEditorController controller,
   required MarkdownCommandTarget? menuTarget,
+  required Object tapRegionGroupId,
   required bool canEdit,
   required bool canPaste,
   required bool hasText,
@@ -51,6 +52,7 @@ List<Widget> buildLiveMarkdownContextMenuItems({
       itemKey: const Key('note-menu-insert'),
       submenuKey: const Key('note-submenu-insert'),
       label: '插入',
+      tapRegionGroupId: tapRegionGroupId,
       children: [
         NoteMenuAction(
           itemKey: const Key('note-menu-insert-table'),
@@ -88,6 +90,7 @@ List<Widget> buildLiveMarkdownContextMenuItems({
       itemKey: const Key('note-menu-text-format'),
       submenuKey: const Key('note-submenu-text-format'),
       label: '文本格式',
+      tapRegionGroupId: tapRegionGroupId,
       children: [
         const NoteMenuAction(
           itemKey: Key('note-menu-highlight'),
@@ -131,6 +134,7 @@ List<Widget> buildLiveMarkdownContextMenuItems({
       itemKey: const Key('note-menu-paragraph'),
       submenuKey: const Key('note-submenu-paragraph'),
       label: '段落设置',
+      tapRegionGroupId: tapRegionGroupId,
       children: [
         NoteMenuAction(
           itemKey: const Key('note-menu-heading-1'),
@@ -188,6 +192,7 @@ List<Widget> buildLiveMarkdownContextMenuItems({
       itemKey: const Key('note-menu-list'),
       submenuKey: const Key('note-submenu-list'),
       label: '列表设置',
+      tapRegionGroupId: tapRegionGroupId,
       children: [
         NoteMenuAction(
           itemKey: const Key('note-menu-unordered-list'),

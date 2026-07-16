@@ -18,14 +18,12 @@ class LiveMarkdownEditorController extends ChangeNotifier {
   bool _syncingBlock = false;
   bool _updatingDocument = false;
   bool _activeTrailingInsertion = false;
-  bool _autoActivatedInitialBlock = false;
 
   TextEditingController get document => _document;
   int? get activeOffset => _activeOffset;
   bool get syncingBlock => _syncingBlock;
   bool get updatingDocument => _updatingDocument;
   bool get activeTrailingInsertion => _activeTrailingInsertion;
-  bool get autoActivatedInitialBlock => _autoActivatedInitialBlock;
 
   void replaceDocument(TextEditingController document) {
     _document = document;
@@ -33,7 +31,6 @@ class LiveMarkdownEditorController extends ChangeNotifier {
     _activeOffset = null;
     _activeSelectionTarget = null;
     _activeTrailingInsertion = false;
-    _autoActivatedInitialBlock = false;
   }
 
   @override
@@ -64,10 +61,6 @@ class LiveMarkdownEditorController extends ChangeNotifier {
     _activeTrailingInsertion = false;
   }
 
-  void markInitialBlockActivated() {
-    _autoActivatedInitialBlock = true;
-  }
-
   void beginDocumentUpdate() {
     _updatingDocument = true;
   }
@@ -93,7 +86,7 @@ class LiveMarkdownEditorController extends ChangeNotifier {
     return true;
   }
 
-  void syncBlockController() {
+  void syncBlockController({int? selectionOffset}) {
     final activeOffset = _activeOffset;
     if (activeOffset == null) {
       return;
@@ -116,19 +109,33 @@ class LiveMarkdownEditorController extends ChangeNotifier {
       return;
     }
     final block = blocks[index];
-    if (blockController.text == block.text) {
+    final editableText = editableTextForBlock(block);
+    final requestedSelectionOffset = selectionOffset == null
+        ? null
+        : _clampOffset(selectionOffset, editableText.length);
+    if (blockController.text == editableText) {
+      if (requestedSelectionOffset != null &&
+          blockController.selection.extentOffset != requestedSelectionOffset) {
+        _syncingBlock = true;
+        blockController.selection = TextSelection.collapsed(
+          offset: requestedSelectionOffset,
+        );
+        _syncingBlock = false;
+      }
       clearStaleSelectionTarget();
       return;
     }
     _activeSelectionTarget = null;
     _syncingBlock = true;
     final oldSelection = blockController.selection;
-    final selectionOffset = oldSelection.isValid
-        ? _clampOffset(oldSelection.extentOffset, block.text.length)
-        : block.text.length;
+    final nextSelectionOffset =
+        requestedSelectionOffset ??
+        (oldSelection.isValid
+            ? _clampOffset(oldSelection.extentOffset, editableText.length)
+            : editableText.length);
     blockController.value = TextEditingValue(
-      text: block.text,
-      selection: TextSelection.collapsed(offset: selectionOffset),
+      text: editableText,
+      selection: TextSelection.collapsed(offset: nextSelectionOffset),
     );
     _syncingBlock = false;
   }
@@ -148,6 +155,7 @@ class LiveMarkdownEditorController extends ChangeNotifier {
       return false;
     }
     final block = blocks[index];
+    final separator = block.text.substring(editableTextForBlock(block).length);
     final blockSelection = blockController.selection;
     final textSelectionOffset = blockSelection.isValid
         ? _clampOffset(blockSelection.extentOffset, text.length)
@@ -156,7 +164,7 @@ class LiveMarkdownEditorController extends ChangeNotifier {
     final updated = replaceMarkdownLiveBlock(
       markdown: markdown,
       block: block,
-      replacement: text,
+      replacement: '$text$separator',
     );
 
     _updatingDocument = true;
@@ -381,6 +389,17 @@ class LiveMarkdownEditorController extends ChangeNotifier {
     return index == null ? null : blocks[index];
   }
 
+  String editableTextForBlock(MarkdownLiveBlock block) {
+    final text = block.text;
+    if (text.endsWith('\r\n')) {
+      return text.substring(0, text.length - 2);
+    }
+    if (text.endsWith('\n')) {
+      return text.substring(0, text.length - 1);
+    }
+    return text;
+  }
+
   TextSelection normalizedBlockSelection() {
     return normalizedSelectionForValue(blockController.value);
   }
@@ -519,7 +538,7 @@ class LiveMarkdownEditorController extends ChangeNotifier {
     if (target == null ||
         block == null ||
         target.blockStart != block.start ||
-        target.value.text != block.text ||
+        target.value.text != editableTextForBlock(block) ||
         target.value.text != blockController.text) {
       return null;
     }
@@ -566,7 +585,7 @@ class LiveMarkdownEditorController extends ChangeNotifier {
     final block = currentActiveTextBlock();
     return block != null &&
         block.start == target.blockStart &&
-        block.text == target.value.text &&
+        editableTextForBlock(block) == target.value.text &&
         blockController.text == target.value.text;
   }
 }

@@ -1,6 +1,5 @@
 import 'package:flutter/cupertino.dart';
 
-import '../../../infrastructure/config/synapse_settings.dart';
 import '../../cupertino/workspace/workspace_theme.dart';
 
 class MarkdownStyledTextEditingController extends TextEditingController {
@@ -48,16 +47,14 @@ class _MarkdownSourceTextSpanBuilder {
   ) {
     final headingMatch = RegExp(r'^(#{1,6})(\s+)(.*)$').firstMatch(line);
     if (headingMatch != null) {
-      final level = headingMatch.group(1)!.length;
-      final headingStyle = _headingStyle(baseStyle, level);
-      final markerStyle = headingStyle.copyWith(
+      final markerStyle = baseStyle.copyWith(
         color: workspaceMutedColor,
         fontWeight: FontWeight.w500,
       );
       return [
         TextSpan(text: headingMatch.group(1), style: markerStyle),
         TextSpan(text: headingMatch.group(2), style: markerStyle),
-        ..._buildInlineSpans(headingMatch.group(3)!, headingStyle),
+        ..._buildInlineSpans(headingMatch.group(3)!, baseStyle),
       ];
     }
 
@@ -75,21 +72,6 @@ class _MarkdownSourceTextSpanBuilder {
     }
 
     return _buildInlineSpans(line, baseStyle);
-  }
-
-  static TextStyle _headingStyle(TextStyle baseStyle, int level) {
-    final baseFontSize =
-        baseStyle.fontSize ??
-        WorkspacePreferences.defaultNoteFontSize.toDouble();
-    return baseStyle.copyWith(
-      fontSize: WorkspaceAppearance.headingFontSizeForBase(baseFontSize, level),
-      fontWeight: FontWeight.w600,
-      height: switch (level) {
-        1 => 1.35,
-        2 => 1.4,
-        _ => 1.45,
-      },
-    );
   }
 
   static List<InlineSpan> _buildInlineSpans(

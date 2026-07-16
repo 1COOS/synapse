@@ -107,6 +107,7 @@ class _LiveMarkdownEditableTextState extends State<LiveMarkdownEditableText>
                   readOnly: !widget.enabled,
                   keyboardType: TextInputType.multiline,
                   style: widget.style,
+                  strutStyle: StrutStyle.disabled,
                   cursorColor: widget.cursorColor,
                   backgroundCursorColor: backgroundCursorColor,
                   maxLines: null,

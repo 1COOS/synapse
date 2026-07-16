@@ -88,6 +88,32 @@ class WorkspaceAppearance {
   };
 }
 
+TextStyle workspaceMarkdownBodyTextStyle(
+  BuildContext context,
+  WorkspaceAppearance appearance,
+) => CupertinoTheme.of(context).textTheme.textStyle.copyWith(
+  fontSize: appearance.noteFontSize,
+  height: 1.55,
+  color: workspaceTextColor,
+);
+
+TextStyle workspaceMarkdownHeadingTextStyle(
+  BuildContext context,
+  WorkspaceAppearance appearance,
+  int level,
+) => workspaceMarkdownBodyTextStyle(context, appearance).copyWith(
+  fontSize: WorkspaceAppearance.headingFontSizeForBase(
+    appearance.noteFontSize,
+    level,
+  ),
+  fontWeight: FontWeight.w600,
+  height: switch (level) {
+    1 => 1.35,
+    2 => 1.4,
+    _ => 1.45,
+  },
+);
+
 class WorkspaceAppearanceScope extends InheritedWidget {
   const WorkspaceAppearanceScope({
     super.key,

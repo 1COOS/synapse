@@ -460,10 +460,8 @@ void main() {
       expect(betaController.text, betaMarkdownBeforeCommand);
       expect(vault.updateCalls, updatesBeforeCommand + 1);
 
-      await tester.enterText(
-        activeLiveMarkdownEditableText(paneId: 1),
-        '# During OCR',
-      );
+      expect(inNotePane(find.byKey(const Key('note-editor')), 1), findsNothing);
+      await tester.sendKeyEvent(LogicalKeyboardKey.keyX);
       await tester.pump(const Duration(milliseconds: 10000));
       await tester.pump();
       expect(alphaController.text, isNot(contains('During OCR')));

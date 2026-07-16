@@ -434,15 +434,16 @@ void main() {
     await tester.tap(find.byKey(const Key('note-mode-source-pane-1')));
     await tester.pump(const Duration(milliseconds: 250));
     await activateLiveMarkdownBlock(tester);
-    final editorState = activeLiveMarkdownEditableTextState(tester);
+    final documentController = liveMarkdownDocumentController(
+      tester,
+      paneId: 1,
+    );
 
     await tester.tap(find.byKey(const Key('delete-image-button')));
     await tester.pumpAndSettle();
-    editorState.updateEditingValue(
-      const TextEditingValue(
-        text: '# Remapped Study',
-        selection: TextSelection.collapsed(offset: 16),
-      ),
+    documentController.value = const TextEditingValue(
+      text: '# Remapped Study',
+      selection: TextSelection.collapsed(offset: 16),
     );
     await tester.pump(const Duration(milliseconds: 1000));
     await tester.pump();

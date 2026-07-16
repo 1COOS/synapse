@@ -330,14 +330,17 @@ void main() {
     await pumpWorkspace(tester, vault: vault);
     await switchToSourceMode(tester);
     await enterTextInLiveMarkdownBlock(tester, '# First\nchanged');
+    final documentController = tester
+        .widget<LiveMarkdownEditor>(find.byType(LiveMarkdownEditor))
+        .controller;
     vault.failUpdates = true;
 
     await tester.tap(find.byKey(Key('resource-row-${second.id}')));
     await tester.pump(const Duration(milliseconds: 250));
 
-    final noteEditor = activeLiveMarkdownTextField(tester);
-    expect(noteEditor.controller.text, contains('changed'));
-    expect(noteEditor.controller.text, isNot(contains('# Second')));
+    expect(find.byKey(const Key('note-editor')), findsNothing);
+    expect(documentController.text, contains('changed'));
+    expect(documentController.text, isNot(contains('# Second')));
     expect(find.textContaining('save failed'), findsOneWidget);
   });
 

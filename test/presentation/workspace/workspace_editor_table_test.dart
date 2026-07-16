@@ -1,4 +1,5 @@
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
 
@@ -82,13 +83,85 @@ void main() {
     await tester.pump();
 
     expect(find.byKey(const Key('live-markdown-block-editor-1')), findsNothing);
-    expect(noteEditor.controller.text, 'Before table\n');
+    expect(noteEditor.controller.text, 'Before table');
     expect(
       tester
           .getTopLeft(find.byKey(const Key('live-markdown-block-preview-2')))
           .dy,
       closeTo(beforeTableTop, 1),
     );
+  });
+
+  testWidgets(
+    'clicking inter-block whitespace exits without changing markdown',
+    (tester) async {
+      final vault = MemoryVaultBackend(seedExampleData: false);
+      final note = await vault.createNote(parentPath: '', title: 'Blank Study');
+      const markdown =
+          'Before table\n\n\n'
+          '| A | B |\n'
+          '|---|---|\n'
+          '| 1 | 2 |\n';
+      await vault.updateMarkdown(noteId: note.id, markdown: markdown);
+      final storedMarkdown = (await vault.readNote(note.id)).markdown;
+
+      await pumpWorkspace(tester, vault: vault);
+      await activateLiveMarkdownBlock(tester, blockIndex: 0);
+
+      await tester.tap(find.byKey(const Key('live-markdown-block-preview-1')));
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const Key('note-editor')), findsNothing);
+      expect(
+        find.byKey(const Key('live-markdown-block-editor-1')),
+        findsNothing,
+      );
+      expect((await vault.readNote(note.id)).markdown, storedMarkdown);
+    },
+  );
+
+  testWidgets('mouse hover never activates blocks or changes layout', (
+    tester,
+  ) async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Hover Study');
+    const markdown =
+        'Before table\n\n\n'
+        '| A | B |\n'
+        '|---|---|\n'
+        '| 1 | 2 |\n';
+    await vault.updateMarkdown(noteId: note.id, markdown: markdown);
+    final storedMarkdown = (await vault.readNote(note.id)).markdown;
+
+    await pumpWorkspace(tester, vault: vault);
+    await tester.pumpAndSettle();
+
+    final tablePreview = find.byKey(const Key('live-markdown-block-preview-2'));
+    final endTarget = find.byKey(const Key('live-markdown-end-edit-target'));
+    final tableTop = tester.getTopLeft(tablePreview).dy;
+    final endTop = tester.getTopLeft(endTarget).dy;
+    final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+    await mouse.addPointer();
+
+    for (final target in [
+      find.byKey(const Key('live-markdown-block-preview-0')),
+      find.byKey(const Key('live-markdown-block-preview-1')),
+      tablePreview,
+      endTarget,
+    ]) {
+      await mouse.moveTo(tester.getCenter(target));
+      await tester.pump();
+      expect(find.byKey(const Key('note-editor')), findsNothing);
+      expect(
+        find.byKey(const Key('live-markdown-table-editor-2')),
+        findsNothing,
+      );
+      expect(tester.getTopLeft(tablePreview).dy, closeTo(tableTop, 1));
+      expect(tester.getTopLeft(endTarget).dy, closeTo(endTop, 1));
+    }
+
+    await mouse.removePointer();
+    expect((await vault.readNote(note.id)).markdown, storedMarkdown);
   });
 
   testWidgets('can continue writing below a trailing table', (tester) async {

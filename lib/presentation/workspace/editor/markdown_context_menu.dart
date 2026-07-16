@@ -30,10 +30,12 @@ class NoteContextMenuToolbar extends StatelessWidget {
     super.key,
     required this.anchors,
     required this.child,
+    this.tapRegionGroupId,
   });
 
   final TextSelectionToolbarAnchors anchors;
   final Widget child;
+  final Object? tapRegionGroupId;
 
   @override
   Widget build(BuildContext context) {
@@ -55,7 +57,7 @@ class NoteContextMenuToolbar extends StatelessWidget {
           delegate: _NoteContextMenuLayoutDelegate(
             anchor: anchors.primaryAnchor - localAdjustment,
           ),
-          child: child,
+          child: TapRegion(groupId: tapRegionGroupId, child: child),
         ),
       ),
     );
@@ -154,12 +156,14 @@ class NoteMenuSubmenu extends StatefulWidget {
     required this.submenuKey,
     required this.label,
     required this.children,
+    this.tapRegionGroupId,
   });
 
   final Key itemKey;
   final Key submenuKey;
   final String label;
   final List<Widget> children;
+  final Object? tapRegionGroupId;
 
   @override
   State<NoteMenuSubmenu> createState() => _NoteMenuSubmenuState();
@@ -221,12 +225,15 @@ class _NoteMenuSubmenuState extends State<NoteMenuSubmenu> {
                   alignment: Alignment.topLeft,
                   widthFactor: 1,
                   heightFactor: 1,
-                  child: WorkspaceAppearanceScope(
-                    appearance: appearance,
-                    child: WorkspaceContextMenuPanel(
-                      panelKey: widget.submenuKey,
-                      width: 136,
-                      children: widget.children,
+                  child: TapRegion(
+                    groupId: widget.tapRegionGroupId,
+                    child: WorkspaceAppearanceScope(
+                      appearance: appearance,
+                      child: WorkspaceContextMenuPanel(
+                        panelKey: widget.submenuKey,
+                        width: 136,
+                        children: widget.children,
+                      ),
                     ),
                   ),
                 ),

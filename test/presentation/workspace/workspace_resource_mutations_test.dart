@@ -393,7 +393,7 @@ void main() {
         same(originalPane2Controller),
       );
       expect(originalPane1Controller.text, contains('# 心经'));
-      expect(originalPane2Controller.text, '# 其他\npending autosave');
+      expect(originalPane2Controller.text, '# 其他\npending autosave\n');
 
       await tester.pump(const Duration(milliseconds: 10000));
       await tester.pump();

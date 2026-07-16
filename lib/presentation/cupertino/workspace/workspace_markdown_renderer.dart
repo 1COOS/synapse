@@ -99,39 +99,34 @@ final class WorkspaceMarkdownRenderer {
         onImageTap: onImageTap,
       ),
       styleSheetTheme: MarkdownStyleSheetBaseTheme.cupertino,
-      styleSheet: _noteMarkdownStyleSheet(),
+      styleSheet: _noteMarkdownStyleSheet(markdown),
     );
   }
 
-  MarkdownStyleSheet _noteMarkdownStyleSheet() {
+  MarkdownStyleSheet _noteMarkdownStyleSheet(String markdown) {
     final appearance = _appearance;
+    final bodyStyle = workspaceMarkdownBodyTextStyle(context, appearance);
+    final inlineBaseStyle = _inlineBaseTextStyle(markdown, bodyStyle);
     final baseStyle = MarkdownStyleSheet.fromCupertinoTheme(
       CupertinoTheme.of(context),
     );
     return baseStyle.copyWith(
-      p: TextStyle(
-        fontSize: appearance.noteFontSize,
-        height: 1.55,
-        color: workspaceTextColor,
+      p: bodyStyle,
+      code: inlineBaseStyle.copyWith(
+        fontFamily: 'monospace',
+        backgroundColor: workspaceSecondarySurfaceColor,
       ),
-      h1: TextStyle(
-        fontSize: appearance.h1FontSize,
-        fontWeight: FontWeight.w600,
-        height: 1.35,
-        color: workspaceTextColor,
-      ),
-      h2: TextStyle(
-        fontSize: appearance.h2FontSize,
-        fontWeight: FontWeight.w600,
-        height: 1.4,
-        color: workspaceTextColor,
-      ),
-      h3: TextStyle(
-        fontSize: appearance.h3FontSize,
-        fontWeight: FontWeight.w600,
-        height: 1.45,
-        color: workspaceTextColor,
-      ),
+      h1: workspaceMarkdownHeadingTextStyle(context, appearance, 1),
+      h2: workspaceMarkdownHeadingTextStyle(context, appearance, 2),
+      h3: workspaceMarkdownHeadingTextStyle(context, appearance, 3),
+      h4: workspaceMarkdownHeadingTextStyle(context, appearance, 4),
+      h5: workspaceMarkdownHeadingTextStyle(context, appearance, 5),
+      h6: workspaceMarkdownHeadingTextStyle(context, appearance, 6),
+      em: inlineBaseStyle.copyWith(fontStyle: FontStyle.italic),
+      strong: inlineBaseStyle.copyWith(fontWeight: FontWeight.bold),
+      del: inlineBaseStyle.copyWith(decoration: TextDecoration.lineThrough),
+      blockquote: bodyStyle,
+      listBullet: bodyStyle,
       tableHead: TextStyle(
         fontSize: appearance.noteFontSize,
         fontWeight: FontWeight.w600,
@@ -143,6 +138,18 @@ final class WorkspaceMarkdownRenderer {
         height: 1.35,
         color: workspaceTextColor,
       ),
+    );
+  }
+
+  TextStyle _inlineBaseTextStyle(String markdown, TextStyle bodyStyle) {
+    final headingMatch = RegExp(r'^\s*(#{1,6})(?:\s|$)').firstMatch(markdown);
+    if (headingMatch == null) {
+      return bodyStyle;
+    }
+    return workspaceMarkdownHeadingTextStyle(
+      context,
+      _appearance,
+      headingMatch.group(1)!.length,
     );
   }
 

@@ -112,7 +112,7 @@ void main() {
 
     await pumpWorkspace(tester, vault: vault);
     await switchToSourceMode(tester);
-    await tester.pumpAndSettle();
+    await activateLiveMarkdownBlock(tester);
 
     expect(find.byKey(const Key('note-editor')), findsOneWidget);
 
@@ -241,12 +241,14 @@ void main() {
       CupertinoColors.systemGreen,
     );
     expect(find.byKey(const Key('note-submenu-text-format')), findsOneWidget);
+    expect(find.byKey(const Key('note-editor')), findsOneWidget);
 
     await tester.tapAt(const Offset(1, 1));
     await tester.pumpAndSettle();
 
     expect(find.byKey(const Key('note-context-menu')), findsNothing);
     expect(find.byKey(const Key('note-submenu-text-format')), findsNothing);
+    expect(find.byKey(const Key('note-editor')), findsNothing);
     await mouse.removePointer();
   });
 
@@ -275,7 +277,7 @@ void main() {
     await tester.pumpAndSettle();
     await mouse.removePointer();
 
-    expect(noteEditor.controller.text, 'Alpha **beta**\n');
+    expect(noteEditor.controller.text, 'Alpha **beta**');
     final span = activeLiveMarkdownTextSpan(tester);
     expect(span.toPlainText(), noteEditor.controller.text);
     expect(spanHasTextStyle(span, 'beta', fontWeight: FontWeight.bold), isTrue);
@@ -314,7 +316,7 @@ void main() {
       await tester.pumpAndSettle();
       await mouse.removePointer();
 
-      expect(noteEditor.controller.text, 'Alpha **beta**\n');
+      expect(noteEditor.controller.text, 'Alpha **beta**');
       final span = activeLiveMarkdownTextSpan(tester);
       expect(span.toPlainText(), noteEditor.controller.text);
       expect(
@@ -356,7 +358,7 @@ void main() {
       await tester.pumpAndSettle();
       await mouse.removePointer();
 
-      expect(noteEditor.controller.text, 'Alpha *beta*\n');
+      expect(noteEditor.controller.text, 'Alpha *beta*');
       final span = activeLiveMarkdownTextSpan(tester);
       expect(span.toPlainText(), noteEditor.controller.text);
       expect(
@@ -400,7 +402,7 @@ void main() {
       await mouse.removePointer();
 
       final noteEditor = activeLiveMarkdownTextField(tester);
-      expect(noteEditor.controller.text, 'Alpha **beta**\n');
+      expect(noteEditor.controller.text, 'Alpha **beta**');
       final span = activeLiveMarkdownTextSpan(tester);
       expect(span.toPlainText(), noteEditor.controller.text);
       expect(
@@ -450,7 +452,7 @@ void main() {
       await mouse.removePointer();
 
       final updatedEditor = activeLiveMarkdownTextField(tester);
-      expect(updatedEditor.controller.text, 'Alpha **beta**\n');
+      expect(updatedEditor.controller.text, 'Alpha **beta**');
       final span = activeLiveMarkdownTextSpan(tester);
       expect(span.toPlainText(), updatedEditor.controller.text);
       expect(
@@ -492,7 +494,7 @@ void main() {
       await mouse.removePointer();
 
       final noteEditor = activeLiveMarkdownTextField(tester);
-      expect(noteEditor.controller.text, 'Alpha **beta**\n');
+      expect(noteEditor.controller.text, 'Alpha **beta**');
       final span = activeLiveMarkdownTextSpan(tester);
       expect(span.toPlainText(), noteEditor.controller.text);
       expect(
@@ -524,7 +526,7 @@ void main() {
     await mouse.removePointer();
 
     final noteEditor = activeLiveMarkdownTextField(tester);
-    expect(noteEditor.controller.text, 'Alpha **beta**\n');
+    expect(noteEditor.controller.text, 'Alpha **beta**');
     final span = activeLiveMarkdownTextSpan(tester);
     expect(span.toPlainText(), noteEditor.controller.text);
     expect(spanHasTextStyle(span, 'beta', fontWeight: FontWeight.bold), isTrue);
@@ -562,7 +564,7 @@ void main() {
       await mouse.removePointer();
 
       final noteEditor = activeLiveMarkdownTextField(tester);
-      expect(noteEditor.controller.text, 'Alpha **beta**\n');
+      expect(noteEditor.controller.text, 'Alpha **beta**');
       final span = activeLiveMarkdownTextSpan(tester);
       expect(span.toPlainText(), noteEditor.controller.text);
       expect(
@@ -596,6 +598,7 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tapAt(const Offset(1, 1));
       await tester.pumpAndSettle();
+      await activateLiveMarkdownBlock(tester, blockIndex: 0);
 
       await setActiveLiveMarkdownSelection(
         tester,
@@ -616,7 +619,7 @@ void main() {
       await mouse.removePointer();
 
       final noteEditor = activeLiveMarkdownTextField(tester);
-      expect(noteEditor.controller.text, 'Alpha beta *gamma*\n');
+      expect(noteEditor.controller.text, 'Alpha beta *gamma*');
       final span = activeLiveMarkdownTextSpan(tester);
       expect(span.toPlainText(), noteEditor.controller.text);
       expect(
@@ -664,7 +667,7 @@ void main() {
 
       expect(
         activeLiveMarkdownTextField(tester).controller.text,
-        'Alpha **beta** gamma\n',
+        'Alpha **beta** gamma',
       );
       activeLiveMarkdownEditableTextState(tester).hideToolbar();
       await tester.pumpAndSettle();
@@ -689,7 +692,7 @@ void main() {
       await mouse.removePointer();
 
       final noteEditor = activeLiveMarkdownTextField(tester);
-      expect(noteEditor.controller.text, 'Alpha **beta** *gamma*\n');
+      expect(noteEditor.controller.text, 'Alpha **beta** *gamma*');
       final span = activeLiveMarkdownTextSpan(tester);
       expect(span.toPlainText(), noteEditor.controller.text);
       expect(
@@ -740,7 +743,7 @@ void main() {
 
       expect(
         activeLiveMarkdownTextField(tester).controller.text,
-        'Alpha **beta** gamma\n',
+        'Alpha **beta** gamma',
       );
 
       await setActiveLiveMarkdownSelection(
@@ -762,7 +765,7 @@ void main() {
       await mouse.removePointer();
 
       final noteEditor = activeLiveMarkdownTextField(tester);
-      expect(noteEditor.controller.text, 'Alpha **beta** *gamma*\n');
+      expect(noteEditor.controller.text, 'Alpha **beta** *gamma*');
       final span = activeLiveMarkdownTextSpan(tester);
       expect(span.toPlainText(), noteEditor.controller.text);
       expect(
@@ -801,7 +804,7 @@ void main() {
     await tester.pumpAndSettle();
     await mouse.removePointer();
 
-    expect(noteEditor.controller.text, 'Alpha *beta*\n');
+    expect(noteEditor.controller.text, 'Alpha *beta*');
     final span = activeLiveMarkdownTextSpan(tester);
     expect(span.toPlainText(), noteEditor.controller.text);
     expect(spanHasTextStyle(span, 'beta', fontStyle: FontStyle.italic), isTrue);
@@ -836,7 +839,7 @@ void main() {
       await tester.pumpAndSettle();
       await mouse.removePointer();
 
-      expect(noteEditor.controller.text, 'Alpha ~~beta~~\n');
+      expect(noteEditor.controller.text, 'Alpha ~~beta~~');
       final span = activeLiveMarkdownTextSpan(tester);
       expect(span.toPlainText(), noteEditor.controller.text);
       expect(
@@ -875,7 +878,7 @@ void main() {
     await tester.pumpAndSettle();
     await mouse.removePointer();
 
-    expect(noteEditor.controller.text, 'Second **beta**\n');
+    expect(noteEditor.controller.text, 'Second **beta**');
   });
 
   testWidgets('note editor context menu applies paragraph commands', (
@@ -902,7 +905,7 @@ void main() {
     await tester.tap(find.byKey(const Key('note-menu-heading-1')));
     await tester.pumpAndSettle();
     await mouse.removePointer();
-    expect(noteEditor.controller.text, '# Alpha\n');
+    expect(noteEditor.controller.text, '# Alpha');
   });
 
   testWidgets('note editor context menu applies list commands', (tester) async {
@@ -924,7 +927,7 @@ void main() {
     await tester.pumpAndSettle();
     await mouse.removePointer();
 
-    expect(noteEditor.controller.text, '- [ ] Alpha\n');
+    expect(noteEditor.controller.text, '- [ ] Alpha');
   });
 
   testWidgets('plain text paste skips pasted images from context menu', (
