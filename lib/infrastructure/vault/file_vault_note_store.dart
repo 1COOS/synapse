@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:path/path.dart' as p;
+import 'package:uuid/uuid.dart';
 
 import '../../domain/markdown/markdown_document.dart';
 import '../../domain/vault/note_id.dart';
@@ -38,7 +39,7 @@ final class FileVaultNoteStore {
     final parent = paths.directoryForFolder(parentPath);
     await operations.ensureRoot();
     await paths.ensureSafePath(parent.path);
-    final folder = await paths.uniqueDirectory(parent, title);
+    final folder = await paths.resourceDirectory(parent, title);
     await paths.ensureSafePath(folder.path);
     return operations.transaction(
       'create-folder',
@@ -200,7 +201,12 @@ final class FileVaultNoteStore {
     if (!await operations.fileExists(file)) {
       throw StateError('Note not found: $noteId');
     }
-    return _moveNoteFile(file: file, parent: file.parent, title: title);
+    return _moveNoteFile(
+      file: file,
+      parent: file.parent,
+      title: title,
+      resolveConflict: false,
+    );
   }
 
   Future<VaultNote> copyNote({required String noteId}) async {
@@ -274,7 +280,12 @@ final class FileVaultNoteStore {
     }
     final doc = MarkdownDocument.parse(await operations.readFileString(file));
     final note = await _noteFromExistingFile(file, doc);
-    return _moveNoteFile(file: file, parent: parent, title: note.title);
+    return _moveNoteFile(
+      file: file,
+      parent: parent,
+      title: note.title,
+      resolveConflict: true,
+    );
   }
 
   Future<void> deleteFolder(String folderPath) async {
@@ -310,7 +321,7 @@ final class FileVaultNoteStore {
     if (!await operations.directoryExists(directory)) {
       throw StateError('Folder not found: $folderPath');
     }
-    final target = await paths.uniqueDirectory(
+    final target = await paths.resourceDirectory(
       directory.parent,
       title,
       excludePath: directory.path,
@@ -335,7 +346,7 @@ final class FileVaultNoteStore {
     return operations.transaction(
       'rename-folder',
       () => runVaultPostCommit(() async {
-        final moved = await operations.renameDirectory(directory, target.path);
+        final moved = await _renameDirectoryPortable(directory, target.path);
         await listResources();
         for (final noteId in movedLegacyIds.values) {
           await sources.rewriteMoved(noteId);
@@ -499,16 +510,15 @@ final class FileVaultNoteStore {
     required File file,
     required Directory parent,
     required String title,
+    required bool resolveConflict,
   }) async {
     final markdown = await operations.readFileString(file);
     final document = MarkdownDocument.parse(markdown);
     final note = await _noteFromExistingFile(file, document);
     final now = DateTime.now().toUtc();
-    final target = await paths.uniqueNoteFile(
-      parent,
-      title,
-      excludePath: file.path,
-    );
+    final target = resolveConflict
+        ? await paths.uniqueNoteFile(parent, title, excludePath: file.path)
+        : await paths.resourceNoteFile(parent, title, excludePath: file.path);
     await paths.ensureSafePath(target.path);
     final movedPath = paths.relativePath(target.path);
     final movedTitle = p.basenameWithoutExtension(target.path);
@@ -529,10 +539,10 @@ final class FileVaultNoteStore {
           await operations.writeFileString(file, updatedMarkdown);
         } else {
           await operations.createDirectory(target.parent, recursive: true);
-          final movedFile = await operations.renameFile(file, target.path);
+          final movedFile = await _renameFilePortable(file, target.path);
           await operations.writeFileString(movedFile, updatedMarkdown);
           if (await operations.directoryExists(assets)) {
-            await operations.renameDirectory(assets, movedAssets.path);
+            await _renameDirectoryPortable(assets, movedAssets.path);
           } else {
             await operations.createDirectory(movedAssets, recursive: true);
           }
@@ -561,6 +571,33 @@ final class FileVaultNoteStore {
         await operations.copyFile(entity, targetPath);
       }
     }
+  }
+
+  Future<File> _renameFilePortable(File source, String targetPath) async {
+    if (!p.equals(p.normalize(source.path), p.normalize(targetPath)) &&
+        await operations.fileExists(File(targetPath))) {
+      final temporary = File(
+        p.join(source.parent.path, '.synapse-rename-${const Uuid().v4()}.tmp'),
+      );
+      final staged = await operations.renameFile(source, temporary.path);
+      return operations.renameFile(staged, targetPath);
+    }
+    return operations.renameFile(source, targetPath);
+  }
+
+  Future<Directory> _renameDirectoryPortable(
+    Directory source,
+    String targetPath,
+  ) async {
+    if (!p.equals(p.normalize(source.path), p.normalize(targetPath)) &&
+        await operations.directoryExists(Directory(targetPath))) {
+      final temporary = Directory(
+        p.join(source.parent.path, '.synapse-rename-${const Uuid().v4()}'),
+      );
+      final staged = await operations.renameDirectory(source, temporary.path);
+      return operations.renameDirectory(staged, targetPath);
+    }
+    return operations.renameDirectory(source, targetPath);
   }
 
   DateTime? _parseMarkdownTime(Object? value) {

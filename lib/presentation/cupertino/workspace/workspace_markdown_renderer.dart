@@ -3,18 +3,22 @@ import 'dart:async';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
+import 'package:markdown/markdown.dart' as md;
 import 'package:path/path.dart' as p;
 
 import '../../../domain/markdown/markdown_document.dart';
 import '../../../domain/vault/vault_resource.dart';
 import '../../workspace/controller/workspace_controller.dart';
 import '../../workspace/editor/markdown_image_transform.dart';
+import '../../workspace/editor/markdown_styled_controller.dart';
 import '../../workspace/editor/markdown_table_editor.dart';
 import '../../workspace/editor/pane_editor_context.dart';
 import '../../workspace/editor/preview_image_block.dart';
 import '../../workspace/state/note_document_session.dart';
 import '../markdown_live_blocks.dart';
 import 'workspace_theme.dart';
+
+final _highlightSyntax = _ObsidianHighlightSyntax();
 
 final class WorkspaceMarkdownRenderer {
   const WorkspaceMarkdownRenderer({
@@ -88,10 +92,13 @@ final class WorkspaceMarkdownRenderer {
     required PaneEditorContext editorContext,
     VoidCallback? onImageTap,
   }) {
+    final styleSheet = _noteMarkdownStyleSheet(markdown);
     return MarkdownBody(
       data: _markdownPreviewData(markdown, editorContext),
       selectable: false,
       softLineBreak: true,
+      inlineSyntaxes: [_highlightSyntax],
+      builders: {'mark': _HighlightElementBuilder()},
       sizedImageBuilder: (config) => _buildPreviewImage(
         config,
         mode: mode,
@@ -99,7 +106,7 @@ final class WorkspaceMarkdownRenderer {
         onImageTap: onImageTap,
       ),
       styleSheetTheme: MarkdownStyleSheetBaseTheme.cupertino,
-      styleSheet: _noteMarkdownStyleSheet(markdown),
+      styleSheet: styleSheet,
     );
   }
 
@@ -110,7 +117,7 @@ final class WorkspaceMarkdownRenderer {
     final baseStyle = MarkdownStyleSheet.fromCupertinoTheme(
       CupertinoTheme.of(context),
     );
-    return baseStyle.copyWith(
+    final styleSheet = baseStyle.copyWith(
       p: bodyStyle,
       code: inlineBaseStyle.copyWith(
         fontFamily: 'monospace',
@@ -139,6 +146,7 @@ final class WorkspaceMarkdownRenderer {
         color: workspaceTextColor,
       ),
     );
+    return styleSheet;
   }
 
   TextStyle _inlineBaseTextStyle(String markdown, TextStyle bodyStyle) {
@@ -505,5 +513,63 @@ final class WorkspaceMarkdownRenderer {
     }
     final assetsDirectory = '${p.basenameWithoutExtension(note.path)}.assets';
     return '$assetsDirectory/$attachmentPath'.replaceAll('\\', '/');
+  }
+}
+
+final class _ObsidianHighlightSyntax extends md.InlineSyntax {
+  _ObsidianHighlightSyntax() : super(r'==(.+?)==', startCharacter: 0x3D);
+
+  @override
+  bool onMatch(md.InlineParser parser, Match match) {
+    parser.addNode(md.Element.text('mark', match[1]!));
+    return true;
+  }
+}
+
+final class _HighlightElementBuilder extends MarkdownElementBuilder {
+  @override
+  Widget? visitElementAfterWithContext(
+    BuildContext context,
+    md.Element element,
+    TextStyle? preferredStyle,
+    TextStyle? parentStyle,
+  ) {
+    final style =
+        (parentStyle ?? CupertinoTheme.of(context).textTheme.textStyle)
+            .copyWith(backgroundColor: workspaceMarkdownHighlightColor);
+    return Text.rich(
+      _highlightSpan(element.children ?? const <md.Node>[], style),
+      textScaler: MediaQuery.textScalerOf(context),
+    );
+  }
+
+  TextSpan _highlightSpan(List<md.Node> nodes, TextStyle style) {
+    return TextSpan(
+      style: style,
+      children: [for (final node in nodes) _highlightNode(node, style)],
+    );
+  }
+
+  InlineSpan _highlightNode(md.Node node, TextStyle inheritedStyle) {
+    if (node is md.Text) {
+      return buildMarkdownPreviewInlineTextSpan(node.text, inheritedStyle);
+    }
+    if (node is! md.Element) {
+      return const TextSpan();
+    }
+    final style = switch (node.tag) {
+      'strong' => inheritedStyle.copyWith(fontWeight: FontWeight.bold),
+      'em' => inheritedStyle.copyWith(fontStyle: FontStyle.italic),
+      'del' => inheritedStyle.copyWith(decoration: TextDecoration.lineThrough),
+      'code' => inheritedStyle.copyWith(fontFamily: 'monospace'),
+      _ => inheritedStyle,
+    };
+    return TextSpan(
+      style: style,
+      children: [
+        for (final child in node.children ?? const <md.Node>[])
+          _highlightNode(child, style),
+      ],
+    );
   }
 }

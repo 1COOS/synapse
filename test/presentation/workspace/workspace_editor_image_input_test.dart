@@ -446,7 +446,7 @@ void main() {
     expect(await vault.listSources(note.id), isEmpty);
   });
 
-  testWidgets('post-commit paste target change requires workspace reload', (
+  testWidgets('transactional paste target change rolls back without reload', (
     tester,
   ) async {
     final vault = _GatedCommittedImageSourceVaultBackend(
@@ -485,9 +485,9 @@ void main() {
     expect(await paste, PaneEditorCommandOutcome.unchanged);
     await tester.pumpAndSettle();
     FlutterError.onError = previousOnError;
-    expect(reportedErrors, hasLength(1));
-    expect(find.textContaining('后端操作可能已完成，请重新加载工作区'), findsOneWidget);
-    expect(await vault.listSources(note.id), hasLength(1));
+    expect(reportedErrors, isEmpty);
+    expect(find.textContaining('后端操作可能已完成，请重新加载工作区'), findsNothing);
+    expect(await vault.listSources(note.id), isEmpty);
     expect((await vault.readNote(note.id)).markdown, isNot(contains('<img')));
   });
 

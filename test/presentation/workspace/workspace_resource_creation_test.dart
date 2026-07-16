@@ -2,6 +2,7 @@ import 'dart:ui' show Tristate;
 
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/gestures.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:synapse/domain/vault/vault_resource.dart';
 import 'package:synapse/infrastructure/config/synapse_settings.dart';
@@ -68,6 +69,7 @@ void main() {
     await tester.tap(find.byKey(const Key('new-folder-button')));
     await tester.pumpAndSettle();
     await tester.enterText(find.byKey(const Key('resource-name-input')), '读书');
+    await tester.pump();
     await tester.tap(find.text('创建'));
     await tester.pumpAndSettle();
 
@@ -134,6 +136,123 @@ void main() {
   });
 
   testWidgets(
+    'resource name dialog validates immediately and disables submit',
+    (tester) async {
+      final vault = MemoryVaultBackend(seedExampleData: false);
+
+      await pumpWorkspace(tester, vault: vault);
+      await tester.tap(find.byKey(const Key('new-folder-button')));
+      await tester.pumpAndSettle();
+
+      CupertinoDialogAction submit() => tester.widget<CupertinoDialogAction>(
+        find.byKey(const Key('resource-name-submit')),
+      );
+
+      expect(find.text('名称不能为空。'), findsOneWidget);
+      expect(submit().onPressed, isNull);
+
+      await tester.enterText(
+        find.byKey(const Key('resource-name-input')),
+        'bad/name',
+      );
+      await tester.pump();
+      expect(find.text('名称包含文件系统不支持的字符。'), findsOneWidget);
+      expect(submit().onPressed, isNull);
+
+      await tester.enterText(
+        find.byKey(const Key('resource-name-input')),
+        '课程',
+      );
+      await tester.pump();
+      expect(find.byKey(const Key('resource-name-error')), findsNothing);
+      expect(submit().onPressed, isNotNull);
+    },
+  );
+
+  testWidgets('explicit folder conflict keeps the validated dialog open', (
+    tester,
+  ) async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    await vault.createFolder(parentPath: '', title: '课程');
+
+    await pumpWorkspace(tester, vault: vault);
+    await tester.tap(find.byKey(const Key('new-folder-button')));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byKey(const Key('resource-name-input')), '课程');
+    await tester.pump();
+    await tester.tap(find.byKey(const Key('resource-name-submit')));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('resource-name-input')), findsOneWidget);
+    expect(
+      tester.widget<Text>(find.byKey(const Key('resource-name-error'))).data,
+      '同一文件夹中已存在名为“课程”的资源。',
+    );
+    expect((await vault.listResources()).map((node) => node.title), ['课程']);
+
+    await tester.enterText(
+      find.byKey(const Key('resource-name-input')),
+      '课程 2',
+    );
+    await tester.pump();
+    await tester.tap(find.byKey(const Key('resource-name-submit')));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('resource-name-input')), findsNothing);
+    expect((await vault.listResources()).map((node) => node.title), [
+      '课程',
+      '课程 2',
+    ]);
+  });
+
+  testWidgets(
+    'resource menu supports keyboard open navigation and focus restore',
+    (tester) async {
+      final vault = MemoryVaultBackend(seedExampleData: false);
+      final note = await vault.createNote(parentPath: '', title: 'Alpha');
+
+      await pumpWorkspace(tester, vault: vault);
+      final rowFocus = tester
+          .widget<Focus>(find.byKey(Key('resource-row-focus-${note.id}')))
+          .focusNode!;
+
+      await tester.tap(find.byKey(Key('resource-row-${note.id}')));
+      await tester.pump();
+      expect(rowFocus.hasPrimaryFocus, isTrue);
+
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+      await tester.sendKeyEvent(LogicalKeyboardKey.f10);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(Key('resource-context-menu-${note.id}')),
+        findsOneWidget,
+      );
+
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.pumpAndSettle();
+      expect(find.text('重命名笔记'), findsOneWidget);
+      await tester.tap(find.text('取消'));
+      await tester.pumpAndSettle();
+
+      rowFocus.requestFocus();
+      await tester.pump();
+      await tester.sendKeyEvent(LogicalKeyboardKey.contextMenu);
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(Key('resource-context-menu-${note.id}')),
+        findsOneWidget,
+      );
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(Key('resource-context-menu-${note.id}')), findsNothing);
+      expect(rowFocus.hasPrimaryFocus, isTrue);
+    },
+  );
+
+  testWidgets(
     'create note hydration failure requires reload and never duplicates create',
     (tester) async {
       final vault = _CreateNoteHydrationFailureVault();
@@ -170,6 +289,7 @@ void main() {
         find.byKey(const Key('resource-name-input')),
         '读书',
       );
+      await tester.pump();
       await tester.tap(find.text('创建'));
       await tester.pumpAndSettle();
 
@@ -184,6 +304,7 @@ void main() {
         find.byKey(const Key('resource-name-input')),
         '佛学',
       );
+      await tester.pump();
       await tester.tap(find.text('创建'));
       await tester.pumpAndSettle();
 
@@ -210,6 +331,7 @@ void main() {
         find.byKey(const Key('resource-name-input')),
         '课程',
       );
+      await tester.pump();
       await tester.tap(find.text('重命名'));
       await tester.pumpAndSettle();
 
@@ -455,6 +577,7 @@ void main() {
         find.byKey(const Key('resource-name-input')),
         '读书',
       );
+      await tester.pump();
       await tester.tap(find.text('创建'));
       await tester.pumpAndSettle();
 
@@ -466,6 +589,7 @@ void main() {
         find.byKey(const Key('resource-name-input')),
         '课程',
       );
+      await tester.pump();
       await tester.tap(find.text('创建'));
       await tester.pumpAndSettle();
 

@@ -14,6 +14,8 @@ typedef SearchIndexFactory =
     SearchIndex Function(AiProvider provider, bool semanticSearchEnabled);
 typedef AiProviderFactory = WorkspaceAiProvider Function(ProviderConfig config);
 typedef AiProviderConfigTester = Future<String> Function(ProviderConfig config);
+typedef WorkspaceBackgroundTaskErrorReporter =
+    void Function(Object error, StackTrace stackTrace);
 typedef VaultLocationPicker = Future<VaultLocation?> Function();
 typedef VaultAccessRestorer =
     Future<VaultLocation> Function(VaultLocation location);
@@ -68,6 +70,7 @@ final class WorkspaceDependencies {
     required this.workspaceCommitFailureForTesting,
     required this.runtimeSnapshotPublishHookForTesting,
     required this.cleanupErrorReporter,
+    required this.backgroundTaskErrorReporter,
   });
 
   final VaultBackend? initialVault;
@@ -94,4 +97,5 @@ final class WorkspaceDependencies {
   final WorkspaceCommitPhase? workspaceCommitFailureForTesting;
   final void Function()? runtimeSnapshotPublishHookForTesting;
   final WorkspaceRuntimeCleanupErrorReporter cleanupErrorReporter;
+  final WorkspaceBackgroundTaskErrorReporter backgroundTaskErrorReporter;
 }

@@ -266,7 +266,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.byKey(Key('note-menu-new-note-${note.id}')), findsOneWidget);
-    expect(find.byKey(Key('note-menu-rename-${note.id}')), findsNothing);
+    expect(find.byKey(Key('note-menu-rename-${note.id}')), findsOneWidget);
     expect(find.byKey(Key('note-menu-copy-${note.id}')), findsOneWidget);
     expect(find.byKey(Key('note-menu-move-${note.id}')), findsOneWidget);
     expect(find.byKey(Key('note-menu-delete-${note.id}')), findsOneWidget);
@@ -281,10 +281,24 @@ void main() {
       buttons: kSecondaryMouseButton,
     );
     await tester.pumpAndSettle();
+    await tester.tap(find.byKey(Key('note-menu-rename-${note.id}')));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byKey(const Key('resource-name-input')), '金刚经');
+    await tester.pump();
+    await tester.tap(find.text('重命名'));
+    await tester.pumpAndSettle();
+    expect((await vault.readNote(note.id)).path, '读书/金刚经.md');
+    expect((await vault.readNote(note.id)).markdown, contains('# 金刚经'));
+
+    await tester.tap(
+      find.byKey(Key('resource-row-${note.id}')),
+      buttons: kSecondaryMouseButton,
+    );
+    await tester.pumpAndSettle();
     await tester.tap(find.byKey(Key('note-menu-copy-${note.id}')));
     await tester.pumpAndSettle();
 
-    expect((await vault.readNote('读书/心经 2.md')).title, '心经 2');
+    expect((await vault.readNote('读书/金刚经 2.md')).title, '金刚经 2');
 
     await tester.tap(
       find.byKey(Key('resource-row-${note.id}')),
@@ -300,8 +314,8 @@ void main() {
     await tester.pumpAndSettle();
 
     final moved = await vault.readNote(note.id);
-    expect(moved.title, '心经');
-    expect(moved.path, '课程/心经.md');
+    expect(moved.title, '金刚经');
+    expect(moved.path, '课程/金刚经.md');
 
     await tester.tap(
       find.byKey(Key('resource-row-${note.id}')),
@@ -542,21 +556,19 @@ void main() {
       await pumpWorkspace(tester, vault: vault);
 
       Future<void> requestRename() async {
-        await tester.tap(
-          find.byKey(Key('resource-row-${folder.id}')),
-          buttons: kSecondaryMouseButton,
-        );
-        await tester.pumpAndSettle();
-        await tester.tap(find.byKey(Key('folder-menu-rename-${folder.id}')));
-        await tester.pumpAndSettle();
-        if (find
-            .byKey(const Key('resource-name-input'))
-            .evaluate()
-            .isNotEmpty) {
-          await tester.enterText(
-            find.byKey(const Key('resource-name-input')),
-            '课程',
+        final input = find.byKey(const Key('resource-name-input'));
+        if (input.evaluate().isEmpty) {
+          await tester.tap(
+            find.byKey(Key('resource-row-${folder.id}')),
+            buttons: kSecondaryMouseButton,
           );
+          await tester.pumpAndSettle();
+          await tester.tap(find.byKey(Key('folder-menu-rename-${folder.id}')));
+          await tester.pumpAndSettle();
+        }
+        if (input.evaluate().isNotEmpty) {
+          await tester.enterText(input, '课程');
+          await tester.pump();
           await tester.tap(find.text('重命名'));
           await tester.pumpAndSettle();
         }
@@ -567,7 +579,8 @@ void main() {
 
       expect(vault.renameFolderCalls, 1);
       expect(reportedErrors, hasLength(1));
-      expect(find.text(_reloadRequiredMessage), findsOneWidget);
+      expect(find.text(_reloadRequiredMessage), findsWidgets);
+      expect(find.byKey(const Key('resource-name-error')), findsOneWidget);
 
       await requestRename();
       expect(vault.renameFolderCalls, 1);

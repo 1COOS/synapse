@@ -2,12 +2,137 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:synapse/domain/vault/vault_resource.dart';
+import 'package:synapse/infrastructure/config/synapse_settings.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
 
 import '../../support/workspace_fakes.dart';
 import '../../support/workspace_harness.dart';
 
 void main() {
+  testWidgets('note rename saves dirty markdown and refreshes every pane', (
+    tester,
+  ) async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Alpha');
+    await vault.createNote(parentPath: '', title: 'Beta');
+
+    await pumpWorkspace(
+      tester,
+      vault: vault,
+      settingsStore: FakeSettingsStore(
+        initialSettings: const SynapseSettings(
+          preferences: WorkspacePreferences(
+            defaultNoteMode: WorkspaceDefaultNoteMode.source,
+            semanticSearchEnabled: true,
+            pastedImageWidth: 480,
+            autoSaveDelayMillis: 10000,
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.byKey(const Key('split-pane-right-button')));
+    await tester.pump(const Duration(milliseconds: 250));
+    final paneOneController = liveMarkdownDocumentController(tester, paneId: 1);
+    final paneTwoController = liveMarkdownDocumentController(tester, paneId: 2);
+    expect(paneTwoController, same(paneOneController));
+
+    tester
+        .widget<GestureDetector>(find.byKey(const Key('split-pane-pane-1')))
+        .onTap!();
+    await tester.pump(const Duration(milliseconds: 250));
+    await enterTextInLiveMarkdownBlock(
+      tester,
+      '# Draft title\nunsaved body',
+      paneId: 1,
+    );
+    await tester.pump();
+
+    await tester.tap(
+      find.byKey(Key('resource-row-${note.id}')),
+      buttons: kSecondaryMouseButton,
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(Key('note-menu-rename-${note.id}')));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.byKey(const Key('resource-name-input')),
+      'Gamma',
+    );
+    await tester.pump();
+    await tester.tap(find.text('重命名'));
+    await tester.pumpAndSettle();
+
+    final renamed = await vault.readNote(note.id);
+    expect(renamed.path, 'Gamma.md');
+    expect(renamed.markdown, contains('# Gamma\nunsaved body'));
+    expect(paneOneController.text, '# Gamma\nunsaved body\n');
+    expect(paneTwoController.text, '# Gamma\nunsaved body\n');
+    for (final paneId in [1, 2]) {
+      expect(
+        find.descendant(
+          of: find.byKey(Key('split-pane-title-pane-$paneId')),
+          matching: find.text('Gamma'),
+        ),
+        findsOneWidget,
+      );
+    }
+  });
+
+  testWidgets(
+    'note rename conflict rolls back and preserves dirty editor text',
+    (tester) async {
+      final vault = MemoryVaultBackend(seedExampleData: false);
+      final alpha = await vault.createNote(parentPath: '', title: 'Alpha');
+      await vault.createNote(parentPath: '', title: 'Beta');
+
+      await pumpWorkspace(
+        tester,
+        vault: vault,
+        settingsStore: FakeSettingsStore(
+          initialSettings: const SynapseSettings(
+            preferences: WorkspacePreferences(
+              defaultNoteMode: WorkspaceDefaultNoteMode.source,
+              semanticSearchEnabled: true,
+              pastedImageWidth: 480,
+              autoSaveDelayMillis: 10000,
+            ),
+          ),
+        ),
+      );
+      await enterTextInLiveMarkdownBlock(
+        tester,
+        '# Beta\nunsaved conflict body',
+        paneId: 1,
+      );
+      final controller = liveMarkdownDocumentController(tester, paneId: 1);
+
+      await tester.tap(
+        find.byKey(Key('resource-row-${alpha.id}')),
+        buttons: kSecondaryMouseButton,
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(Key('note-menu-rename-${alpha.id}')));
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byKey(const Key('resource-name-input')),
+        'beta',
+      );
+      await tester.pump();
+      await tester.tap(find.byKey(const Key('resource-name-submit')));
+      await tester.pump(const Duration(milliseconds: 300));
+
+      expect(find.byKey(const Key('resource-name-input')), findsOneWidget);
+      expect(
+        tester.widget<Text>(find.byKey(const Key('resource-name-error'))).data,
+        '同一文件夹中已存在名为“beta”的资源。',
+      );
+      expect(controller.text, '# Beta\nunsaved conflict body\n');
+      final persisted = await vault.readNote(alpha.id);
+      expect(persisted.path, 'Alpha.md');
+      expect(persisted.markdown, isNot(contains('unsaved conflict body')));
+    },
+  );
+
   testWidgets('folder rename refreshes every open note session', (
     tester,
   ) async {
@@ -65,6 +190,7 @@ void main() {
     await tester.tap(find.byKey(Key('folder-menu-rename-${folder.id}')));
     await tester.pumpAndSettle();
     await tester.enterText(find.byKey(const Key('resource-name-input')), '课程');
+    await tester.pump();
     await tester.tap(find.text('重命名'));
     await tester.pumpAndSettle();
     await tester.tap(find.byKey(const Key('note-mode-source-pane-2')));
@@ -142,6 +268,7 @@ void main() {
       find.byKey(const Key('resource-name-input')),
       'Renamed',
     );
+    await tester.pump();
     await tester.tap(find.text('重命名'));
     await tester.pumpAndSettle();
     await tester.tap(find.byKey(const Key('left-pane-mode-search')));
@@ -185,6 +312,7 @@ void main() {
         find.byKey(const Key('resource-name-input')),
         '课程',
       );
+      await tester.pump();
       await tester.tap(find.text('重命名'));
       await tester.pump();
       await vault.renameStarted.future;

@@ -4,7 +4,6 @@ import 'package:flutter/foundation.dart';
 
 import '../../../domain/vault/vault_resource.dart';
 import '../../../infrastructure/vault/vault_backend.dart';
-import '../../../infrastructure/vault/vault_post_commit_error.dart';
 import 'note_document_session.dart';
 import 'note_session_registry.dart';
 import 'workspace_commit_error.dart';
@@ -517,9 +516,31 @@ final class NoteSaveCoordinator {
     try {
       final markdown = _serializeVisibleBody(noteSnapshot, bodySnapshot);
       final vault = _vault();
-      var savedNote = await vault.updateMarkdown(
-        noteId: oldNoteId,
-        markdown: markdown,
+      final savedNote = await vault.runMutationTransaction<VaultNoteContent>(
+        label: 'save-note',
+        action: () async {
+          var saved = await vault.updateMarkdown(
+            noteId: oldNoteId,
+            markdown: markdown,
+          );
+          if (_fatalError case final fatalError?) {
+            throw fatalError;
+          }
+          if (saved.title != noteSnapshot.title) {
+            final renamed = await vault.renameNote(
+              noteId: oldNoteId,
+              title: saved.title,
+            );
+            if (_fatalError case final fatalError?) {
+              throw fatalError;
+            }
+            saved = await vault.readNote(renamed.id);
+            if (_fatalError case final fatalError?) {
+              throw fatalError;
+            }
+          }
+          return saved;
+        },
       );
       backendCommitted = true;
       if (_fatalError case final fatalError?) {
@@ -529,29 +550,6 @@ final class NoteSaveCoordinator {
           oldNoteId: oldNoteId,
           bodySnapshot: bodySnapshot,
         );
-      }
-      if (savedNote.title != noteSnapshot.title) {
-        final renamed = await vault.renameNote(
-          noteId: oldNoteId,
-          title: savedNote.title,
-        );
-        if (_fatalError case final fatalError?) {
-          return _fatalResult(
-            session,
-            fatalError,
-            oldNoteId: oldNoteId,
-            bodySnapshot: bodySnapshot,
-          );
-        }
-        savedNote = await vault.readNote(renamed.id);
-        if (_fatalError case final fatalError?) {
-          return _fatalResult(
-            session,
-            fatalError,
-            oldNoteId: oldNoteId,
-            bodySnapshot: bodySnapshot,
-          );
-        }
       }
       return NoteSaveResult(
         session: session,
@@ -568,21 +566,6 @@ final class NoteSaveCoordinator {
         return _fatalResult(
           session,
           fatalError,
-          oldNoteId: oldNoteId,
-          bodySnapshot: bodySnapshot,
-        );
-      }
-      if (error case VaultPostCommitError(
-        :final cause,
-        :final causeStackTrace,
-      )) {
-        return _fatalResult(
-          session,
-          WorkspaceCommitInvariantError(
-            phase: WorkspaceCommitPhase.hydrate,
-            cause: cause,
-            causeStackTrace: causeStackTrace,
-          ),
           oldNoteId: oldNoteId,
           bodySnapshot: bodySnapshot,
         );

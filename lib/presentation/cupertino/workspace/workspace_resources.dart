@@ -1,10 +1,153 @@
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart' show MenuAnchor, MenuController;
+import 'package:flutter/services.dart';
 
 import '../../../domain/vault/vault_resource.dart';
+import '../../../domain/vault/vault_resource_name.dart';
 import 'workspace_controls.dart';
 import 'workspace_context_menu.dart';
 import 'workspace_theme.dart';
+
+typedef ResourceNameSubmit = Future<String?> Function(String name);
+
+class ResourceNameDialog extends StatefulWidget {
+  const ResourceNameDialog({
+    super.key,
+    required this.title,
+    required this.placeholder,
+    required this.actionLabel,
+    required this.onSubmit,
+    this.initialValue = '',
+  });
+
+  final String title;
+  final String placeholder;
+  final String actionLabel;
+  final String initialValue;
+  final ResourceNameSubmit onSubmit;
+
+  @override
+  State<ResourceNameDialog> createState() => _ResourceNameDialogState();
+}
+
+class _ResourceNameDialogState extends State<ResourceNameDialog> {
+  late final TextEditingController _controller;
+  late VaultResourceNameValidation _validation;
+  String? _operationError;
+  bool _submitting = false;
+
+  bool get _canSubmit => _validation.isValid && !_submitting;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = TextEditingController(text: widget.initialValue);
+    _validation = validateVaultResourceName(_controller.text);
+    _controller.addListener(_handleNameChanged);
+  }
+
+  @override
+  void dispose() {
+    _controller.removeListener(_handleNameChanged);
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _handleNameChanged() {
+    if (!mounted) {
+      return;
+    }
+    final validation = validateVaultResourceName(_controller.text);
+    if (validation.issue == _validation.issue && _operationError == null) {
+      return;
+    }
+    setState(() {
+      _validation = validation;
+      _operationError = null;
+    });
+  }
+
+  Future<void> _submit() async {
+    final validation = validateVaultResourceName(_controller.text);
+    if (!validation.isValid || _submitting) {
+      setState(() {
+        _validation = validation;
+        _operationError = null;
+      });
+      return;
+    }
+    setState(() {
+      _submitting = true;
+      _operationError = null;
+    });
+    final error = await widget.onSubmit(_controller.text);
+    if (!mounted) {
+      return;
+    }
+    if (error == null) {
+      Navigator.of(context).pop(true);
+      return;
+    }
+    setState(() {
+      _submitting = false;
+      _operationError = error;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final error = _operationError ?? _validation.message;
+    return CupertinoAlertDialog(
+      title: Text(widget.title),
+      content: Padding(
+        padding: const EdgeInsets.only(top: 12),
+        child: Column(
+          children: [
+            CupertinoTextField(
+              key: const Key('resource-name-input'),
+              controller: _controller,
+              autofocus: true,
+              placeholder: widget.placeholder,
+              enabled: !_submitting,
+              onSubmitted: (_) {
+                if (_canSubmit) {
+                  _submit();
+                }
+              },
+            ),
+            if (error != null) ...[
+              const SizedBox(height: 8),
+              Text(
+                error,
+                key: const Key('resource-name-error'),
+                style: const TextStyle(
+                  color: CupertinoColors.systemRed,
+                  fontSize: 12,
+                ),
+              ),
+            ],
+            if (_submitting) ...[
+              const SizedBox(height: 8),
+              const CupertinoActivityIndicator(radius: 8),
+            ],
+          ],
+        ),
+      ),
+      actions: [
+        CupertinoDialogAction(
+          onPressed: _submitting ? null : () => Navigator.of(context).pop(),
+          child: const Text('取消'),
+        ),
+        CupertinoDialogAction(
+          key: const Key('resource-name-submit'),
+          isDefaultAction: true,
+          onPressed: _canSubmit ? _submit : null,
+          child: Text(widget.actionLabel),
+        ),
+      ],
+    );
+  }
+}
 
 class MoveNoteTargetDialog extends StatefulWidget {
   const MoveNoteTargetDialog({
@@ -171,6 +314,7 @@ class ResourceTree extends StatelessWidget {
     required this.onCreateNote,
     required this.onCreateSiblingNote,
     required this.onRenameFolder,
+    required this.onRenameNote,
     required this.onCopyNote,
     required this.onMoveNote,
     required this.onDelete,
@@ -185,6 +329,7 @@ class ResourceTree extends StatelessWidget {
   final ValueChanged<VaultResourceNode> onCreateNote;
   final ValueChanged<VaultResourceNode> onCreateSiblingNote;
   final ValueChanged<VaultResourceNode> onRenameFolder;
+  final ValueChanged<VaultResourceNode> onRenameNote;
   final ValueChanged<VaultResourceNode> onCopyNote;
   final ValueChanged<VaultResourceNode> onMoveNote;
   final ValueChanged<VaultResourceNode> onDelete;
@@ -223,6 +368,7 @@ class ResourceTree extends StatelessWidget {
         onCreateNote: () => onCreateNote(node),
         onCreateSiblingNote: () => onCreateSiblingNote(node),
         onRenameFolder: () => onRenameFolder(node),
+        onRenameNote: () => onRenameNote(node),
         onCopyNote: () => onCopyNote(node),
         onMoveNote: () => onMoveNote(node),
         onDelete: () => onDelete(node),
@@ -234,7 +380,7 @@ class ResourceTree extends StatelessWidget {
   }
 }
 
-class _ResourceRow extends StatelessWidget {
+class _ResourceRow extends StatefulWidget {
   const _ResourceRow({
     required this.node,
     required this.depth,
@@ -247,6 +393,7 @@ class _ResourceRow extends StatelessWidget {
     required this.onCreateNote,
     required this.onCreateSiblingNote,
     required this.onRenameFolder,
+    required this.onRenameNote,
     required this.onCopyNote,
     required this.onMoveNote,
     required this.onDelete,
@@ -263,46 +410,226 @@ class _ResourceRow extends StatelessWidget {
   final VoidCallback onCreateNote;
   final VoidCallback onCreateSiblingNote;
   final VoidCallback onRenameFolder;
+  final VoidCallback onRenameNote;
   final VoidCallback onCopyNote;
   final VoidCallback onMoveNote;
   final VoidCallback onDelete;
 
   @override
+  State<_ResourceRow> createState() => _ResourceRowState();
+}
+
+class _ResourceRowState extends State<_ResourceRow> {
+  final MenuController _menuController = MenuController();
+  final FocusNode _focusNode = FocusNode();
+  FocusNode? _previousFocus;
+
+  VaultResourceNode get node => widget.node;
+  int get depth => widget.depth;
+  bool get selected => widget.selected;
+  bool get collapsed => widget.collapsed;
+  int get noteCount => widget.noteCount;
+  VoidCallback get onTap => widget.onTap;
+  VoidCallback get onToggleFolder => widget.onToggleFolder;
+  VoidCallback get onCreateFolder => widget.onCreateFolder;
+  VoidCallback get onCreateNote => widget.onCreateNote;
+  VoidCallback get onCreateSiblingNote => widget.onCreateSiblingNote;
+  VoidCallback get onRenameFolder => widget.onRenameFolder;
+  VoidCallback get onRenameNote => widget.onRenameNote;
+  VoidCallback get onCopyNote => widget.onCopyNote;
+  VoidCallback get onMoveNote => widget.onMoveNote;
+  VoidCallback get onDelete => widget.onDelete;
+
+  @override
+  void dispose() {
+    _focusNode.dispose();
+    super.dispose();
+  }
+
+  KeyEventResult _handleKeyEvent(FocusNode _, KeyEvent event) {
+    if (event is! KeyDownEvent) {
+      return KeyEventResult.ignored;
+    }
+    final openMenu =
+        event.logicalKey == LogicalKeyboardKey.contextMenu ||
+        event.logicalKey == LogicalKeyboardKey.f10 &&
+            HardwareKeyboard.instance.isShiftPressed;
+    if (!openMenu) {
+      return KeyEventResult.ignored;
+    }
+    _openMenu(position: const Offset(24, 34));
+    return KeyEventResult.handled;
+  }
+
+  void _openMenu({Offset? position}) {
+    _previousFocus = FocusManager.instance.primaryFocus;
+    if (!selected) {
+      onTap();
+    }
+    _menuController.open(position: position);
+  }
+
+  void _handleTap() {
+    _focusNode.requestFocus();
+    onTap();
+  }
+
+  void _restoreFocus() {
+    final target = _previousFocus;
+    _previousFocus = null;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) {
+        return;
+      }
+      if (target != null && target.canRequestFocus) {
+        target.requestFocus();
+      } else if (_focusNode.canRequestFocus) {
+        _focusNode.requestFocus();
+      }
+    });
+  }
+
+  @override
   Widget build(BuildContext context) {
     final accentColor = WorkspaceAppearanceScope.of(context).accentColor;
     if (node.isFolder) {
-      final menuController = MenuController();
-      return MenuAnchor(
-        controller: menuController,
+      return Focus(
+        key: Key('resource-row-focus-${node.id}'),
+        focusNode: _focusNode,
+        onKeyEvent: _handleKeyEvent,
+        child: MenuAnchor(
+          controller: _menuController,
+          onClose: _restoreFocus,
+          consumeOutsideTap: true,
+          clipBehavior: Clip.none,
+          style: workspaceResourceMenuAnchorStyle,
+          menuChildren: [
+            _ResourceContextMenu(
+              resourceId: node.id,
+              onDismiss: _menuController.close,
+              children: [
+                _ResourceMenuAction(
+                  itemKey: Key('folder-menu-new-folder-${node.id}'),
+                  label: '新建文件夹',
+                  onPressed: _closeMenuAndRun(onCreateFolder),
+                ),
+                _ResourceMenuAction(
+                  itemKey: Key('folder-menu-new-note-${node.id}'),
+                  label: '新建笔记',
+                  onPressed: _closeMenuAndRun(onCreateNote),
+                ),
+                _ResourceMenuSeparator(
+                  key: Key('resource-menu-separator-${node.id}-0'),
+                ),
+                _ResourceMenuAction(
+                  itemKey: Key('folder-menu-rename-${node.id}'),
+                  label: '重命名',
+                  onPressed: _closeMenuAndRun(onRenameFolder),
+                ),
+                _ResourceMenuAction(
+                  itemKey: Key('folder-menu-delete-${node.id}'),
+                  label: '删除',
+                  onPressed: _closeMenuAndRun(onDelete),
+                ),
+              ],
+            ),
+          ],
+          child: _ResourceRowShell(
+            key: Key('resource-row-${node.id}'),
+            depth: depth,
+            selected: selected,
+            onTap: _handleTap,
+            onSecondaryTapDown: (details) {
+              _openMenu(position: details.localPosition);
+            },
+            child: Row(
+              children: [
+                SizedBox(
+                  width: 24,
+                  child: node.children.isEmpty
+                      ? const SizedBox(width: 18)
+                      : CupertinoButton(
+                          key: Key('resource-toggle-${node.id}'),
+                          minimumSize: const Size.square(24),
+                          padding: EdgeInsets.zero,
+                          onPressed: onToggleFolder,
+                          child: Icon(
+                            collapsed
+                                ? CupertinoIcons.chevron_right
+                                : CupertinoIcons.chevron_down,
+                            size: 14,
+                            color: workspaceMutedColor,
+                          ),
+                        ),
+                ),
+                Icon(
+                  CupertinoIcons.folder,
+                  size: 19,
+                  color: selected ? accentColor : workspaceMutedColor,
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    node.title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: workspaceResourceTitleStyle,
+                  ),
+                ),
+                Text(
+                  '$noteCount',
+                  key: Key('resource-count-${node.id}'),
+                  style: workspaceResourceCountStyle,
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
+    return Focus(
+      key: Key('resource-row-focus-${node.id}'),
+      focusNode: _focusNode,
+      onKeyEvent: _handleKeyEvent,
+      child: MenuAnchor(
+        controller: _menuController,
+        onClose: _restoreFocus,
         consumeOutsideTap: true,
         clipBehavior: Clip.none,
         style: workspaceResourceMenuAnchorStyle,
         menuChildren: [
           _ResourceContextMenu(
             resourceId: node.id,
+            onDismiss: _menuController.close,
             children: [
               _ResourceMenuAction(
-                itemKey: Key('folder-menu-new-folder-${node.id}'),
-                label: '新建文件夹',
-                onPressed: _closeMenuAndRun(menuController, onCreateFolder),
+                itemKey: Key('note-menu-new-note-${node.id}'),
+                label: '新建笔记',
+                onPressed: _closeMenuAndRun(onCreateSiblingNote),
               ),
               _ResourceMenuAction(
-                itemKey: Key('folder-menu-new-note-${node.id}'),
-                label: '新建笔记',
-                onPressed: _closeMenuAndRun(menuController, onCreateNote),
+                itemKey: Key('note-menu-rename-${node.id}'),
+                label: '重命名',
+                onPressed: _closeMenuAndRun(onRenameNote),
+              ),
+              _ResourceMenuAction(
+                itemKey: Key('note-menu-copy-${node.id}'),
+                label: '创建副本',
+                onPressed: _closeMenuAndRun(onCopyNote),
+              ),
+              _ResourceMenuAction(
+                itemKey: Key('note-menu-move-${node.id}'),
+                label: '移动到…',
+                onPressed: _closeMenuAndRun(onMoveNote),
               ),
               _ResourceMenuSeparator(
                 key: Key('resource-menu-separator-${node.id}-0'),
               ),
               _ResourceMenuAction(
-                itemKey: Key('folder-menu-rename-${node.id}'),
-                label: '重命名',
-                onPressed: _closeMenuAndRun(menuController, onRenameFolder),
-              ),
-              _ResourceMenuAction(
-                itemKey: Key('folder-menu-delete-${node.id}'),
+                itemKey: Key('note-menu-delete-${node.id}'),
                 label: '删除',
-                onPressed: _closeMenuAndRun(menuController, onDelete),
+                onPressed: _closeMenuAndRun(onDelete),
               ),
             ],
           ),
@@ -311,36 +638,16 @@ class _ResourceRow extends StatelessWidget {
           key: Key('resource-row-${node.id}'),
           depth: depth,
           selected: selected,
-          onTap: onTap,
+          onTap: _handleTap,
           onSecondaryTapDown: (details) {
-            if (!selected) {
-              onTap();
-            }
-            menuController.open(position: details.localPosition);
+            _openMenu(position: details.localPosition);
           },
           child: Row(
             children: [
-              SizedBox(
-                width: 24,
-                child: node.children.isEmpty
-                    ? const SizedBox(width: 18)
-                    : CupertinoButton(
-                        key: Key('resource-toggle-${node.id}'),
-                        minimumSize: const Size.square(24),
-                        padding: EdgeInsets.zero,
-                        onPressed: onToggleFolder,
-                        child: Icon(
-                          collapsed
-                              ? CupertinoIcons.chevron_right
-                              : CupertinoIcons.chevron_down,
-                          size: 14,
-                          color: workspaceMutedColor,
-                        ),
-                      ),
-              ),
+              const SizedBox(width: 24),
               Icon(
-                CupertinoIcons.folder,
-                size: 19,
+                CupertinoIcons.doc_text,
+                size: 18,
                 color: selected ? accentColor : workspaceMutedColor,
               ),
               const SizedBox(width: 8),
@@ -352,93 +659,16 @@ class _ResourceRow extends StatelessWidget {
                   style: workspaceResourceTitleStyle,
                 ),
               ),
-              Text(
-                '$noteCount',
-                key: Key('resource-count-${node.id}'),
-                style: workspaceResourceCountStyle,
-              ),
             ],
           ),
-        ),
-      );
-    }
-
-    final menuController = MenuController();
-    return MenuAnchor(
-      controller: menuController,
-      consumeOutsideTap: true,
-      clipBehavior: Clip.none,
-      style: workspaceResourceMenuAnchorStyle,
-      menuChildren: [
-        _ResourceContextMenu(
-          resourceId: node.id,
-          children: [
-            _ResourceMenuAction(
-              itemKey: Key('note-menu-new-note-${node.id}'),
-              label: '新建笔记',
-              onPressed: _closeMenuAndRun(menuController, onCreateSiblingNote),
-            ),
-            _ResourceMenuAction(
-              itemKey: Key('note-menu-copy-${node.id}'),
-              label: '创建副本',
-              onPressed: _closeMenuAndRun(menuController, onCopyNote),
-            ),
-            _ResourceMenuAction(
-              itemKey: Key('note-menu-move-${node.id}'),
-              label: '移动到...',
-              onPressed: _closeMenuAndRun(menuController, onMoveNote),
-            ),
-            _ResourceMenuSeparator(
-              key: Key('resource-menu-separator-${node.id}-0'),
-            ),
-            _ResourceMenuAction(
-              itemKey: Key('note-menu-delete-${node.id}'),
-              label: '删除',
-              onPressed: _closeMenuAndRun(menuController, onDelete),
-            ),
-          ],
-        ),
-      ],
-      child: _ResourceRowShell(
-        key: Key('resource-row-${node.id}'),
-        depth: depth,
-        selected: selected,
-        onTap: onTap,
-        onSecondaryTapDown: (details) {
-          if (!selected) {
-            onTap();
-          }
-          menuController.open(position: details.localPosition);
-        },
-        child: Row(
-          children: [
-            const SizedBox(width: 24),
-            Icon(
-              CupertinoIcons.doc_text,
-              size: 18,
-              color: selected ? accentColor : workspaceMutedColor,
-            ),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Text(
-                node.title,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: workspaceResourceTitleStyle,
-              ),
-            ),
-          ],
         ),
       ),
     );
   }
 
-  VoidCallback _closeMenuAndRun(
-    MenuController menuController,
-    VoidCallback action,
-  ) {
+  VoidCallback _closeMenuAndRun(VoidCallback action) {
     return () {
-      menuController.close();
+      _menuController.close();
       action();
     };
   }
@@ -458,16 +688,20 @@ class _ResourceContextMenu extends StatelessWidget {
   const _ResourceContextMenu({
     required this.resourceId,
     required this.children,
+    required this.onDismiss,
   });
 
   final String resourceId;
   final List<Widget> children;
+  final VoidCallback onDismiss;
 
   @override
   Widget build(BuildContext context) {
     return WorkspaceContextMenuPanel(
       panelKey: Key('resource-context-menu-$resourceId'),
       width: 188,
+      autofocusFirst: true,
+      onDismiss: onDismiss,
       children: children,
     );
   }

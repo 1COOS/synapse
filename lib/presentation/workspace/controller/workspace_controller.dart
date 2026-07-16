@@ -489,6 +489,15 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
     );
   }
 
+  Future<WorkspaceActionResult> renameNote({
+    required VaultResourceNode note,
+    required String newName,
+  }) {
+    return _runDocumentOperation(
+      () => _documents.renameNote(note: note, newName: newName),
+    );
+  }
+
   Future<WorkspaceActionResult> deleteResource(VaultResourceNode resource) {
     return _runDocumentOperation(() => _documents.deleteResource(resource));
   }
@@ -1002,7 +1011,7 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
         (_) {},
         onError: (Object error, StackTrace stackTrace) {
           try {
-            _dependencies.cleanupErrorReporter(error, stackTrace);
+            _dependencies.backgroundTaskErrorReporter(error, stackTrace);
           } catch (_) {
             // Background cache errors cannot change workspace availability.
           }

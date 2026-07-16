@@ -1,5 +1,6 @@
 import 'package:flutter/cupertino.dart';
 
+import '../../cupertino/markdown_inline_formatting.dart';
 import '../../cupertino/workspace/workspace_theme.dart';
 
 class MarkdownStyledTextEditingController extends TextEditingController {
@@ -16,6 +17,20 @@ class MarkdownStyledTextEditingController extends TextEditingController {
       ),
     );
   }
+}
+
+TextSpan buildMarkdownPreviewInlineTextSpan(
+  String source,
+  TextStyle baseStyle,
+) {
+  return TextSpan(
+    style: baseStyle,
+    children: _MarkdownSourceTextSpanBuilder.buildInlineSpans(
+      source,
+      baseStyle,
+      showMarkers: false,
+    ),
+  );
 }
 
 class _MarkdownSourceTextSpanBuilder {
@@ -54,7 +69,7 @@ class _MarkdownSourceTextSpanBuilder {
       return [
         TextSpan(text: headingMatch.group(1), style: markerStyle),
         TextSpan(text: headingMatch.group(2), style: markerStyle),
-        ..._buildInlineSpans(headingMatch.group(3)!, baseStyle),
+        ...buildInlineSpans(headingMatch.group(3)!, baseStyle),
       ];
     }
 
@@ -67,104 +82,60 @@ class _MarkdownSourceTextSpanBuilder {
           text: blockMarkerMatch.group(1),
           style: baseStyle.copyWith(color: workspaceMutedColor),
         ),
-        ..._buildInlineSpans(blockMarkerMatch.group(2)!, baseStyle),
+        ...buildInlineSpans(blockMarkerMatch.group(2)!, baseStyle),
       ];
     }
 
-    return _buildInlineSpans(line, baseStyle);
+    return buildInlineSpans(line, baseStyle);
   }
 
-  static List<InlineSpan> _buildInlineSpans(
+  static List<InlineSpan> buildInlineSpans(
     String source,
-    TextStyle baseStyle,
-  ) {
+    TextStyle baseStyle, {
+    bool showMarkers = true,
+  }) {
+    final analysis = MarkdownInlineAnalysis.parse(source);
+    final boundaries = analysis.spanBoundaries();
     final spans = <InlineSpan>[];
-    final markerStyle = baseStyle.copyWith(color: workspaceMutedColor);
-    var index = 0;
-    while (index < source.length) {
-      if (source.startsWith('~~', index)) {
-        final end = source.indexOf('~~', index + 2);
-        if (end != -1) {
-          spans.add(TextSpan(text: '~~', style: markerStyle));
-          spans.add(
-            TextSpan(
-              text: source.substring(index + 2, end),
-              style: baseStyle.copyWith(decoration: TextDecoration.lineThrough),
-            ),
-          );
-          spans.add(TextSpan(text: '~~', style: markerStyle));
-          index = end + 2;
-          continue;
-        }
+    for (var index = 0; index < boundaries.length - 1; index += 1) {
+      final start = boundaries[index];
+      final end = boundaries[index + 1];
+      if (start == end) {
+        continue;
       }
-      if (source.startsWith('**', index)) {
-        final end = source.indexOf('**', index + 2);
-        if (end != -1) {
-          spans.add(TextSpan(text: '**', style: markerStyle));
-          spans.add(
-            TextSpan(
-              text: source.substring(index + 2, end),
-              style: baseStyle.copyWith(fontWeight: FontWeight.bold),
-            ),
-          );
-          spans.add(TextSpan(text: '**', style: markerStyle));
-          index = end + 2;
-          continue;
-        }
+      final marker = analysis.isMarkerRange(start, end);
+      if (marker && !showMarkers) {
+        continue;
       }
-      if (source.startsWith('`', index)) {
-        final end = source.indexOf('`', index + 1);
-        if (end != -1) {
-          spans.add(TextSpan(text: '`', style: markerStyle));
-          spans.add(
-            TextSpan(
-              text: source.substring(index + 1, end),
-              style: baseStyle.copyWith(
-                fontFamily: 'monospace',
-                backgroundColor: workspaceSecondarySurfaceColor,
-              ),
-            ),
-          );
-          spans.add(TextSpan(text: '`', style: markerStyle));
-          index = end + 1;
-          continue;
-        }
+      final styles = analysis.stylesForRange(start, end);
+      var style = baseStyle;
+      if (styles.contains(MarkdownInlineStyle.highlight)) {
+        style = style.copyWith(
+          backgroundColor: workspaceMarkdownHighlightColor,
+        );
       }
-      if (source.startsWith('*', index) && !source.startsWith('**', index)) {
-        final end = source.indexOf('*', index + 1);
-        if (end != -1) {
-          spans.add(TextSpan(text: '*', style: markerStyle));
-          spans.add(
-            TextSpan(
-              text: source.substring(index + 1, end),
-              style: baseStyle.copyWith(fontStyle: FontStyle.italic),
-            ),
-          );
-          spans.add(TextSpan(text: '*', style: markerStyle));
-          index = end + 1;
-          continue;
-        }
+      if (styles.contains(MarkdownInlineStyle.bold)) {
+        style = style.copyWith(fontWeight: FontWeight.bold);
       }
-      final next = _nextInlineMarker(source, index + 1);
-      spans.add(
-        TextSpan(text: source.substring(index, next), style: baseStyle),
-      );
-      index = next;
+      if (styles.contains(MarkdownInlineStyle.italic)) {
+        style = style.copyWith(fontStyle: FontStyle.italic);
+      }
+      if (styles.contains(MarkdownInlineStyle.strikethrough)) {
+        style = style.copyWith(decoration: TextDecoration.lineThrough);
+      }
+      if (styles.contains(MarkdownInlineStyle.code)) {
+        style = style.copyWith(
+          fontFamily: 'monospace',
+          backgroundColor: styles.contains(MarkdownInlineStyle.highlight)
+              ? workspaceMarkdownHighlightColor
+              : workspaceSecondarySurfaceColor,
+        );
+      }
+      if (marker) {
+        style = style.copyWith(color: workspaceMutedColor);
+      }
+      spans.add(TextSpan(text: source.substring(start, end), style: style));
     }
     return spans;
-  }
-
-  static int _nextInlineMarker(String source, int start) {
-    final candidates = <int>[
-      source.indexOf('~~', start),
-      source.indexOf('**', start),
-      source.indexOf('`', start),
-      source.indexOf('*', start),
-    ].where((index) => index != -1).toList();
-    if (candidates.isEmpty) {
-      return source.length;
-    }
-    candidates.sort();
-    return candidates.first;
   }
 }

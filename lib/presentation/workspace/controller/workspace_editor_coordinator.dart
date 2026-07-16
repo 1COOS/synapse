@@ -199,54 +199,63 @@ final class WorkspaceEditorCoordinator {
         commitBackend: () async {
           _requireCurrentPasteMutationTarget(context, targetSession, target);
           final oldNoteId = targetSession.noteId;
-          final source = await vault.addImageSource(
-            noteId: oldNoteId,
-            filename: filename,
-            mimeType: image.mimeType,
-            bytes: image.bytes,
-          );
-          _requireUnchangedPasteTextAfterBackend(
-            targetSession,
-            target,
-            noteIds: {oldNoteId},
-          );
-          final selection = _normalizedSelection(target);
-          final replacement = blockImageInsertion(
-            text: target.text,
-            start: selection.start,
-            end: selection.end,
-            tag: _imageMarkdownTag(targetSession.note, source),
-          );
-          final updatedBody = target.text.replaceRange(
-            selection.start,
-            selection.end,
-            replacement,
-          );
-          final saved = await runVaultPostCommit(
-            () => vault.updateMarkdown(
-              noteId: oldNoteId,
-              markdown: _markdownForVisibleBody(
-                targetSession.note,
-                updatedBody,
-              ),
-            ),
-          );
-          _requireUnchangedPasteTextAfterBackend(
-            targetSession,
-            target,
-            noteIds: {oldNoteId, saved.id},
-          );
+          late SourceItem source;
           var committedNoteId = oldNoteId;
-          if (saved.title != targetSession.note.title) {
-            final renamed = await runVaultPostCommit(
-              () => vault.renameNote(noteId: oldNoteId, title: saved.title),
+          try {
+            await vault.runMutationTransaction<void>(
+              label: 'paste-image-into-note',
+              action: () async {
+                source = await vault.addImageSource(
+                  noteId: oldNoteId,
+                  filename: filename,
+                  mimeType: image.mimeType,
+                  bytes: image.bytes,
+                );
+                _requireUnchangedPasteTextAfterBackend(
+                  targetSession,
+                  target,
+                  noteIds: {oldNoteId},
+                );
+                final selection = _normalizedSelection(target);
+                final replacement = blockImageInsertion(
+                  text: target.text,
+                  start: selection.start,
+                  end: selection.end,
+                  tag: _imageMarkdownTag(targetSession.note, source),
+                );
+                final updatedBody = target.text.replaceRange(
+                  selection.start,
+                  selection.end,
+                  replacement,
+                );
+                final saved = await vault.updateMarkdown(
+                  noteId: oldNoteId,
+                  markdown: _markdownForVisibleBody(
+                    targetSession.note,
+                    updatedBody,
+                  ),
+                );
+                _requireUnchangedPasteTextAfterBackend(
+                  targetSession,
+                  target,
+                  noteIds: {oldNoteId, saved.id},
+                );
+                if (saved.title != targetSession.note.title) {
+                  final renamed = await vault.renameNote(
+                    noteId: oldNoteId,
+                    title: saved.title,
+                  );
+                  committedNoteId = renamed.id;
+                  _requireUnchangedPasteTextAfterBackend(
+                    targetSession,
+                    target,
+                    noteIds: {oldNoteId, committedNoteId},
+                  );
+                }
+              },
             );
-            committedNoteId = renamed.id;
-            _requireUnchangedPasteTextAfterBackend(
-              targetSession,
-              target,
-              noteIds: {oldNoteId, committedNoteId},
-            );
+          } on VaultPostCommitError catch (error) {
+            Error.throwWithStackTrace(error.cause, error.causeStackTrace);
           }
           return WorkspaceBackendCommit(
             postCommitHydrate: () async {
@@ -681,11 +690,7 @@ final class WorkspaceEditorCoordinator {
     if (!sessionStillOwned || targetSession.controller.text == target.text) {
       return;
     }
-    final cause = const _PasteTargetChangedAfterBackend();
-    throw VaultPostCommitError(
-      cause: cause,
-      causeStackTrace: StackTrace.current,
-    );
+    throw const _PasteTargetChangedAfterBackend();
   }
 
   PaneEditorCommandOutcome _editorResult<T>(

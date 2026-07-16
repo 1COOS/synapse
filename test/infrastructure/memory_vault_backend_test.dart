@@ -1,5 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:synapse/domain/vault/vault_resource.dart';
+import 'package:synapse/domain/vault/vault_resource_name.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
 
 void main() {
@@ -387,17 +388,20 @@ updatedAt: 2026-07-03 12:00
     );
   });
 
-  test('renames folders uniquely and rejects invalid folder paths', () async {
+  test('rejects folder rename conflicts and invalid folder paths', () async {
     final backend = MemoryVaultBackend(seedExampleData: false);
     await backend.createFolder(parentPath: '', title: '课程');
     final folder = await backend.createFolder(parentPath: '', title: '读书');
 
-    final renamed = await backend.renameFolder(
-      folderPath: folder.path,
-      title: '课程',
+    await expectLater(
+      backend.renameFolder(folderPath: folder.path, title: '课程'),
+      throwsA(isA<VaultResourceNameConflictException>()),
     );
 
-    expect(renamed.path, '课程 2');
+    expect((await backend.listResources()).map((node) => node.path), [
+      '读书',
+      '课程',
+    ]);
     expect(
       () => backend.renameFolder(folderPath: '', title: '根目录'),
       throwsA(isA<StateError>()),

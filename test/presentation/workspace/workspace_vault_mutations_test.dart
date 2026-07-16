@@ -82,50 +82,53 @@ void main() {
     );
   });
 
-  testWidgets(
-    'rename readback failure requires reload and suppresses later saves',
-    (tester) async {
-      final vault = _RenameReadbackFailureVault();
-      final note = await vault.createNote(parentPath: '', title: '心经');
-      final other = await vault.createNote(parentPath: '', title: '其他');
-      final reportedErrors = <FlutterErrorDetails>[];
-      final previousOnError = FlutterError.onError;
-      FlutterError.onError = reportedErrors.add;
-      addTearDown(() => FlutterError.onError = previousOnError);
+  testWidgets('rename readback failure rolls back and permits a later save', (
+    tester,
+  ) async {
+    final vault = _RenameReadbackFailureVault();
+    final note = await vault.createNote(parentPath: '', title: '心经');
+    final reportedErrors = <FlutterErrorDetails>[];
+    final previousOnError = FlutterError.onError;
+    FlutterError.onError = reportedErrors.add;
+    addTearDown(() => FlutterError.onError = previousOnError);
 
-      await pumpWorkspace(tester, vault: vault);
-      await tester.tap(find.byKey(Key('resource-row-${note.id}')));
-      await tester.pump(const Duration(milliseconds: 250));
-      await switchToSourceMode(tester);
-      vault.failRenameReadback = true;
-      await enterTextInLiveMarkdownBlock(tester, '# 金刚经\n正文');
-      await tester.pump(const Duration(milliseconds: 1000));
-      await tester.pumpAndSettle();
-      FlutterError.onError = previousOnError;
+    await pumpWorkspace(tester, vault: vault);
+    await tester.tap(find.byKey(Key('resource-row-${note.id}')));
+    await tester.pump(const Duration(milliseconds: 250));
+    await switchToSourceMode(tester);
+    vault.failRenameReadback = true;
+    await enterTextInLiveMarkdownBlock(tester, '# 金刚经\n正文');
+    await tester.pump(const Duration(milliseconds: 1000));
+    await tester.pumpAndSettle();
+    FlutterError.onError = previousOnError;
 
-      expect(vault.updateCalls, 1);
-      expect(vault.renameCalls, 1);
-      expect(reportedErrors, hasLength(1));
-      expect(find.text(_reloadRequiredMessage), findsOneWidget);
-      expect(
-        tester
-            .widget<LiveMarkdownEditor>(find.byType(LiveMarkdownEditor))
-            .enabled,
-        isFalse,
-      );
+    expect(vault.updateCalls, 1);
+    expect(vault.renameCalls, 1);
+    expect(reportedErrors, isEmpty);
+    expect(find.text(_reloadRequiredMessage), findsNothing);
+    expect(
+      tester
+          .widget<LiveMarkdownEditor>(find.byType(LiveMarkdownEditor))
+          .enabled,
+      isTrue,
+    );
+    expect(
+      liveMarkdownDocumentController(tester, paneId: 1).text,
+      '# 金刚经\n正文\n',
+    );
 
-      liveMarkdownDocumentController(tester, paneId: 1).text =
-          '# 金刚经\nlater edit';
-      await tester.pump(const Duration(milliseconds: 10000));
-      await tester.tap(find.byKey(Key('resource-row-${other.id}')));
-      await tester.pump(const Duration(milliseconds: 250));
+    vault.failRenameReadback = false;
+    liveMarkdownDocumentController(tester, paneId: 1).text =
+        '# 金刚经\nlater edit';
+    await tester.pump(const Duration(milliseconds: 1000));
+    await tester.pumpAndSettle();
 
-      expect(vault.updateCalls, 1);
-      expect(vault.renameCalls, 1);
-      vault.failRenameReadback = false;
-      expect((await vault.readNote(note.id)).markdown, contains('正文'));
-    },
-  );
+    expect(vault.updateCalls, 2);
+    expect(vault.renameCalls, 2);
+    final saved = await vault.readNote(note.id);
+    expect(saved.path, '金刚经.md');
+    expect(saved.markdown, contains('later edit'));
+  });
 
   testWidgets(
     'save commit invariant requires reload and suppresses later saves',

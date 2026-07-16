@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:synapse/domain/vault/vault_resource.dart';
+import 'package:synapse/domain/vault/vault_resource_name.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
 import 'package:synapse/infrastructure/vault/vault_post_commit_error.dart';
 import 'package:synapse/presentation/workspace/state/note_document_session.dart';
@@ -39,97 +40,117 @@ void main() {
     });
 
     test(
-      'rename failure after markdown update is fatal and suppresses retries',
+      'title conflict rolls back persistence and keeps the session dirty',
       () async {
-        final vault = _TrackingVault();
-        final harness = _Harness(vault, scheduleEdits: false);
-        addTearDown(harness.dispose);
-        final session = await harness.createSession('Old Title');
-        vault.resetTracking();
-        vault.failRenames = true;
-        session.controller.text = '# New Title\nbody';
-
-        final result = await harness.coordinator.save(session);
-
-        expect(result.succeeded, isFalse);
-        expect(result.requiresReload, isTrue);
-        expect(result.error, isNull);
-        expect(result.fatalError, isA<WorkspaceCommitInvariantError>());
-        expect(result.fatalError!.phase, WorkspaceCommitPhase.hydrate);
-        expect(result.fatalError!.cause, isA<StateError>());
-        expect(harness.fatalErrors, [same(result.fatalError)]);
-        expect(vault.updateCalls, 1);
-        expect(vault.renameCalls, 1);
-
-        session.controller.text = '# New Title\nlater edit';
-        final retry = await harness.coordinator.save(session);
-
-        expect(retry.requiresReload, isTrue);
-        expect(vault.updateCalls, 1);
-        expect(vault.renameCalls, 1);
-      },
-    );
-
-    test(
-      'vault post-commit update failure is fatal and preserves the cause',
-      () async {
-        final cause = StateError('readback failed after write');
-        final causeStackTrace = StackTrace.current;
         final vault = _TrackingVault();
         final harness = _Harness(vault, scheduleEdits: false);
         addTearDown(harness.dispose);
         final session = await harness.createSession('Alpha');
+        await vault.createNote(parentPath: '', title: 'Beta');
+        final original = await vault.readNote(session.noteId);
         vault.resetTracking();
-        vault.postCommitUpdateError = VaultPostCommitError(
-          cause: cause,
-          causeStackTrace: causeStackTrace,
-        );
-        session.controller.text = '# Alpha\nchanged';
-
-        final result = await harness.coordinator.save(session);
-
-        expect(result.requiresReload, isTrue);
-        expect(result.error, isNull);
-        expect(result.fatalError!.phase, WorkspaceCommitPhase.hydrate);
-        expect(result.fatalError!.cause, same(cause));
-        expect(result.fatalError!.causeStackTrace, same(causeStackTrace));
-        expect(harness.fatalErrors, [same(result.fatalError)]);
-        expect(vault.updateCalls, 1);
-      },
-    );
-
-    test(
-      'rename readback failure is fatal and suppresses later saves',
-      () async {
-        final vault = _TrackingVault();
-        final harness = _Harness(vault, scheduleEdits: false);
-        addTearDown(harness.dispose);
-        final session = await harness.createSession('Old Title');
-        vault.resetTracking();
-        vault.failReads = true;
-        session.controller.text = '# New Title\nbody';
+        session.controller.text = '# beta\nunsaved body';
 
         final result = await harness.coordinator.save(session);
 
         expect(result.succeeded, isFalse);
-        expect(result.requiresReload, isTrue);
-        expect(result.error, isNull);
-        expect(result.fatalError, isA<WorkspaceCommitInvariantError>());
-        expect(result.fatalError!.phase, WorkspaceCommitPhase.hydrate);
-        expect(harness.fatalErrors, [same(result.fatalError)]);
-        expect(vault.updateCalls, 1);
-        expect(vault.renameCalls, 1);
-
-        session.controller.text = '# New Title\nlater edit';
-        harness.coordinator.schedule(session);
-        final report = await harness.coordinator.flush([session]);
-
-        expect(report.succeeded, isFalse);
-        expect(report.results.single.requiresReload, isTrue);
-        expect(vault.updateCalls, 1);
-        expect(vault.renameCalls, 1);
+        expect(result.requiresReload, isFalse);
+        expect(result.error, isA<VaultResourceNameConflictException>());
+        expect(session.controller.text, '# beta\nunsaved body');
+        expect(session.isDirty, isTrue);
+        expect(session.savePhase, NoteSavePhase.failed);
+        expect(session.lastSaveError, same(result.error));
+        final persisted = await vault.readNote(session.noteId);
+        expect(persisted.path, original.path);
+        expect(persisted.markdown, original.markdown);
       },
     );
+
+    test('rename failure rolls back markdown and allows retry', () async {
+      final vault = _TrackingVault();
+      final harness = _Harness(vault, scheduleEdits: false);
+      addTearDown(harness.dispose);
+      final session = await harness.createSession('Old Title');
+      vault.resetTracking();
+      vault.failRenames = true;
+      session.controller.text = '# New Title\nbody';
+
+      final result = await harness.coordinator.save(session);
+
+      expect(result.succeeded, isFalse);
+      expect(result.requiresReload, isFalse);
+      expect(result.error, isA<StateError>());
+      expect(result.fatalError, isNull);
+      expect(harness.fatalErrors, isEmpty);
+      expect(vault.updateCalls, 1);
+      expect(vault.renameCalls, 1);
+      expect((await vault.readNote(session.noteId)).title, 'Old Title');
+
+      vault.failRenames = false;
+      session.controller.text = '# New Title\nlater edit';
+      final retry = await harness.coordinator.save(session);
+
+      expect(retry.succeeded, isTrue);
+      expect(vault.updateCalls, 2);
+      expect(vault.renameCalls, 2);
+    });
+
+    test('transaction rolls back a post-commit update failure', () async {
+      final cause = StateError('readback failed after write');
+      final causeStackTrace = StackTrace.current;
+      final vault = _TrackingVault();
+      final harness = _Harness(vault, scheduleEdits: false);
+      addTearDown(harness.dispose);
+      final session = await harness.createSession('Alpha');
+      vault.resetTracking();
+      vault.postCommitUpdateError = VaultPostCommitError(
+        cause: cause,
+        causeStackTrace: causeStackTrace,
+      );
+      session.controller.text = '# Alpha\nchanged';
+
+      final result = await harness.coordinator.save(session);
+
+      expect(result.requiresReload, isFalse);
+      expect(result.error, same(vault.postCommitUpdateError));
+      expect(result.fatalError, isNull);
+      expect(harness.fatalErrors, isEmpty);
+      expect(vault.updateCalls, 1);
+      expect(
+        (await vault.readNote(session.noteId)).markdown,
+        isNot(contains('changed')),
+      );
+    });
+
+    test('rename readback failure rolls back and allows later saves', () async {
+      final vault = _TrackingVault();
+      final harness = _Harness(vault, scheduleEdits: false);
+      addTearDown(harness.dispose);
+      final session = await harness.createSession('Old Title');
+      vault.resetTracking();
+      vault.failReads = true;
+      session.controller.text = '# New Title\nbody';
+
+      final result = await harness.coordinator.save(session);
+
+      expect(result.succeeded, isFalse);
+      expect(result.requiresReload, isFalse);
+      expect(result.error, isA<StateError>());
+      expect(result.fatalError, isNull);
+      expect(harness.fatalErrors, isEmpty);
+      expect(vault.updateCalls, 1);
+      expect(vault.renameCalls, 1);
+
+      vault.failReads = false;
+      session.controller.text = '# New Title\nlater edit';
+      harness.coordinator.schedule(session);
+      final report = await harness.coordinator.flush([session]);
+
+      expect(report.succeeded, isTrue);
+      expect(report.results.single.succeeded, isTrue);
+      expect(vault.updateCalls, 2);
+      expect(vault.renameCalls, 2);
+    });
 
     test(
       'workspace commit invariant is fatal and suppresses later saves',

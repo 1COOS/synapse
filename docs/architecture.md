@@ -190,7 +190,7 @@ backend commit 成功后，`postCommitHydrate`、prepare/validate、apply 或 pu
 
 图片粘贴、导入、宽度调整、拖动和 proposal 等异步操作在 await 前捕获 `PaneEditorContext`。焦点切换不会改变发起目标；pane 重绑、关闭、session 移除、runtime 更换或 dispose 后，context 返回 stale target，不得把结果写入其他笔记。
 
-Live Markdown 继续遵守：活动 block 显示 Markdown marker，失焦后由预览隐藏；`TextSpan.toPlainText()` 必须与 backing controller text 完全一致；focus、selection 和 context menu 不得修改正文或插入空行。
+Live Markdown 继续遵守：活动 block 显示 Markdown marker，失焦后由预览隐藏；共享 inline parser 负责加粗、斜体、删除线、Obsidian `==高亮==`、转义、嵌套和代码范围；`TextSpan.toPlainText()` 必须与 backing controller text 完全一致；focus、selection 和 context menu 不得修改正文或插入空行。产品命令只开放 H1–H4，但 renderer 与 outline parser 继续兼容已有 H5/H6。
 
 ### 6.4 File Vault mutation journal
 
@@ -239,7 +239,9 @@ File Vault mutation 由 `.synapse/transactions/` 下的 WAL journal 保护，并
 
 ### 7.3 文件系统边界
 
-所有桌面文件操作必须限制在用户选择的 Vault root 内。路径解析需要拒绝 `../`、绝对路径注入和通过符号链接逃逸根目录；移动、重命名、复制和删除必须同步处理 `.md` 与同名 `.assets/`。当目标文件名因重命名、复制或移动冲突而改变时，必须同步改写正文中指向本笔记 assets 的 HTML/Markdown 图片路径，同时保持外链、其他笔记引用和 fenced code 不变。
+所有桌面文件操作必须限制在用户选择的 Vault root 内。路径解析需要拒绝 `../`、绝对路径注入和通过符号链接逃逸根目录；资源名使用跨平台 validator，并以 Unicode NFC + lowercase 比较同级冲突。移动、重命名、复制和删除必须同步处理 `.md` 与同名 `.assets/`。当目标文件名因重命名、复制或移动冲突而改变时，必须同步改写正文中指向本笔记 assets 的 HTML/Markdown 图片路径，同时保持外链、其他笔记引用和 fenced code 不变。显式 folder/note rename 与 create-folder 冲突直接失败，自动创建笔记、复制和移动才允许编号去重。
+
+笔记右键重命名和 H1 驱动的自动重命名都使用 save + rename 单事务。事务同时覆盖首个 H1、frontmatter、Markdown 文件、assets 目录及引用；冲突回滚后 session 继续保留用户当前正文与 dirty 状态，workspace 不进入 `reloadRequired`。
 
 ## 8. 平台与 Vault Access Lease
 

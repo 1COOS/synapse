@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:synapse/domain/vault/note_id.dart';
 import 'package:synapse/domain/vault/vault_resource.dart';
+import 'package:synapse/domain/vault/vault_resource_name.dart';
 import 'package:synapse/infrastructure/vault/file_vault_backend.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
 import 'package:synapse/infrastructure/vault/vault_backend.dart';
@@ -44,36 +45,38 @@ void _vaultBackendContract(
       await fixture.dispose();
     });
 
-    test('supports note and folder lifecycle with unique naming', () async {
-      final folder = await backend.createFolder(parentPath: '', title: '课程');
-      final duplicateFolder = await backend.createFolder(
-        parentPath: '',
-        title: '课程',
-      );
-      final nested = await backend.createFolder(
-        parentPath: folder.path,
-        title: '章节',
-      );
-      final note = await backend.createNote(
-        parentPath: nested.path,
-        title: '导论',
-      );
-      final duplicateNote = await backend.createNote(
-        parentPath: nested.path,
-        title: '导论',
-      );
+    test(
+      'supports note and folder lifecycle with automatic note naming',
+      () async {
+        final folder = await backend.createFolder(parentPath: '', title: '课程');
+        final duplicateFolder = await backend.createFolder(
+          parentPath: '',
+          title: '归档',
+        );
+        final nested = await backend.createFolder(
+          parentPath: folder.path,
+          title: '章节',
+        );
+        final note = await backend.createNote(
+          parentPath: nested.path,
+          title: '导论',
+        );
+        final duplicateNote = await backend.createNote(
+          parentPath: nested.path,
+          title: '导论',
+        );
 
-      expect(folder.path, '课程');
-      expect(duplicateFolder.path, '课程 2');
-      expect(NoteId.tryParse(note.id), isNotNull);
-      expect(NoteId.tryParse(duplicateNote.id), isNotNull);
-      expect(duplicateNote.id, isNot(note.id));
-      expect(note.path, '课程/章节/导论.md');
-      expect(duplicateNote.path, '课程/章节/导论 2.md');
+        expect(folder.path, '课程');
+        expect(duplicateFolder.path, '归档');
+        expect(NoteId.tryParse(note.id), isNotNull);
+        expect(NoteId.tryParse(duplicateNote.id), isNotNull);
+        expect(duplicateNote.id, isNot(note.id));
+        expect(note.path, '课程/章节/导论.md');
+        expect(duplicateNote.path, '课程/章节/导论 2.md');
 
-      final updated = await backend.updateMarkdown(
-        noteId: note.id,
-        markdown: '''---
+        final updated = await backend.updateMarkdown(
+          noteId: note.id,
+          markdown: '''---
 title: 隐藏标题
 createdAt: 2026-07-13 10:00
 updatedAt: 2026-07-13 10:01
@@ -85,46 +88,128 @@ updatedAt: 2026-07-13 10:01
 
 正文
 ''',
-      );
-      final appended = await backend.appendMarkdown(
-        noteId: note.id,
-        markdown: '## 第二节\n\n补充',
-      );
+        );
+        final appended = await backend.appendMarkdown(
+          noteId: note.id,
+          markdown: '## 第二节\n\n补充',
+        );
 
-      expect(updated.title, '可见标题');
-      expect(updated.id, note.id);
-      expect(updated.markdown, contains('synapseId: ${note.id}'));
-      expect(updated.outline.single.title, '可见标题');
-      expect(updated.outline.single.children.single.title, '第一节');
-      expect(appended.markdown, contains('## 第二节'));
+        expect(updated.title, '可见标题');
+        expect(updated.id, note.id);
+        expect(updated.markdown, contains('synapseId: ${note.id}'));
+        expect(updated.outline.single.title, '可见标题');
+        expect(updated.outline.single.children.single.title, '第一节');
+        expect(appended.markdown, contains('## 第二节'));
 
-      final renamed = await backend.renameNote(noteId: note.id, title: '新导论');
-      final moved = await backend.moveNote(
-        noteId: renamed.id,
-        parentPath: duplicateFolder.path,
-      );
-      final copied = await backend.copyNote(noteId: moved.id);
+        final renamed = await backend.renameNote(noteId: note.id, title: '新导论');
+        final moved = await backend.moveNote(
+          noteId: renamed.id,
+          parentPath: duplicateFolder.path,
+        );
+        final copied = await backend.copyNote(noteId: moved.id);
 
-      expect(renamed.id, note.id);
-      expect(moved.id, note.id);
-      expect(copied.id, isNot(note.id));
-      expect(NoteId.tryParse(copied.id), isNotNull);
-      expect(renamed.path, '课程/章节/新导论.md');
-      expect(moved.path, '课程 2/新导论.md');
-      expect(copied.path, '课程 2/新导论 2.md');
-      expect((await backend.readNote(copied.id)).title, '新导论 2');
+        expect(renamed.id, note.id);
+        expect(moved.id, note.id);
+        expect(copied.id, isNot(note.id));
+        expect(NoteId.tryParse(copied.id), isNotNull);
+        expect(renamed.path, '课程/章节/新导论.md');
+        expect(moved.path, '归档/新导论.md');
+        expect(copied.path, '归档/新导论 2.md');
+        expect((await backend.readNote(copied.id)).title, '新导论 2');
 
-      final resources = await backend.listResources();
-      expect(resources.map((node) => node.path), ['课程', '课程 2']);
+        final resources = await backend.listResources();
+        expect(resources.map((node) => node.path), ['归档', '课程']);
 
-      await backend.deleteNote(moved.id);
-      await expectLater(backend.readNote(moved.id), throwsA(isA<StateError>()));
-      await backend.deleteFolder(folder.path);
+        await backend.deleteNote(moved.id);
+        await expectLater(
+          backend.readNote(moved.id),
+          throwsA(isA<StateError>()),
+        );
+        await backend.deleteFolder(folder.path);
+        await expectLater(
+          backend.readNote(duplicateNote.id),
+          throwsA(isA<StateError>()),
+        );
+      },
+    );
+
+    test('rejects invalid portable resource names', () async {
+      for (final invalid in <String>[
+        '',
+        '   ',
+        '.',
+        '..',
+        '尾随空格 ',
+        '尾随点.',
+        'a/b',
+        'a:b',
+        'CON',
+        'LPT1.txt',
+        '控制\u007F字符',
+      ]) {
+        await expectLater(
+          backend.createFolder(parentPath: '', title: invalid),
+          throwsA(isA<VaultResourceNameValidationException>()),
+          reason: invalid,
+        );
+      }
       await expectLater(
-        backend.readNote(duplicateNote.id),
-        throwsA(isA<StateError>()),
+        backend.createNote(parentPath: '', title: 'bad?name'),
+        throwsA(isA<VaultResourceNameValidationException>()),
       );
     });
+
+    test('uses NFC and case-insensitive conflict comparison', () async {
+      await backend.createFolder(parentPath: '', title: 'Caf\u00e9');
+      await expectLater(
+        backend.createFolder(parentPath: '', title: 'Cafe\u0301'),
+        throwsA(isA<VaultResourceNameConflictException>()),
+      );
+
+      final alpha = await backend.createNote(parentPath: '', title: 'Alpha');
+      final beta = await backend.createNote(parentPath: '', title: 'Beta');
+      await expectLater(
+        backend.renameNote(noteId: beta.id, title: 'alpha'),
+        throwsA(isA<VaultResourceNameConflictException>()),
+      );
+      final caseOnly = await backend.renameNote(
+        noteId: alpha.id,
+        title: 'ALPHA',
+      );
+      expect(caseOnly.title, 'ALPHA');
+      expect(caseOnly.path, 'ALPHA.md');
+    });
+
+    test(
+      'rolls back markdown and path when transactional rename conflicts',
+      () async {
+        final alpha = await backend.createNote(parentPath: '', title: 'Alpha');
+        await backend.createNote(parentPath: '', title: 'Beta');
+        final original = await backend.readNote(alpha.id);
+
+        await expectLater(
+          backend.runMutationTransaction<void>(
+            label: 'save-and-rename-note',
+            action: () async {
+              await backend.updateMarkdown(
+                noteId: alpha.id,
+                markdown: '# Beta\n\nchanged',
+              );
+              await backend.renameNote(noteId: alpha.id, title: 'Beta');
+            },
+          ),
+          throwsA(isA<VaultResourceNameConflictException>()),
+        );
+
+        final rolledBack = await backend.readNote(alpha.id);
+        expect(rolledBack.path, original.path);
+        expect(rolledBack.markdown, original.markdown);
+        expect((await backend.listResources()).map((node) => node.title), [
+          'Alpha',
+          'Beta',
+        ]);
+      },
+    );
 
     test('supports source and proposal CRUD', () async {
       final note = await backend.createNote(parentPath: '', title: '材料');

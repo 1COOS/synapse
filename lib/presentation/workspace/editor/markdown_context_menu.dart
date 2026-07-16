@@ -102,6 +102,8 @@ class NoteContextMenu extends StatelessWidget {
     return WorkspaceContextMenuPanel(
       panelKey: const Key('note-context-menu'),
       width: 204,
+      autofocusFirst: true,
+      onDismiss: dismissAllMacContextMenus,
       children: children,
     );
   }
@@ -115,8 +117,12 @@ class NoteMenuAction extends StatefulWidget {
     required this.enabled,
     required this.onPressed,
     this.trailing,
+    this.checked = false,
+    this.shortcutLabel,
+    this.focused = false,
     this.highlighted = false,
     this.onHoverChanged,
+    this.onOpenSubmenu,
     this.dismissContextMenuOnPressed = true,
   });
 
@@ -125,8 +131,12 @@ class NoteMenuAction extends StatefulWidget {
   final bool enabled;
   final FutureOr<void> Function()? onPressed;
   final Widget? trailing;
+  final bool checked;
+  final String? shortcutLabel;
+  final bool focused;
   final bool highlighted;
   final ValueChanged<bool>? onHoverChanged;
+  final VoidCallback? onOpenSubmenu;
   final bool dismissContextMenuOnPressed;
 
   @override
@@ -142,8 +152,12 @@ class _NoteMenuActionState extends State<NoteMenuAction> {
       enabled: widget.enabled,
       onPressed: widget.onPressed,
       trailing: widget.trailing,
+      checked: widget.checked,
+      shortcutLabel: widget.shortcutLabel,
+      focused: widget.focused,
       highlighted: widget.highlighted,
       onHoverChanged: widget.onHoverChanged,
+      onOpenSubmenu: widget.onOpenSubmenu,
       dismissContextMenuOnPressed: widget.dismissContextMenuOnPressed,
     );
   }
@@ -156,6 +170,7 @@ class NoteMenuSubmenu extends StatefulWidget {
     required this.submenuKey,
     required this.label,
     required this.children,
+    this.enabled = true,
     this.tapRegionGroupId,
   });
 
@@ -163,6 +178,7 @@ class NoteMenuSubmenu extends StatefulWidget {
   final Key submenuKey;
   final String label;
   final List<Widget> children;
+  final bool enabled;
   final Object? tapRegionGroupId;
 
   @override
@@ -197,6 +213,11 @@ class _NoteMenuSubmenuState extends State<NoteMenuSubmenu> {
     if (_overlayEntry != null) {
       return;
     }
+    for (final closeSubmenu in List<VoidCallback>.of(_openNoteSubmenuClosers)) {
+      if (closeSubmenu != _closeFromOutside) {
+        closeSubmenu();
+      }
+    }
     _closeTimer?.cancel();
     final appearance = WorkspaceAppearanceScope.of(context);
     _overlayEntry = OverlayEntry(
@@ -211,7 +232,7 @@ class _NoteMenuSubmenuState extends State<NoteMenuSubmenu> {
               showWhenUnlinked: false,
               targetAnchor: Alignment.topRight,
               followerAnchor: Alignment.topLeft,
-              offset: const Offset(6, -8),
+              offset: const Offset(0, -8),
               child: MouseRegion(
                 onEnter: (_) {
                   _submenuHovered = true;
@@ -221,18 +242,26 @@ class _NoteMenuSubmenuState extends State<NoteMenuSubmenu> {
                   _submenuHovered = false;
                   _scheduleClose();
                 },
-                child: Align(
-                  alignment: Alignment.topLeft,
-                  widthFactor: 1,
-                  heightFactor: 1,
-                  child: TapRegion(
-                    groupId: widget.tapRegionGroupId,
-                    child: WorkspaceAppearanceScope(
-                      appearance: appearance,
-                      child: WorkspaceContextMenuPanel(
-                        panelKey: widget.submenuKey,
-                        width: 136,
-                        children: widget.children,
+                child: Padding(
+                  padding: const EdgeInsets.only(left: 6),
+                  child: Align(
+                    alignment: Alignment.topLeft,
+                    widthFactor: 1,
+                    heightFactor: 1,
+                    child: TapRegion(
+                      groupId: widget.tapRegionGroupId,
+                      child: WorkspaceAppearanceScope(
+                        appearance: appearance,
+                        child: WorkspaceContextMenuPanel(
+                          panelKey: widget.submenuKey,
+                          width: 136,
+                          autofocusFirst: true,
+                          onDismiss: dismissAllMacContextMenus,
+                          onNavigateBack: () {
+                            _hideOverlay();
+                          },
+                          children: widget.children,
+                        ),
                       ),
                     ),
                   ),
@@ -265,7 +294,7 @@ class _NoteMenuSubmenuState extends State<NoteMenuSubmenu> {
 
   void _scheduleClose() {
     _closeTimer?.cancel();
-    _closeTimer = Timer(const Duration(milliseconds: 120), () {
+    _closeTimer = Timer(const Duration(milliseconds: 250), () {
       if (!_parentHovered && !_submenuHovered) {
         _hideOverlay();
       }
@@ -279,10 +308,13 @@ class _NoteMenuSubmenuState extends State<NoteMenuSubmenu> {
       child: NoteMenuAction(
         itemKey: widget.itemKey,
         label: widget.label,
-        enabled: true,
+        enabled: widget.enabled,
         highlighted: _open,
         dismissContextMenuOnPressed: false,
         onHoverChanged: (hovered) {
+          if (!widget.enabled) {
+            return;
+          }
           _parentHovered = hovered;
           if (hovered) {
             _showOverlay();
@@ -291,6 +323,9 @@ class _NoteMenuSubmenuState extends State<NoteMenuSubmenu> {
           }
         },
         onPressed: () {
+          if (!widget.enabled) {
+            return;
+          }
           _parentHovered = true;
           if (_open) {
             _hideOverlay();
@@ -298,10 +333,13 @@ class _NoteMenuSubmenuState extends State<NoteMenuSubmenu> {
             _showOverlay();
           }
         },
-        trailing: const Text(
+        onOpenSubmenu: widget.enabled ? _showOverlay : null,
+        trailing: Text(
           '›',
           style: TextStyle(
-            color: workspaceResourceMenuText,
+            color: widget.enabled
+                ? workspaceResourceMenuText
+                : workspaceNoteMenuDisabledText,
             fontSize: 22,
             fontWeight: FontWeight.w400,
             height: 1,

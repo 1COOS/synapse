@@ -1,4 +1,4 @@
-import '../../domain/markdown/markdown_document.dart';
+import '../../domain/vault/vault_resource_name.dart';
 import 'memory_vault_state.dart';
 
 final class MemoryVaultPaths {
@@ -51,21 +51,17 @@ final class MemoryVaultPaths {
     }
   }
 
-  String uniqueFolderPath(
+  String resourceFolderPath(
     String parentPath,
     String title, {
     String? excludePath,
   }) {
-    final base = joinPath(parentPath, sanitizeFileName(title));
-    var candidate = base;
-    var suffix = 2;
-    while (candidate != excludePath &&
-        (state.folders.contains(candidate) ||
-            state.notes.values.any((note) => note.path == candidate))) {
-      candidate = '$base $suffix';
-      suffix += 1;
+    final name = requireValidVaultResourceName(title);
+    final names = _canonicalResourceNames(parentPath, excludePath: excludePath);
+    if (names.contains(canonicalVaultResourceName(name))) {
+      throw VaultResourceNameConflictException(name);
     }
-    return candidate;
+    return joinPath(parentPath, name);
   }
 
   String uniqueNotePath(
@@ -73,17 +69,28 @@ final class MemoryVaultPaths {
     String title, {
     String? excludePath,
   }) {
-    final base = joinPath(parentPath, '${sanitizeFileName(title)}.md');
-    final stem = withoutExtension(base);
-    var candidate = base;
+    final base = requireValidVaultResourceName(title);
+    final names = _canonicalResourceNames(parentPath, excludePath: excludePath);
+    var candidateTitle = base;
     var suffix = 2;
-    while (candidate != excludePath &&
-        (state.notes.values.any((note) => note.path == candidate) ||
-            state.folders.contains(candidate))) {
-      candidate = '$stem $suffix.md';
+    while (names.contains(canonicalVaultResourceName(candidateTitle))) {
+      candidateTitle = '$base $suffix';
       suffix += 1;
     }
-    return candidate;
+    return joinPath(parentPath, '$candidateTitle.md');
+  }
+
+  String resourceNotePath(
+    String parentPath,
+    String title, {
+    String? excludePath,
+  }) {
+    final name = requireValidVaultResourceName(title);
+    final names = _canonicalResourceNames(parentPath, excludePath: excludePath);
+    if (names.contains(canonicalVaultResourceName(name))) {
+      throw VaultResourceNameConflictException(name);
+    }
+    return joinPath(parentPath, '$name.md');
   }
 
   String uniqueAttachmentPath(String noteId, String filename) {
@@ -103,5 +110,20 @@ final class MemoryVaultPaths {
       }
       index += 1;
     }
+  }
+
+  Set<String> _canonicalResourceNames(
+    String parentPath, {
+    String? excludePath,
+  }) {
+    final parent = normalizeFolderPath(parentPath);
+    return <String>{
+      for (final folder in state.folders)
+        if (dirname(folder) == parent && folder != excludePath)
+          canonicalVaultResourceName(basename(folder)),
+      for (final note in state.notes.values)
+        if (dirname(note.path) == parent && note.path != excludePath)
+          canonicalVaultResourceName(basenameWithoutExtension(note.path)),
+    };
   }
 }

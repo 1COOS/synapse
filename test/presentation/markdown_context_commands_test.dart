@@ -11,12 +11,14 @@ void main() {
   }
 
   group('Markdown context inline commands', () {
-    test('wrap selected text with bold italic and strikethrough markers', () {
+    test('applies inline formats and preserves the visible selection', () {
       final source = value('Alpha beta gamma', start: 6, end: 10);
 
+      final bold = applyMarkdownInlineFormat(source, MarkdownInlineFormat.bold);
+      expect(bold.text, 'Alpha **beta** gamma');
       expect(
-        applyMarkdownInlineFormat(source, MarkdownInlineFormat.bold).text,
-        'Alpha **beta** gamma',
+        bold.selection,
+        const TextSelection(baseOffset: 8, extentOffset: 12),
       );
       expect(
         applyMarkdownInlineFormat(source, MarkdownInlineFormat.italic).text,
@@ -29,6 +31,75 @@ void main() {
         ).text,
         'Alpha ~~beta~~ gamma',
       );
+      expect(
+        applyMarkdownInlineFormat(source, MarkdownInlineFormat.highlight).text,
+        'Alpha ==beta== gamma',
+      );
+    });
+
+    test('toggles an existing inline format without disturbing nesting', () {
+      final source = value('Alpha **==beta==** gamma', start: 10, end: 14);
+
+      final updated = applyMarkdownInlineFormat(
+        source,
+        MarkdownInlineFormat.highlight,
+      );
+
+      expect(updated.text, 'Alpha **beta** gamma');
+      expect(
+        updated.selection,
+        const TextSelection(baseOffset: 8, extentOffset: 12),
+      );
+    });
+
+    test('normalizes a mixed selection before applying one format', () {
+      final source = value('**Alpha** beta', start: 0, end: 14);
+
+      final updated = applyMarkdownInlineFormat(
+        source,
+        MarkdownInlineFormat.bold,
+      );
+
+      expect(updated.text, '**Alpha beta**');
+      expect(
+        updated.selection,
+        const TextSelection(baseOffset: 2, extentOffset: 12),
+      );
+    });
+
+    test('applies inline formats to each non-empty selected line', () {
+      final source = value('Alpha\n\nBeta', start: 0, end: 11);
+
+      final updated = applyMarkdownInlineFormat(
+        source,
+        MarkdownInlineFormat.highlight,
+      );
+
+      expect(updated.text, '==Alpha==\n\n==Beta==');
+      expect(
+        updated.selection,
+        const TextSelection(baseOffset: 2, extentOffset: 17),
+      );
+    });
+
+    test('detects active formats and disables commands inside code', () {
+      final formatted = markdownCommandState(
+        value('**==Alpha==**', start: 4, end: 9),
+      );
+      final code = markdownCommandState(
+        value('Use `code` now', start: 5, end: 9),
+      );
+
+      expect(formatted.canFormat, isTrue);
+      expect(
+        formatted.activeInlineFormats,
+        containsAll(<MarkdownInlineFormat>{
+          MarkdownInlineFormat.bold,
+          MarkdownInlineFormat.highlight,
+        }),
+      );
+      expect(code.inCode, isTrue);
+      expect(code.canUseStructuralCommands, isFalse);
     });
   });
 
@@ -55,6 +126,28 @@ void main() {
       expect(
         applyMarkdownParagraphStyle(source, MarkdownParagraphStyle.body).text,
         'Alpha\nBeta\nGamma',
+      );
+    });
+
+    test('toggles blockquotes on the current or selected lines', () {
+      final source = value('Alpha\nBeta', start: 0, end: 10);
+      final quoted = applyMarkdownParagraphStyle(
+        source,
+        MarkdownParagraphStyle.blockquote,
+      );
+
+      expect(quoted.text, '> Alpha\n> Beta');
+      expect(
+        applyMarkdownParagraphStyle(
+          quoted.copyWith(
+            selection: TextSelection(
+              baseOffset: 0,
+              extentOffset: quoted.text.length,
+            ),
+          ),
+          MarkdownParagraphStyle.blockquote,
+        ).text,
+        'Alpha\nBeta',
       );
     });
   });
@@ -86,25 +179,28 @@ void main() {
   });
 
   group('Markdown context insertion commands', () {
-    test('inserts table block with surrounding blank lines', () {
-      final source = value('Alpha', start: 5);
+    test(
+      'inserts table after the current block without replacing selection',
+      () {
+        final source = value('Alpha beta', start: 0, end: 5);
 
-      expect(
-        insertMarkdownBlock(source, MarkdownInsertion.table).text,
-        'Alpha\n\n| 列 1 | 列 2 |\n| --- | --- |\n|  |  |',
-      );
-    });
+        final updated = insertMarkdownBlock(source, MarkdownInsertion.table);
 
-    test('inserts a quoted annotation and horizontal rule', () {
-      final source = value('Alpha', start: 0);
+        expect(
+          updated.text,
+          'Alpha beta\n\n| 列 1 | 列 2 |\n| --- | --- |\n|  |  |',
+        );
+        expect(updated.selection.isCollapsed, isTrue);
+        expect(updated.selection.extentOffset, updated.text.indexOf('列 1'));
+      },
+    );
 
-      expect(
-        insertMarkdownBlock(source, MarkdownInsertion.annotation).text,
-        '> 标注\n\nAlpha',
-      );
+    test('inserts a horizontal rule followed by an editable blank block', () {
+      final source = value('Alpha', start: 0, end: 5);
+
       expect(
         insertMarkdownBlock(source, MarkdownInsertion.divider).text,
-        '---\n\nAlpha',
+        'Alpha\n\n---\n\n',
       );
     });
   });

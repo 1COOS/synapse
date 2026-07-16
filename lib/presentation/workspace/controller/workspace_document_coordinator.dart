@@ -1,4 +1,6 @@
+import '../../../domain/markdown/markdown_document.dart';
 import '../../../domain/vault/vault_resource.dart';
+import '../../../infrastructure/vault/vault_post_commit_error.dart';
 import '../state/note_document_session.dart';
 import '../state/note_save_coordinator.dart';
 import '../state/note_session_registry.dart';
@@ -174,6 +176,87 @@ final class WorkspaceDocumentCoordinator {
                     id,
               },
               message: '文件夹已重命名',
+              selectedPreviewImageSrc: null,
+            ),
+          );
+        },
+      ),
+    );
+    return _actionResult(result);
+  }
+
+  Future<WorkspaceActionResult> renameNote({
+    required VaultResourceNode note,
+    required String newName,
+  }) async {
+    final runtime = _runtimes.requireCurrent();
+    final vault = runtime.vault;
+    final oldNoteId = note.id;
+    final targetSession = _sessions.sessionFor(oldNoteId);
+    final bodySnapshot = targetSession?.controller.text;
+    final result = await _mutations.run<_NoteHydration>(
+      WorkspaceMutationPlan<_NoteHydration>(
+        affectedNoteIds: {oldNoteId},
+        dirtyDisposition: DirtyDisposition.discard,
+        commitBackend: () async {
+          late VaultNote renamed;
+          try {
+            renamed = await vault.runMutationTransaction<VaultNote>(
+              label: 'rename-note',
+              action: () async {
+                if (targetSession != null && bodySnapshot != null) {
+                  final body = markdownBodyWithTitle(bodySnapshot, newName);
+                  final markdown =
+                      MarkdownDocument.parse(targetSession.note.markdown)
+                          .copyWithSyncedBody(
+                            body,
+                            updatedAt: DateTime.now().toUtc(),
+                          )
+                          .toMarkdown();
+                  await vault.updateMarkdown(
+                    noteId: oldNoteId,
+                    markdown: markdown,
+                  );
+                }
+                return vault.renameNote(noteId: oldNoteId, title: newName);
+              },
+            );
+          } on VaultPostCommitError catch (error) {
+            Error.throwWithStackTrace(error.cause, error.causeStackTrace);
+          }
+          return WorkspaceBackendCommit(
+            postCommitHydrate: () async {
+              final loaded = await vault.readNote(renamed.id);
+              final proposals = await vault.listProposals(loaded.id);
+              return VaultMutationDelta(
+                value: _NoteHydration(note: loaded, proposals: proposals),
+                remappedNoteIds: {oldNoteId: loaded.id},
+                refreshedNotesByNewId: {loaded.id: loaded},
+                resources: await vault.listResources(),
+              );
+            },
+          );
+        },
+        prepareCommit: (delta) {
+          final loaded = delta.value.note;
+          return _commits.prepare(
+            delta,
+            savedNoteCommit: targetSession == null
+                ? null
+                : SavedNoteSessionCommit(
+                    session: targetSession,
+                    oldNoteId: oldNoteId,
+                    savedNote: loaded,
+                    preserveCurrentBody: false,
+                  ),
+            replacementProposalsByNoteId: {loaded.id: delta.value.proposals},
+            patch: WorkspaceStatePatch(
+              resources: delta.resources,
+              selectedResourceId: _readState().selectedResourceId == oldNoteId
+                  ? loaded.id
+                  : _readState().selectedResourceId,
+              searchResults: const [],
+              message: '笔记已重命名',
               selectedPreviewImageSrc: null,
             ),
           );

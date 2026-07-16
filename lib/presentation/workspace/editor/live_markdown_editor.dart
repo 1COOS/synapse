@@ -1,8 +1,11 @@
 import 'dart:async';
 
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/rendering.dart';
+import 'package:flutter/services.dart';
 
+import '../../cupertino/markdown_context_commands.dart';
 import '../../cupertino/markdown_live_blocks.dart';
 import '../../cupertino/workspace/workspace_theme.dart';
 import 'live_markdown_context_menu.dart';
@@ -66,6 +69,7 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
   final _editorFocusNode = FocusNode();
   final _editingSessionTapGroup = Object();
   var _openContextMenuCount = 0;
+  var _autofocusInsertedTable = false;
 
   @override
   void initState() {
@@ -172,6 +176,14 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
       return;
     }
     if (_activeBlockIsTable()) {
+      if (_autofocusInsertedTable) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted && _autofocusInsertedTable) {
+            setState(() => _autofocusInsertedTable = false);
+          }
+        });
+        return;
+      }
       _focusEditorSession();
     } else {
       _focusBlockEditor();
@@ -294,8 +306,24 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
   }
 
   void _handleEditorControllerChanged() {
-    if (mounted) {
-      setState(() {});
+    if (!mounted) {
+      return;
+    }
+    final insertion = _editorController.takePendingInsertionFocus();
+    setState(() {
+      if (insertion != null) {
+        _autofocusInsertedTable = insertion == MarkdownInsertion.table;
+      }
+    });
+    if (insertion == MarkdownInsertion.divider) {
+      _focusBlockEditor();
+    }
+    if (insertion == MarkdownInsertion.table) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && _autofocusInsertedTable) {
+          setState(() => _autofocusInsertedTable = false);
+        }
+      });
     }
   }
 
@@ -425,15 +453,81 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
     );
   }
 
-  void _showContextMenuAt(Offset globalPosition) {
+  void _showContextMenuAt(
+    Offset globalPosition, {
+    MarkdownCommandTarget? menuTarget,
+  }) {
+    final resolvedTarget =
+        menuTarget ?? _editorController.captureCommandTargetForMenu();
     ContextMenuController().show(
       context: context,
       contextMenuBuilder: (context) => _buildContextMenuForAnchors(
         context,
         TextSelectionToolbarAnchors(primaryAnchor: globalPosition),
+        menuTarget: resolvedTarget,
       ),
       debugRequiredFor: widget,
     );
+  }
+
+  void _openContextMenuFromKeyboard() {
+    if (_editorController.activeOffset == null) {
+      return;
+    }
+    final renderEditable = _findRenderEditable(
+      _blockFocusNode.context?.findRenderObject(),
+    );
+    Offset anchor;
+    if (renderEditable != null && renderEditable.attached) {
+      final selection = _editorController.normalizedBlockSelection();
+      final caret = renderEditable.getLocalRectForCaret(
+        TextPosition(offset: selection.extentOffset),
+      );
+      anchor = renderEditable.localToGlobal(caret.bottomCenter);
+    } else {
+      final renderBox = context.findRenderObject();
+      if (renderBox is! RenderBox || !renderBox.attached) {
+        return;
+      }
+      anchor = renderBox.localToGlobal(renderBox.paintBounds.center);
+    }
+    _showContextMenuAt(anchor);
+  }
+
+  void _applyInlineShortcut(MarkdownInlineFormat format) {
+    if (!widget.enabled || widget.busy) {
+      return;
+    }
+    _editorController.applyInlineFormat(format, busy: widget.busy);
+  }
+
+  Map<ShortcutActivator, VoidCallback> _editorShortcuts() {
+    final usesMeta = !kIsWeb && defaultTargetPlatform == TargetPlatform.macOS;
+    return <ShortcutActivator, VoidCallback>{
+      SingleActivator(
+        LogicalKeyboardKey.keyB,
+        meta: usesMeta,
+        control: !usesMeta,
+      ): () =>
+          _applyInlineShortcut(MarkdownInlineFormat.bold),
+      SingleActivator(
+        LogicalKeyboardKey.keyI,
+        meta: usesMeta,
+        control: !usesMeta,
+      ): () =>
+          _applyInlineShortcut(MarkdownInlineFormat.italic),
+      SingleActivator(
+        LogicalKeyboardKey.keyV,
+        shift: true,
+        meta: usesMeta,
+        control: !usesMeta,
+      ): () =>
+          unawaited(_editorController.pastePlainText(busy: widget.busy)),
+      const SingleActivator(LogicalKeyboardKey.f10, shift: true):
+          _openContextMenuFromKeyboard,
+      const SingleActivator(LogicalKeyboardKey.contextMenu):
+          _openContextMenuFromKeyboard,
+    };
   }
 
   bool _globalPositionHitsBlockEditor(Offset globalPosition) {
@@ -524,48 +618,51 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
         ? null
         : _editorController.nonBlankBlockIndexForOffset(blocks, activeOffset);
 
-    return TapRegion(
-      groupId: _editingSessionTapGroup,
-      onTapOutside: (_) => _clearActiveBlock(),
-      child: Focus(
-        focusNode: _editorFocusNode,
-        onFocusChange: _handleEditorFocusChanged,
-        child: GestureDetector(
-          behavior: HitTestBehavior.translucent,
-          onTap: _clearActiveBlock,
-          onSecondaryTapDown: (details) {
-            if (_globalPositionHitsBlockEditor(details.globalPosition)) {
-              return;
-            }
-            _openContextMenuAtDocumentEnd(blocks, details.globalPosition);
-          },
-          child: CupertinoScrollbar(
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.fromLTRB(16, 54, 16, 16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  for (var index = 0; index < blocks.length; index += 1)
-                    _buildBlock(blocks[index], index, activeIndex),
-                  if (_editorController.activeTrailingInsertion)
-                    _buildVirtualTrailingTextBlockEditor(blocks.length),
-                  GestureDetector(
-                    key: const Key('live-markdown-end-edit-target'),
-                    behavior: HitTestBehavior.opaque,
-                    onTap: _activateTrailingTextBlock,
-                    onSecondaryTapDown: (details) {
-                      _openContextMenuAtDocumentEnd(
-                        blocks,
-                        details.globalPosition,
-                      );
-                    },
-                    child: SizedBox(
-                      height: _editorController.activeTrailingInsertion
-                          ? 24
-                          : 96,
+    return CallbackShortcuts(
+      bindings: _editorShortcuts(),
+      child: TapRegion(
+        groupId: _editingSessionTapGroup,
+        onTapOutside: (_) => _clearActiveBlock(),
+        child: Focus(
+          focusNode: _editorFocusNode,
+          onFocusChange: _handleEditorFocusChanged,
+          child: GestureDetector(
+            behavior: HitTestBehavior.translucent,
+            onTap: _clearActiveBlock,
+            onSecondaryTapDown: (details) {
+              if (_globalPositionHitsBlockEditor(details.globalPosition)) {
+                return;
+              }
+              _openContextMenuAtDocumentEnd(blocks, details.globalPosition);
+            },
+            child: CupertinoScrollbar(
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.fromLTRB(16, 54, 16, 16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    for (var index = 0; index < blocks.length; index += 1)
+                      _buildBlock(blocks[index], index, activeIndex),
+                    if (_editorController.activeTrailingInsertion)
+                      _buildVirtualTrailingTextBlockEditor(blocks.length),
+                    GestureDetector(
+                      key: const Key('live-markdown-end-edit-target'),
+                      behavior: HitTestBehavior.opaque,
+                      onTap: _activateTrailingTextBlock,
+                      onSecondaryTapDown: (details) {
+                        _openContextMenuAtDocumentEnd(
+                          blocks,
+                          details.globalPosition,
+                        );
+                      },
+                      child: SizedBox(
+                        height: _editorController.activeTrailingInsertion
+                            ? 24
+                            : 96,
+                      ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
             ),
           ),
@@ -641,6 +738,7 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
       blockIndex: index,
       table: table,
       enabled: widget.enabled,
+      autofocusFirstCell: _autofocusInsertedTable,
       onFocusPane: widget.onFocusPane,
       onChanged: (table) => _replaceTableBlock(block, table),
     );

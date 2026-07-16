@@ -11,6 +11,7 @@ const workspaceSoftLineColor = Color(0xFFE5E5EA);
 const workspaceTextColor = CupertinoColors.label;
 const workspaceMutedColor = CupertinoColors.secondaryLabel;
 const workspaceDangerColor = CupertinoColors.systemRed;
+const workspaceMarkdownHighlightColor = Color(0x59FFCC00);
 const workspaceBorderRadius = BorderRadius.all(Radius.circular(8));
 const workspaceResourceTitleStyle = TextStyle(
   fontSize: 14,

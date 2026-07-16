@@ -395,6 +395,41 @@ void main() {
       },
     );
 
+    test(
+      'disables semantic indexing when provider config is incomplete',
+      () async {
+        const settings = SynapseSettings(
+          providerConfig: ProviderConfig(
+            baseUrl: 'https://api.example.com/v1',
+            apiKey: '',
+            chatModel: 'chat-model',
+            visionModel: 'vision-model',
+            embeddingModel: 'embedding-model',
+          ),
+        );
+        final semanticSearchFlags = <bool>[];
+        final container = ProviderContainer(
+          overrides: [
+            workspaceDependenciesProvider.overrideWithValue(
+              createWorkspaceDependencies(
+                initialVault: MemoryVaultBackend(),
+                settingsStore: FakeSettingsStore(initialSettings: settings),
+                searchIndexFactory: (_, semanticSearchEnabled) {
+                  semanticSearchFlags.add(semanticSearchEnabled);
+                  return _RecordingSearchIndex();
+                },
+              ),
+            ),
+          ],
+        );
+        addTearDown(container.dispose);
+
+        await container.read(workspaceControllerProvider.future);
+
+        expect(semanticSearchFlags, [false, false]);
+      },
+    );
+
     test('exposes settings dialog capability through the controller', () async {
       const settings = SynapseSettings(
         providerConfig: ProviderConfig(

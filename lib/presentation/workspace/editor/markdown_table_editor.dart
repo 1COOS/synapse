@@ -220,6 +220,7 @@ class LiveMarkdownTableEditor extends StatefulWidget {
     required this.blockIndex,
     required this.table,
     required this.enabled,
+    this.autofocusFirstCell = false,
     required this.onFocusPane,
     required this.onChanged,
   });
@@ -227,6 +228,7 @@ class LiveMarkdownTableEditor extends StatefulWidget {
   final int blockIndex;
   final MarkdownLiveTable table;
   final bool enabled;
+  final bool autofocusFirstCell;
   final VoidCallback onFocusPane;
   final ValueChanged<MarkdownLiveTable> onChanged;
 
@@ -340,6 +342,7 @@ class _LiveMarkdownTableEditorState extends State<LiveMarkdownTableEditor> {
           'live-markdown-table-cell-${widget.blockIndex}-$rowIndex-$column',
         ),
         controller: _controllerFor(rowIndex, column, cell.plainText),
+        autofocus: widget.autofocusFirstCell && rowIndex == 0 && column == 0,
         enabled: widget.enabled,
         minLines: 1,
         maxLines: null,

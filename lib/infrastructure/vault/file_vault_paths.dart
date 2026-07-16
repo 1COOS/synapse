@@ -2,8 +2,8 @@ import 'dart:io';
 
 import 'package:path/path.dart' as p;
 
-import '../../domain/markdown/markdown_document.dart';
 import '../../domain/vault/vault_resource.dart';
+import '../../domain/vault/vault_resource_name.dart';
 import 'file_vault_catalog.dart';
 
 final class FileVaultPaths {
@@ -99,23 +99,20 @@ final class FileVaultPaths {
     return File(filePath);
   }
 
-  Future<Directory> uniqueDirectory(
+  Future<Directory> resourceDirectory(
     Directory parent,
     String title, {
     String? excludePath,
   }) async {
-    final base = sanitizeFileName(title);
-    var candidate = Directory(p.join(parent.path, base));
-    var suffix = 2;
-    while (!p.equals(
-          p.normalize(candidate.path),
-          p.normalize(excludePath ?? ''),
-        ) &&
-        await _entityExists(candidate)) {
-      candidate = Directory(p.join(parent.path, '$base $suffix'));
-      suffix += 1;
+    final name = requireValidVaultResourceName(title);
+    final names = await _canonicalResourceNames(
+      parent,
+      excludePath: excludePath,
+    );
+    if (names.contains(canonicalVaultResourceName(name))) {
+      throw VaultResourceNameConflictException(name);
     }
-    return candidate;
+    return Directory(p.join(parent.path, name));
   }
 
   Future<File> uniqueNoteFile(
@@ -123,21 +120,34 @@ final class FileVaultPaths {
     String title, {
     String? excludePath,
   }) async {
-    final base = sanitizeFileName(title);
-    var candidate = File(p.join(parent.path, '$base.md'));
+    final base = requireValidVaultResourceName(title);
+    final names = await _canonicalResourceNames(
+      parent,
+      excludePath: excludePath,
+    );
+    var candidateTitle = base;
     var suffix = 2;
-    while (!p.equals(
-          p.normalize(candidate.path),
-          p.normalize(excludePath ?? ''),
-        ) &&
-        (await _entityExists(candidate) ||
-            await _entityExists(
-              Directory(assetsDirectoryPathForFile(candidate)),
-            ))) {
-      candidate = File(p.join(parent.path, '$base $suffix.md'));
+    while (names.contains(canonicalVaultResourceName(candidateTitle))) {
+      candidateTitle = '$base $suffix';
       suffix += 1;
     }
-    return candidate;
+    return File(p.join(parent.path, '$candidateTitle.md'));
+  }
+
+  Future<File> resourceNoteFile(
+    Directory parent,
+    String title, {
+    String? excludePath,
+  }) async {
+    final name = requireValidVaultResourceName(title);
+    final names = await _canonicalResourceNames(
+      parent,
+      excludePath: excludePath,
+    );
+    if (names.contains(canonicalVaultResourceName(name))) {
+      throw VaultResourceNameConflictException(name);
+    }
+    return File(p.join(parent.path, '$name.md'));
   }
 
   Future<String> uniqueAttachmentPath({
@@ -203,6 +213,44 @@ final class FileVaultPaths {
   Future<bool> _entityExists(FileSystemEntity entity) async {
     await ensureSafePath(entity.path);
     return entity.exists();
+  }
+
+  Future<Set<String>> _canonicalResourceNames(
+    Directory parent, {
+    String? excludePath,
+  }) async {
+    await ensureSafePath(parent.path);
+    if (!await parent.exists()) {
+      return <String>{};
+    }
+    final excluded = excludePath == null
+        ? null
+        : p.normalize(p.absolute(excludePath));
+    final excludedAssets =
+        excludePath != null && p.extension(excludePath) == '.md'
+        ? p.normalize(p.absolute(assetsDirectoryPathForFile(File(excludePath))))
+        : null;
+    final names = <String>{};
+    await for (final entity in parent.list(followLinks: false)) {
+      final absolute = p.normalize(p.absolute(entity.path));
+      if ((excluded != null && p.equals(absolute, excluded)) ||
+          (excludedAssets != null && p.equals(absolute, excludedAssets))) {
+        continue;
+      }
+      final basename = p.basename(entity.path);
+      String? visibleName;
+      if (entity is Directory && basename.endsWith('.assets')) {
+        visibleName = basename.substring(0, basename.length - '.assets'.length);
+      } else if (entity is Directory) {
+        visibleName = basename;
+      } else if (entity is File && p.extension(basename) == '.md') {
+        visibleName = p.basenameWithoutExtension(basename);
+      }
+      if (visibleName != null && visibleName.isNotEmpty) {
+        names.add(canonicalVaultResourceName(visibleName));
+      }
+    }
+    return names;
   }
 
   Future<String> _resolveEntityPath(

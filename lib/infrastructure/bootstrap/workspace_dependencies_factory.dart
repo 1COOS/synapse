@@ -45,6 +45,7 @@ WorkspaceDependencies createWorkspaceDependencies({
   WorkspaceCommitPhase? workspaceCommitFailureForTesting,
   void Function()? runtimeSnapshotPublishHookForTesting,
   WorkspaceRuntimeCleanupErrorReporter? cleanupErrorReporter,
+  WorkspaceBackgroundTaskErrorReporter? backgroundTaskErrorReporter,
   WorkspaceRuntimeCleanupErrorReporter? searchCacheErrorReporter,
 }) {
   SettingsStore? resolvedSettingsStore =
@@ -58,6 +59,8 @@ WorkspaceDependencies createWorkspaceDependencies({
   final customSearchIndexFactory = searchIndexFactory;
   final createPlatformAiProvider = aiProviderFactory ?? _createAiProvider;
   final reportCleanupError = cleanupErrorReporter ?? _reportCleanupError;
+  final reportBackgroundTaskError =
+      backgroundTaskErrorReporter ?? _reportBackgroundTaskError;
   final supportsNativeVaultAccess =
       !kIsWeb && defaultTargetPlatform == TargetPlatform.macOS;
   final resolvedVaultAccessGateway =
@@ -161,6 +164,7 @@ WorkspaceDependencies createWorkspaceDependencies({
     workspaceCommitFailureForTesting: workspaceCommitFailureForTesting,
     runtimeSnapshotPublishHookForTesting: runtimeSnapshotPublishHookForTesting,
     cleanupErrorReporter: reportCleanupError,
+    backgroundTaskErrorReporter: reportBackgroundTaskError,
   );
 }
 
@@ -189,6 +193,17 @@ void _reportCleanupError(Object error, StackTrace stackTrace) {
       stack: stackTrace,
       library: 'synapse workspace runtime',
       context: ErrorDescription('while disposing workspace runtime resources'),
+    ),
+  );
+}
+
+void _reportBackgroundTaskError(Object error, StackTrace stackTrace) {
+  FlutterError.reportError(
+    FlutterErrorDetails(
+      exception: error,
+      stack: stackTrace,
+      library: 'synapse workspace background task',
+      context: ErrorDescription('while refreshing background search index'),
     ),
   );
 }

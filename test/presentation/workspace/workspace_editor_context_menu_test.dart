@@ -1,4 +1,5 @@
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -156,6 +157,10 @@ void main() {
       noteMenuItemTextColor(tester, const Key('note-menu-copy')),
       const Color(0x73F2F2F7),
     );
+    expect(
+      noteMenuItemTextColor(tester, const Key('note-menu-text-format')),
+      const Color(0x73F2F2F7),
+    );
     final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
     await mouse.addPointer();
     await mouse.moveTo(
@@ -172,38 +177,9 @@ void main() {
     );
     expect(
       (highlightedFormatSurface.decoration! as BoxDecoration).color,
-      CupertinoColors.activeBlue,
+      const Color(0x00000000),
     );
-
-    expect(find.byKey(const Key('note-menu-highlight')), findsOneWidget);
-    expect(
-      find.descendant(
-        of: menu,
-        matching: find.byKey(const Key('note-menu-highlight')),
-      ),
-      findsNothing,
-    );
-    expect(find.byKey(const Key('note-submenu-text-format')), findsOneWidget);
-    expect(
-      menuItemTextStyle(tester, const Key('note-menu-highlight'))?.fontSize,
-      13,
-    );
-    expect(
-      menuItemTextStyle(tester, const Key('note-menu-highlight'))?.fontWeight,
-      FontWeight.w400,
-    );
-    expect(
-      menuItemTextStyle(tester, const Key('note-menu-highlight'))?.height,
-      1.15,
-    );
-    expect(
-      tester.getSize(find.byKey(const Key('note-menu-highlight'))).height,
-      30,
-    );
-    expect(
-      noteMenuItemTextColor(tester, const Key('note-menu-highlight')),
-      const Color(0x73F2F2F7),
-    );
+    expect(find.byKey(const Key('note-submenu-text-format')), findsNothing);
     await mouse.removePointer();
   });
 
@@ -230,6 +206,10 @@ void main() {
       ),
     );
     await activateLiveMarkdownBlock(tester, blockIndex: 0);
+    await setActiveLiveMarkdownSelection(
+      tester,
+      const TextSelection(baseOffset: 0, extentOffset: 5),
+    );
     await openNoteContextMenu(tester);
 
     final mouse = await hoverNoteMenuItem(
@@ -850,6 +830,395 @@ void main() {
     },
   );
 
+  testWidgets(
+    'format menu shows checked state shortcuts and nested highlight',
+    (tester) async {
+      final vault = MemoryVaultBackend(seedExampleData: false);
+      final note = await vault.createNote(
+        parentPath: '',
+        title: 'Format Study',
+      );
+      await vault.updateMarkdown(noteId: note.id, markdown: 'Alpha **beta**\n');
+
+      await pumpWorkspace(tester, vault: vault);
+      await switchToSourceMode(tester);
+      await activateLiveMarkdownBlock(tester, blockIndex: 0);
+      final noteEditor = activeLiveMarkdownTextField(tester);
+      await setActiveLiveMarkdownSelection(
+        tester,
+        const TextSelection(baseOffset: 8, extentOffset: 12),
+      );
+
+      await openNoteContextMenu(tester);
+      final macShortcuts =
+          !kIsWeb && defaultTargetPlatform == TargetPlatform.macOS;
+      expect(find.text(macShortcuts ? '⇧⌘V' : 'Ctrl+Shift+V'), findsOneWidget);
+      final mouse = await hoverNoteMenuItem(
+        tester,
+        const Key('note-menu-text-format'),
+      );
+      expect(find.text(macShortcuts ? '⌘B' : 'Ctrl+B'), findsOneWidget);
+      expect(find.text(macShortcuts ? '⌘I' : 'Ctrl+I'), findsOneWidget);
+      expect(
+        find.descendant(
+          of: find.byKey(const Key('note-menu-bold')),
+          matching: find.text('✓'),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(
+          of: find.byKey(const Key('note-menu-highlight')),
+          matching: find.text('✓'),
+        ),
+        findsNothing,
+      );
+
+      await tester.tap(find.byKey(const Key('note-menu-highlight')));
+      await tester.pumpAndSettle();
+      await mouse.removePointer();
+
+      expect(noteEditor.controller.text, 'Alpha **==beta==**');
+      final span = activeLiveMarkdownTextSpan(tester);
+      expect(span.toPlainText(), noteEditor.controller.text);
+      expect(
+        spanHasTextStyle(
+          span,
+          'beta',
+          fontWeight: FontWeight.bold,
+          backgroundColor: workspaceMarkdownHighlightColor,
+        ),
+        isTrue,
+      );
+    },
+  );
+
+  testWidgets('code selections disable format and structural menu entries', (
+    tester,
+  ) async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Code Study');
+    await vault.updateMarkdown(noteId: note.id, markdown: 'Alpha `code`\n');
+
+    await pumpWorkspace(tester, vault: vault);
+    await switchToSourceMode(tester);
+    await activateLiveMarkdownBlock(tester, blockIndex: 0);
+    await setActiveLiveMarkdownSelection(
+      tester,
+      const TextSelection(baseOffset: 7, extentOffset: 11),
+    );
+    await openNoteContextMenu(tester);
+
+    for (final key in <Key>[
+      const Key('note-menu-insert'),
+      const Key('note-menu-text-format'),
+      const Key('note-menu-paragraph'),
+      const Key('note-menu-list'),
+    ]) {
+      expect(noteMenuItemTextColor(tester, key), workspaceNoteMenuDisabledText);
+    }
+    expect(
+      noteMenuItemTextColor(tester, const Key('note-menu-copy')),
+      workspaceResourceMenuText,
+    );
+    final mouse = await hoverNoteMenuItem(
+      tester,
+      const Key('note-menu-text-format'),
+    );
+    expect(find.byKey(const Key('note-submenu-text-format')), findsNothing);
+    await mouse.removePointer();
+  });
+
+  testWidgets(
+    'editor menu supports keyboard submenu navigation and execution',
+    (tester) async {
+      final vault = MemoryVaultBackend(seedExampleData: false);
+      final note = await vault.createNote(
+        parentPath: '',
+        title: 'Keyboard Study',
+      );
+      await vault.updateMarkdown(noteId: note.id, markdown: 'Alpha beta\n');
+
+      await pumpWorkspace(tester, vault: vault);
+      await switchToSourceMode(tester);
+      await activateLiveMarkdownBlock(tester, blockIndex: 0);
+      final noteEditor = activeLiveMarkdownTextField(tester);
+      await setActiveLiveMarkdownSelection(
+        tester,
+        const TextSelection(baseOffset: 6, extentOffset: 10),
+      );
+
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+      await tester.sendKeyEvent(LogicalKeyboardKey.f10);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('note-context-menu')), findsOneWidget);
+
+      for (var index = 0; index < 3; index += 1) {
+        await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+      }
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('note-submenu-text-format')), findsOneWidget);
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+      await tester.sendKeyEvent(LogicalKeyboardKey.space);
+      await tester.pumpAndSettle();
+
+      expect(noteEditor.controller.text, 'Alpha **beta**');
+      expect(find.byKey(const Key('note-context-menu')), findsNothing);
+      expect(noteEditor.focusNode.hasFocus, isTrue);
+    },
+  );
+
+  testWidgets('editor submenu supports left navigation and focus restore', (
+    tester,
+  ) async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(
+      parentPath: '',
+      title: 'Keyboard Study',
+    );
+    await vault.updateMarkdown(noteId: note.id, markdown: 'Alpha beta\n');
+
+    await pumpWorkspace(tester, vault: vault);
+    await switchToSourceMode(tester);
+    await activateLiveMarkdownBlock(tester, blockIndex: 0);
+    final noteEditor = activeLiveMarkdownTextField(tester);
+    await setActiveLiveMarkdownSelection(
+      tester,
+      const TextSelection(baseOffset: 6, extentOffset: 10),
+    );
+
+    await openNoteContextMenu(tester);
+    final mouse = await hoverNoteMenuItem(
+      tester,
+      const Key('note-menu-text-format'),
+    );
+    expect(find.byKey(const Key('note-submenu-text-format')), findsOneWidget);
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowLeft);
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('note-submenu-text-format')), findsNothing);
+    expect(find.byKey(const Key('note-context-menu')), findsOneWidget);
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('note-submenu-text-format')), findsOneWidget);
+    await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+    await tester.pumpAndSettle();
+    await mouse.removePointer();
+
+    expect(find.byKey(const Key('note-context-menu')), findsNothing);
+    expect(noteEditor.focusNode.hasFocus, isTrue);
+  });
+
+  testWidgets('editor submenu hover transition is delayed and exclusive', (
+    tester,
+  ) async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Hover Study');
+    await vault.updateMarkdown(noteId: note.id, markdown: 'Alpha beta\n');
+
+    await pumpWorkspace(tester, vault: vault);
+    await switchToSourceMode(tester);
+    await activateLiveMarkdownBlock(tester, blockIndex: 0);
+    await setActiveLiveMarkdownSelection(
+      tester,
+      const TextSelection(baseOffset: 6, extentOffset: 10),
+    );
+    await openNoteContextMenu(tester);
+
+    final mouse = await hoverNoteMenuItem(
+      tester,
+      const Key('note-menu-text-format'),
+    );
+    expect(find.byKey(const Key('note-submenu-text-format')), findsOneWidget);
+
+    await mouse.moveTo(
+      tester.getCenter(find.byKey(const Key('note-menu-bold'))),
+    );
+    await tester.pump();
+    expect(find.byKey(const Key('note-submenu-text-format')), findsOneWidget);
+
+    await mouse.moveTo(const Offset(1, 1));
+    await tester.pump(const Duration(milliseconds: 249));
+    expect(find.byKey(const Key('note-submenu-text-format')), findsOneWidget);
+    await tester.pump(const Duration(milliseconds: 2));
+    expect(find.byKey(const Key('note-submenu-text-format')), findsNothing);
+
+    await mouse.moveTo(
+      tester.getCenter(find.byKey(const Key('note-menu-text-format'))),
+    );
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('note-submenu-text-format')), findsOneWidget);
+    await mouse.moveTo(
+      tester.getCenter(find.byKey(const Key('note-menu-paragraph'))),
+    );
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('note-submenu-text-format')), findsNothing);
+    expect(find.byKey(const Key('note-submenu-paragraph')), findsOneWidget);
+    await mouse.removePointer();
+  });
+
+  testWidgets('editor formatting and plain-paste shortcuts execute', (
+    tester,
+  ) async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(
+      parentPath: '',
+      title: 'Shortcut Study',
+    );
+    await vault.updateMarkdown(noteId: note.id, markdown: 'Alpha beta gamma\n');
+    mockClipboardText(' tail');
+
+    await pumpWorkspace(tester, vault: vault);
+    await switchToSourceMode(tester);
+    await activateLiveMarkdownBlock(tester, blockIndex: 0);
+    await setActiveLiveMarkdownSelection(
+      tester,
+      const TextSelection(baseOffset: 6, extentOffset: 10),
+    );
+
+    await _sendEditorShortcut(tester, LogicalKeyboardKey.keyB);
+    expect(
+      activeLiveMarkdownTextField(tester).controller.text,
+      'Alpha **beta** gamma',
+    );
+
+    await setActiveLiveMarkdownSelection(
+      tester,
+      const TextSelection(baseOffset: 15, extentOffset: 20),
+    );
+    await _sendEditorShortcut(tester, LogicalKeyboardKey.keyI);
+    expect(
+      activeLiveMarkdownTextField(tester).controller.text,
+      'Alpha **beta** *gamma*',
+    );
+
+    await setActiveLiveMarkdownSelection(
+      tester,
+      const TextSelection.collapsed(offset: 22),
+    );
+    await _sendEditorShortcut(tester, LogicalKeyboardKey.keyV, shift: true);
+
+    final noteEditor = activeLiveMarkdownTextField(tester);
+    expect(noteEditor.controller.text, 'Alpha **beta** *gamma* tail');
+    expect(
+      activeLiveMarkdownTextSpan(tester).toPlainText(),
+      noteEditor.controller.text,
+    );
+  });
+
+  testWidgets(
+    'paragraph menu exposes only product heading levels one to four',
+    (tester) async {
+      final vault = MemoryVaultBackend(seedExampleData: false);
+      final note = await vault.createNote(
+        parentPath: '',
+        title: 'Heading Study',
+      );
+      await vault.updateMarkdown(noteId: note.id, markdown: 'Alpha\n');
+
+      await pumpWorkspace(tester, vault: vault);
+      await switchToSourceMode(tester);
+      await activateLiveMarkdownBlock(tester, blockIndex: 0);
+      await openNoteContextMenu(tester);
+      final mouse = await hoverNoteMenuItem(
+        tester,
+        const Key('note-menu-paragraph'),
+      );
+
+      for (var level = 1; level <= 4; level += 1) {
+        expect(find.byKey(Key('note-menu-heading-$level')), findsOneWidget);
+      }
+      expect(find.byKey(const Key('note-menu-heading-5')), findsNothing);
+      expect(find.byKey(const Key('note-menu-heading-6')), findsNothing);
+      expect(find.text('标题 5'), findsNothing);
+      expect(find.text('标题 6'), findsNothing);
+      await mouse.removePointer();
+    },
+  );
+
+  testWidgets('blockquote and block insertions preserve content and focus', (
+    tester,
+  ) async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Block Study');
+    await vault.updateMarkdown(noteId: note.id, markdown: 'Alpha\nBeta\n');
+
+    await pumpWorkspace(tester, vault: vault);
+    await switchToSourceMode(tester);
+    await activateLiveMarkdownBlock(tester, blockIndex: 0);
+    await setActiveLiveMarkdownSelection(
+      tester,
+      const TextSelection(baseOffset: 0, extentOffset: 10),
+    );
+    await openNoteContextMenu(tester);
+    var mouse = await hoverNoteMenuItem(
+      tester,
+      const Key('note-menu-paragraph'),
+    );
+    await tester.tap(find.byKey(const Key('note-menu-blockquote')));
+    await tester.pumpAndSettle();
+    await mouse.removePointer();
+    expect(
+      activeLiveMarkdownTextField(tester).controller.text,
+      '> Alpha\n> Beta',
+    );
+
+    await setActiveLiveMarkdownSelection(
+      tester,
+      const TextSelection(baseOffset: 2, extentOffset: 7),
+    );
+    await openNoteContextMenu(tester);
+    mouse = await hoverNoteMenuItem(tester, const Key('note-menu-insert'));
+    await tester.tap(find.byKey(const Key('note-menu-insert-table')));
+    await tester.pumpAndSettle();
+    await mouse.removePointer();
+
+    final document = liveMarkdownDocumentController(tester, paneId: 1);
+    expect(document.text, startsWith('> Alpha\n> Beta\n\n| 列 1 | 列 2 |'));
+    final focusedHeaders = tester
+        .widgetList<EditableText>(find.byType(EditableText))
+        .where(
+          (editable) =>
+              editable.focusNode.hasFocus && editable.controller.text == '列 1',
+        );
+    expect(focusedHeaders, hasLength(1));
+  });
+
+  testWidgets('divider insertion focuses the following empty body block', (
+    tester,
+  ) async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Divider Study');
+    await vault.updateMarkdown(noteId: note.id, markdown: 'Alpha\n');
+
+    await pumpWorkspace(tester, vault: vault);
+    await switchToSourceMode(tester);
+    await activateLiveMarkdownBlock(tester, blockIndex: 0);
+    await setActiveLiveMarkdownSelection(
+      tester,
+      const TextSelection(baseOffset: 0, extentOffset: 5),
+    );
+    await openNoteContextMenu(tester);
+    final mouse = await hoverNoteMenuItem(
+      tester,
+      const Key('note-menu-insert'),
+    );
+    await tester.tap(find.byKey(const Key('note-menu-insert-divider')));
+    await tester.pumpAndSettle();
+    await mouse.removePointer();
+
+    expect(
+      liveMarkdownDocumentController(tester, paneId: 1).text,
+      'Alpha\n\n---\n\n',
+    );
+    final editor = activeLiveMarkdownTextField(tester);
+    expect(editor.controller.text, isEmpty);
+    expect(editor.focusNode.hasFocus, isTrue);
+  });
+
   testWidgets('note editor inline format uses the selected block offset', (
     tester,
   ) async {
@@ -956,4 +1325,25 @@ void main() {
     expect(imageInput.pasteCalls, 0);
     expect(noteEditor.controller.text, contains('普通文本'));
   });
+}
+
+Future<void> _sendEditorShortcut(
+  WidgetTester tester,
+  LogicalKeyboardKey key, {
+  bool shift = false,
+}) async {
+  final modifier = !kIsWeb && defaultTargetPlatform == TargetPlatform.macOS
+      ? LogicalKeyboardKey.metaLeft
+      : LogicalKeyboardKey.controlLeft;
+  await tester.sendKeyDownEvent(modifier);
+  if (shift) {
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+  }
+  await tester.sendKeyDownEvent(key);
+  await tester.sendKeyUpEvent(key);
+  if (shift) {
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+  }
+  await tester.sendKeyUpEvent(modifier);
+  await tester.pumpAndSettle();
 }

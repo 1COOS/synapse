@@ -714,7 +714,8 @@ final class WorkspaceStartupCoordinator {
   bool _semanticSearchEnabledFor(SynapseSettings settings) {
     return settings.preferences.semanticSearchEnabled &&
         (dependencies.usesInjectedAiProvider ||
-            settings.providerConfig.hasEmbeddingConfig);
+            (settings.providerConfig.isComplete &&
+                settings.providerConfig.hasEmbeddingConfig));
   }
 
   String _startupMessage(String recoveryMessage, {required String fallback}) {

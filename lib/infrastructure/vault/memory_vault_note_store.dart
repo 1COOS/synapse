@@ -29,7 +29,7 @@ final class MemoryVaultNoteStore {
     required String title,
   }) async {
     final parent = paths.normalizeFolderPath(parentPath);
-    final path = paths.uniqueFolderPath(parent, title);
+    final path = paths.resourceFolderPath(parent, title);
     state.folders.add(path);
     return VaultResourceNode(
       id: path,
@@ -166,7 +166,7 @@ final class MemoryVaultNoteStore {
     required String title,
   }) async {
     final note = state.note(noteId);
-    final target = paths.uniqueNotePath(
+    final target = paths.resourceNotePath(
       paths.dirname(note.path),
       title,
       excludePath: note.path,
@@ -251,7 +251,7 @@ final class MemoryVaultNoteStore {
     if (!state.folders.contains(folder)) {
       throw StateError('Folder not found: $folderPath');
     }
-    final target = paths.uniqueFolderPath(
+    final target = paths.resourceFolderPath(
       paths.dirname(folder),
       title,
       excludePath: folder,

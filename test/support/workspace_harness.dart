@@ -464,24 +464,49 @@ bool spanHasTextStyle(
   FontWeight? fontWeight,
   FontStyle? fontStyle,
   TextDecoration? decoration,
+  Color? backgroundColor,
+}) => _spanHasTextStyle(
+  span,
+  text,
+  inheritedStyle: null,
+  fontSize: fontSize,
+  fontWeight: fontWeight,
+  fontStyle: fontStyle,
+  decoration: decoration,
+  backgroundColor: backgroundColor,
+);
+
+bool _spanHasTextStyle(
+  InlineSpan span,
+  String text, {
+  required TextStyle? inheritedStyle,
+  double? fontSize,
+  FontWeight? fontWeight,
+  FontStyle? fontStyle,
+  TextDecoration? decoration,
+  Color? backgroundColor,
 }) {
   if (span is TextSpan) {
-    final style = span.style;
+    final style = inheritedStyle?.merge(span.style) ?? span.style;
     if (span.text == text &&
         (fontSize == null || style?.fontSize == fontSize) &&
         (fontWeight == null || style?.fontWeight == fontWeight) &&
         (fontStyle == null || style?.fontStyle == fontStyle) &&
-        (decoration == null || style?.decoration == decoration)) {
+        (decoration == null || style?.decoration == decoration) &&
+        (backgroundColor == null ||
+            style?.backgroundColor == backgroundColor)) {
       return true;
     }
     return span.children?.any(
-          (child) => spanHasTextStyle(
+          (child) => _spanHasTextStyle(
             child,
             text,
+            inheritedStyle: style,
             fontSize: fontSize,
             fontWeight: fontWeight,
             fontStyle: fontStyle,
             decoration: decoration,
+            backgroundColor: backgroundColor,
           ),
         ) ??
         false;

@@ -319,6 +319,40 @@ void main() {
     });
 
     test(
+      'reports background indexing separately from runtime cleanup',
+      () async {
+        final error = StateError('background index failed');
+        final searchIndex = _BackgroundPersistentSearchIndex(indexError: error);
+        final cleanupErrors = <Object>[];
+        final backgroundErrors = <Object>[];
+        final vault = MemoryVaultBackend(seedExampleData: false);
+        await vault.createNote(parentPath: '', title: 'Indexed');
+        final container = ProviderContainer(
+          overrides: [
+            workspaceDependenciesProvider.overrideWithValue(
+              createWorkspaceDependencies(
+                initialVault: vault,
+                settingsStore: FakeSettingsStore(),
+                searchIndexFactory: (_, _) => searchIndex,
+                cleanupErrorReporter: (error, _) => cleanupErrors.add(error),
+                backgroundTaskErrorReporter: (error, _) =>
+                    backgroundErrors.add(error),
+              ),
+            ),
+          ],
+        );
+        addTearDown(container.dispose);
+
+        await container.read(workspaceControllerProvider.future);
+        await searchIndex.indexStarted.future;
+        await Future<void>.delayed(Duration.zero);
+
+        expect(cleanupErrors, isEmpty);
+        expect(backgroundErrors, [same(error)]);
+      },
+    );
+
+    test(
       'publishes editor locks and autosave through WorkspaceState',
       () async {
         final vault = GatedSuccessfulUpdateVaultBackend(seedExampleData: false);
@@ -869,6 +903,9 @@ final class _RecordingSearchIndex implements SearchIndex {
 }
 
 final class _BackgroundPersistentSearchIndex implements PersistentSearchIndex {
+  _BackgroundPersistentSearchIndex({this.indexError});
+
+  final Object? indexError;
   final Completer<void> indexStarted = Completer<void>();
   final List<String> indexedIds = [];
   final Map<String, String> _fingerprints = {};
@@ -904,11 +941,15 @@ final class _BackgroundPersistentSearchIndex implements PersistentSearchIndex {
     required String text,
     required String fingerprint,
   }) async {
-    indexedIds.add(id);
-    _fingerprints[id] = fingerprint;
     if (!indexStarted.isCompleted) {
       indexStarted.complete();
     }
+    final error = indexError;
+    if (error != null) {
+      throw error;
+    }
+    indexedIds.add(id);
+    _fingerprints[id] = fingerprint;
   }
 
   @override

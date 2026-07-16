@@ -18,12 +18,19 @@ class LiveMarkdownEditorController extends ChangeNotifier {
   bool _syncingBlock = false;
   bool _updatingDocument = false;
   bool _activeTrailingInsertion = false;
+  MarkdownInsertion? _pendingInsertionFocus;
 
   TextEditingController get document => _document;
   int? get activeOffset => _activeOffset;
   bool get syncingBlock => _syncingBlock;
   bool get updatingDocument => _updatingDocument;
   bool get activeTrailingInsertion => _activeTrailingInsertion;
+
+  MarkdownInsertion? takePendingInsertionFocus() {
+    final pending = _pendingInsertionFocus;
+    _pendingInsertionFocus = null;
+    return pending;
+  }
 
   void replaceDocument(TextEditingController document) {
     _document = document;
@@ -260,7 +267,9 @@ class LiveMarkdownEditorController extends ChangeNotifier {
       menuTarget: menuTarget,
       requireSelection: true,
     );
-    if (busy || target == null) {
+    if (busy ||
+        target == null ||
+        !commandState(menuTarget: menuTarget).canFormat) {
       return;
     }
     dismissAllMacContextMenus();
@@ -272,7 +281,8 @@ class LiveMarkdownEditorController extends ChangeNotifier {
     MarkdownCommandTarget? menuTarget,
     required bool busy,
   }) {
-    if (busy) {
+    if (busy ||
+        !commandState(menuTarget: menuTarget).canUseStructuralCommands) {
       return;
     }
     dismissAllMacContextMenus();
@@ -289,7 +299,8 @@ class LiveMarkdownEditorController extends ChangeNotifier {
     MarkdownCommandTarget? menuTarget,
     required bool busy,
   }) {
-    if (busy) {
+    if (busy ||
+        !commandState(menuTarget: menuTarget).canUseStructuralCommands) {
       return;
     }
     dismissAllMacContextMenus();
@@ -306,16 +317,33 @@ class LiveMarkdownEditorController extends ChangeNotifier {
     MarkdownCommandTarget? menuTarget,
     required bool busy,
   }) {
-    if (busy) {
+    if (busy ||
+        !commandState(menuTarget: menuTarget).canUseStructuralCommands) {
       return;
     }
     dismissAllMacContextMenus();
-    applyBlockValue(
-      insertMarkdownBlock(
-        commandTarget(menuTarget: menuTarget).value,
-        insertion,
-      ),
+    _pendingInsertionFocus = insertion;
+    var value = insertMarkdownBlock(
+      commandTarget(menuTarget: menuTarget).value,
+      insertion,
     );
+    final activeBlock = currentActiveTextBlock();
+    if (insertion == MarkdownInsertion.divider &&
+        activeBlock != null &&
+        activeBlock.text.endsWith('\n') &&
+        value.text.endsWith('\n\n')) {
+      value = value.copyWith(
+        text: value.text.substring(0, value.text.length - 1),
+        selection: TextSelection.collapsed(offset: value.text.length - 1),
+      );
+    }
+    applyBlockValue(value);
+    if (insertion == MarkdownInsertion.divider) {
+      _activeOffset = _document.text.length;
+      _activeTrailingInsertion = true;
+      syncBlockController(selectionOffset: 0);
+      notifyListeners();
+    }
   }
 
   void replaceBlockSelection(
@@ -463,6 +491,23 @@ class LiveMarkdownEditorController extends ChangeNotifier {
       value: blockController.value.copyWith(selection: selection),
       blockStart: currentActiveTextBlock()?.start,
     );
+  }
+
+  MarkdownCommandState commandState({MarkdownCommandTarget? menuTarget}) {
+    final target = resolveCommandTarget(menuTarget: menuTarget);
+    if (target == null) {
+      return markdownCommandState(blockController.value);
+    }
+    var fencedCode = false;
+    final blockStart = target.blockStart;
+    if (blockStart != null) {
+      final blocks = splitMarkdownLiveBlocks(_document.text);
+      final index = markdownBlockIndexForOffset(blocks, blockStart);
+      if (index >= 0 && index < blocks.length) {
+        fencedCode = blocks[index].kind == MarkdownLiveBlockKind.fencedCode;
+      }
+    }
+    return markdownCommandState(target.value, fencedCode: fencedCode);
   }
 
   void clearStaleSelectionTarget() {

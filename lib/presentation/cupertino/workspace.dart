@@ -194,13 +194,13 @@ class _SynapseWorkspaceState extends ConsumerState<SynapseWorkspace> {
   }
 
   Future<void> _createFolder({String parentPath = ''}) async {
-    final title = await _promptResourceName(
+    await _runResourceNameOperation(
       title: '新建文件夹',
       placeholder: '文件夹名称',
+      actionLabel: '创建',
+      operation: (name) =>
+          _controller.createFolder(parentPath: parentPath, title: name),
     );
-    if (title != null) {
-      await _controller.createFolder(parentPath: parentPath, title: title);
-    }
   }
 
   Future<void> _createNote({String parentPath = ''}) async {
@@ -215,15 +215,24 @@ class _SynapseWorkspaceState extends ConsumerState<SynapseWorkspace> {
   }
 
   Future<void> _renameFolder(VaultResourceNode folder) async {
-    final name = await _promptResourceName(
+    await _runResourceNameOperation(
       title: '重命名文件夹',
       placeholder: '文件夹名称',
       initialValue: folder.title,
       actionLabel: '重命名',
+      operation: (name) =>
+          _controller.renameFolder(folder: folder, newName: name),
     );
-    if (name != null) {
-      await _controller.renameFolder(folder: folder, newName: name);
-    }
+  }
+
+  Future<void> _renameNote(VaultResourceNode note) async {
+    await _runResourceNameOperation(
+      title: '重命名笔记',
+      placeholder: '笔记名称',
+      initialValue: note.title,
+      actionLabel: '重命名',
+      operation: (name) => _controller.renameNote(note: note, newName: name),
+    );
   }
 
   Future<void> _copyNote(VaultResourceNode note) async {
@@ -258,54 +267,43 @@ class _SynapseWorkspaceState extends ConsumerState<SynapseWorkspace> {
     return active == null ? '' : _parentFolderPath(active.path);
   }
 
-  Future<String?> _promptResourceName({
+  Future<void> _runResourceNameOperation({
     required String title,
     required String placeholder,
+    required String actionLabel,
+    required Future<WorkspaceActionResult> Function(String name) operation,
     String? initialValue,
-    String actionLabel = '创建',
   }) async {
-    final textController = TextEditingController(text: initialValue);
-    try {
-      return await showCupertinoDialog<String>(
-        context: context,
-        builder: (context) => CupertinoAlertDialog(
-          title: Text(title),
-          content: Padding(
-            padding: const EdgeInsets.only(top: 12),
-            child: CupertinoTextField(
-              key: const Key('resource-name-input'),
-              controller: textController,
-              autofocus: true,
-              placeholder: placeholder,
-              onSubmitted: (value) {
-                final trimmed = value.trim();
-                if (trimmed.isNotEmpty) {
-                  Navigator.of(context).pop(trimmed);
-                }
-              },
-            ),
-          ),
-          actions: [
-            CupertinoDialogAction(
-              onPressed: () => Navigator.of(context).pop(),
-              child: const Text('取消'),
-            ),
-            CupertinoDialogAction(
-              isDefaultAction: true,
-              onPressed: () {
-                final trimmed = textController.text.trim();
-                if (trimmed.isNotEmpty) {
-                  Navigator.of(context).pop(trimmed);
-                }
-              },
-              child: Text(actionLabel),
-            ),
-          ],
-        ),
-      );
-    } finally {
-      textController.dispose();
+    await showCupertinoDialog<bool>(
+      context: context,
+      builder: (context) => ResourceNameDialog(
+        title: title,
+        placeholder: placeholder,
+        actionLabel: actionLabel,
+        initialValue: initialValue ?? '',
+        onSubmit: (name) => _resourceNameOperationError(operation(name)),
+      ),
+    );
+  }
+
+  Future<String?> _resourceNameOperationError(
+    Future<WorkspaceActionResult> pending,
+  ) async {
+    final result = await pending;
+    if (result == WorkspaceActionResult.committed) {
+      return null;
     }
+    final message = ref.read(workspaceControllerProvider).value?.message ?? '';
+    if (message.isNotEmpty) {
+      return message;
+    }
+    return switch (result) {
+      WorkspaceActionResult.busy => '工作区正忙，请稍后重试。',
+      WorkspaceActionResult.aborted => '操作已中止，请先处理当前保存错误。',
+      WorkspaceActionResult.cancelled => '操作已取消。',
+      WorkspaceActionResult.failed => '操作失败，请重试。',
+      WorkspaceActionResult.committed => null,
+    };
   }
 
   Future<bool> _confirmDelete({
@@ -581,6 +579,7 @@ class _SynapseWorkspaceState extends ConsumerState<SynapseWorkspace> {
                 onCreateNote: (folder) => _createNote(parentPath: folder.path),
                 onCreateSiblingNote: _createSiblingNote,
                 onRenameFolder: _renameFolder,
+                onRenameNote: _renameNote,
                 onCopyNote: _copyNote,
                 onMoveNote: _moveNote,
                 onDelete: _deleteResource,

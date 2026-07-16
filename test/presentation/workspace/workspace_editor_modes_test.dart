@@ -1,9 +1,12 @@
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/rendering.dart';
+import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:synapse/infrastructure/config/synapse_settings.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
 import 'package:synapse/presentation/cupertino/browser_context_menu_guard.dart';
+import 'package:synapse/presentation/cupertino/workspace/workspace_theme.dart';
+import 'package:synapse/presentation/workspace/editor/markdown_styled_controller.dart';
 
 import '../../support/workspace_fakes.dart';
 import '../../support/workspace_harness.dart';
@@ -400,7 +403,10 @@ void main() {
     final note = await vault.createNote(parentPath: '', title: 'Alpha');
     await vault.updateMarkdown(
       noteId: note.id,
-      markdown: 'Alpha **bold** *italic* ~~gone~~ `code`\n',
+      markdown:
+          'Alpha **bold** *italic* ~~gone~~ `code` ==**focus**== '
+          r'\==literal\=='
+          '\n',
     );
 
     await pumpWorkspace(tester, vault: vault);
@@ -414,6 +420,8 @@ void main() {
     expect(span.toPlainText(), contains('*italic*'));
     expect(span.toPlainText(), contains('~~gone~~'));
     expect(span.toPlainText(), contains('`code`'));
+    expect(span.toPlainText(), contains('==**focus**=='));
+    expect(span.toPlainText(), contains(r'\==literal\=='));
     expect(spanHasTextStyle(span, 'bold', fontWeight: FontWeight.bold), isTrue);
     expect(
       spanHasTextStyle(span, 'italic', fontStyle: FontStyle.italic),
@@ -422,6 +430,60 @@ void main() {
     expect(
       spanHasTextStyle(span, 'gone', decoration: TextDecoration.lineThrough),
       isTrue,
+    );
+    expect(
+      spanHasTextStyle(
+        span,
+        'focus',
+        fontWeight: FontWeight.bold,
+        backgroundColor: workspaceMarkdownHighlightColor,
+      ),
+      isTrue,
+    );
+  });
+
+  testWidgets('reading preview renders nested Obsidian highlights', (
+    tester,
+  ) async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Alpha');
+    await vault.updateMarkdown(
+      noteId: note.id,
+      markdown: '==**focus**== and `==code==` and \\==literal\\==\n',
+    );
+
+    await pumpWorkspace(tester, vault: vault);
+    await tester.tap(find.byKey(const Key('note-mode-reading')));
+    await tester.pumpAndSettle();
+
+    final markdownBody = tester.widget<MarkdownBody>(find.byType(MarkdownBody));
+    final previewSpan = buildMarkdownPreviewInlineTextSpan(
+      '**focus**',
+      const TextStyle(backgroundColor: workspaceMarkdownHighlightColor),
+    );
+    expect(markdownBody.inlineSyntaxes, isNotEmpty);
+    expect(markdownBody.builders, contains('mark'));
+    expect(find.textContaining('==code==', findRichText: true), findsWidgets);
+    expect(
+      find.textContaining('==literal==', findRichText: true),
+      findsWidgets,
+    );
+    expect(
+      spanHasTextStyle(
+        previewSpan,
+        'focus',
+        fontWeight: FontWeight.bold,
+        backgroundColor: workspaceMarkdownHighlightColor,
+      ),
+      isTrue,
+    );
+    expect(
+      spanHasTextStyle(
+        previewSpan,
+        '==code==',
+        backgroundColor: workspaceMarkdownHighlightColor,
+      ),
+      isFalse,
     );
   });
 
