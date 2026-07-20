@@ -1,12 +1,12 @@
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/rendering.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:synapse/infrastructure/config/synapse_settings.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
 import 'package:synapse/presentation/cupertino/browser_context_menu_guard.dart';
 import 'package:synapse/presentation/cupertino/workspace/workspace_theme.dart';
-import 'package:synapse/presentation/workspace/editor/markdown_styled_controller.dart';
 
 import '../../support/workspace_fakes.dart';
 import '../../support/workspace_harness.dart';
@@ -76,6 +76,264 @@ void main() {
     await tester.pump();
 
     expect(find.textContaining('Changed from edit mode'), findsWidgets);
+  });
+
+  testWidgets('enter inserts a newline in the active markdown block', (
+    tester,
+  ) async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Newline');
+    await vault.updateMarkdown(noteId: note.id, markdown: 'Alpha beta\n');
+
+    await pumpWorkspace(tester, vault: vault);
+    await activateLiveMarkdownBlock(tester, blockIndex: 0);
+    await setActiveLiveMarkdownSelection(
+      tester,
+      const TextSelection.collapsed(offset: 5),
+    );
+
+    final editor = activeLiveMarkdownTextField(tester);
+    expect(editor.focusNode.hasFocus, isTrue);
+
+    tester.testTextInput.updateEditingValue(
+      const TextEditingValue(
+        text: 'Alpha\n beta',
+        selection: TextSelection.collapsed(offset: 6),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(
+      liveMarkdownDocumentController(tester, paneId: 1).text,
+      'Alpha\n beta\n',
+    );
+    expect(activeLiveMarkdownTextField(tester).focusNode.hasFocus, isTrue);
+  });
+
+  testWidgets('enter at document end opens a writable next line', (
+    tester,
+  ) async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Trailing line');
+    await vault.updateMarkdown(noteId: note.id, markdown: 'Alpha beta\n');
+
+    await pumpWorkspace(tester, vault: vault);
+    await activateLiveMarkdownBlock(tester, blockIndex: 0);
+    await setActiveLiveMarkdownSelection(
+      tester,
+      const TextSelection.collapsed(offset: 10),
+    );
+
+    tester.testTextInput.updateEditingValue(
+      const TextEditingValue(
+        text: 'Alpha beta\n',
+        selection: TextSelection.collapsed(offset: 11),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    var editor = activeLiveMarkdownTextField(tester);
+    expect(editor.controller.text, isEmpty);
+    expect(editor.focusNode.hasFocus, isTrue);
+    expect(tester.testTextInput.hasAnyClients, isTrue);
+
+    tester.testTextInput.updateEditingValue(
+      const TextEditingValue(
+        text: 'Next line',
+        selection: TextSelection.collapsed(offset: 9),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(
+      liveMarkdownDocumentController(tester, paneId: 1).text,
+      'Alpha beta\n\nNext line',
+    );
+    editor = activeLiveMarkdownTextField(tester);
+    expect(editor.controller.text, 'Next line');
+    expect(editor.focusNode.hasFocus, isTrue);
+  });
+
+  testWidgets('enter at a middle block end inserts before the next block', (
+    tester,
+  ) async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Middle line');
+    await vault.updateMarkdown(noteId: note.id, markdown: 'Alpha\n\nBeta\n');
+
+    await pumpWorkspace(tester, vault: vault);
+    await activateLiveMarkdownBlock(tester, blockIndex: 0);
+    await setActiveLiveMarkdownSelection(
+      tester,
+      const TextSelection.collapsed(offset: 5),
+    );
+
+    tester.testTextInput.updateEditingValue(
+      const TextEditingValue(
+        text: 'Alpha\n',
+        selection: TextSelection.collapsed(offset: 6),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    var editor = activeLiveMarkdownTextField(tester);
+    expect(editor.controller.text, isEmpty);
+    expect(editor.focusNode.hasFocus, isTrue);
+    expect(
+      tester.getTopLeft(find.byKey(const Key('note-editor'))).dy,
+      lessThan(
+        tester
+            .getTopLeft(find.byKey(const Key('live-markdown-block-preview-2')))
+            .dy,
+      ),
+    );
+
+    tester.testTextInput.updateEditingValue(
+      const TextEditingValue(
+        text: 'Middle',
+        selection: TextSelection.collapsed(offset: 6),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(
+      liveMarkdownDocumentController(tester, paneId: 1).text,
+      'Alpha\n\nMiddle\n\nBeta\n',
+    );
+    editor = activeLiveMarkdownTextField(tester);
+    expect(editor.controller.text, 'Middle');
+    expect(editor.focusNode.hasFocus, isTrue);
+  });
+
+  testWidgets('backspace removes an empty inserted line', (tester) async {
+    const markdown = 'Alpha\n\nBeta\n';
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Backspace');
+    await vault.updateMarkdown(noteId: note.id, markdown: markdown);
+
+    await pumpWorkspace(tester, vault: vault);
+    await activateLiveMarkdownBlock(tester, blockIndex: 0);
+    await setActiveLiveMarkdownSelection(
+      tester,
+      const TextSelection.collapsed(offset: 5),
+    );
+    tester.testTextInput.updateEditingValue(
+      const TextEditingValue(
+        text: 'Alpha\n',
+        selection: TextSelection.collapsed(offset: 6),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(activeLiveMarkdownTextField(tester).controller.text, isEmpty);
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.backspace);
+    await tester.pumpAndSettle();
+
+    final editor = activeLiveMarkdownTextField(tester);
+    expect(editor.controller.text, 'Alpha');
+    expect(
+      editor.controller.selection,
+      const TextSelection.collapsed(offset: 5),
+    );
+    expect(editor.focusNode.hasFocus, isTrue);
+    expect(liveMarkdownDocumentController(tester, paneId: 1).text, markdown);
+  });
+
+  testWidgets('backspace on the last character returns to previous line end', (
+    tester,
+  ) async {
+    const markdown = 'Alpha\n\nBeta\n';
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Join previous');
+    await vault.updateMarkdown(noteId: note.id, markdown: markdown);
+
+    await pumpWorkspace(tester, vault: vault);
+    await activateLiveMarkdownBlock(tester, blockIndex: 0);
+    await setActiveLiveMarkdownSelection(
+      tester,
+      const TextSelection.collapsed(offset: 5),
+    );
+    tester.testTextInput.updateEditingValue(
+      const TextEditingValue(
+        text: 'Alpha\n',
+        selection: TextSelection.collapsed(offset: 6),
+      ),
+    );
+    await tester.pumpAndSettle();
+    tester.testTextInput.updateEditingValue(
+      const TextEditingValue(
+        text: 'x',
+        selection: TextSelection.collapsed(offset: 1),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(
+      liveMarkdownDocumentController(tester, paneId: 1).text,
+      'Alpha\n\nx\n\nBeta\n',
+    );
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.backspace);
+    await tester.pumpAndSettle();
+
+    final editor = activeLiveMarkdownTextField(tester);
+    expect(editor.controller.text, 'Alpha');
+    expect(
+      editor.controller.selection,
+      const TextSelection.collapsed(offset: 5),
+    );
+    expect(editor.focusNode.hasFocus, isTrue);
+    expect(liveMarkdownDocumentController(tester, paneId: 1).text, markdown);
+  });
+
+  testWidgets('arrow keys navigate across markdown block boundaries', (
+    tester,
+  ) async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Arrows');
+    await vault.updateMarkdown(noteId: note.id, markdown: 'Alpha\n\nBeta\n');
+
+    await pumpWorkspace(tester, vault: vault);
+    await activateLiveMarkdownBlock(tester, blockIndex: 0);
+    await setActiveLiveMarkdownSelection(
+      tester,
+      const TextSelection.collapsed(offset: 5),
+    );
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
+    await tester.pumpAndSettle();
+    var editor = activeLiveMarkdownTextField(tester);
+    expect(editor.controller.text, 'Beta');
+    expect(
+      editor.controller.selection,
+      const TextSelection.collapsed(offset: 0),
+    );
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowLeft);
+    await tester.pumpAndSettle();
+    editor = activeLiveMarkdownTextField(tester);
+    expect(editor.controller.text, 'Alpha');
+    expect(
+      editor.controller.selection,
+      const TextSelection.collapsed(offset: 5),
+    );
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+    await tester.pumpAndSettle();
+    editor = activeLiveMarkdownTextField(tester);
+    expect(editor.controller.text, 'Beta');
+    expect(
+      editor.controller.selection,
+      const TextSelection.collapsed(offset: 0),
+    );
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowUp);
+    await tester.pumpAndSettle();
+    editor = activeLiveMarkdownTextField(tester);
+    expect(editor.controller.text, 'Alpha');
+    expect(
+      editor.controller.selection,
+      const TextSelection.collapsed(offset: 5),
+    );
   });
 
   testWidgets('switching to edit mode waits for a block click', (tester) async {
@@ -457,12 +715,10 @@ void main() {
     await tester.pumpAndSettle();
 
     final markdownBody = tester.widget<MarkdownBody>(find.byType(MarkdownBody));
-    final previewSpan = buildMarkdownPreviewInlineTextSpan(
-      '**focus**',
-      const TextStyle(backgroundColor: workspaceMarkdownHighlightColor),
-    );
+    final previewSpan = _richTextSpanContaining(tester, 'focus');
     expect(markdownBody.inlineSyntaxes, isNotEmpty);
     expect(markdownBody.builders, contains('mark'));
+    expect(previewSpan.toPlainText(), contains('focus'));
     expect(find.textContaining('==code==', findRichText: true), findsWidgets);
     expect(
       find.textContaining('==literal==', findRichText: true),
@@ -484,6 +740,142 @@ void main() {
         backgroundColor: workspaceMarkdownHighlightColor,
       ),
       isFalse,
+    );
+  });
+
+  testWidgets('losing focus preserves stacked highlighted text', (
+    tester,
+  ) async {
+    const source = 'adfa==sdf打发法师==打发==阿**斯顿发生发**送到*发送到*才==的';
+    const visible = 'adfasdf打发法师打发阿斯顿发生发送到发送到才的';
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Stacked');
+    await vault.updateMarkdown(noteId: note.id, markdown: '$source\n');
+
+    await pumpWorkspace(tester, vault: vault);
+    await activateLiveMarkdownBlock(tester, blockIndex: 0);
+
+    final editor = activeLiveMarkdownTextField(tester);
+    final editorSpan = activeLiveMarkdownTextSpan(tester);
+    expect(editor.controller.text, source);
+    expect(editorSpan.toPlainText(), source);
+
+    await tester.tapAt(const Offset(1, 1));
+    await tester.pumpAndSettle();
+
+    final preview = find.byKey(const Key('live-markdown-block-preview-0'));
+    expect(preview, findsOneWidget);
+    final previewSpan = _richTextSpanContaining(
+      tester,
+      'adfa',
+      within: preview,
+    );
+    expect(previewSpan.toPlainText(), visible);
+    expect(
+      spanHasTextStyle(
+        previewSpan,
+        'sdf打发法师',
+        backgroundColor: workspaceMarkdownHighlightColor,
+      ),
+      isTrue,
+    );
+    expect(
+      spanHasTextStyle(
+        previewSpan,
+        '斯顿发生发',
+        fontWeight: FontWeight.bold,
+        backgroundColor: workspaceMarkdownHighlightColor,
+      ),
+      isTrue,
+    );
+    expect(
+      spanHasTextStyle(
+        previewSpan,
+        '发送到',
+        fontStyle: FontStyle.italic,
+        backgroundColor: workspaceMarkdownHighlightColor,
+      ),
+      isTrue,
+    );
+  });
+
+  testWidgets('preview composes adjacent and nested inline formats', (
+    tester,
+  ) async {
+    const source =
+        '==first====second== **==bold highlight==** '
+        '*==italic highlight==* ==~~gone~~ `code`==';
+    const visible = 'firstsecond bold highlight italic highlight gone code';
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Formats');
+    await vault.updateMarkdown(noteId: note.id, markdown: '$source\n');
+
+    await pumpWorkspace(tester, vault: vault);
+    final preview = find.byKey(const Key('live-markdown-block-preview-0'));
+    final previewSpan = _richTextSpanContaining(
+      tester,
+      'first',
+      within: preview,
+    );
+
+    expect(previewSpan.toPlainText(), visible);
+    expect(
+      spanHasTextStyle(
+        previewSpan,
+        'bold highlight',
+        fontWeight: FontWeight.bold,
+        backgroundColor: workspaceMarkdownHighlightColor,
+      ),
+      isTrue,
+    );
+    expect(
+      spanHasTextStyle(
+        previewSpan,
+        'italic highlight',
+        fontStyle: FontStyle.italic,
+        backgroundColor: workspaceMarkdownHighlightColor,
+      ),
+      isTrue,
+    );
+    expect(
+      spanHasTextStyle(
+        previewSpan,
+        'gone',
+        decoration: TextDecoration.lineThrough,
+        backgroundColor: workspaceMarkdownHighlightColor,
+      ),
+      isTrue,
+    );
+    expect(
+      spanHasTextStyle(
+        previewSpan,
+        'code',
+        backgroundColor: workspaceMarkdownHighlightColor,
+      ),
+      isTrue,
+    );
+  });
+
+  testWidgets('invalid highlight nesting falls back to literal text', (
+    tester,
+  ) async {
+    const unclosed = 'before ==unclosed';
+    const crossed = 'cross ==outer **inner== tail** end';
+    const escaped = r'escaped \==literal\==';
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Invalid');
+    await vault.updateMarkdown(
+      noteId: note.id,
+      markdown: '$unclosed\n\n$crossed\n\n$escaped\n',
+    );
+
+    await pumpWorkspace(tester, vault: vault);
+
+    expect(find.textContaining(unclosed, findRichText: true), findsWidgets);
+    expect(find.textContaining(crossed, findRichText: true), findsWidgets);
+    expect(
+      find.textContaining('escaped ==literal==', findRichText: true),
+      findsWidgets,
     );
   });
 

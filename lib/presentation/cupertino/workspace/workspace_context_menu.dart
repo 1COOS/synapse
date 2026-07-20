@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
 
 import 'workspace_theme.dart';
@@ -180,6 +181,10 @@ class WorkspaceContextMenuItem extends StatefulWidget {
     this.onHoverChanged,
     this.onOpenSubmenu,
     this.dismissContextMenuOnPressed = false,
+    this.invokeOnPointerDown = false,
+    this.commandBeforeDismiss = false,
+    this.onInteractionStart,
+    this.onInteractionEnd,
   });
 
   final Key itemKey;
@@ -194,6 +199,10 @@ class WorkspaceContextMenuItem extends StatefulWidget {
   final ValueChanged<bool>? onHoverChanged;
   final VoidCallback? onOpenSubmenu;
   final bool dismissContextMenuOnPressed;
+  final bool invokeOnPointerDown;
+  final bool commandBeforeDismiss;
+  final VoidCallback? onInteractionStart;
+  final VoidCallback? onInteractionEnd;
 
   @override
   State<WorkspaceContextMenuItem> createState() =>
@@ -204,6 +213,9 @@ class _WorkspaceContextMenuItemState extends State<WorkspaceContextMenuItem> {
   _WorkspaceContextMenuPanelState? _panel;
   bool _hovered = false;
   bool _keyboardHighlighted = false;
+  bool _pointerCommandActive = false;
+  bool _commandInFlight = false;
+  bool _interactionHeld = false;
 
   bool get isEnabled => widget.enabled && widget.onPressed != null;
 
@@ -238,15 +250,38 @@ class _WorkspaceContextMenuItemState extends State<WorkspaceContextMenuItem> {
     }
   }
 
-  Future<void> _invokeCommand() async {
-    if (!isEnabled) {
+  Future<void> _invokeCommand({
+    bool dismissContextMenu = true,
+    bool endInteraction = true,
+  }) async {
+    if (!isEnabled || _commandInFlight) {
       return;
     }
-    if (widget.dismissContextMenuOnPressed) {
-      ContextMenuController.removeAny();
+    if (endInteraction) {
+      _startInteraction();
     }
+    _commandInFlight = true;
+    var interactionEnded = false;
+    var menuDismissed = false;
     try {
-      await widget.onPressed?.call();
+      if (dismissContextMenu &&
+          widget.dismissContextMenuOnPressed &&
+          !widget.commandBeforeDismiss) {
+        ContextMenuController.removeAny();
+        menuDismissed = true;
+      }
+      final pending = widget.onPressed?.call();
+      if (dismissContextMenu &&
+          widget.dismissContextMenuOnPressed &&
+          widget.commandBeforeDismiss) {
+        ContextMenuController.removeAny();
+        menuDismissed = true;
+      }
+      if (endInteraction) {
+        _endInteraction();
+        interactionEnded = true;
+      }
+      await pending;
     } catch (error, stackTrace) {
       FlutterError.reportError(
         FlutterErrorDetails(
@@ -256,7 +291,55 @@ class _WorkspaceContextMenuItemState extends State<WorkspaceContextMenuItem> {
           context: ErrorDescription('while executing a context menu command'),
         ),
       );
+    } finally {
+      _commandInFlight = false;
+      if (dismissContextMenu &&
+          widget.dismissContextMenuOnPressed &&
+          !menuDismissed) {
+        ContextMenuController.removeAny();
+      }
+      if (endInteraction && !interactionEnded) {
+        _endInteraction();
+      }
     }
+  }
+
+  void _startInteraction() {
+    if (_interactionHeld) {
+      return;
+    }
+    _interactionHeld = true;
+    widget.onInteractionStart?.call();
+  }
+
+  void _endInteraction() {
+    if (!_interactionHeld) {
+      return;
+    }
+    _interactionHeld = false;
+    widget.onInteractionEnd?.call();
+  }
+
+  void _scheduleInteractionEnd({
+    required bool dismissContextMenu,
+    required bool endInteraction,
+  }) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (dismissContextMenu && widget.dismissContextMenuOnPressed) {
+        ContextMenuController.removeAny();
+      }
+      if (endInteraction) {
+        _endInteraction();
+      }
+    });
+  }
+
+  void _finishPointerInteraction() {
+    if (!_pointerCommandActive) {
+      return;
+    }
+    _pointerCommandActive = false;
+    _scheduleInteractionEnd(dismissContextMenu: true, endInteraction: true);
   }
 
   @override
@@ -273,70 +356,105 @@ class _WorkspaceContextMenuItemState extends State<WorkspaceContextMenuItem> {
         : workspaceNoteMenuDisabledText;
     final highlightColor = WorkspaceAppearanceScope.of(context).accentColor;
     return Semantics(
+      key: widget.itemKey,
       button: true,
       enabled: enabled,
       selected: widget.checked,
+      excludeSemantics: true,
       label: widget.label,
       onTap: enabled ? _invokeCommand : null,
-      child: GestureDetector(
-        key: widget.itemKey,
-        behavior: HitTestBehavior.opaque,
-        onTap: enabled ? _invokeCommand : null,
-        child: MouseRegion(
-          cursor: enabled ? SystemMouseCursors.click : SystemMouseCursors.basic,
-          onEnter: (_) {
-            _panel?.activateItem(enabled ? this : null);
-            setState(() => _hovered = true);
-            widget.onHoverChanged?.call(true);
-          },
-          onExit: (_) {
-            setState(() => _hovered = false);
-            widget.onHoverChanged?.call(false);
-          },
-          child: AnimatedContainer(
-            duration: const Duration(milliseconds: 80),
-            curve: Curves.easeOut,
-            height: workspaceContextMenuItemHeight,
-            padding: const EdgeInsets.symmetric(horizontal: 10),
-            decoration: BoxDecoration(
-              color: highlighted ? highlightColor : const Color(0x00000000),
-              borderRadius: workspaceContextMenuItemRadius,
-            ),
-            child: Row(
-              children: [
-                SizedBox(
-                  width: 18,
-                  child: Text(
-                    widget.checked ? '✓' : '',
-                    style: workspaceContextMenuItemTextStyle.copyWith(
-                      color: textColor,
+      child: Listener(
+        // Mouse commands run before the overlay can win the tap gesture.
+        onPointerDown: enabled && widget.invokeOnPointerDown
+            ? (event) {
+                if (event.buttons & kPrimaryButton != 0 &&
+                    !_pointerCommandActive) {
+                  _pointerCommandActive = true;
+                  _startInteraction();
+                  unawaited(
+                    _invokeCommand(
+                      dismissContextMenu: false,
+                      endInteraction: false,
+                    ),
+                  );
+                }
+              }
+            : null,
+        onPointerUp: enabled && widget.invokeOnPointerDown
+            ? (_) => _finishPointerInteraction()
+            : null,
+        onPointerCancel: enabled && widget.invokeOnPointerDown
+            ? (_) => _finishPointerInteraction()
+            : null,
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          // The wrapping Semantics node owns the accessible action. Keeping
+          // gesture semantics here would expose a duplicate tap target, whose
+          // pointer-down placeholder is intentionally a no-op for note menus.
+          excludeFromSemantics: true,
+          onTap: enabled
+              ? widget.invokeOnPointerDown
+                    ? () {}
+                    : _invokeCommand
+              : null,
+          child: MouseRegion(
+            cursor: enabled
+                ? SystemMouseCursors.click
+                : SystemMouseCursors.basic,
+            onEnter: (_) {
+              _panel?.activateItem(enabled ? this : null);
+              setState(() => _hovered = true);
+              widget.onHoverChanged?.call(true);
+            },
+            onExit: (_) {
+              setState(() => _hovered = false);
+              widget.onHoverChanged?.call(false);
+            },
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 80),
+              curve: Curves.easeOut,
+              height: workspaceContextMenuItemHeight,
+              padding: const EdgeInsets.symmetric(horizontal: 10),
+              decoration: BoxDecoration(
+                color: highlighted ? highlightColor : const Color(0x00000000),
+                borderRadius: workspaceContextMenuItemRadius,
+              ),
+              child: Row(
+                children: [
+                  SizedBox(
+                    width: 18,
+                    child: Text(
+                      widget.checked ? '✓' : '',
+                      style: workspaceContextMenuItemTextStyle.copyWith(
+                        color: textColor,
+                      ),
                     ),
                   ),
-                ),
-                Expanded(
-                  child: Text(
-                    widget.label,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: workspaceContextMenuItemTextStyle.copyWith(
-                      color: textColor,
+                  Expanded(
+                    child: Text(
+                      widget.label,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: workspaceContextMenuItemTextStyle.copyWith(
+                        color: textColor,
+                      ),
                     ),
                   ),
-                ),
-                if (widget.shortcutLabel case final shortcut?) ...[
-                  const SizedBox(width: 14),
-                  Text(
-                    shortcut,
-                    style: workspaceContextMenuItemTextStyle.copyWith(
-                      color: textColor.withValues(alpha: 0.72),
+                  if (widget.shortcutLabel case final shortcut?) ...[
+                    const SizedBox(width: 14),
+                    Text(
+                      shortcut,
+                      style: workspaceContextMenuItemTextStyle.copyWith(
+                        color: textColor.withValues(alpha: 0.72),
+                      ),
                     ),
-                  ),
+                  ],
+                  if (widget.trailing != null) ...[
+                    const SizedBox(width: 10),
+                    widget.trailing!,
+                  ],
                 ],
-                if (widget.trailing != null) ...[
-                  const SizedBox(width: 10),
-                  widget.trailing!,
-                ],
-              ],
+              ),
             ),
           ),
         ),

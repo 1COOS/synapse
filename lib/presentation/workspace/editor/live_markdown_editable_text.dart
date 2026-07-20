@@ -18,6 +18,7 @@ class LiveMarkdownEditableText extends StatefulWidget {
     required this.onChanged,
     required this.onTap,
     required this.onSelectionChanged,
+    this.onKeyEvent,
   });
 
   final MarkdownStyledTextEditingController controller;
@@ -33,6 +34,7 @@ class LiveMarkdownEditableText extends StatefulWidget {
   final ValueChanged<String> onChanged;
   final VoidCallback? onTap;
   final SelectionChangedCallback onSelectionChanged;
+  final FocusOnKeyEventCallback? onKeyEvent;
 
   bool get readOnly => !enabled;
   TextAlignVertical get textAlignVertical => TextAlignVertical.top;
@@ -73,59 +75,64 @@ class _LiveMarkdownEditableTextState extends State<LiveMarkdownEditableText>
       context,
     );
 
-    return DecoratedBox(
-      decoration: widget.decoration ?? const BoxDecoration(),
-      child: Padding(
-        padding: widget.padding,
-        child: _gestureDetectorBuilder.buildGestureDetector(
-          behavior: HitTestBehavior.translucent,
-          child: Listener(
+    return Focus(
+      canRequestFocus: false,
+      skipTraversal: true,
+      onKeyEvent: widget.onKeyEvent,
+      child: DecoratedBox(
+        decoration: widget.decoration ?? const BoxDecoration(),
+        child: Padding(
+          padding: widget.padding,
+          child: _gestureDetectorBuilder.buildGestureDetector(
             behavior: HitTestBehavior.translucent,
-            onPointerDown: (_) => widget.onTap?.call(),
-            child: Stack(
-              alignment: AlignmentDirectional.topStart,
-              children: [
-                ValueListenableBuilder<TextEditingValue>(
-                  valueListenable: widget.controller,
-                  builder: (context, value, child) {
-                    if (widget.placeholder == null || value.text.isNotEmpty) {
-                      return const SizedBox.shrink();
-                    }
-                    return IgnorePointer(
-                      child: Text(
-                        widget.placeholder!,
-                        style: widget.placeholderStyle,
-                        textAlign: TextAlign.start,
-                      ),
-                    );
-                  },
-                ),
-                EditableText(
-                  key: editableTextKey,
-                  controller: widget.controller,
-                  focusNode: widget.focusNode,
-                  readOnly: !widget.enabled,
-                  keyboardType: TextInputType.multiline,
-                  style: widget.style,
-                  strutStyle: StrutStyle.disabled,
-                  cursorColor: widget.cursorColor,
-                  backgroundCursorColor: backgroundCursorColor,
-                  maxLines: null,
-                  minLines: 1,
-                  autofocus: false,
-                  enableInteractiveSelection: widget.enabled,
-                  selectionColor: selectionColor,
-                  selectionControls: widget.enabled
-                      ? cupertinoTextSelectionHandleControls
-                      : null,
-                  rendererIgnoresPointer: true,
-                  cursorOpacityAnimates: true,
-                  paintCursorAboveText: true,
-                  onChanged: widget.onChanged,
-                  onSelectionChanged: widget.onSelectionChanged,
-                  contextMenuBuilder: widget.contextMenuBuilder,
-                ),
-              ],
+            child: Listener(
+              behavior: HitTestBehavior.translucent,
+              onPointerDown: (_) => widget.onTap?.call(),
+              child: Stack(
+                alignment: AlignmentDirectional.topStart,
+                children: [
+                  ValueListenableBuilder<TextEditingValue>(
+                    valueListenable: widget.controller,
+                    builder: (context, value, child) {
+                      if (widget.placeholder == null || value.text.isNotEmpty) {
+                        return const SizedBox.shrink();
+                      }
+                      return IgnorePointer(
+                        child: Text(
+                          widget.placeholder!,
+                          style: widget.placeholderStyle,
+                          textAlign: TextAlign.start,
+                        ),
+                      );
+                    },
+                  ),
+                  EditableText(
+                    key: editableTextKey,
+                    controller: widget.controller,
+                    focusNode: widget.focusNode,
+                    readOnly: !widget.enabled,
+                    keyboardType: TextInputType.multiline,
+                    style: widget.style,
+                    strutStyle: StrutStyle.disabled,
+                    cursorColor: widget.cursorColor,
+                    backgroundCursorColor: backgroundCursorColor,
+                    maxLines: null,
+                    minLines: 1,
+                    autofocus: false,
+                    enableInteractiveSelection: widget.enabled,
+                    selectionColor: selectionColor,
+                    selectionControls: widget.enabled
+                        ? cupertinoTextSelectionHandleControls
+                        : null,
+                    rendererIgnoresPointer: true,
+                    cursorOpacityAnimates: true,
+                    paintCursorAboveText: true,
+                    onChanged: widget.onChanged,
+                    onSelectionChanged: widget.onSelectionChanged,
+                    contextMenuBuilder: widget.contextMenuBuilder,
+                  ),
+                ],
+              ),
             ),
           ),
         ),

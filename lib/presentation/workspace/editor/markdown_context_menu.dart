@@ -31,11 +31,19 @@ class NoteContextMenuToolbar extends StatelessWidget {
     required this.anchors,
     required this.child,
     this.tapRegionGroupId,
+    this.onDismiss,
   });
 
   final TextSelectionToolbarAnchors anchors;
   final Widget child;
   final Object? tapRegionGroupId;
+  final VoidCallback? onDismiss;
+
+  void _dismiss() {
+    // Release the owning editing session before removing the root overlay.
+    onDismiss?.call();
+    dismissAllMacContextMenus();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -44,8 +52,8 @@ class NoteContextMenuToolbar extends StatelessWidget {
     final localAdjustment = Offset(screenPadding, topPadding);
     return GestureDetector(
       behavior: HitTestBehavior.translucent,
-      onTap: dismissAllMacContextMenus,
-      onSecondaryTapDown: (_) => dismissAllMacContextMenus(),
+      onTap: _dismiss,
+      onSecondaryTapDown: (_) => _dismiss(),
       child: Padding(
         padding: EdgeInsets.fromLTRB(
           screenPadding,
@@ -93,19 +101,58 @@ class _NoteContextMenuLayoutDelegate extends SingleChildLayoutDelegate {
 }
 
 class NoteContextMenu extends StatelessWidget {
-  const NoteContextMenu({super.key, required this.children});
+  const NoteContextMenu({
+    super.key,
+    required this.children,
+    this.onDismiss,
+    this.onInteractionStart,
+    this.onInteractionEnd,
+  });
 
   final List<Widget> children;
+  final VoidCallback? onDismiss;
+  final VoidCallback? onInteractionStart;
+  final VoidCallback? onInteractionEnd;
+
+  void _dismiss() {
+    onDismiss?.call();
+    dismissAllMacContextMenus();
+  }
 
   @override
   Widget build(BuildContext context) {
-    return WorkspaceContextMenuPanel(
-      panelKey: const Key('note-context-menu'),
-      width: 204,
-      autofocusFirst: true,
-      onDismiss: dismissAllMacContextMenus,
-      children: children,
+    return _NoteMenuInteractionScope(
+      onStart: onInteractionStart,
+      onEnd: onInteractionEnd,
+      child: WorkspaceContextMenuPanel(
+        panelKey: const Key('note-context-menu'),
+        width: 204,
+        autofocusFirst: true,
+        onDismiss: _dismiss,
+        children: children,
+      ),
     );
+  }
+}
+
+class _NoteMenuInteractionScope extends InheritedWidget {
+  const _NoteMenuInteractionScope({
+    required this.onStart,
+    required this.onEnd,
+    required super.child,
+  });
+
+  final VoidCallback? onStart;
+  final VoidCallback? onEnd;
+
+  static _NoteMenuInteractionScope? maybeOf(BuildContext context) {
+    return context
+        .dependOnInheritedWidgetOfExactType<_NoteMenuInteractionScope>();
+  }
+
+  @override
+  bool updateShouldNotify(_NoteMenuInteractionScope oldWidget) {
+    return onStart != oldWidget.onStart || onEnd != oldWidget.onEnd;
   }
 }
 
@@ -146,6 +193,7 @@ class NoteMenuAction extends StatefulWidget {
 class _NoteMenuActionState extends State<NoteMenuAction> {
   @override
   Widget build(BuildContext context) {
+    final interaction = _NoteMenuInteractionScope.maybeOf(context);
     return WorkspaceContextMenuItem(
       itemKey: widget.itemKey,
       label: widget.label,
@@ -159,6 +207,10 @@ class _NoteMenuActionState extends State<NoteMenuAction> {
       onHoverChanged: widget.onHoverChanged,
       onOpenSubmenu: widget.onOpenSubmenu,
       dismissContextMenuOnPressed: widget.dismissContextMenuOnPressed,
+      invokeOnPointerDown: true,
+      commandBeforeDismiss: true,
+      onInteractionStart: interaction?.onStart,
+      onInteractionEnd: interaction?.onEnd,
     );
   }
 }
@@ -172,6 +224,7 @@ class NoteMenuSubmenu extends StatefulWidget {
     required this.children,
     this.enabled = true,
     this.tapRegionGroupId,
+    this.onDismiss,
   });
 
   final Key itemKey;
@@ -180,6 +233,7 @@ class NoteMenuSubmenu extends StatefulWidget {
   final List<Widget> children;
   final bool enabled;
   final Object? tapRegionGroupId;
+  final VoidCallback? onDismiss;
 
   @override
   State<NoteMenuSubmenu> createState() => _NoteMenuSubmenuState();
@@ -194,6 +248,11 @@ class _NoteMenuSubmenuState extends State<NoteMenuSubmenu> {
   bool _submenuHovered = false;
 
   bool get _open => _overlayEntry != null;
+
+  void _dismissAll() {
+    widget.onDismiss?.call();
+    dismissAllMacContextMenus();
+  }
 
   @override
   void initState() {
@@ -220,13 +279,14 @@ class _NoteMenuSubmenuState extends State<NoteMenuSubmenu> {
     }
     _closeTimer?.cancel();
     final appearance = WorkspaceAppearanceScope.of(context);
+    final interaction = _NoteMenuInteractionScope.maybeOf(context);
     _overlayEntry = OverlayEntry(
       builder: (context) {
         return Positioned.fill(
           child: GestureDetector(
             behavior: HitTestBehavior.translucent,
-            onTap: dismissAllMacContextMenus,
-            onSecondaryTapDown: (_) => dismissAllMacContextMenus(),
+            onTap: _dismissAll,
+            onSecondaryTapDown: (_) => _dismissAll(),
             child: CompositedTransformFollower(
               link: _link,
               showWhenUnlinked: false,
@@ -252,15 +312,19 @@ class _NoteMenuSubmenuState extends State<NoteMenuSubmenu> {
                       groupId: widget.tapRegionGroupId,
                       child: WorkspaceAppearanceScope(
                         appearance: appearance,
-                        child: WorkspaceContextMenuPanel(
-                          panelKey: widget.submenuKey,
-                          width: 136,
-                          autofocusFirst: true,
-                          onDismiss: dismissAllMacContextMenus,
-                          onNavigateBack: () {
-                            _hideOverlay();
-                          },
-                          children: widget.children,
+                        child: _NoteMenuInteractionScope(
+                          onStart: interaction?.onStart,
+                          onEnd: interaction?.onEnd,
+                          child: WorkspaceContextMenuPanel(
+                            panelKey: widget.submenuKey,
+                            width: 136,
+                            autofocusFirst: true,
+                            onDismiss: _dismissAll,
+                            onNavigateBack: () {
+                              _hideOverlay();
+                            },
+                            children: widget.children,
+                          ),
                         ),
                       ),
                     ),

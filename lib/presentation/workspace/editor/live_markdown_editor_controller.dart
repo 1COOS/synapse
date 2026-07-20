@@ -18,6 +18,7 @@ class LiveMarkdownEditorController extends ChangeNotifier {
   bool _syncingBlock = false;
   bool _updatingDocument = false;
   bool _activeTrailingInsertion = false;
+  int? _activeInsertionOffset;
   MarkdownInsertion? _pendingInsertionFocus;
 
   TextEditingController get document => _document;
@@ -25,6 +26,7 @@ class LiveMarkdownEditorController extends ChangeNotifier {
   bool get syncingBlock => _syncingBlock;
   bool get updatingDocument => _updatingDocument;
   bool get activeTrailingInsertion => _activeTrailingInsertion;
+  int? get activeInsertionOffset => _activeInsertionOffset;
 
   MarkdownInsertion? takePendingInsertionFocus() {
     final pending = _pendingInsertionFocus;
@@ -38,6 +40,7 @@ class LiveMarkdownEditorController extends ChangeNotifier {
     _activeOffset = null;
     _activeSelectionTarget = null;
     _activeTrailingInsertion = false;
+    _activeInsertionOffset = null;
   }
 
   @override
@@ -51,8 +54,20 @@ class LiveMarkdownEditorController extends ChangeNotifier {
     bool trailingInsertion = false,
     bool preserveSelectionTarget = false,
   }) {
+    final enteringTrailingInsertion =
+        trailingInsertion &&
+        (!_activeTrailingInsertion || _activeOffset != offset);
     _activeOffset = offset;
     _activeTrailingInsertion = trailingInsertion;
+    _activeInsertionOffset = trailingInsertion ? offset : null;
+    if (enteringTrailingInsertion) {
+      _syncingBlock = true;
+      blockController.value = const TextEditingValue(
+        text: '',
+        selection: TextSelection.collapsed(offset: 0),
+      );
+      _syncingBlock = false;
+    }
     if (!preserveSelectionTarget) {
       _activeSelectionTarget = null;
     }
@@ -66,6 +81,7 @@ class LiveMarkdownEditorController extends ChangeNotifier {
     _activeOffset = null;
     _activeSelectionTarget = null;
     _activeTrailingInsertion = false;
+    _activeInsertionOffset = null;
   }
 
   void beginDocumentUpdate() {
@@ -99,15 +115,6 @@ class LiveMarkdownEditorController extends ChangeNotifier {
       return;
     }
     if (_activeTrailingInsertion) {
-      if (blockController.text.isEmpty) {
-        return;
-      }
-      _syncingBlock = true;
-      blockController.value = const TextEditingValue(
-        text: '',
-        selection: TextSelection.collapsed(offset: 0),
-      );
-      _syncingBlock = false;
       return;
     }
     final blocks = splitMarkdownLiveBlocks(_document.text);
@@ -162,8 +169,19 @@ class LiveMarkdownEditorController extends ChangeNotifier {
       return false;
     }
     final block = blocks[index];
-    final separator = block.text.substring(editableTextForBlock(block).length);
+    final editableText = editableTextForBlock(block);
     final blockSelection = blockController.selection;
+    if (_shouldBeginBlockInsertion(
+      block: block,
+      editableText: editableText,
+      replacement: text,
+      selection: blockSelection,
+    )) {
+      activateOffset(block.end, trailingInsertion: true);
+      notifyListeners();
+      return true;
+    }
+    final separator = block.text.substring(editableText.length);
     final textSelectionOffset = blockSelection.isValid
         ? _clampOffset(blockSelection.extentOffset, text.length)
         : text.length;
@@ -339,9 +357,7 @@ class LiveMarkdownEditorController extends ChangeNotifier {
     }
     applyBlockValue(value);
     if (insertion == MarkdownInsertion.divider) {
-      _activeOffset = _document.text.length;
-      _activeTrailingInsertion = true;
-      syncBlockController(selectionOffset: 0);
+      activateOffset(_document.text.length, trailingInsertion: true);
       notifyListeners();
     }
   }
@@ -382,7 +398,10 @@ class LiveMarkdownEditorController extends ChangeNotifier {
     }
     if (_activeTrailingInsertion) {
       _document.selection = TextSelection.collapsed(
-        offset: _document.text.length,
+        offset: _clampOffset(
+          _activeInsertionOffset ?? _document.text.length,
+          _document.text.length,
+        ),
       );
       return;
     }
@@ -543,14 +562,28 @@ class LiveMarkdownEditorController extends ChangeNotifier {
     if (text.isEmpty) {
       return false;
     }
+    if (text.trim().isEmpty) {
+      _activeSelectionTarget = null;
+      notifyListeners();
+      return true;
+    }
     final markdown = _document.text;
-    final prefix = _trailingInsertionPrefix(markdown);
-    final insertionStart = markdown.length + prefix.length;
+    final insertionOffset = _clampOffset(
+      _activeInsertionOffset ?? markdown.length,
+      markdown.length,
+    );
+    final prefix = _insertionPrefix(markdown, insertionOffset);
+    final suffix = _insertionSuffix(markdown, insertionOffset);
+    final insertionStart = insertionOffset + prefix.length;
     final blockSelection = blockController.selection;
     final textSelectionOffset = blockSelection.isValid
         ? _clampOffset(blockSelection.extentOffset, text.length)
         : text.length;
-    final updated = '$markdown$prefix$text';
+    final updated = markdown.replaceRange(
+      insertionOffset,
+      insertionOffset,
+      '$prefix$text$suffix',
+    );
     final nextOffset = insertionStart + textSelectionOffset;
 
     _updatingDocument = true;
@@ -564,7 +597,24 @@ class LiveMarkdownEditorController extends ChangeNotifier {
     _activeOffset = _clampOffset(nextOffset, updated.length);
     _activeSelectionTarget = null;
     _activeTrailingInsertion = false;
+    _activeInsertionOffset = null;
     notifyListeners();
+    return true;
+  }
+
+  bool _shouldBeginBlockInsertion({
+    required MarkdownLiveBlock block,
+    required String editableText,
+    required String replacement,
+    required TextSelection selection,
+  }) {
+    if (block.kind != MarkdownLiveBlockKind.paragraph ||
+        replacement != '$editableText\n' ||
+        !selection.isValid ||
+        !selection.isCollapsed ||
+        selection.extentOffset != replacement.length) {
+      return false;
+    }
     return true;
   }
 
@@ -651,14 +701,22 @@ class _AsyncMarkdownCommand {
   final bool trailingInsertion;
 }
 
-String _trailingInsertionPrefix(String markdown) {
-  if (markdown.isEmpty || markdown.endsWith('\n\n')) {
+String _insertionPrefix(String markdown, int offset) {
+  final before = markdown.substring(0, offset);
+  if (before.isEmpty || before.endsWith('\n\n')) {
     return '';
   }
-  if (markdown.endsWith('\n')) {
+  if (before.endsWith('\n')) {
     return '\n';
   }
   return '\n\n';
+}
+
+String _insertionSuffix(String markdown, int offset) {
+  if (offset >= markdown.length) {
+    return '';
+  }
+  return markdown.startsWith('\n', offset) ? '\n' : '\n\n';
 }
 
 int _clampOffset(int offset, int length) {

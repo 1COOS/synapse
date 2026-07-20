@@ -1,3 +1,6 @@
+import 'dart:async';
+import 'dart:ui' show SemanticsAction;
+
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
@@ -8,9 +11,24 @@ import 'package:synapse/infrastructure/input/image_input_service.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
 import 'package:synapse/presentation/cupertino/workspace/workspace_context_menu.dart';
 import 'package:synapse/presentation/cupertino/workspace/workspace_theme.dart';
+import 'package:synapse/presentation/workspace/editor/markdown_context_menu.dart';
 
 import '../../support/workspace_fakes.dart';
 import '../../support/workspace_harness.dart';
+
+Future<void> clickNoteMenuItemWithMouse(
+  WidgetTester tester,
+  TestGesture mouse,
+  Key itemKey,
+) async {
+  final item = find.byKey(itemKey);
+  final position = tester.getCenter(item);
+  await mouse.moveTo(position);
+  await mouse.down(position);
+  await tester.pump();
+  await mouse.up();
+  await tester.pumpAndSettle();
+}
 
 void main() {
   for (final error in <Object>[
@@ -42,8 +60,13 @@ void main() {
         ),
       );
 
-      await tester.tap(find.byKey(const Key('failing-menu-item')));
-      await tester.pump();
+      final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+      await clickNoteMenuItemWithMouse(
+        tester,
+        mouse,
+        const Key('failing-menu-item'),
+      );
+      await mouse.removePointer();
 
       FlutterError.onError = previousOnError;
       expect(reported, hasLength(1));
@@ -73,7 +96,7 @@ void main() {
                   contextMenuBuilder: (context) => WorkspaceContextMenuPanel(
                     width: 160,
                     children: [
-                      WorkspaceContextMenuItem(
+                      NoteMenuAction(
                         itemKey: const Key('failing-overlay-menu-item'),
                         label: '失败命令',
                         enabled: true,
@@ -96,14 +119,122 @@ void main() {
     await tester.pump();
     expect(find.byKey(const Key('failing-overlay-menu-item')), findsOneWidget);
 
-    await tester.tap(find.byKey(const Key('failing-overlay-menu-item')));
-    await tester.pump();
+    final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+    await clickNoteMenuItemWithMouse(
+      tester,
+      mouse,
+      const Key('failing-overlay-menu-item'),
+    );
+    await mouse.removePointer();
 
     FlutterError.onError = previousOnError;
     expect(find.byKey(const Key('failing-overlay-menu-item')), findsNothing);
     expect(reported, hasLength(1));
     expect(reported.single.exception, isA<StateError>());
     expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('note menu semantics execute once before dismissing', (
+    tester,
+  ) async {
+    var commandCount = 0;
+    await tester.pumpWidget(
+      CupertinoApp(
+        home: WorkspaceAppearanceScope(
+          appearance: WorkspaceAppearance.defaults,
+          child: Builder(
+            builder: (context) => CupertinoButton(
+              key: const Key('open-semantics-menu'),
+              onPressed: () {
+                ContextMenuController().show(
+                  context: context,
+                  contextMenuBuilder: (context) => WorkspaceContextMenuPanel(
+                    width: 160,
+                    children: [
+                      NoteMenuAction(
+                        itemKey: const Key('semantics-menu-item'),
+                        label: '语义命令',
+                        enabled: true,
+                        onPressed: () => commandCount += 1,
+                      ),
+                    ],
+                  ),
+                  debugRequiredFor: context.widget,
+                );
+              },
+              child: const Text('打开'),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.byKey(const Key('open-semantics-menu')));
+    await tester.pump();
+    final semantics = tester.getSemantics(
+      find.byKey(const Key('semantics-menu-item')),
+    );
+    expect(semantics.label, '语义命令');
+    expect(semantics.getSemanticsData().hasAction(SemanticsAction.tap), isTrue);
+    semantics.owner!.performAction(semantics.id, SemanticsAction.tap);
+    await tester.pumpAndSettle();
+
+    expect(commandCount, 1);
+    expect(find.byKey(const Key('semantics-menu-item')), findsNothing);
+  }, semanticsEnabled: true);
+
+  testWidgets('note menu ignores rapid commands while one is in flight', (
+    tester,
+  ) async {
+    var commandCount = 0;
+    var pendingCommand = Completer<void>();
+    await tester.pumpWidget(
+      CupertinoApp(
+        home: WorkspaceAppearanceScope(
+          appearance: WorkspaceAppearance.defaults,
+          child: Center(
+            child: NoteMenuAction(
+              itemKey: const Key('slow-menu-item'),
+              label: '慢命令',
+              enabled: true,
+              dismissContextMenuOnPressed: false,
+              onPressed: () {
+                commandCount += 1;
+                return pendingCommand.future;
+              },
+            ),
+          ),
+        ),
+      ),
+    );
+
+    final item = find.byKey(const Key('slow-menu-item'));
+    final position = tester.getCenter(item);
+    final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+    await mouse.moveTo(position);
+    await mouse.down(position);
+    await tester.pump();
+    await mouse.up();
+    await tester.pump();
+    await mouse.down(position);
+    await tester.pump();
+    await mouse.up();
+    await tester.pump();
+
+    expect(commandCount, 1);
+
+    pendingCommand.complete();
+    await tester.pump();
+    pendingCommand = Completer<void>();
+    await mouse.down(position);
+    await tester.pump();
+    await mouse.up();
+    await tester.pump();
+
+    expect(commandCount, 2);
+    pendingCommand.complete();
+    await tester.pump();
+    await mouse.removePointer();
   });
 
   testWidgets('note editor context menu opens in edit mode', (tester) async {
@@ -253,8 +384,11 @@ void main() {
       tester,
       const Key('note-menu-text-format'),
     );
-    await tester.tap(find.byKey(const Key('note-menu-bold')));
-    await tester.pumpAndSettle();
+    await clickNoteMenuItemWithMouse(
+      tester,
+      mouse,
+      const Key('note-menu-bold'),
+    );
     await mouse.removePointer();
 
     expect(noteEditor.controller.text, 'Alpha **beta**');
@@ -292,8 +426,11 @@ void main() {
         tester,
         const Key('note-menu-text-format'),
       );
-      await tester.tap(find.byKey(const Key('note-menu-bold')));
-      await tester.pumpAndSettle();
+      await clickNoteMenuItemWithMouse(
+        tester,
+        mouse,
+        const Key('note-menu-bold'),
+      );
       await mouse.removePointer();
 
       expect(noteEditor.controller.text, 'Alpha **beta**');
@@ -334,8 +471,11 @@ void main() {
         tester,
         const Key('note-menu-text-format'),
       );
-      await tester.tap(find.byKey(const Key('note-menu-italic')));
-      await tester.pumpAndSettle();
+      await clickNoteMenuItemWithMouse(
+        tester,
+        mouse,
+        const Key('note-menu-italic'),
+      );
       await mouse.removePointer();
 
       expect(noteEditor.controller.text, 'Alpha *beta*');
@@ -377,8 +517,11 @@ void main() {
         tester,
         const Key('note-menu-text-format'),
       );
-      await tester.tap(find.byKey(const Key('note-menu-bold')));
-      await tester.pumpAndSettle();
+      await clickNoteMenuItemWithMouse(
+        tester,
+        mouse,
+        const Key('note-menu-bold'),
+      );
       await mouse.removePointer();
 
       final noteEditor = activeLiveMarkdownTextField(tester);
@@ -427,8 +570,11 @@ void main() {
         tester,
         const Key('note-menu-text-format'),
       );
-      await tester.tap(find.byKey(const Key('note-menu-bold')));
-      await tester.pumpAndSettle();
+      await clickNoteMenuItemWithMouse(
+        tester,
+        mouse,
+        const Key('note-menu-bold'),
+      );
       await mouse.removePointer();
 
       final updatedEditor = activeLiveMarkdownTextField(tester);
@@ -469,8 +615,11 @@ void main() {
         tester,
         const Key('note-menu-text-format'),
       );
-      await tester.tap(find.byKey(const Key('note-menu-bold')));
-      await tester.pumpAndSettle();
+      await clickNoteMenuItemWithMouse(
+        tester,
+        mouse,
+        const Key('note-menu-bold'),
+      );
       await mouse.removePointer();
 
       final noteEditor = activeLiveMarkdownTextField(tester);
@@ -501,8 +650,11 @@ void main() {
       tester,
       const Key('note-menu-text-format'),
     );
-    await tester.tap(find.byKey(const Key('note-menu-bold')));
-    await tester.pumpAndSettle();
+    await clickNoteMenuItemWithMouse(
+      tester,
+      mouse,
+      const Key('note-menu-bold'),
+    );
     await mouse.removePointer();
 
     final noteEditor = activeLiveMarkdownTextField(tester);
@@ -510,6 +662,121 @@ void main() {
     final span = activeLiveMarkdownTextSpan(tester);
     expect(span.toPlainText(), noteEditor.controller.text);
     expect(spanHasTextStyle(span, 'beta', fontWeight: FontWeight.bold), isTrue);
+  });
+
+  testWidgets('desktop drag selection survives right click and italic', (
+    tester,
+  ) async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(
+      parentPath: '',
+      title: 'Mouse Format Study',
+    );
+    await vault.updateMarkdown(noteId: note.id, markdown: 'Alpha beta\n');
+
+    await pumpWorkspace(tester, vault: vault);
+    await switchToSourceMode(tester);
+    await activateLiveMarkdownBlock(tester, blockIndex: 0);
+    final editableTextState = activeLiveMarkdownEditableTextState(tester);
+    Offset caretPosition(int offset) {
+      final caret = editableTextState.renderEditable.getLocalRectForCaret(
+        TextPosition(offset: offset),
+      );
+      return editableTextState.renderEditable.localToGlobal(caret.center);
+    }
+
+    final selectionMouse = await tester.createGesture(
+      pointer: 41,
+      kind: PointerDeviceKind.mouse,
+    );
+    final start = caretPosition(6);
+    final end = caretPosition(10);
+    await selectionMouse.moveTo(start);
+    await selectionMouse.down(start);
+    await tester.pump();
+    await selectionMouse.moveTo(end);
+    await tester.pump();
+    await selectionMouse.up();
+    await selectionMouse.removePointer();
+    await tester.pumpAndSettle();
+    expect(
+      activeLiveMarkdownTextField(tester).controller.selection,
+      const TextSelection(baseOffset: 6, extentOffset: 10),
+    );
+
+    final selectedEndpoints = editableTextState.renderEditable
+        .getEndpointsForSelection(
+          activeLiveMarkdownTextField(tester).controller.selection,
+        );
+    final selectionCenter = editableTextState.renderEditable.localToGlobal(
+      Offset(
+        (selectedEndpoints.first.point.dx + selectedEndpoints.last.point.dx) /
+            2,
+        selectedEndpoints.first.point.dy - 2,
+      ),
+    );
+    final contextMouse = await tester.createGesture(
+      pointer: 42,
+      kind: PointerDeviceKind.mouse,
+      buttons: kSecondaryMouseButton,
+    );
+    await contextMouse.addPointer(location: selectionCenter);
+    await contextMouse.moveTo(selectionCenter);
+    await contextMouse.down(selectionCenter);
+    await tester.pump();
+    await contextMouse.up();
+    await contextMouse.removePointer();
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('note-context-menu')), findsOneWidget);
+    expect(
+      activeLiveMarkdownTextField(tester).controller.selection,
+      const TextSelection(baseOffset: 6, extentOffset: 10),
+    );
+
+    final menuMouse = await tester.createGesture(
+      pointer: 43,
+      kind: PointerDeviceKind.mouse,
+    );
+    await menuMouse.addPointer();
+    await menuMouse.moveTo(
+      tester.getCenter(find.byKey(const Key('note-menu-text-format'))),
+    );
+    await tester.pumpAndSettle();
+    await clickNoteMenuItemWithMouse(
+      tester,
+      menuMouse,
+      const Key('note-menu-italic'),
+    );
+
+    final editor = activeLiveMarkdownTextField(tester);
+    expect(editor.controller.text, 'Alpha *beta*');
+    expect(
+      activeLiveMarkdownTextSpan(tester).toPlainText(),
+      editor.controller.text,
+    );
+
+    expect(editor.focusNode.hasFocus, isTrue);
+    tester.testTextInput.updateEditingValue(
+      const TextEditingValue(
+        text: 'Alpha *beta*\n',
+        selection: TextSelection.collapsed(offset: 13),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(activeLiveMarkdownTextField(tester).controller.text, isEmpty);
+    tester.testTextInput.updateEditingValue(
+      const TextEditingValue(
+        text: 'Next',
+        selection: TextSelection.collapsed(offset: 4),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(
+      liveMarkdownDocumentController(tester, paneId: 1).text,
+      'Alpha *beta*\n\nNext',
+    );
+    await menuMouse.removePointer();
   });
 
   testWidgets(
@@ -539,8 +806,11 @@ void main() {
         tester,
         const Key('note-menu-text-format'),
       );
-      await tester.tap(find.byKey(const Key('note-menu-bold')));
-      await tester.pumpAndSettle();
+      await clickNoteMenuItemWithMouse(
+        tester,
+        mouse,
+        const Key('note-menu-bold'),
+      );
       await mouse.removePointer();
 
       final noteEditor = activeLiveMarkdownTextField(tester);
@@ -553,6 +823,50 @@ void main() {
       );
     },
   );
+
+  testWidgets('blank markdown space opens the editor context menu', (
+    tester,
+  ) async {
+    const markdown = 'Alpha\n\nBeta\n';
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Blank Menu');
+    await vault.updateMarkdown(noteId: note.id, markdown: markdown);
+
+    await pumpWorkspace(tester, vault: vault);
+    await switchToSourceMode(tester);
+    await activateLiveMarkdownBlock(tester, blockIndex: 0);
+    final document = liveMarkdownDocumentController(tester, paneId: 1);
+
+    await tester.tap(
+      find.byKey(const Key('live-markdown-block-preview-1')),
+      buttons: kSecondaryMouseButton,
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('note-context-menu')), findsOneWidget);
+    expect(find.byKey(const Key('note-menu-insert')), findsOneWidget);
+    expect(document.text, markdown);
+  });
+
+  testWidgets('empty note opens the editor context menu', (tester) async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Empty Menu');
+    await vault.updateMarkdown(noteId: note.id, markdown: '');
+
+    await pumpWorkspace(tester, vault: vault);
+    await switchToSourceMode(tester);
+    final document = liveMarkdownDocumentController(tester, paneId: 1);
+
+    await tester.tap(
+      find.byKey(const Key('live-markdown-block-preview-0')),
+      buttons: kSecondaryMouseButton,
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('note-context-menu')), findsOneWidget);
+    expect(find.byKey(const Key('note-menu-paste')), findsOneWidget);
+    expect(document.text, isEmpty);
+  });
 
   testWidgets(
     'context menu does not reuse a stale editable text command target',
@@ -594,8 +908,11 @@ void main() {
         tester,
         const Key('note-menu-text-format'),
       );
-      await tester.tap(find.byKey(const Key('note-menu-italic')));
-      await tester.pumpAndSettle();
+      await clickNoteMenuItemWithMouse(
+        tester,
+        mouse,
+        const Key('note-menu-italic'),
+      );
       await mouse.removePointer();
 
       final noteEditor = activeLiveMarkdownTextField(tester);
@@ -641,8 +958,11 @@ void main() {
         tester,
         const Key('note-menu-text-format'),
       );
-      await tester.tap(find.byKey(const Key('note-menu-bold')));
-      await tester.pumpAndSettle();
+      await clickNoteMenuItemWithMouse(
+        tester,
+        mouse,
+        const Key('note-menu-bold'),
+      );
       await mouse.removePointer();
 
       expect(
@@ -667,8 +987,11 @@ void main() {
         tester,
         const Key('note-menu-text-format'),
       );
-      await tester.tap(find.byKey(const Key('note-menu-italic')));
-      await tester.pumpAndSettle();
+      await clickNoteMenuItemWithMouse(
+        tester,
+        mouse,
+        const Key('note-menu-italic'),
+      );
       await mouse.removePointer();
 
       final noteEditor = activeLiveMarkdownTextField(tester);
@@ -717,8 +1040,11 @@ void main() {
         tester,
         const Key('note-menu-text-format'),
       );
-      await tester.tap(find.byKey(const Key('note-menu-bold')));
-      await tester.pumpAndSettle();
+      await clickNoteMenuItemWithMouse(
+        tester,
+        mouse,
+        const Key('note-menu-bold'),
+      );
       await mouse.removePointer();
 
       expect(
@@ -740,8 +1066,11 @@ void main() {
         tester,
         const Key('note-menu-text-format'),
       );
-      await tester.tap(find.byKey(const Key('note-menu-italic')));
-      await tester.pumpAndSettle();
+      await clickNoteMenuItemWithMouse(
+        tester,
+        mouse,
+        const Key('note-menu-italic'),
+      );
       await mouse.removePointer();
 
       final noteEditor = activeLiveMarkdownTextField(tester);
@@ -780,8 +1109,11 @@ void main() {
       tester,
       const Key('note-menu-text-format'),
     );
-    await tester.tap(find.byKey(const Key('note-menu-italic')));
-    await tester.pumpAndSettle();
+    await clickNoteMenuItemWithMouse(
+      tester,
+      mouse,
+      const Key('note-menu-italic'),
+    );
     await mouse.removePointer();
 
     expect(noteEditor.controller.text, 'Alpha *beta*');
@@ -815,8 +1147,11 @@ void main() {
         tester,
         const Key('note-menu-text-format'),
       );
-      await tester.tap(find.byKey(const Key('note-menu-strikethrough')));
-      await tester.pumpAndSettle();
+      await clickNoteMenuItemWithMouse(
+        tester,
+        mouse,
+        const Key('note-menu-strikethrough'),
+      );
       await mouse.removePointer();
 
       expect(noteEditor.controller.text, 'Alpha ~~beta~~');
@@ -874,8 +1209,11 @@ void main() {
         findsNothing,
       );
 
-      await tester.tap(find.byKey(const Key('note-menu-highlight')));
-      await tester.pumpAndSettle();
+      await clickNoteMenuItemWithMouse(
+        tester,
+        mouse,
+        const Key('note-menu-highlight'),
+      );
       await mouse.removePointer();
 
       expect(noteEditor.controller.text, 'Alpha **==beta==**');
@@ -1158,8 +1496,11 @@ void main() {
       tester,
       const Key('note-menu-paragraph'),
     );
-    await tester.tap(find.byKey(const Key('note-menu-blockquote')));
-    await tester.pumpAndSettle();
+    await clickNoteMenuItemWithMouse(
+      tester,
+      mouse,
+      const Key('note-menu-blockquote'),
+    );
     await mouse.removePointer();
     expect(
       activeLiveMarkdownTextField(tester).controller.text,
@@ -1172,8 +1513,11 @@ void main() {
     );
     await openNoteContextMenu(tester);
     mouse = await hoverNoteMenuItem(tester, const Key('note-menu-insert'));
-    await tester.tap(find.byKey(const Key('note-menu-insert-table')));
-    await tester.pumpAndSettle();
+    await clickNoteMenuItemWithMouse(
+      tester,
+      mouse,
+      const Key('note-menu-insert-table'),
+    );
     await mouse.removePointer();
 
     final document = liveMarkdownDocumentController(tester, paneId: 1);
@@ -1206,8 +1550,11 @@ void main() {
       tester,
       const Key('note-menu-insert'),
     );
-    await tester.tap(find.byKey(const Key('note-menu-insert-divider')));
-    await tester.pumpAndSettle();
+    await clickNoteMenuItemWithMouse(
+      tester,
+      mouse,
+      const Key('note-menu-insert-divider'),
+    );
     await mouse.removePointer();
 
     expect(
@@ -1243,61 +1590,133 @@ void main() {
       tester,
       const Key('note-menu-text-format'),
     );
-    await tester.tap(find.byKey(const Key('note-menu-bold')));
-    await tester.pumpAndSettle();
+    await clickNoteMenuItemWithMouse(
+      tester,
+      mouse,
+      const Key('note-menu-bold'),
+    );
     await mouse.removePointer();
 
     expect(noteEditor.controller.text, 'Second **beta**');
   });
 
-  testWidgets('note editor context menu applies paragraph commands', (
-    tester,
-  ) async {
-    final vault = MemoryVaultBackend(seedExampleData: false);
-    final note = await vault.createNote(parentPath: '', title: 'Block Study');
-    await vault.updateMarkdown(noteId: note.id, markdown: 'Alpha\nBeta\n');
-
-    await pumpWorkspace(tester, vault: vault);
-    await switchToSourceMode(tester);
-    await activateLiveMarkdownBlock(tester, blockIndex: 0);
-    final noteEditor = activeLiveMarkdownTextField(tester);
-    await setActiveLiveMarkdownSelection(
+  for (final command
+      in <({String name, Key key, String source, String expected})>[
+        (
+          name: 'heading 1',
+          key: const Key('note-menu-heading-1'),
+          source: 'Alpha\n',
+          expected: '# Alpha',
+        ),
+        (
+          name: 'heading 2',
+          key: const Key('note-menu-heading-2'),
+          source: 'Alpha\n',
+          expected: '## Alpha',
+        ),
+        (
+          name: 'heading 3',
+          key: const Key('note-menu-heading-3'),
+          source: 'Alpha\n',
+          expected: '### Alpha',
+        ),
+        (
+          name: 'heading 4',
+          key: const Key('note-menu-heading-4'),
+          source: 'Alpha\n',
+          expected: '#### Alpha',
+        ),
+        (
+          name: 'body',
+          key: const Key('note-menu-body'),
+          source: '## Alpha\n',
+          expected: 'Alpha',
+        ),
+        (
+          name: 'blockquote',
+          key: const Key('note-menu-blockquote'),
+          source: 'Alpha\n',
+          expected: '> Alpha',
+        ),
+      ]) {
+    testWidgets('note editor context menu applies ${command.name}', (
       tester,
-      const TextSelection.collapsed(offset: 0),
-    );
+    ) async {
+      final vault = MemoryVaultBackend(seedExampleData: false);
+      final note = await vault.createNote(parentPath: '', title: 'Block Study');
+      await vault.updateMarkdown(noteId: note.id, markdown: command.source);
 
-    await openNoteContextMenu(tester);
-    final mouse = await hoverNoteMenuItem(
+      await pumpWorkspace(tester, vault: vault);
+      await switchToSourceMode(tester);
+      await activateLiveMarkdownBlock(tester, blockIndex: 0);
+      await setActiveLiveMarkdownSelection(
+        tester,
+        const TextSelection.collapsed(offset: 0),
+      );
+      await openNoteContextMenu(tester);
+      final mouse = await hoverNoteMenuItem(
+        tester,
+        const Key('note-menu-paragraph'),
+      );
+      await clickNoteMenuItemWithMouse(tester, mouse, command.key);
+      await mouse.removePointer();
+
+      final editor = activeLiveMarkdownTextField(tester);
+      expect(editor.controller.text, command.expected);
+      expect(
+        activeLiveMarkdownTextSpan(tester).toPlainText(),
+        command.expected,
+      );
+    });
+  }
+
+  for (final command in <({String name, Key key, String expected})>[
+    (
+      name: 'unordered list',
+      key: const Key('note-menu-unordered-list'),
+      expected: '- Alpha',
+    ),
+    (
+      name: 'ordered list',
+      key: const Key('note-menu-ordered-list'),
+      expected: '1. Alpha',
+    ),
+    (
+      name: 'task list',
+      key: const Key('note-menu-task-list'),
+      expected: '- [ ] Alpha',
+    ),
+  ]) {
+    testWidgets('note editor context menu applies ${command.name}', (
       tester,
-      const Key('note-menu-paragraph'),
-    );
-    await tester.tap(find.byKey(const Key('note-menu-heading-1')));
-    await tester.pumpAndSettle();
-    await mouse.removePointer();
-    expect(noteEditor.controller.text, '# Alpha');
-  });
+    ) async {
+      final vault = MemoryVaultBackend(seedExampleData: false);
+      final note = await vault.createNote(parentPath: '', title: 'List Study');
+      await vault.updateMarkdown(noteId: note.id, markdown: 'Alpha\n');
 
-  testWidgets('note editor context menu applies list commands', (tester) async {
-    final vault = MemoryVaultBackend(seedExampleData: false);
-    final note = await vault.createNote(parentPath: '', title: 'List Study');
-    await vault.updateMarkdown(noteId: note.id, markdown: 'Alpha\nBeta\n');
+      await pumpWorkspace(tester, vault: vault);
+      await switchToSourceMode(tester);
+      await activateLiveMarkdownBlock(tester, blockIndex: 0);
+      await setActiveLiveMarkdownSelection(
+        tester,
+        const TextSelection(baseOffset: 0, extentOffset: 5),
+      );
+      await openNoteContextMenu(tester);
+      final mouse = await hoverNoteMenuItem(
+        tester,
+        const Key('note-menu-list'),
+      );
+      await clickNoteMenuItemWithMouse(tester, mouse, command.key);
+      await mouse.removePointer();
 
-    await pumpWorkspace(tester, vault: vault);
-    await switchToSourceMode(tester);
-    await activateLiveMarkdownBlock(tester, blockIndex: 0);
-    final noteEditor = activeLiveMarkdownTextField(tester);
-    await setActiveLiveMarkdownSelection(
-      tester,
-      const TextSelection(baseOffset: 0, extentOffset: 5),
-    );
-    await openNoteContextMenu(tester);
-    final mouse = await hoverNoteMenuItem(tester, const Key('note-menu-list'));
-    await tester.tap(find.byKey(const Key('note-menu-task-list')));
-    await tester.pumpAndSettle();
-    await mouse.removePointer();
-
-    expect(noteEditor.controller.text, '- [ ] Alpha');
-  });
+      final editor = activeLiveMarkdownTextField(tester);
+      expect(editor.controller.text, command.expected);
+      expect(
+        activeLiveMarkdownTextSpan(tester).toPlainText(),
+        command.expected,
+      );
+    });
+  }
 
   testWidgets('plain text paste skips pasted images from context menu', (
     tester,
@@ -1318,8 +1737,13 @@ void main() {
 
     await openNoteContextMenu(tester);
     expect(find.byKey(const Key('note-context-menu')), findsOneWidget);
-    await tester.tap(find.byKey(const Key('note-menu-paste-plain')));
-    await tester.pumpAndSettle();
+    final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+    await clickNoteMenuItemWithMouse(
+      tester,
+      mouse,
+      const Key('note-menu-paste-plain'),
+    );
+    await mouse.removePointer();
 
     final noteEditor = activeLiveMarkdownTextField(tester);
     expect(imageInput.pasteCalls, 0);

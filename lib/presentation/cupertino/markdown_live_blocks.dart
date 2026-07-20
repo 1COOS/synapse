@@ -240,6 +240,25 @@ class MarkdownLiveTable {
     return _copyWith(rows: nextRows);
   }
 
+  MarkdownLiveTable moveRow({
+    required int fromVisualRow,
+    required int toVisualRow,
+  }) {
+    final from = fromVisualRow - 1;
+    final to = toVisualRow - 1;
+    if (from < 0 ||
+        from >= rows.length ||
+        to < 0 ||
+        to >= rows.length ||
+        from == to) {
+      return this;
+    }
+    final nextRows = _copyRows(rows);
+    final moved = nextRows.removeAt(from);
+    nextRows.insert(to, moved);
+    return _copyWith(rows: nextRows);
+  }
+
   MarkdownLiveTable insertColumn({required int afterColumn}) {
     final insertAt = (afterColumn + 1).clamp(0, columnCount).toInt();
     final nextHeader = [...header]
@@ -266,6 +285,32 @@ class MarkdownLiveTable {
     final nextRows = _copyRows(rows);
     for (final row in nextRows) {
       row.removeAt(column);
+    }
+    return _copyWith(
+      header: nextHeader,
+      alignments: nextAlignments,
+      rows: nextRows,
+    );
+  }
+
+  MarkdownLiveTable moveColumn({required int from, required int to}) {
+    if (from < 0 ||
+        from >= columnCount ||
+        to < 0 ||
+        to >= columnCount ||
+        from == to) {
+      return this;
+    }
+    final nextHeader = [...header];
+    final movedHeader = nextHeader.removeAt(from);
+    nextHeader.insert(to, movedHeader);
+    final nextAlignments = [...alignments];
+    final movedAlignment = nextAlignments.removeAt(from);
+    nextAlignments.insert(to, movedAlignment);
+    final nextRows = _copyRows(rows);
+    for (final row in nextRows) {
+      final movedCell = row.removeAt(from);
+      row.insert(to, movedCell);
     }
     return _copyWith(
       header: nextHeader,
@@ -610,13 +655,18 @@ List<MarkdownLiveTableCell> _emptyTableRow(int columnCount) {
 
 String _escapeMarkdownTablePlainText(String text) {
   return text
-      .replaceAll(RegExp(r'\s*\r?\n\s*'), ' ')
+      .replaceAll('\r\n', '\n')
+      .replaceAll('\r', '\n')
+      .split('\n')
+      .map((line) => line.trim())
+      .join('<br>')
       .replaceAll('|', r'\|')
       .trim();
 }
 
 String _plainTextFromMarkdownTableCell(String source) {
   var text = source.replaceAll(r'\|', '|');
+  text = text.replaceAll(RegExp(r'<br\s*/?>', caseSensitive: false), '\n');
   text = text.replaceAllMapped(
     RegExp(r'\[([^\]]+)\]\([^)]+\)'),
     (match) => match.group(1)!,

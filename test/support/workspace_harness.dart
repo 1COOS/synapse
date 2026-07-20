@@ -294,7 +294,13 @@ LiveMarkdownEditableText activeLiveMarkdownTextField(
   int? paneId,
 }) {
   return tester.widget<LiveMarkdownEditableText>(
-    inNotePane(find.byKey(const Key('note-editor')), paneId).first,
+    inNotePane(
+      find.descendant(
+        of: find.byKey(const Key('note-editor')),
+        matching: find.byType(LiveMarkdownEditableText),
+      ),
+      paneId,
+    ).first,
   );
 }
 

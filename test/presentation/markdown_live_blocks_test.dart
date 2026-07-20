@@ -133,6 +133,29 @@ void main() {}
     );
   });
 
+  test('preserves multiline table cells with markdown line breaks', () {
+    const markdown =
+        '| Name | Notes |\n'
+        '|---|---|\n'
+        '| Alpha | first<br>second<br />third |\n';
+    final table = parseMarkdownLiveTable(markdown)!;
+
+    expect(table.rows[0][1].plainText, 'first\nsecond\nthird');
+
+    final edited = table.replaceCell(
+      visualRow: 1,
+      column: 1,
+      plainText: 'updated | value\nnext',
+    );
+    expect(edited.rows[0][1].plainText, 'updated | value\nnext');
+    expect(
+      serializeMarkdownLiveTable(edited),
+      '| Name | Notes |\n'
+      '| --- | --- |\n'
+      '| Alpha | updated \\| value<br>next |\n',
+    );
+  });
+
   test('ignores invalid Synapse table width metadata', () {
     const markdown =
         '<!-- synapse-table width="wide" -->\n'
@@ -180,5 +203,31 @@ void main() {}
       '| --- | --- |\n'
       '|  |  |\n',
     );
+  });
+
+  test('moves table rows and columns without losing alignment metadata', () {
+    const markdown =
+        '| A | B | C |\n'
+        '|:---|:---:|---:|\n'
+        '| 1 | 2 | 3 |\n'
+        '| 4 | 5 | 6 |\n';
+    final table = parseMarkdownLiveTable(markdown)!;
+
+    final edited = table
+        .moveRow(fromVisualRow: 2, toVisualRow: 1)
+        .moveColumn(from: 2, to: 0);
+
+    expect(
+      serializeMarkdownLiveTable(edited),
+      '| C | A | B |\n'
+      '| ---: | :--- | :---: |\n'
+      '| 6 | 4 | 5 |\n'
+      '| 3 | 1 | 2 |\n',
+    );
+    expect(
+      identical(table.moveRow(fromVisualRow: 0, toVisualRow: 1), table),
+      isTrue,
+    );
+    expect(identical(table.moveColumn(from: 1, to: 1), table), isTrue);
   });
 }

@@ -9,8 +9,8 @@ import 'package:path/path.dart' as p;
 import '../../../domain/markdown/markdown_document.dart';
 import '../../../domain/vault/vault_resource.dart';
 import '../../workspace/controller/workspace_controller.dart';
+import '../markdown_inline_formatting.dart';
 import '../../workspace/editor/markdown_image_transform.dart';
-import '../../workspace/editor/markdown_styled_controller.dart';
 import '../../workspace/editor/markdown_table_editor.dart';
 import '../../workspace/editor/pane_editor_context.dart';
 import '../../workspace/editor/preview_image_block.dart';
@@ -521,9 +521,28 @@ final class _ObsidianHighlightSyntax extends md.InlineSyntax {
 
   @override
   bool onMatch(md.InlineParser parser, Match match) {
-    parser.addNode(md.Element.text('mark', match[1]!));
+    if (_crossesAnotherInlineRange(parser.source, match.start, match.end)) {
+      parser.addNode(md.Text(match[0]!));
+      return true;
+    }
+    parser.addNode(
+      _ObsidianHighlightElement(
+        source: match[1]!,
+        parsedChildren: parser.document.parseInline(match[1]!),
+      ),
+    );
     return true;
   }
+}
+
+final class _ObsidianHighlightElement extends md.Element {
+  _ObsidianHighlightElement({
+    required this.source,
+    required this.parsedChildren,
+  }) : super.text('mark', source);
+
+  final String source;
+  final List<md.Node> parsedChildren;
 }
 
 final class _HighlightElementBuilder extends MarkdownElementBuilder {
@@ -537,39 +556,75 @@ final class _HighlightElementBuilder extends MarkdownElementBuilder {
     final style =
         (parentStyle ?? CupertinoTheme.of(context).textTheme.textStyle)
             .copyWith(backgroundColor: workspaceMarkdownHighlightColor);
+    final nodes = element is _ObsidianHighlightElement
+        ? element.parsedChildren
+        : element.children ?? const <md.Node>[];
     return Text.rich(
-      _highlightSpan(element.children ?? const <md.Node>[], style),
+      TextSpan(children: _flattenHighlightNodes(nodes, style)),
       textScaler: MediaQuery.textScalerOf(context),
     );
   }
 
-  TextSpan _highlightSpan(List<md.Node> nodes, TextStyle style) {
-    return TextSpan(
-      style: style,
-      children: [for (final node in nodes) _highlightNode(node, style)],
-    );
+  List<InlineSpan> _flattenHighlightNodes(
+    List<md.Node> nodes,
+    TextStyle inheritedStyle,
+  ) {
+    return [
+      for (final node in nodes) ..._flattenHighlightNode(node, inheritedStyle),
+    ];
   }
 
-  InlineSpan _highlightNode(md.Node node, TextStyle inheritedStyle) {
+  List<InlineSpan> _flattenHighlightNode(
+    md.Node node,
+    TextStyle inheritedStyle,
+  ) {
     if (node is md.Text) {
-      return buildMarkdownPreviewInlineTextSpan(node.text, inheritedStyle);
+      return [TextSpan(text: node.text, style: inheritedStyle)];
     }
     if (node is! md.Element) {
-      return const TextSpan();
+      final text = node.textContent;
+      return text.isEmpty
+          ? const <InlineSpan>[]
+          : [TextSpan(text: text, style: inheritedStyle)];
     }
     final style = switch (node.tag) {
       'strong' => inheritedStyle.copyWith(fontWeight: FontWeight.bold),
       'em' => inheritedStyle.copyWith(fontStyle: FontStyle.italic),
       'del' => inheritedStyle.copyWith(decoration: TextDecoration.lineThrough),
       'code' => inheritedStyle.copyWith(fontFamily: 'monospace'),
+      'mark' => inheritedStyle.copyWith(
+        backgroundColor: workspaceMarkdownHighlightColor,
+      ),
       _ => inheritedStyle,
     };
-    return TextSpan(
-      style: style,
-      children: [
-        for (final child in node.children ?? const <md.Node>[])
-          _highlightNode(child, style),
-      ],
-    );
+    final children = node is _ObsidianHighlightElement
+        ? node.parsedChildren
+        : node.children ?? const <md.Node>[];
+    if (children.isEmpty) {
+      final text = node.textContent;
+      return text.isEmpty
+          ? const <InlineSpan>[]
+          : [TextSpan(text: text, style: style)];
+    }
+    return _flattenHighlightNodes(children, style);
   }
+}
+
+bool _crossesAnotherInlineRange(String source, int start, int end) {
+  final analysis = MarkdownInlineAnalysis.parse(source);
+  for (final range in analysis.ranges) {
+    if (range.style == MarkdownInlineStyle.highlight &&
+        range.fullStart == start &&
+        range.fullEnd == end) {
+      continue;
+    }
+    final crossesFromLeft =
+        range.fullStart < start && range.fullEnd > start && range.fullEnd < end;
+    final crossesFromRight =
+        range.fullStart > start && range.fullStart < end && range.fullEnd > end;
+    if (crossesFromLeft || crossesFromRight) {
+      return true;
+    }
+  }
+  return false;
 }
