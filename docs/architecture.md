@@ -294,7 +294,7 @@ macOS 目录选择或 bookmark 恢复通过 Dart MethodChannel 和 Swift token m
 
 ## 10. Keychain 与配置安全
 
-`macos/Runner/DebugProfile.entitlements` 和 `Release.entitlements` 均包含插件要求的空 `keychain-access-groups`。`LocalDebug.entitlements` 不包含 Keychain Sharing，使无证书环境可以 ad-hoc 签名运行；该配置下 API Key 操作必须 fail-closed。API Key 只进入 Keychain：
+`macos/Runner/DebugProfile.entitlements` 和 `Release.entitlements` 均包含插件要求的空 `keychain-access-groups`。Debug/Profile 使用前者，Release 使用后者；所有 macOS 运行配置都要求有效 Apple Team 和证书签名，不再提供 ad-hoc Local Debug。真实 Team ID 仅放在 ignored 的 `macos/Runner/Configs/Signing.local.xcconfig` 中。API Key 只进入 Keychain：
 
 - `settings.json` 和 provider JSON 不包含 `apiKey`；
 - Keychain 失败后不会创建明文 key 文件；
@@ -306,7 +306,7 @@ macOS 目录选择或 bookmark 恢复通过 Dart MethodChannel 和 Swift token m
 - 同进程 mutex 与 blocking file lock 串行化 key 读取、迁移和写入，避免多实例竞态。
 - Riverpod `WorkspaceState` 永远只发布脱敏后的 Provider 配置；完整 key 不通过 controller getter 暴露。
 
-Keychain、签名或 entitlement 异常必须明确报错并 fail-closed。Local Debug 遇到 `-34018` 时应切换到正确签名的 Profile/Release 构建并重新输入 key，不能把 secret 写入本地 JSON 绕过问题。
+Keychain、签名或 entitlement 异常必须明确报错并 fail-closed。任何配置遇到 `-34018` 都应检查本机 Team、签名 identity 和实际产物 entitlement，清理并重新构建后再输入 key，不能把 secret 写入本地 JSON 绕过问题。
 
 详细运行与排障见 [macOS 生产说明](./macos-production.md)。
 

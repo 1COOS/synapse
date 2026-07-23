@@ -3,7 +3,7 @@
 > 历史执行记录：本文保留 2026-07-10 状态层重写当时的范围和 checkpoint。后续架构批次已引入稳定 UUID note identity、File Vault WAL、API Key observable redaction 和后台 SQLite 索引；当前实现与约束以 [架构文档](../../architecture.md) 为准。
 
 **日期：** 2026-07-10
-**状态：** 代码阶段全部完成；本地运行、Debug build 与原生测试通过，最终 macOS production gate blocked/pending Release signing
+**历史状态（2026-07-14）：** 代码阶段全部完成；当时的本地运行、Debug build 与原生测试通过，最终 macOS production gate blocked/pending Release signing。该 ad-hoc Debug 结论已被下方 2026-07-23 签名策略更新取代。
 **目标分支：** `codex/state-layer-rewrite`
 **Foundation implementation baseline：** `3cc85d9c9b3e54920a98b91e8d1fc69b76b08ac9`
 **Initial documentation checkpoint：** `92d5576`
@@ -25,7 +25,7 @@
 
 **Final local gate checkpoint（2026-07-14）：** `dart format` 165 files、0 changed，`flutter test --no-pub` 630/630，`flutter analyze --no-pub` 无 issue，`git diff --check` PASS，执行前后 worktree clean。原始 `xcodebuild test`、Debug build 与 Release build 均因 Runner entitlements 需要 Apple Development certificate 而失败；Release app 未生成，codesign entitlement inspection 因此未完成。关闭签名的辅助 `xcodebuild test` 通过 RunnerTests 3/3，但不能替代 production gate。代码与 unsigned native tests 已通过；strict final local production gate 仍被外部 Apple Development certificate/Team 阻塞。
 
-**Local Debug signing remediation（2026-07-14）：** Debug 改用不含 Keychain Sharing 的 `LocalDebug.entitlements` 和 ad-hoc `Sign to Run Locally`；Profile/Release 继续使用带空 `keychain-access-groups` 的签名 entitlement。Vault/普通偏好保存与 API Key transaction 已解耦，未修改密钥时使用 `savePreservingApiKey`，不会读取或清空 Keychain。`flutter run -d macos`、Debug build、原始 `xcodebuild test`（RunnerTests 3/3）、634/634 Flutter tests 和 analyze 均通过。当前外部阻塞仅剩 Release build 与 Release codesign entitlement inspection。
+**签名策略更新（2026-07-23）：** 2026-07-14 的无证书 ad-hoc Local Debug 方案已被签名 Debug 取代。Debug/Profile 使用 `DebugProfile.entitlements`，Release 使用 `Release.entitlements`；所有 macOS 配置都要求本机 Team 和有效签名 identity。Vault/普通偏好保存与 API Key transaction 继续解耦，未修改密钥时使用 `savePreservingApiKey`，不会读取或清空 Keychain。
 
 > Foundation baseline 捕获时，分支相对 `main` 有 15 个实现提交，任务 1-5 的 session/save/split/mutation foundation 已完成。该 baseline 的 fresh evidence 为状态层 65 tests pass、workspace 140 tests pass，共 205 tests pass，`flutter analyze --no-pub` 无 issue，`git diff --check` clean。提交数量仅描述 baseline 捕获时点，不作为后续分支总提交数。
 
@@ -60,7 +60,7 @@
 4. 异步编辑操作永久绑定发起 pane/session，不在完成时重新读取全局焦点。
 5. `main.dart`/bootstrap 成为真实 composition root，`workspace.dart` 不再构造具体 Vault、AI、搜索和 Settings adapter。
 6. Riverpod 承接 workspace 的可观察状态与 controller 生命周期。
-7. macOS Profile/Release 只使用 Keychain 保存 API Key；Local Debug 不持久化密钥并保持 fail-closed；旧明文 key 文件被移除并安全迁移。
+7. macOS Debug/Profile/Release 只使用 Keychain 保存 API Key，所有配置都要求有效签名并保持 fail-closed；旧明文 key 文件被移除并安全迁移。
 8. macOS security-scoped Vault 访问具有显式 lease 生命周期，切仓失败不会丢失旧 Vault 访问。
 9. 保持现有 Markdown、OCR、proposal、自动保存和编辑器行为契约。
 
@@ -439,7 +439,7 @@ Picker 不得在旧 session flush 之前释放旧 security scope。
 <array/>
 ```
 
-`macos/Runner/LocalDebug.entitlements` 刻意不声明 Keychain Sharing，供无证书环境使用 ad-hoc signing 执行 `flutter run`、Debug build 与原生测试。Local Debug 下密钥操作必须 fail-closed；真实 Keychain 流程和生产检查只允许使用正确签名的 Profile/Release 配置。
+Debug/Profile 统一使用 `macos/Runner/DebugProfile.entitlements`，Release 使用 `Release.entitlements`。真实 Team ID 通过 ignored 的 `Signing.local.xcconfig` 注入；缺少 Team 或签名 identity 时 macOS build 必须失败，不提供无证书 ad-hoc fallback。
 
 `FileSettingsStore` 改为 fail closed：
 
@@ -503,7 +503,7 @@ Picker 不得在旧 session flush 之前释放旧 security scope。
 
 ### 10.3 macOS
 
-- entitlements 测试检查 Profile/Release 的 `keychain-access-groups`，并检查 Local Debug 保持 ad-hoc signable；
+- entitlements 测试检查 Debug/Profile/Release 的 `keychain-access-groups`、本机 Team 配置模板和 Xcode Automatic Signing；
 - settings store 测试验证不再创建明文 key 文件，以及旧文件的一次性迁移；
 - MethodChannel 测试覆盖 lease release；
 - Swift 原生测试覆盖新 lease 替换/释放逻辑；

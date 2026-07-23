@@ -1,5 +1,6 @@
 import Cocoa
 import FlutterMacOS
+import Security
 import XCTest
 @testable import synapse
 
@@ -67,6 +68,40 @@ class RunnerTests: XCTestCase {
     XCTAssertThrowsError(try manager.createLease(for: url))
     XCTAssertEqual(manager.activeLeaseCount, 0)
     XCTAssertEqual(stops, [url])
+  }
+
+  func testSignedDebugCanRoundTripTemporaryKeychainItem() {
+    let service = "co.onecoos.synapse.RunnerTests"
+    let account = UUID().uuidString
+    let expected = Data("synapse-keychain-test".utf8)
+    let baseQuery: [CFString: Any] = [
+      kSecClass: kSecClassGenericPassword,
+      kSecAttrService: service,
+      kSecAttrAccount: account,
+    ]
+
+    SecItemDelete(baseQuery as CFDictionary)
+    defer { SecItemDelete(baseQuery as CFDictionary) }
+
+    var addQuery = baseQuery
+    addQuery[kSecValueData] = expected
+    XCTAssertEqual(
+      SecItemAdd(addQuery as CFDictionary, nil),
+      errSecSuccess,
+      "Signed Debug must be able to write to the macOS Keychain."
+    )
+
+    var readQuery = baseQuery
+    readQuery[kSecReturnData] = true
+    readQuery[kSecMatchLimit] = kSecMatchLimitOne
+    var result: CFTypeRef?
+    XCTAssertEqual(
+      SecItemCopyMatching(readQuery as CFDictionary, &result),
+      errSecSuccess,
+      "Signed Debug must be able to read back its Keychain item."
+    )
+    XCTAssertEqual(result as? Data, expected)
+    XCTAssertEqual(SecItemDelete(baseQuery as CFDictionary), errSecSuccess)
   }
 
 }

@@ -7,7 +7,7 @@
 **Initial documentation checkpoint：** `92d5576`
 **Review clarification commit：** `d4c5310`
 
-**Latest completed code checkpoint：** Local Debug ad-hoc signing remediation（2026-07-14）；本地运行、Debug build 与原生测试已恢复，Final local gate 仅 blocked/pending Release signing
+**Latest completed code checkpoint：** 签名 Debug 与 Keychain 策略（2026-07-23）；Debug/Profile/Release 均要求本机 Team 和有效签名 identity，不再提供 ad-hoc Local Debug
 
 > Foundation baseline 捕获时，分支相对 `main` 有 15 个实现提交。该数字只描述 baseline 捕获时点，不声明后续分支的固定提交总数。
 
@@ -29,7 +29,7 @@
 
 **Final local gate checkpoint（2026-07-14）：** `dart format` 165 files、0 changed，`flutter test --no-pub` 630/630，`flutter analyze --no-pub` 无 issue，`git diff --check` PASS，执行前后 worktree clean。原始 `xcodebuild test`、Debug build 与 Release build 均因 Runner entitlements 需要 Apple Development certificate 而失败；Release app 未生成，因此无法完成 codesign entitlement inspection。关闭签名的辅助 `xcodebuild test` 通过 RunnerTests 3/3，但不能替代 production gate。代码与 unsigned native tests 已通过；strict final local production gate 仍被外部 Apple Development certificate/Team 阻塞。
 
-**Local Debug signing remediation（2026-07-14）：** 新增 `LocalDebug.entitlements`，Debug 使用 ad-hoc `Sign to Run Locally`，不声明 Keychain Sharing；Profile/Release 继续使用带空 `keychain-access-groups` 的签名 entitlement。后续修复将 Vault/普通偏好保存与 API Key transaction 解耦，未修改密钥时使用 `savePreservingApiKey`，不会读取或清空 Keychain。`flutter run -d macos` PASS、Debug build PASS、原始 `xcodebuild test` PASS（RunnerTests 3/3）、全量 Flutter tests 634/634、analyze 无 issue。当前只剩 Release build 与 Release codesign entitlement inspection 被 Apple Development certificate/Team 阻塞。
+**签名策略更新（2026-07-23）：** 2026-07-14 的无证书 ad-hoc 方案已被签名 Debug 取代。Debug/Profile 使用 `DebugProfile.entitlements`，Release 使用 `Release.entitlements`，本机 Team 通过 ignored 的 `Signing.local.xcconfig` 注入；缺少签名 identity 时所有 macOS build/test 明确 blocked。Vault/普通偏好保存与 API Key transaction 仍保持解耦。
 
 **目标：** 在已完成的 session/save/split/mutation foundation 上，拆分长文件、收敛状态所有权、绑定异步编辑目标，并完成 macOS 生产安全与本地发布门禁。
 
@@ -183,7 +183,7 @@ Commit：`fix: bind pane async mutations to stable context`。
 
 **状态：已完成。** 提交范围 `34725ad..a50f229`，规格与代码质量审查 PASS。
 
-- Profile/Release entitlement 均加入插件要求的空 `keychain-access-groups`；Local Debug 使用不含 Keychain Sharing 的独立 entitlement，以支持无证书 ad-hoc 运行，密钥操作保持 fail-closed。
+- Debug/Profile/Release entitlement 均加入插件要求的空 `keychain-access-groups`；所有 macOS 配置使用 Automatic Signing，密钥操作保持 fail-closed。
 - `settings.json` 永不包含 API key；secure store 写入失败立即报错，不创建明文 key 文件。
 - legacy plaintext migration 固定为 read → secure write → secure read verify → delete。
 - 任一步失败都立即删除旧明文、不返回旧 key，并要求用户重新输入。
@@ -226,18 +226,18 @@ Commit：`fix: bind pane async mutations to stable context`。
 
 ### 阶段 11：Final local gate
 
-**状态：blocked/pending Release signing。** 2026-07-14 已执行本机门禁；代码验证、本地运行、Debug build 和原始 native tests 均通过，但 Release production gate 因本机缺少有效 Apple Development certificate/Team 而未通过。不得宣称 complete、merge-ready 或 mergeable。
+**历史状态（2026-07-14）：blocked/pending Release signing。** 当时的代码验证、本地运行、Debug build 和原始 native tests 均通过，但 Release production gate 因本机缺少有效 Apple Development certificate/Team 而未通过。2026-07-23 起该 ad-hoc Debug 路径已删除，Debug/native tests 同样要求 Team 与 Apple Development identity。
 
-实测结果：
+2026-07-14 历史实测结果（其中 ad-hoc Debug 结果不再代表当前策略）：
 
 | 检查 | 结果 |
 |---|---|
 | `dart format --output=none --set-exit-if-changed lib test` | PASS：165 files，0 changed |
 | `flutter test --no-pub` | PASS：634/634 |
 | `flutter analyze --no-pub` | PASS：No issues |
-| `xcodebuild test -project macos/Runner.xcodeproj -scheme Runner -destination 'platform=macOS'` | PASS：Local Debug ad-hoc signing；RunnerTests 3/3 |
-| `flutter build macos --debug --no-pub` | PASS：生成 Debug `synapse.app` |
-| `flutter run -d macos` | PASS：应用启动并暴露 Dart VM Service |
+| `xcodebuild test -project macos/Runner.xcodeproj -scheme Runner -destination 'platform=macOS'` | PASS：当时使用 Local Debug ad-hoc signing；该路径现已删除 |
+| `flutter build macos --debug --no-pub` | PASS：当时生成 ad-hoc Debug `synapse.app`；该结果现已失效 |
+| `flutter run -d macos` | PASS：当时使用 ad-hoc Debug 启动；该结果现已失效 |
 | `flutter build macos --release --no-pub` | FAIL：需要 Apple Development certificate/Team |
 | `codesign -d --entitlements :- build/macos/Build/Products/Release/synapse.app` | BLOCKED：Release app 不存在，未能执行 inspection |
 | `git diff --check` | PASS |

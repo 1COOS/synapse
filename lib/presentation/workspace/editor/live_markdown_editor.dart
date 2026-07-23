@@ -967,6 +967,28 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
     _focusBlockEditor();
   }
 
+  void _activateBlankBlock(MarkdownLiveBlock block) {
+    _clearSelectedImageTarget();
+    _persistentBlankInsertion = false;
+    widget.onFocusPane();
+    final insertionOffset = _clampOffset(
+      block.end,
+      widget.controller.text.length,
+    );
+    setState(() {
+      _editorController.activateOffset(
+        insertionOffset,
+        trailingInsertion: true,
+      );
+      _editorController.beginDocumentUpdate();
+      widget.controller.selection = TextSelection.collapsed(
+        offset: insertionOffset,
+      );
+      _editorController.endDocumentUpdate();
+    });
+    _focusBlockEditor();
+  }
+
   void _clearActiveBlock() {
     final hadImageSelection = _selectedImageSrc != null;
     _clearSelectedImageTarget();
@@ -1090,13 +1112,12 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
       final lineBreakCount = RegExp(
         r'\r\n|\n|\r',
       ).allMatches(block.text).length;
+      final visibleLineCount = lineBreakCount.clamp(1, 2);
       return GestureDetector(
         key: Key('live-markdown-block-preview-$index'),
         behavior: HitTestBehavior.opaque,
-        onTap: _clearActiveBlock,
-        child: SizedBox(
-          height: 12.0 * (lineBreakCount == 0 ? 1 : lineBreakCount),
-        ),
+        onTap: () => _activateBlankBlock(block),
+        child: SizedBox(height: 12.0 * visibleLineCount),
       );
     }
     final hasPreviewImage = _blockHasPreviewImage(block);

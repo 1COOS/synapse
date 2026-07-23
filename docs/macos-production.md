@@ -8,14 +8,14 @@ macOS 是 Synapse 当前唯一生产目标。本页记录签名 entitlement、AP
 
 ## 2. Entitlements
 
-本地 Debug 使用 `macos/Runner/LocalDebug.entitlements` 和 ad-hoc signing，不要求 Apple Development certificate，可直接执行 `flutter run -d macos`、`xcodebuild test` 和 Debug build。Local Debug 不声明 Keychain Sharing，因此只用于界面、Vault 和非密钥流程开发；API Key 安全存储会 fail-closed。
+Debug/Profile 使用 `macos/Runner/DebugProfile.entitlements`，Release 使用 `Release.entitlements`。所有配置必须安装有效签名 identity，并通过 `macos/Runner/Configs/Signing.local.xcconfig` 为 Xcode Automatic Signing 提供本机 Team ID；该本机文件必须保持 Git ignored。
 
-Profile/Release 使用 `DebugProfile.entitlements` / `Release.entitlements`，必须安装有效 Apple Development signing certificate，并在 Xcode 中为 Runner 配置可用 Team。所有配置必须启用：
+项目不再提供无证书的 ad-hoc Local Debug。缺少 Team 或 Apple Development certificate 时，`flutter run -d macos`、`xcodebuild test` 和 macOS build 必须在构建阶段失败，不能生成一个运行后才因 `-34018` 无法访问 Keychain 的应用。所有配置必须启用：
 
 - App Sandbox；
 - user-selected file read/write。
 
-Profile/Release 还必须包含插件要求的空 `keychain-access-groups`。`codesign -d` 检查本身不需要证书，但需要 Release build 成功生成可检查的 app。
+Debug/Profile/Release 还必须包含插件要求的空 `keychain-access-groups`。`codesign -d` 检查本身不需要证书，但需要对应 build 成功生成可检查的 app。
 
 Release 不应包含只为 Debug/JIT 或本地调试准备的额外能力。源码检查不能替代最终 app 的 codesign 输出；production gate 必须检查构建产物实际 entitlement。
 
@@ -33,7 +33,7 @@ API Key 只允许保存到 macOS Keychain：
 - Keychain 写入、读取验证或清理失败时，不继续返回或使用未验证 key；
 - 用户必须在安全存储恢复后重新输入 key。
 
-Local Debug 遇到 `-34018` 是预期的 fail-closed 行为。需要保存或使用 API Key 时，应改用配置了有效 Team/certificate 的 Profile/Release 构建并重新输入 key，不得把 secret 写入应用支持目录。
+遇到 `-34018` 表示实际产物没有正确签名、缺少 Team 或缺少 Keychain entitlement，不属于可接受的 Debug 行为。应修复本机签名配置、清理并重新构建应用，然后重新输入 key；不得把 secret 写入应用支持目录。
 
 ## 4. Legacy Migration 与 Quarantine
 
@@ -67,7 +67,7 @@ read legacy
 5. JSON 提交失败时 abort staged secret；
 6. 所有路径最终释放 lock。
 
-Vault 位置、界面偏好等非密钥设置不属于 Keychain transaction。API Key 未变化时必须使用 `savePreservingApiKey`，只原子写入不含 secret 的 `settings.json`，不得读取、写入或清空 Keychain。只有用户明确新增、替换或清空 API Key 时才执行上述 secure transaction；因此 Local Debug 即使无法访问 Keychain，也仍可选择 Vault 和保存普通偏好。
+Vault 位置、界面偏好等非密钥设置不属于 Keychain transaction。API Key 未变化时必须使用 `savePreservingApiKey`，只原子写入不含 secret 的 `settings.json`，不得读取、写入或清空 Keychain。只有用户明确新增、替换或清空 API Key 时才执行上述 secure transaction，避免普通设置保存触发不必要的 Keychain 写入或验证。
 
 file lock 用于多进程/多实例串行化，不能改成只覆盖单 isolate 的内存锁。排障日志只能记录阶段和错误类型，不能输出 key。
 
@@ -116,7 +116,16 @@ Process.run('/usr/bin/open', ['-R', rootPath])
 
 ## 7. 本地 Production Gate
 
-`xcodebuild test` 和 Debug build 使用 Local Debug entitlement，可在没有开发证书时执行。Release build 及其实际 entitlement inspection 仍要求有效 Apple Development certificate 与可用 Xcode Team。若此前置条件缺失，应只把 Release production signing 标记为外部 blocked，不得把它描述为代码或本地 Debug 失败。
+`xcodebuild test`、Debug build、Release build 和实际 entitlement inspection 都要求有效签名 identity 与可用 Xcode Team。若此前置条件缺失，仍需完成不依赖签名的 Flutter tests、analyze 和静态 entitlement 检查；所有 macOS 签名产物门禁标记为外部 blocked。
+
+首次配置本机签名：
+
+```bash
+cp macos/Runner/Configs/Signing.local.xcconfig.example \
+  macos/Runner/Configs/Signing.local.xcconfig
+# 编辑 Signing.local.xcconfig，写入 DEVELOPMENT_TEAM。
+security find-identity -v -p codesigning
+```
 
 必须顺序执行，不并行运行 Flutter tests/builds：
 
@@ -126,6 +135,8 @@ flutter test --no-pub
 flutter analyze --no-pub
 xcodebuild test -project macos/Runner.xcodeproj -scheme Runner -destination 'platform=macOS'
 flutter build macos --debug --no-pub
+codesign -d --entitlements :- build/macos/Build/Products/Debug/synapse.app
+codesign -dv --verbose=4 build/macos/Build/Products/Debug/synapse.app
 flutter build web --no-pub
 flutter build macos --release --no-pub
 codesign -d --entitlements :- build/macos/Build/Products/Release/synapse.app
@@ -139,7 +150,9 @@ git status --short --branch
 
 ### Keychain 返回错误
 
-- 检查当前配置使用的是 Local Debug 还是 Profile/Release entitlement；
+- 检查当前配置使用的是 Debug/Profile 还是 Release entitlement；
+- 检查 `Signing.local.xcconfig` 是否存在且 Team ID 有效；
+- 用 `security find-identity -v -p codesigning` 确认 Apple Development identity；
 - 检查实际 app codesign entitlement；
 - 清理并重新构建正确签名的 app；
 - 重新输入 API Key；

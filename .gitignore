@@ -54,6 +54,7 @@ app.*.map.json
 # Flutter desktop generated files
 macos/Pods/
 macos/Flutter/ephemeral/
+/macos/Runner/Configs/Signing.local.xcconfig
 windows/flutter/ephemeral/
 
 # Local env and tooling

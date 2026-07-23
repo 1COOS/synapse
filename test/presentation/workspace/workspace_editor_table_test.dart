@@ -404,12 +404,12 @@ void main() {
   });
 
   testWidgets(
-    'clicking inter-block whitespace exits without changing markdown',
+    'inter-block whitespace stays compact and opens a writable insertion',
     (tester) async {
       final vault = MemoryVaultBackend(seedExampleData: false);
       final note = await vault.createNote(parentPath: '', title: 'Blank Study');
       const markdown =
-          'Before table\n\n\n'
+          'Before table\n\n\n\n\n\n\n\n'
           '| A | B |\n'
           '|---|---|\n'
           '| 1 | 2 |\n';
@@ -419,15 +419,24 @@ void main() {
       await pumpWorkspace(tester, vault: vault);
       await activateLiveMarkdownBlock(tester, blockIndex: 0);
 
-      await tester.tap(find.byKey(const Key('live-markdown-block-preview-1')));
+      final whitespace = find.byKey(const Key('live-markdown-block-preview-1'));
+      expect(tester.getSize(whitespace).height, 24);
+
+      await tester.tap(whitespace);
       await tester.pumpAndSettle();
 
-      expect(find.byKey(const Key('note-editor')), findsNothing);
-      expect(
-        find.byKey(const Key('live-markdown-block-editor-1')),
-        findsNothing,
-      );
+      expect(find.byKey(const Key('note-editor')), findsOneWidget);
+      expect(activeLiveMarkdownTextField(tester).controller.text, isEmpty);
+      expect(activeLiveMarkdownTextField(tester).focusNode.hasFocus, isTrue);
       expect((await vault.readNote(note.id)).markdown, storedMarkdown);
+
+      tester.testTextInput.enterText('Between blocks');
+      await tester.pump();
+
+      expect(
+        liveMarkdownDocumentController(tester, paneId: 1).text,
+        contains('Between blocks\n\n| A | B |'),
+      );
     },
   );
 
