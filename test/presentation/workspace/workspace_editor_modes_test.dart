@@ -205,6 +205,49 @@ void main() {
     expect(editor.focusNode.hasFocus, isTrue);
   });
 
+  testWidgets('enter at a heading end opens a writable body line', (
+    tester,
+  ) async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Heading line');
+    await vault.updateMarkdown(noteId: note.id, markdown: '# Alpha\n\nBeta\n');
+
+    await pumpWorkspace(tester, vault: vault);
+    await activateLiveMarkdownBlock(tester, blockIndex: 0);
+    await setActiveLiveMarkdownSelection(
+      tester,
+      const TextSelection.collapsed(offset: 7),
+    );
+
+    tester.testTextInput.updateEditingValue(
+      const TextEditingValue(
+        text: '# Alpha\n',
+        selection: TextSelection.collapsed(offset: 8),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    var editor = activeLiveMarkdownTextField(tester);
+    expect(editor.controller.text, isEmpty);
+    expect(editor.focusNode.hasFocus, isTrue);
+
+    tester.testTextInput.updateEditingValue(
+      const TextEditingValue(
+        text: 'Body',
+        selection: TextSelection.collapsed(offset: 4),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(
+      liveMarkdownDocumentController(tester, paneId: 1).text,
+      '# Alpha\n\nBody\n\nBeta\n',
+    );
+    editor = activeLiveMarkdownTextField(tester);
+    expect(editor.controller.text, 'Body');
+    expect(editor.focusNode.hasFocus, isTrue);
+  });
+
   testWidgets('backspace removes an empty inserted line', (tester) async {
     const markdown = 'Alpha\n\nBeta\n';
     final vault = MemoryVaultBackend(seedExampleData: false);

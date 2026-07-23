@@ -10,6 +10,8 @@ enum ImageDropSide { before, after }
 
 enum ImagePreviewMode { reading, editing }
 
+enum _ImageResizeSide { left, right }
+
 final class PreviewImageDragData {
   const PreviewImageDragData({required this.sourceId, required this.src});
 
@@ -51,12 +53,14 @@ class PreviewImageBlock extends StatefulWidget {
 }
 
 class _PreviewImageBlockState extends State<PreviewImageBlock> {
+  late Future<List<int>> _imageBytes;
   double? _previewWidth;
   double? _resizeStartGlobalX;
   double? _resizeStartWidth;
   int? _resizePointer;
+  _ImageResizeSide? _resizeSide;
   bool _dragging = false;
-  bool _resizeHandleHovered = false;
+  _ImageResizeSide? _resizeHandleHovered;
   ImageDropSide? _dropSide;
 
   double get _effectiveWidth => _previewWidth ?? widget.width;
@@ -65,14 +69,26 @@ class _PreviewImageBlockState extends State<PreviewImageBlock> {
       widget.selectedImageSrc == normalizeImageSrc(widget.src);
 
   @override
+  void initState() {
+    super.initState();
+    _imageBytes = widget.imageBytes;
+  }
+
+  @override
   void didUpdateWidget(covariant PreviewImageBlock oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (oldWidget.source.id != widget.source.id ||
+        oldWidget.source.noteId != widget.source.noteId ||
+        oldWidget.source.attachmentPath != widget.source.attachmentPath ||
+        oldWidget.source.updatedAt != widget.source.updatedAt) {
+      _imageBytes = widget.imageBytes;
+    }
     if (!_dragging && oldWidget.width != widget.width) {
       _previewWidth = null;
     }
   }
 
-  void _startResize(PointerDownEvent event) {
+  void _startResize(PointerDownEvent event, _ImageResizeSide side) {
     if (!widget.editableControls) {
       return;
     }
@@ -83,6 +99,7 @@ class _PreviewImageBlockState extends State<PreviewImageBlock> {
       _dragging = true;
       _previewWidth = _effectiveWidth;
       _resizePointer = event.pointer;
+      _resizeSide = side;
       _resizeStartGlobalX = event.position.dx;
       _resizeStartWidth = _effectiveWidth;
     });
@@ -97,7 +114,10 @@ class _PreviewImageBlockState extends State<PreviewImageBlock> {
         _resizeStartWidth == null) {
       return;
     }
-    final delta = event.position.dx - _resizeStartGlobalX!;
+    final pointerDelta = event.position.dx - _resizeStartGlobalX!;
+    final delta = _resizeSide == _ImageResizeSide.left
+        ? -pointerDelta
+        : pointerDelta;
     final nextWidth = clampImageWidth(
       (_resizeStartWidth! + delta).round(),
     ).toDouble();
@@ -116,6 +136,7 @@ class _PreviewImageBlockState extends State<PreviewImageBlock> {
       _dragging = false;
       _previewWidth = width;
       _resizePointer = null;
+      _resizeSide = null;
       _resizeStartGlobalX = null;
       _resizeStartWidth = null;
     });
@@ -128,8 +149,9 @@ class _PreviewImageBlockState extends State<PreviewImageBlock> {
     setState(() {
       _dragging = false;
       _previewWidth = null;
-      _resizeHandleHovered = false;
+      _resizeHandleHovered = null;
       _resizePointer = null;
+      _resizeSide = null;
       _resizeStartGlobalX = null;
       _resizeStartWidth = null;
     });
@@ -217,7 +239,10 @@ class _PreviewImageBlockState extends State<PreviewImageBlock> {
                   )
                 else
                   _buildImageBody(),
-                if (widget.editableControls) _buildResizeHandle(),
+                if (widget.editableControls && (_selected || _dragging)) ...[
+                  _buildResizeHandle(_ImageResizeSide.left),
+                  _buildResizeHandle(_ImageResizeSide.right),
+                ],
               ],
             ),
           );
@@ -226,30 +251,37 @@ class _PreviewImageBlockState extends State<PreviewImageBlock> {
     );
   }
 
-  Widget _buildResizeHandle() {
-    final showHint = _resizeHandleHovered || _dragging;
+  Widget _buildResizeHandle(_ImageResizeSide side) {
+    final isLeft = side == _ImageResizeSide.left;
+    final showHint = _selected || _dragging || _resizeHandleHovered == side;
     final accentColor = WorkspaceAppearanceScope.of(context).accentColor;
     return Positioned(
-      right: 0,
+      left: isLeft ? 0 : null,
+      right: isLeft ? null : 0,
+      top: 0,
       bottom: 0,
       child: MouseRegion(
-        cursor: SystemMouseCursors.resizeUpLeftDownRight,
+        cursor: SystemMouseCursors.resizeLeftRight,
         onEnter: (_) {
-          if (!_resizeHandleHovered) {
-            setState(() => _resizeHandleHovered = true);
+          if (_resizeHandleHovered != side) {
+            setState(() => _resizeHandleHovered = side);
           }
         },
         onExit: (_) {
-          if (_resizeHandleHovered) {
-            setState(() => _resizeHandleHovered = false);
+          if (_resizeHandleHovered == side) {
+            setState(() => _resizeHandleHovered = null);
           }
         },
         child: Listener(
-          key: Key('image-resize-handle-${widget.source.id}'),
+          key: Key(
+            isLeft
+                ? 'image-resize-handle-left-${widget.source.id}'
+                : 'image-resize-handle-${widget.source.id}',
+          ),
           behavior: HitTestBehavior.opaque,
           onPointerDown: (event) {
             widget.onTap();
-            _startResize(event);
+            _startResize(event, side);
           },
           onPointerMove: _updateResize,
           onPointerUp: (event) {
@@ -263,13 +295,16 @@ class _PreviewImageBlockState extends State<PreviewImageBlock> {
             }
           },
           child: SizedBox(
-            width: 28,
-            height: 28,
+            width: 16,
             child: Align(
-              alignment: Alignment.bottomRight,
+              alignment: isLeft ? Alignment.centerLeft : Alignment.centerRight,
               child: showHint
                   ? DecoratedBox(
-                      key: Key('image-resize-handle-icon-${widget.source.id}'),
+                      key: Key(
+                        isLeft
+                            ? 'image-resize-handle-left-indicator-${widget.source.id}'
+                            : 'image-resize-handle-icon-${widget.source.id}',
+                      ),
                       decoration: BoxDecoration(
                         color: workspaceSurfaceColor.withValues(alpha: 0.72),
                         border: Border.all(
@@ -278,13 +313,15 @@ class _PreviewImageBlockState extends State<PreviewImageBlock> {
                         borderRadius: BorderRadius.circular(7),
                       ),
                       child: SizedBox(
-                        width: 18,
-                        height: 18,
-                        child: Icon(
-                          CupertinoIcons.arrow_down_right_arrow_up_left,
-                          size: 11,
-                          color: accentColor,
-                        ),
+                        width: isLeft ? 8 : 18,
+                        height: isLeft ? 30 : 18,
+                        child: isLeft
+                            ? null
+                            : Icon(
+                                CupertinoIcons.arrow_down_right_arrow_up_left,
+                                size: 11,
+                                color: accentColor,
+                              ),
                       ),
                     )
                   : const SizedBox.shrink(),
@@ -300,60 +337,57 @@ class _PreviewImageBlockState extends State<PreviewImageBlock> {
     final accentColor = WorkspaceAppearanceScope.of(context).accentColor;
     Widget body = SizedBox(
       width: double.infinity,
-      child: Listener(
-        onPointerDown: (_) => widget.onTap(),
-        child: GestureDetector(
-          key: Key('preview-image-tap-${widget.source.id}'),
-          behavior: HitTestBehavior.opaque,
-          onTap: widget.onTap,
-          child: DecoratedBox(
-            decoration: BoxDecoration(
-              border: Border.all(
-                color: highlighted ? accentColor : workspaceSoftLineColor,
-              ),
-              borderRadius: workspaceBorderRadius,
+      child: GestureDetector(
+        key: Key('preview-image-tap-${widget.source.id}'),
+        behavior: HitTestBehavior.opaque,
+        onTap: widget.onTap,
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            border: Border.all(
+              color: highlighted ? accentColor : workspaceSoftLineColor,
             ),
-            child: ClipRRect(
-              borderRadius: workspaceBorderRadius,
-              child: ConstrainedBox(
-                constraints: const BoxConstraints(minHeight: 96),
-                child: FutureBuilder<List<int>>(
-                  future: widget.imageBytes,
-                  builder: (context, snapshot) {
-                    if (snapshot.connectionState != ConnectionState.done) {
-                      return const SizedBox(
-                        height: 96,
-                        child: Center(child: CupertinoActivityIndicator()),
-                      );
-                    }
-                    if (snapshot.hasError || !snapshot.hasData) {
-                      return const SizedBox(
-                        height: 96,
-                        child: Center(
-                          child: Icon(
-                            CupertinoIcons.exclamationmark_triangle,
-                            color: workspaceDangerColor,
-                          ),
+            borderRadius: workspaceBorderRadius,
+          ),
+          child: ClipRRect(
+            borderRadius: workspaceBorderRadius,
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(minHeight: 96),
+              child: FutureBuilder<List<int>>(
+                future: _imageBytes,
+                builder: (context, snapshot) {
+                  if (snapshot.connectionState != ConnectionState.done) {
+                    return const SizedBox(
+                      height: 96,
+                      child: Center(child: CupertinoActivityIndicator()),
+                    );
+                  }
+                  if (snapshot.hasError || !snapshot.hasData) {
+                    return const SizedBox(
+                      height: 96,
+                      child: Center(
+                        child: Icon(
+                          CupertinoIcons.exclamationmark_triangle,
+                          color: workspaceDangerColor,
                         ),
-                      );
-                    }
-                    return Image.memory(
-                      Uint8List.fromList(snapshot.data!),
-                      fit: BoxFit.contain,
-                      gaplessPlayback: true,
-                      errorBuilder: (context, error, stackTrace) =>
-                          const SizedBox(
-                            height: 96,
-                            child: Center(
-                              child: Icon(
-                                CupertinoIcons.exclamationmark_triangle,
-                                color: workspaceDangerColor,
-                              ),
+                      ),
+                    );
+                  }
+                  return Image.memory(
+                    Uint8List.fromList(snapshot.data!),
+                    fit: BoxFit.contain,
+                    gaplessPlayback: true,
+                    errorBuilder: (context, error, stackTrace) =>
+                        const SizedBox(
+                          height: 96,
+                          child: Center(
+                            child: Icon(
+                              CupertinoIcons.exclamationmark_triangle,
+                              color: workspaceDangerColor,
                             ),
                           ),
-                    );
-                  },
-                ),
+                        ),
+                  );
+                },
               ),
             ),
           ),

@@ -104,6 +104,10 @@ class LiveMarkdownEditorController extends ChangeNotifier {
     _activeOffset = selection.isValid
         ? _clampOffset(selection.extentOffset, _document.text.length)
         : _clampOffset(_activeOffset!, _document.text.length);
+    if (_activeTrailingInsertion) {
+      _activeTrailingInsertion = false;
+      _activeInsertionOffset = null;
+    }
     clearStaleSelectionTarget();
     syncBlockController();
     return true;
@@ -178,6 +182,9 @@ class LiveMarkdownEditorController extends ChangeNotifier {
       selection: blockSelection,
     )) {
       activateOffset(block.end, trailingInsertion: true);
+      _updatingDocument = true;
+      _document.selection = TextSelection.collapsed(offset: block.end);
+      _updatingDocument = false;
       notifyListeners();
       return true;
     }
@@ -608,7 +615,8 @@ class LiveMarkdownEditorController extends ChangeNotifier {
     required String replacement,
     required TextSelection selection,
   }) {
-    if (block.kind != MarkdownLiveBlockKind.paragraph ||
+    if ((block.kind != MarkdownLiveBlockKind.paragraph &&
+            block.kind != MarkdownLiveBlockKind.heading) ||
         replacement != '$editableText\n' ||
         !selection.isValid ||
         !selection.isCollapsed ||

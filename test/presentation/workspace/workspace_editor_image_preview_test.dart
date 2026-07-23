@@ -1,5 +1,4 @@
 import 'package:flutter/cupertino.dart';
-import 'package:flutter/gestures.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
@@ -63,72 +62,79 @@ void main() {
     expect(find.byKey(Key('preview-image-${source.id}')), findsOneWidget);
   });
 
-  testWidgets('selects a preview image and reveals resize hint only on hover', (
-    tester,
-  ) async {
-    final vault = MemoryVaultBackend(seedExampleData: false);
-    final note = await vault.createNote(parentPath: '', title: 'Image Study');
-    final source = await vault.addImageSource(
-      noteId: note.id,
-      filename: 'pasted.png',
-      mimeType: 'image/png',
-      bytes: tinyPng,
-    );
-    await vault.updateMarkdown(
-      noteId: note.id,
-      markdown:
-          '# Image Study\n\n'
-          '<img src="Image Study.assets/attachments/pasted.png" '
-          'width="360">',
-    );
+  testWidgets(
+    'selecting a loaded preview image exposes border resize handles',
+    (tester) async {
+      final vault = MemoryVaultBackend(seedExampleData: false);
+      final note = await vault.createNote(parentPath: '', title: 'Image Study');
+      final source = await vault.addImageSource(
+        noteId: note.id,
+        filename: 'pasted.png',
+        mimeType: 'image/png',
+        bytes: tinyPng,
+      );
+      await vault.updateMarkdown(
+        noteId: note.id,
+        markdown:
+            '# Image Study\n\n'
+            '<img src="Image Study.assets/attachments/pasted.png" '
+            'width="360">',
+      );
 
-    await pumpWorkspace(tester, vault: vault);
-    await tester.pumpAndSettle();
+      await pumpWorkspace(tester, vault: vault);
+      await tester.pumpAndSettle();
 
-    expect(find.byKey(Key('preview-image-${source.id}')), findsOneWidget);
-    expect(
-      find.byIcon(CupertinoIcons.arrow_down_right_arrow_up_left),
-      findsNothing,
-    );
-    expect(
-      previewImageFrameBorderColor(tester, source),
-      const Color(0xFFE5E5EA),
-    );
+      expect(find.byKey(Key('preview-image-${source.id}')), findsOneWidget);
+      expect(
+        find.byIcon(CupertinoIcons.arrow_down_right_arrow_up_left),
+        findsNothing,
+      );
+      expect(
+        previewImageFrameBorderColor(tester, source),
+        const Color(0xFFE5E5EA),
+      );
+      expect(
+        find.byKey(Key('image-resize-handle-left-${source.id}')),
+        findsNothing,
+      );
+      expect(find.byKey(Key('image-resize-handle-${source.id}')), findsNothing);
 
-    await tester.tap(find.byKey(Key('preview-image-tap-${source.id}')));
-    await tester.pumpAndSettle();
+      await tester.tap(find.byKey(Key('preview-image-tap-${source.id}')));
+      await tester.pump();
 
-    expect(
-      previewImageFrameBorderColor(tester, source),
-      CupertinoColors.activeBlue,
-    );
+      expect(
+        previewImageFrameBorderColor(tester, source),
+        CupertinoColors.activeBlue,
+      );
+      expect(
+        find.descendant(
+          of: find.byKey(Key('preview-image-${source.id}')),
+          matching: find.byType(Image),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(Key('image-resize-handle-icon-${source.id}')),
+        findsOneWidget,
+      );
+      expect(
+        find.byIcon(CupertinoIcons.arrow_down_right_arrow_up_left),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(Key('image-resize-handle-left-${source.id}')),
+        findsOneWidget,
+      );
 
-    final rect = tester.getRect(
-      find.byKey(Key('preview-image-tap-${source.id}')),
-    );
-    final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
-    await mouse.addPointer(location: rect.bottomRight - const Offset(8, 8));
-    await tester.pump();
+      await tester.drag(
+        find.byKey(Key('image-resize-handle-left-${source.id}')),
+        const Offset(-80, 0),
+      );
+      await tester.pumpAndSettle();
 
-    expect(
-      find.byKey(Key('image-resize-handle-icon-${source.id}')),
-      findsOneWidget,
-    );
-    expect(
-      find.byIcon(CupertinoIcons.arrow_down_right_arrow_up_left),
-      findsOneWidget,
-    );
-
-    await mouse.moveTo(rect.topLeft + const Offset(8, 8));
-    await tester.pump();
-
-    expect(
-      find.byKey(Key('image-resize-handle-icon-${source.id}')),
-      findsNothing,
-    );
-
-    await mouse.removePointer();
-  });
+      expect((await vault.readNote(note.id)).markdown, contains('width="440"'));
+    },
+  );
 
   testWidgets(
     'switching notes clears preview selection even when image src matches',
@@ -227,6 +233,8 @@ void main() {
     expect(find.byKey(Key('decrease-image-width-${source.id}')), findsNothing);
     expect(find.byKey(Key('increase-image-width-${source.id}')), findsNothing);
 
+    await tester.tap(find.byKey(Key('preview-image-tap-${source.id}')));
+    await tester.pump();
     await tester.drag(
       find.byKey(Key('image-resize-handle-${source.id}')),
       const Offset(280, 0),

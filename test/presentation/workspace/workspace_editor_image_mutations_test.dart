@@ -327,6 +327,8 @@ void main() {
     await pumpWorkspace(tester, vault: vault);
     await tester.pumpAndSettle();
 
+    await tester.tap(find.byKey(Key('preview-image-tap-${source.id}')));
+    await tester.pump();
     final handle = find.byKey(Key('image-resize-handle-${source.id}'));
     await tester.drag(handle, const Offset(-1000, 0));
     await tester.pumpAndSettle();
@@ -482,6 +484,10 @@ void main() {
         .onTap!();
     await tester.pumpAndSettle();
 
+    await tester.tap(
+      inNotePane(find.byKey(Key('preview-image-tap-${first.id}')), 1),
+    );
+    await tester.pump();
     final firstHandle = inNotePane(
       find.byKey(Key('image-resize-handle-${first.id}')),
       1,
@@ -534,6 +540,8 @@ void main() {
     await pumpWorkspace(tester, vault: vault);
     await tester.pumpAndSettle();
 
+    await tester.tap(find.byKey(Key('preview-image-tap-${first.id}')));
+    await tester.pump();
     await tester.drag(
       find.byKey(Key('image-resize-handle-${first.id}')),
       const Offset(80, 0),
