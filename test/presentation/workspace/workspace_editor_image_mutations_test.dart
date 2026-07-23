@@ -1,7 +1,7 @@
 import 'package:flutter/cupertino.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:synapse/domain/vault/vault_resource.dart';
-import 'package:synapse/infrastructure/config/synapse_settings.dart';
+import 'package:synapse/application/settings/synapse_settings.dart';
 import 'package:synapse/infrastructure/input/image_input_service.dart';
 import 'package:synapse/presentation/workspace/editor/live_markdown_editor.dart';
 import 'package:synapse/presentation/workspace/editor/pane_editor_context.dart';
@@ -74,7 +74,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.textContaining('delayed save failed'), findsNothing);
-    expect(find.textContaining('模型设置已保存'), findsOneWidget);
+    expect(find.textContaining('设置已保存'), findsOneWidget);
   });
 
   testWidgets(
@@ -262,7 +262,7 @@ void main() {
         findsOneWidget,
       );
       expect(find.textContaining('图片已粘贴到笔记'), findsNothing);
-      expect(find.textContaining('模型设置已保存'), findsOneWidget);
+      expect(find.textContaining('设置已保存'), findsOneWidget);
     },
   );
 

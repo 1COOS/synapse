@@ -3,20 +3,22 @@ import 'dart:io';
 
 import 'package:path/path.dart' as p;
 
+import '../../application/settings/synapse_settings.dart';
 import 'atomic_config_file_writer.dart';
 import 'provider_config_store.dart';
 import 'secure_api_key_store.dart';
 import 'settings_store.dart';
-import 'synapse_settings.dart';
-import 'vault_location_store.dart';
+import 'synapse_settings_codec.dart';
 
 class FileSettingsStore extends SettingsStore {
   FileSettingsStore({
     required Directory configDirectory,
     required SecureValueStore secureStore,
     ConfigFileWriter configFileWriter = const AtomicConfigFileWriter(),
+    SynapseSettingsCodec codec = const SynapseSettingsCodec(),
   }) : _configDirectory = configDirectory,
        _configFileWriter = configFileWriter,
+       _codec = codec,
        _apiKeys = SecureApiKeyStore(
          configDirectory: configDirectory,
          secureStore: secureStore,
@@ -24,6 +26,7 @@ class FileSettingsStore extends SettingsStore {
 
   final Directory _configDirectory;
   final ConfigFileWriter _configFileWriter;
+  final SynapseSettingsCodec _codec;
   final SecureApiKeyStore _apiKeys;
 
   File get _settingsFile =>
@@ -42,6 +45,12 @@ class FileSettingsStore extends SettingsStore {
 
   @override
   String get unavailableMessage => '';
+
+  @override
+  SettingsStorageInfo get storageInfo => SettingsStorageInfo(
+    settingsLocation: _settingsFile.path,
+    apiKeyStorage: '系统安全存储（macOS 使用 Keychain，失败即拒绝保存）',
+  );
 
   @override
   Future<SynapseSettings> load() async {
@@ -91,7 +100,7 @@ class FileSettingsStore extends SettingsStore {
     try {
       await _configFileWriter.write(
         _settingsFile,
-        const JsonEncoder.withIndent('  ').convert(normalized.toJson()),
+        const JsonEncoder.withIndent('  ').convert(_codec.encode(normalized)),
       );
       await transaction?.commit();
     } catch (_) {
@@ -110,7 +119,7 @@ class FileSettingsStore extends SettingsStore {
   ) async {
     final raw =
         jsonDecode(await _settingsFile.readAsString()) as Map<String, Object?>;
-    final settings = SynapseSettings.fromJson({
+    final decoded = _codec.decode({
       ...raw,
       'providerConfig': {
         ...(raw['providerConfig'] as Map? ?? const <String, Object?>{}),
@@ -118,8 +127,11 @@ class FileSettingsStore extends SettingsStore {
       },
     });
     return SettingsLoadResult(
-      settings: _normalizeSettings(settings),
-      recoveryMessage: apiKey.recoveryMessage,
+      settings: _normalizeSettings(decoded.settings),
+      recoveryMessage: _joinRecoveryMessages([
+        apiKey.recoveryMessage,
+        ...decoded.recoveryMessages,
+      ]),
     );
   }
 
@@ -146,7 +158,15 @@ class FileSettingsStore extends SettingsStore {
       final raw =
           jsonDecode(await _legacyVaultFile.readAsString())
               as Map<String, Object?>;
-      vaultLocation = _normalizeLocation(VaultLocation.fromJson(raw));
+      final bookmarkBase64 = raw['bookmarkBase64']?.toString();
+      vaultLocation = _normalizeLocation(
+        VaultLocation(
+          rootPath: raw['rootPath']?.toString() ?? '',
+          bookmarkBase64: bookmarkBase64?.trim().isEmpty == true
+              ? null
+              : bookmarkBase64,
+        ),
+      );
       foundLegacy = true;
     }
     if (!foundLegacy) {
@@ -185,4 +205,9 @@ class FileSettingsStore extends SettingsStore {
       await file.delete();
     }
   }
+
+  String _joinRecoveryMessages(Iterable<String> messages) => messages
+      .map((message) => message.trim())
+      .where((message) => message.isNotEmpty)
+      .join('\n');
 }

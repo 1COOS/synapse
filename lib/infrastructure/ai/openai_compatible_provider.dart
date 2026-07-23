@@ -42,6 +42,28 @@ class OpenAICompatibleProvider implements DisposableAiProvider {
     return _readChatContent(json);
   }
 
+  Future<String> testVisionConnection(List<int> imageBytes) async {
+    final dataUrl = 'data:image/png;base64,${base64Encode(imageBytes)}';
+    final json = await _postJson('/chat/completions', {
+      'model': config.visionModel.trim(),
+      'messages': [
+        {'role': 'system', 'content': '你是模型连接测试助手。'},
+        {
+          'role': 'user',
+          'content': [
+            {'type': 'text', 'text': '请查看这张测试图片，并只回复：Synapse 视觉模型连接成功'},
+            {
+              'type': 'image_url',
+              'image_url': {'url': dataUrl, 'detail': 'low'},
+            },
+          ],
+        },
+      ],
+      'temperature': 0,
+    });
+    return _readChatContent(json);
+  }
+
   @override
   Future<String> createOutlineProposal({
     required String noteTitle,

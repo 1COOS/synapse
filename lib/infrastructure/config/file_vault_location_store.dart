@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:path/path.dart' as p;
 
+import '../../application/settings/vault_location.dart';
 import 'vault_location_store.dart';
 
 class FileVaultLocationStore implements VaultLocationStore {
@@ -22,7 +23,13 @@ class FileVaultLocationStore implements VaultLocationStore {
       return null;
     }
     final raw = jsonDecode(await file.readAsString()) as Map<String, Object?>;
-    final location = VaultLocation.fromJson(raw);
+    final bookmarkBase64 = raw['bookmarkBase64']?.toString();
+    final location = VaultLocation(
+      rootPath: raw['rootPath']?.toString() ?? '',
+      bookmarkBase64: bookmarkBase64?.trim().isEmpty == true
+          ? null
+          : bookmarkBase64,
+    );
     final rootPath = location.rootPath.trim();
     if (rootPath.isEmpty) {
       return null;
@@ -41,7 +48,11 @@ class FileVaultLocationStore implements VaultLocationStore {
       bookmarkBase64: location.bookmarkBase64,
     );
     await _configFile.writeAsString(
-      const JsonEncoder.withIndent('  ').convert(normalized.toJson()),
+      const JsonEncoder.withIndent('  ').convert(<String, Object?>{
+        'rootPath': normalized.rootPath,
+        if (normalized.bookmarkBase64?.trim().isNotEmpty == true)
+          'bookmarkBase64': normalized.bookmarkBase64,
+      }),
     );
   }
 

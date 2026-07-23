@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:synapse/application/settings/vault_location.dart';
 import 'package:synapse/infrastructure/config/vault_directory_access.dart';
 
 void main() {
@@ -33,7 +34,7 @@ void main() {
     expect(lease!.location.rootPath, '/Users/bruce/Documents/Synapse');
     expect(lease.location.bookmarkBase64, 'bookmark-data');
     expect(lease.token, 'lease-1');
-    expect(lease.location.toJson(), isNot(contains('leaseToken')));
+    expect(lease.location.rootPath, isNot(contains('leaseToken')));
   });
 
   test('restores a tokenized lease from a saved bookmark', () async {

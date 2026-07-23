@@ -1,8 +1,8 @@
 import 'dart:async';
 
+import '../../../application/settings/synapse_settings.dart';
 import '../../../domain/vault/vault_migration.dart';
 import '../../../infrastructure/config/settings_store.dart';
-import '../../../infrastructure/config/synapse_settings.dart';
 import '../../../infrastructure/config/vault_access_gateway.dart';
 import '../../../infrastructure/vault/vault_backend.dart';
 import '../state/note_save_coordinator.dart';
@@ -69,6 +69,7 @@ final class WorkspaceStartupCoordinator {
   VaultAccessLease? _activeVaultLease;
   Future<SettingsLoadResult>? _startupSettingsFuture;
   Object? _startupSettingsError;
+  String _lastSettingsSaveError = '';
 
   SynapseSettings get settings => _settings;
 
@@ -208,22 +209,70 @@ final class WorkspaceStartupCoordinator {
     if (isDisposed()) {
       return null;
     }
+    ApplicationMetadata metadata;
+    try {
+      metadata = await dependencies.loadApplicationMetadata().timeout(
+        const Duration(milliseconds: 500),
+      );
+    } catch (_) {
+      metadata = ApplicationMetadata(
+        version: '未知',
+        buildNumber: '未知',
+        platformMode: dependencies.supportsDirectoryVault ? '桌面端' : 'Web/H5 预览',
+      );
+    }
+    if (isDisposed()) {
+      return null;
+    }
+    final vaultRootPath =
+        runtimes.current?.rootPath ?? initialSettings.vaultLocation?.rootPath;
     return WorkspaceSettingsDialogModel(
       initialSettings: initialSettings,
-      canSave: store.supportsPersistence,
+      canEdit: store.supportsPersistence,
+      canChooseVault:
+          store.supportsPersistence && dependencies.supportsDirectoryVault,
+      canRevealVault:
+          store.supportsPersistence &&
+          dependencies.usesNativeMacTitlebar &&
+          vaultRootPath != null &&
+          vaultRootPath.trim().isNotEmpty,
+      isWebPreview: !store.supportsPersistence,
+      usesInjectedAiProvider: dependencies.usesInjectedAiProvider,
+      vaultRootPath: vaultRootPath,
+      applicationMetadata: metadata,
+      storageInfo: store.storageInfo,
       unavailableMessage: store.unavailableMessage,
     );
   }
 
-  Future<String> testProviderConfig(ProviderConfig config) async {
+  Future<String> testModelCapability(
+    ProviderConfig config,
+    ModelCapability capability,
+  ) async {
     if (isDisposed()) {
       throw StateError('Workspace controller is disposed.');
     }
-    final result = await dependencies.testProviderConfig(config);
+    final result = await dependencies.testModelCapability(config, capability);
     if (isDisposed()) {
       throw StateError('Workspace controller is disposed.');
     }
     return result;
+  }
+
+  Future<void> revealVaultInFinder() async {
+    if (isDisposed()) {
+      throw StateError('Workspace controller is disposed.');
+    }
+    final rootPath =
+        runtimes.current?.rootPath ??
+        _settingsForEditing.vaultLocation?.rootPath;
+    if (rootPath == null || rootPath.trim().isEmpty) {
+      throw StateError('当前没有可显示的仓库路径。');
+    }
+    await dependencies.revealVault(rootPath);
+    if (isDisposed()) {
+      throw StateError('Workspace controller is disposed.');
+    }
   }
 
   Future<WorkspaceActionResult> chooseVault() async {
@@ -337,6 +386,16 @@ final class WorkspaceStartupCoordinator {
   }
 
   Future<WorkspaceActionResult> updateSettings(SynapseSettings settings) async {
+    _lastSettingsSaveError = '';
+    final baseline = _settingsForEditing;
+    final changes = SettingsChangeSet.between(baseline, settings);
+    if (!changes.hasChanges) {
+      return WorkspaceActionResult.committed;
+    }
+    if (changes.vaultLocationChanged) {
+      setMessage('仓库位置必须通过“更换仓库”单独切换。');
+      return WorkspaceActionResult.failed;
+    }
     final currentOperation = readState().activeOperation;
     if (currentOperation != null &&
         currentOperation != WorkspaceOperation.editorCommand) {
@@ -353,19 +412,21 @@ final class WorkspaceStartupCoordinator {
     _startupToken = null;
     WorkspaceRuntime? candidate;
     try {
-      await _invalidateEditorContextsAndWaitForMutations();
-      final current = runtimes.current;
-      if (current != null) {
-        candidate = _createRuntime(
-          vault: current.vault,
-          rootPath: current.rootPath,
-          label: current.label,
-          settings: settings,
-        );
+      if (changes.requiresRuntimeReplacement) {
+        await _invalidateEditorContextsAndWaitForMutations();
+        final current = runtimes.current;
+        if (current != null) {
+          candidate = _createRuntime(
+            vault: current.vault,
+            rootPath: current.rootPath,
+            label: current.label,
+            settings: settings,
+          );
+        }
       }
       final apiKeyChanged =
           settings.providerConfig.apiKey.trim() !=
-          _settingsForEditing.providerConfig.apiKey.trim();
+          baseline.providerConfig.apiKey.trim();
       await _persistSettings(settings, preserveApiKey: !apiKeyChanged);
       if (candidate != null) {
         runtimes.install(candidate);
@@ -374,29 +435,58 @@ final class WorkspaceStartupCoordinator {
       _settings = settings;
       _loadedSettingsBaseline = settings;
       _startupSettingsError = null;
-      splits.updateDefaultMode(preferredNoteMode);
+      if (changes.defaultNoteModeChanged) {
+        splits.updateDefaultMode(preferredNoteMode);
+      }
       final currentState = readState();
       publishState(
         currentState.copyWith(
           settings: settings,
           splitRoot: splits.root,
           focusedPaneId: splits.focusedPaneId,
-          message: modelConfigurationMessage(),
+          message: '设置已保存',
         ),
       );
-      if (!currentState.requiresMigration) {
+      if (changes.requiresRuntimeReplacement &&
+          !currentState.requiresMigration) {
         scheduleBackgroundSearchIndex();
       }
       return WorkspaceActionResult.committed;
     } catch (error) {
       candidate?.dispose(reportCleanupError: dependencies.cleanupErrorReporter);
-      setMessage('设置保存失败：$error');
+      _lastSettingsSaveError = '设置保存失败：$error';
       return WorkspaceActionResult.failed;
     } finally {
       if (ownsOperation) {
         endOperation(WorkspaceOperation.settings);
       }
     }
+  }
+
+  Future<WorkspaceSettingsSaveResult> saveSettings(
+    SynapseSettings settings,
+  ) async {
+    final changed = SettingsChangeSet.between(
+      _settingsForEditing,
+      settings,
+    ).hasChanges;
+    final result = await updateSettings(settings);
+    return switch (result) {
+      WorkspaceActionResult.committed => WorkspaceSettingsSaveResult.committed(
+        message: changed ? '设置已保存' : '设置没有变化',
+        didWrite: changed,
+      ),
+      WorkspaceActionResult.busy => const WorkspaceSettingsSaveResult.busy(),
+      WorkspaceActionResult.cancelled ||
+      WorkspaceActionResult.aborted ||
+      WorkspaceActionResult.failed => WorkspaceSettingsSaveResult.failed(
+        message: _lastSettingsSaveError.isNotEmpty
+            ? _lastSettingsSaveError
+            : readState().message.isEmpty
+            ? '设置保存失败。'
+            : readState().message,
+      ),
+    };
   }
 
   void dispose() {

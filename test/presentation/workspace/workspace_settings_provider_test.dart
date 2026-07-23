@@ -6,8 +6,7 @@ import 'package:synapse/application/search/search_index.dart';
 import 'package:synapse/domain/vault/vault_resource.dart';
 import 'package:synapse/infrastructure/ai/ai_provider.dart';
 import 'package:synapse/infrastructure/bootstrap/workspace_dependencies_factory.dart';
-import 'package:synapse/infrastructure/config/synapse_settings.dart';
-import 'package:synapse/infrastructure/config/vault_location_store.dart';
+import 'package:synapse/application/settings/synapse_settings.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
 
 import '../../support/workspace_fakes.dart';
@@ -43,6 +42,8 @@ void main() {
       find.byKey(const Key('provider-vision-model')),
       'vision-model',
     );
+    await tester.tap(find.byKey(const Key('settings-nav-search')));
+    await tester.pumpAndSettle();
     await tester.enterText(
       find.byKey(const Key('provider-embedding-model')),
       'embedding-model',
@@ -53,7 +54,7 @@ void main() {
     final savedConfig = settingsStore.savedSettings.last.providerConfig;
     expect(savedConfig.normalizedBaseUrl, 'https://api.example.com/v1');
     expect(savedConfig.apiKey, 'secret-key');
-    expect(find.textContaining('模型设置已保存'), findsOneWidget);
+    expect(find.textContaining('设置已保存'), findsOneWidget);
   });
 
   testWidgets('tests provider config from the settings sheet', (tester) async {
@@ -63,7 +64,7 @@ void main() {
       tester,
       vault: MemoryVaultBackend(),
       settingsStore: FakeSettingsStore(),
-      providerConfigTester: (config) async {
+      modelCapabilityTester: (config, capability) async {
         testedConfig = config;
         return '连接成功：chat-model';
       },
@@ -90,7 +91,7 @@ void main() {
       'vision-model',
     );
 
-    await tester.tap(find.text('测试模型'));
+    await tester.tap(find.text('测试 Chat'));
     await tester.pump();
     await tester.pumpAndSettle();
 
@@ -199,12 +200,13 @@ void main() {
       await tester.tap(find.byKey(const Key('settings-nav-appearance')));
       await tester.pumpAndSettle();
       await tester.tap(find.byKey(const Key('settings-accent-green')));
+      await tester.pump();
       await tester.tap(find.text('保存设置'));
       await tester.pumpAndSettle();
 
       final saved = settingsStore.savedSettings.single;
       expect(saved.vaultLocation, persistedSettings.vaultLocation);
-      expect(saved.providerConfig.baseUrl, 'new-url');
+      expect(saved.providerConfig.baseUrl, 'https://new.example.com/v1');
       expect(saved.providerConfig.apiKey, 'new-key');
       expect(saved.providerConfig.chatModel, 'new-chat');
       expect(saved.providerConfig.visionModel, 'new-vision');
@@ -215,7 +217,7 @@ void main() {
           accentColor: WorkspaceAccentColor.green,
         ),
       );
-      expect(runtimeBuilds, 3);
+      expect(runtimeBuilds, 2);
     },
   );
 
@@ -251,19 +253,25 @@ void main() {
       await _enterReplacementSettings(tester);
       await tester.tap(find.text('保存设置'));
       await tester.pumpAndSettle();
-      expect(settingsStore.currentSettings.providerConfig.baseUrl, 'new-url');
+      expect(
+        settingsStore.currentSettings.providerConfig.baseUrl,
+        'https://new.example.com/v1',
+      );
 
-      expect(settingsStore.currentSettings.providerConfig.baseUrl, 'new-url');
+      expect(
+        settingsStore.currentSettings.providerConfig.baseUrl,
+        'https://new.example.com/v1',
+      );
       expect(
         primaryButtonColor(tester, const Key('add-image-button')),
         CupertinoColors.systemPurple,
       );
       await _runSearch(tester);
       final userProvider = providers.singleWhere(
-        (provider) => provider.id == 'new-url',
+        (provider) => provider.id == 'https://new.example.com/v1',
       );
       final loadedProvider = providers.singleWhere(
-        (provider) => provider.id == 'old-url',
+        (provider) => provider.id == 'https://old.example.com/v1',
       );
       expect(userProvider.embeddingCalls, 1);
       expect(loadedProvider.embeddingCalls, 0);
@@ -277,7 +285,7 @@ void main() {
       const startupSettings = SynapseSettings(
         vaultLocation: VaultLocation(rootPath: '/vault/loaded'),
         providerConfig: ProviderConfig(
-          baseUrl: 'loaded-url',
+          baseUrl: 'https://loaded.example.com/v1',
           apiKey: 'loaded-key',
           chatModel: 'loaded-chat',
           visionModel: 'loaded-vision',
@@ -315,12 +323,13 @@ void main() {
       await tester.tap(find.byKey(const Key('settings-nav-appearance')));
       await tester.pumpAndSettle();
       await tester.tap(find.byKey(const Key('settings-accent-purple')));
+      await tester.pump();
       await tester.tap(find.text('保存设置'));
       await tester.pumpAndSettle();
 
       final saved = settingsStore.savedSettings.single;
       expect(saved.vaultLocation, startupSettings.vaultLocation);
-      expect(saved.providerConfig.baseUrl, 'loaded-url');
+      expect(saved.providerConfig.baseUrl, 'https://loaded.example.com/v1');
       expect(saved.providerConfig.apiKey, 'loaded-key');
       expect(saved.providerConfig.chatModel, 'loaded-chat');
       expect(saved.providerConfig.visionModel, 'loaded-vision');
@@ -337,7 +346,7 @@ void main() {
 
 const _oldSettings = SynapseSettings(
   providerConfig: ProviderConfig(
-    baseUrl: 'old-url',
+    baseUrl: 'https://old.example.com/v1',
     apiKey: 'old-key',
     chatModel: 'old-chat',
     visionModel: 'old-vision',
@@ -347,7 +356,7 @@ const _oldSettings = SynapseSettings(
 
 const _replacementSettings = SynapseSettings(
   providerConfig: ProviderConfig(
-    baseUrl: 'new-url',
+    baseUrl: 'https://new.example.com/v1',
     apiKey: 'new-key',
     chatModel: 'new-chat',
     visionModel: 'new-vision',
@@ -375,7 +384,10 @@ Future<void> _enterReplacementSettingsInOpenDialog(WidgetTester tester) async {
   await tester.tap(find.byKey(const Key('settings-accent-purple')));
   await tester.tap(find.byKey(const Key('settings-nav-models')));
   await tester.pumpAndSettle();
-  await tester.enterText(find.byKey(const Key('provider-base-url')), 'new-url');
+  await tester.enterText(
+    find.byKey(const Key('provider-base-url')),
+    'https://new.example.com/v1',
+  );
 }
 
 Future<void> _runSearch(WidgetTester tester) async {

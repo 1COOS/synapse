@@ -1,7 +1,7 @@
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart' show MenuStyle, WidgetStatePropertyAll;
 
-import '../../../infrastructure/config/synapse_settings.dart';
+import '../../../application/settings/synapse_settings.dart';
 
 const workspaceBackgroundColor = Color(0xFFF5F5F7);
 const workspaceSurfaceColor = Color(0xFFFFFFFF);

@@ -1,9 +1,9 @@
 import 'package:flutter/services.dart';
 
+import '../../application/settings/vault_location.dart';
 import 'vault_access_gateway.dart';
 
-export 'vault_access_gateway.dart'
-    show VaultAccessGateway, VaultAccessLease, VaultLocation;
+export 'vault_access_gateway.dart' show VaultAccessGateway, VaultAccessLease;
 
 final class VaultDirectoryAccess implements VaultAccessGateway {
   VaultDirectoryAccess({

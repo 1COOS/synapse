@@ -5,7 +5,7 @@ import 'package:flutter/material.dart' show SelectableText;
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:synapse/domain/vault/vault_resource.dart';
-import 'package:synapse/infrastructure/config/synapse_settings.dart';
+import 'package:synapse/application/settings/synapse_settings.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
 import 'package:synapse/infrastructure/vault/vault_post_commit_error.dart';
 import 'package:synapse/presentation/cupertino/workspace/workspace_controls.dart';

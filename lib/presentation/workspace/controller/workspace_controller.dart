@@ -5,10 +5,10 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../application/search/search_index.dart';
+import '../../../application/settings/synapse_settings.dart';
 import '../../../domain/markdown/markdown_document.dart';
 import '../../../domain/vault/vault_migration.dart';
 import '../../../domain/vault/vault_resource.dart';
-import '../../../infrastructure/config/synapse_settings.dart';
 import '../../../infrastructure/vault/vault_backend.dart';
 import '../editor/pane_editor_context.dart' as editor_context;
 import '../editor/live_markdown_editor.dart' show NoteEditorPasteAvailability;
@@ -241,8 +241,15 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
   Future<WorkspaceSettingsDialogModel?> settingsDialogModel() =>
       _startup.settingsDialogModel();
 
-  Future<String> testProviderConfig(ProviderConfig config) =>
-      _startup.testProviderConfig(config);
+  Future<String> testModelCapability(
+    ProviderConfig config,
+    ModelCapability capability,
+  ) => _startup.testModelCapability(config, capability);
+
+  Future<void> revealVaultInFinder() => _startup.revealVaultInFinder();
+
+  Future<WorkspaceSettingsSaveResult> saveSettings(SynapseSettings settings) =>
+      _startup.saveSettings(settings);
 
   void setPaneMode(String paneId, NoteMode mode) {
     _splits.setPaneMode(paneId, mode);

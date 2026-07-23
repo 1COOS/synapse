@@ -1,8 +1,12 @@
+import 'dart:convert';
+
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 
+import '../../application/ports/vault_revealer.dart';
 import '../../application/proposals/proposal_service.dart';
 import '../../application/search/search_index.dart';
+import '../../application/settings/synapse_settings.dart';
 import '../../presentation/workspace/controller/workspace_dependencies.dart';
 import '../../presentation/workspace/controller/workspace_runtime.dart';
 import '../../presentation/workspace/controller/workspace_search_coordinator.dart';
@@ -14,10 +18,11 @@ import '../cache/default_search_index.dart';
 import '../config/default_settings_store.dart';
 import '../config/provider_config_store.dart';
 import '../config/settings_store.dart';
-import '../config/synapse_settings.dart';
 import '../config/vault_directory_access.dart';
 import '../config/vault_location_store.dart';
 import '../input/image_input_service.dart';
+import '../platform/default_vault_revealer.dart';
+import '../platform/package_application_metadata.dart';
 import '../vault/default_vault_backend.dart' as platform_vault;
 import '../vault/vault_backend.dart';
 
@@ -32,7 +37,9 @@ WorkspaceDependencies createWorkspaceDependencies({
   VaultBackendFactory? vaultBackendFactory,
   SearchIndexFactory? searchIndexFactory,
   AiProvider Function(ProviderConfig config)? aiProviderFactory,
-  AiProviderConfigTester? providerConfigTester,
+  ModelCapabilityTester? modelCapabilityTester,
+  VaultRevealer? vaultRevealer,
+  ApplicationMetadataLoader? applicationMetadataLoader,
   VaultLocationPicker? pickVaultLocation,
   VaultAccessRestorer? restoreVaultAccess,
   VaultAccessGateway? vaultAccessGateway,
@@ -61,6 +68,7 @@ WorkspaceDependencies createWorkspaceDependencies({
   final reportCleanupError = cleanupErrorReporter ?? _reportCleanupError;
   final reportBackgroundTaskError =
       backgroundTaskErrorReporter ?? _reportBackgroundTaskError;
+  final resolvedVaultRevealer = vaultRevealer ?? createDefaultVaultRevealer();
   final supportsNativeVaultAccess =
       !kIsWeb && defaultTargetPlatform == TargetPlatform.macOS;
   final resolvedVaultAccessGateway =
@@ -132,7 +140,10 @@ WorkspaceDependencies createWorkspaceDependencies({
             rethrow;
           }
         },
-    testProviderConfig: providerConfigTester ?? _testProviderConfig,
+    testModelCapability: modelCapabilityTester ?? _testProviderModelCapability,
+    revealVault: resolvedVaultRevealer.reveal,
+    loadApplicationMetadata:
+        applicationMetadataLoader ?? loadPackageApplicationMetadata,
     pickVaultLocation:
         pickVaultLocation ??
         (directoryPicker == null
@@ -241,24 +252,78 @@ AiProvider _createAiProvider(ProviderConfig config) {
       : const MissingConfigAiProvider();
 }
 
-Future<String> _testProviderConfig(ProviderConfig config) async {
-  if (!config.isComplete) {
-    throw StateError('请填写 Base URL、API Key、Chat Model 和 Vision Model。');
-  }
+Future<String> _testProviderModelCapability(
+  ProviderConfig config,
+  ModelCapability capability,
+) async {
+  _validateProviderTestConfig(config, capability);
   final provider = OpenAICompatibleProvider(config: config);
   try {
-    final response = await provider.testConnection();
-    final summary = response.replaceAll(RegExp(r'\s+'), ' ').trim();
-    if (summary.isEmpty) {
-      return '模型连接成功';
-    }
-    final shortSummary = summary.length > 40
-        ? '${summary.substring(0, 40)}...'
-        : summary;
-    return '模型连接成功：$shortSummary';
+    return switch (capability) {
+      ModelCapability.chat => _testChatCapability(provider),
+      ModelCapability.vision => _testVisionCapability(provider),
+      ModelCapability.embedding => _testEmbeddingCapability(provider),
+    };
   } finally {
     provider.dispose();
   }
+}
+
+void _validateProviderTestConfig(
+  ProviderConfig config,
+  ModelCapability capability,
+) {
+  if (config.normalizedBaseUrl.isEmpty || config.apiKey.trim().isEmpty) {
+    throw StateError('请填写 Base URL 和 API Key。');
+  }
+  final model = switch (capability) {
+    ModelCapability.chat => config.chatModel,
+    ModelCapability.vision => config.visionModel,
+    ModelCapability.embedding => config.embeddingModel,
+  };
+  if (model.trim().isEmpty) {
+    final label = switch (capability) {
+      ModelCapability.chat => 'Chat Model',
+      ModelCapability.vision => 'Vision Model',
+      ModelCapability.embedding => 'Embedding Model',
+    };
+    throw StateError('请填写 $label。');
+  }
+}
+
+Future<String> _testChatCapability(OpenAICompatibleProvider provider) async {
+  final response = await provider.testConnection();
+  return _summarizeCapabilityResponse('Chat 模型连接成功', response);
+}
+
+Future<String> _testVisionCapability(OpenAICompatibleProvider provider) async {
+  final response = await provider.testVisionConnection(
+    base64Decode(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+    ),
+  );
+  return _summarizeCapabilityResponse('Vision 模型连接成功', response);
+}
+
+Future<String> _testEmbeddingCapability(
+  OpenAICompatibleProvider provider,
+) async {
+  final embedding = await provider.createEmbedding('Synapse connection test');
+  if (embedding.isEmpty || embedding.any((value) => !value.isFinite)) {
+    throw StateError('Embedding 模型返回了无效向量。');
+  }
+  return 'Embedding 模型连接成功：${embedding.length} 维';
+}
+
+String _summarizeCapabilityResponse(String success, String response) {
+  final summary = response.replaceAll(RegExp(r'\s+'), ' ').trim();
+  if (summary.isEmpty) {
+    return success;
+  }
+  final shortSummary = summary.length > 80
+      ? '${summary.substring(0, 80)}...'
+      : summary;
+  return '$success：$shortSummary';
 }
 
 SettingsStore? _legacySettingsStore({

@@ -2,7 +2,7 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:synapse/infrastructure/bootstrap/workspace_dependencies_factory.dart';
-import 'package:synapse/infrastructure/config/vault_location_store.dart';
+import 'package:synapse/application/settings/vault_location.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
 import 'package:synapse/main.dart';
 import 'package:synapse/presentation/cupertino/workspace.dart';

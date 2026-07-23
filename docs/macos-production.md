@@ -104,6 +104,16 @@ candidate 获取、验证、settings 保存或 commit 前失败时，释放 cand
 
 若 backend 已成功但 post-commit state publish/prepare 失败，workspace 进入 `reloadRequired`。此时禁止重复执行 backend operation，应重新加载工作区恢复内存状态。
 
+### 6.3 Finder 定位
+
+设置面板的“在 Finder 中显示”通过可注入 `VaultRevealer` 执行。macOS 实现只允许：
+
+```text
+Process.run('/usr/bin/open', ['-R', rootPath])
+```
+
+不得把 Vault 路径拼接到 shell 命令。root path 为空或目录不存在时返回明确错误；Web/Windows 返回不支持。该操作不替代 security-scoped lease，也不修改 Vault 或 settings。
+
 ## 7. 本地 Production Gate
 
 `xcodebuild test` 和 Debug build 使用 Local Debug entitlement，可在没有开发证书时执行。Release build 及其实际 entitlement inspection 仍要求有效 Apple Development certificate 与可用 Xcode Team。若此前置条件缺失，应只把 Release production signing 标记为外部 blocked，不得把它描述为代码或本地 Debug 失败。
@@ -116,6 +126,7 @@ flutter test --no-pub
 flutter analyze --no-pub
 xcodebuild test -project macos/Runner.xcodeproj -scheme Runner -destination 'platform=macOS'
 flutter build macos --debug --no-pub
+flutter build web --no-pub
 flutter build macos --release --no-pub
 codesign -d --entitlements :- build/macos/Build/Products/Release/synapse.app
 git diff --check

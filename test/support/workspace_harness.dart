@@ -4,11 +4,12 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:synapse/domain/vault/vault_resource.dart';
+import 'package:synapse/application/ports/vault_revealer.dart';
 import 'package:synapse/infrastructure/ai/ai_provider.dart';
 import 'package:synapse/infrastructure/bootstrap/workspace_dependencies_factory.dart';
 import 'package:synapse/infrastructure/config/provider_config_store.dart';
 import 'package:synapse/infrastructure/config/settings_store.dart';
-import 'package:synapse/infrastructure/config/synapse_settings.dart';
+import 'package:synapse/application/settings/synapse_settings.dart';
 import 'package:synapse/infrastructure/config/vault_access_gateway.dart';
 import 'package:synapse/infrastructure/config/vault_location_store.dart';
 import 'package:synapse/infrastructure/input/image_input_service.dart';
@@ -119,7 +120,10 @@ Future<void> pumpWorkspace(
   VaultAccessGateway? vaultAccessGateway,
   Future<String?> Function()? directoryPicker,
   VaultBackend Function(String rootPath)? vaultBackendFactory,
-  Future<String> Function(ProviderConfig config)? providerConfigTester,
+  ModelCapabilityTester? modelCapabilityTester,
+  VaultRevealer? vaultRevealer,
+  ApplicationMetadataLoader? applicationMetadataLoader,
+  bool? usesNativeMacTitlebarOverride,
   WorkspaceCommitPhase? workspaceCommitFailureForTesting,
   Size size = const Size(1280, 820),
 }) async {
@@ -139,7 +143,16 @@ Future<void> pumpWorkspace(
         vaultAccessGateway: vaultAccessGateway,
         directoryPicker: directoryPicker,
         vaultBackendFactory: vaultBackendFactory,
-        providerConfigTester: providerConfigTester,
+        modelCapabilityTester: modelCapabilityTester,
+        vaultRevealer: vaultRevealer,
+        applicationMetadataLoader:
+            applicationMetadataLoader ??
+            () async => const ApplicationMetadata(
+              version: '1.0.0-test',
+              buildNumber: '1',
+              platformMode: '测试桌面端',
+            ),
+        usesNativeMacTitlebarOverride: usesNativeMacTitlebarOverride,
         workspaceCommitFailureForTesting: workspaceCommitFailureForTesting,
       );
   await tester.pumpWidget(

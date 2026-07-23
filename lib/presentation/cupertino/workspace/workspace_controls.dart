@@ -9,11 +9,19 @@ class WorkspaceCupertinoField extends StatelessWidget {
     required this.controller,
     required this.placeholder,
     this.obscureText = false,
+    this.enabled = true,
+    this.keyboardType,
+    this.suffix,
+    this.hasError = false,
   });
 
   final TextEditingController controller;
   final String placeholder;
   final bool obscureText;
+  final bool enabled;
+  final TextInputType? keyboardType;
+  final Widget? suffix;
+  final bool hasError;
 
   @override
   Widget build(BuildContext context) {
@@ -21,12 +29,17 @@ class WorkspaceCupertinoField extends StatelessWidget {
       controller: controller,
       placeholder: placeholder,
       obscureText: obscureText,
+      enabled: enabled,
+      keyboardType: keyboardType,
+      suffix: suffix,
       enableSuggestions: !obscureText,
       autocorrect: false,
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
       decoration: BoxDecoration(
         color: workspaceSurfaceColor,
-        border: Border.all(color: workspaceLineColor),
+        border: Border.all(
+          color: hasError ? CupertinoColors.systemRed : workspaceLineColor,
+        ),
         borderRadius: workspaceBorderRadius,
       ),
     );

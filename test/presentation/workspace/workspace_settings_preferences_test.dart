@@ -3,7 +3,7 @@ import 'dart:async';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:synapse/infrastructure/config/synapse_settings.dart';
+import 'package:synapse/application/settings/synapse_settings.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
 import 'package:synapse/presentation/workspace/editor/live_markdown_editor.dart';
 
@@ -25,7 +25,6 @@ void main() {
     expect(find.text('外观'), findsWidgets);
     expect(find.text('仓库'), findsWidgets);
     expect(find.text('搜索'), findsWidgets);
-    expect(find.text('图片'), findsWidgets);
     expect(find.text('关于'), findsWidgets);
   });
 
@@ -51,7 +50,14 @@ void main() {
       find.byKey(const Key('settings-pasted-image-width')),
       '720',
     );
-    await tester.tap(find.byKey(const Key('settings-semantic-search-toggle')));
+    await tester.tap(find.byKey(const Key('settings-nav-search')));
+    await tester.pumpAndSettle();
+    final semanticSwitch = find.descendant(
+      of: find.byKey(const Key('settings-semantic-search-toggle')),
+      matching: find.byType(CupertinoSwitch),
+    );
+    await tester.ensureVisible(semanticSwitch);
+    await tester.tap(semanticSwitch);
     await tester.tap(find.text('保存设置'));
     await tester.pumpAndSettle();
 
@@ -80,7 +86,24 @@ void main() {
 
     await tester.tap(find.byKey(const Key('settings-button')));
     await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const Key('settings-default-mode-reading')));
+    await tester.tap(find.byKey(const Key('settings-nav-models')));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.byKey(const Key('provider-base-url')),
+      'https://api.example.com/v1',
+    );
+    await tester.enterText(
+      find.byKey(const Key('provider-api-key')),
+      'secret-key',
+    );
+    await tester.enterText(
+      find.byKey(const Key('provider-chat-model')),
+      'chat-model',
+    );
+    await tester.enterText(
+      find.byKey(const Key('provider-vision-model')),
+      'vision-model',
+    );
     await tester.tap(find.text('保存设置'));
     await settingsStore.saveStarted.future;
     await tester.pump();
@@ -150,6 +173,8 @@ void main() {
     await tester.tap(find.byKey(const Key('settings-accent-purple')));
     await tester.pump();
     await tester.tap(find.text('取消'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('settings-confirm-discard')));
     await tester.pumpAndSettle();
 
     expect(settingsStore.savedSettings, isEmpty);

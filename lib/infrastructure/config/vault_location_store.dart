@@ -1,25 +1,4 @@
-class VaultLocation {
-  const VaultLocation({required this.rootPath, this.bookmarkBase64});
-
-  final String rootPath;
-  final String? bookmarkBase64;
-
-  Map<String, Object?> toJson() => {
-    'rootPath': rootPath,
-    if (bookmarkBase64?.trim().isNotEmpty == true)
-      'bookmarkBase64': bookmarkBase64,
-  };
-
-  static VaultLocation fromJson(Map<String, Object?> json) {
-    final bookmarkBase64 = json['bookmarkBase64']?.toString();
-    return VaultLocation(
-      rootPath: json['rootPath']?.toString() ?? '',
-      bookmarkBase64: bookmarkBase64?.trim().isEmpty == true
-          ? null
-          : bookmarkBase64,
-    );
-  }
-}
+import '../../application/settings/vault_location.dart';
 
 abstract class VaultLocationStore {
   Future<VaultLocation?> load();

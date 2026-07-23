@@ -8,8 +8,8 @@ import 'package:synapse/infrastructure/config/atomic_config_file_writer.dart';
 import 'package:synapse/infrastructure/config/file_settings_store.dart';
 import 'package:synapse/infrastructure/config/provider_config_store.dart';
 import 'package:synapse/infrastructure/config/settings_store.dart';
-import 'package:synapse/infrastructure/config/synapse_settings.dart';
-import 'package:synapse/infrastructure/config/vault_location_store.dart';
+import 'package:synapse/application/settings/synapse_settings.dart';
+import 'package:synapse/infrastructure/config/synapse_settings_codec.dart';
 
 void main() {
   late Directory root;
@@ -415,14 +415,16 @@ SynapseSettings _settingsWithApiKey(String apiKey) {
 Future<void> _writeSettingsJson(Directory root) async {
   await File(p.join(root.path, 'settings.json')).writeAsString(
     jsonEncode({
-      'schemaVersion': SynapseSettings.currentSchemaVersion,
+      'schemaVersion': SynapseSettingsCodec.currentSchemaVersion,
       'providerConfig': {
         'baseUrl': 'https://api.example.com/v1',
         'chatModel': 'chat-model',
         'visionModel': 'vision-model',
         'embeddingModel': '',
       },
-      'preferences': WorkspacePreferences.defaults.toJson(),
+      'preferences': const SynapseSettingsCodec().encode(
+        SynapseSettings.defaults,
+      )['preferences'],
     }),
   );
 }

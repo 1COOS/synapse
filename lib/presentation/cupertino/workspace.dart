@@ -24,7 +24,6 @@ import 'workspace/workspace_sources_pane.dart';
 import 'workspace/workspace_theme.dart';
 import 'workspace/workspace_titlebar.dart';
 
-export 'workspace/workspace_settings.dart' show ProviderConfigTester;
 export '../workspace/controller/workspace_dependencies.dart'
     show DirectoryPicker, VaultBackendFactory, WorkspaceDependencies;
 
@@ -50,6 +49,7 @@ class SynapseWorkspace extends ConsumerStatefulWidget {
 
 class _SynapseWorkspaceState extends ConsumerState<SynapseWorkspace> {
   final _searchController = TextEditingController();
+  bool _openingSettings = false;
 
   late WorkspaceState _workspace;
 
@@ -358,11 +358,26 @@ class _SynapseWorkspaceState extends ConsumerState<SynapseWorkspace> {
   }
 
   Future<void> _openSettings() async {
-    final controller = _controller;
-    final dialogModel = await controller.settingsDialogModel();
-    if (dialogModel == null || !mounted) {
+    if (_openingSettings) {
       return;
     }
+    setState(() => _openingSettings = true);
+    final controller = _controller;
+    WorkspaceSettingsDialogModel? dialogModel;
+    try {
+      dialogModel = await controller.settingsDialogModel();
+    } finally {
+      if (mounted) {
+        setState(() => _openingSettings = false);
+      }
+    }
+    if (!mounted) {
+      return;
+    }
+    if (dialogModel == null) {
+      return;
+    }
+    final model = dialogModel;
     final currentBusy =
         ref.read(workspaceControllerProvider).value?.isBusy ?? _busy;
     if (!currentBusy) {
@@ -372,22 +387,16 @@ class _SynapseWorkspaceState extends ConsumerState<SynapseWorkspace> {
         return;
       }
     }
-    final saved = await showCupertinoDialog<WorkspaceSettingsValue>(
+    await showCupertinoDialog<bool>(
       context: context,
       builder: (context) => WorkspaceSettingsSheet(
-        initialSettings: dialogModel.initialSettings,
-        currentVaultLabel: _vaultRootPath ?? _vaultLabel,
-        canSave: dialogModel.canSave,
-        unavailableMessage: dialogModel.unavailableMessage,
-        onTestConfig: controller.testProviderConfig,
+        model: model,
+        onSave: controller.saveSettings,
+        onTestCapability: controller.testModelCapability,
+        onChooseVault: controller.chooseVault,
+        onRevealVault: controller.revealVaultInFinder,
       ),
     );
-    if (saved != null) {
-      if (!mounted) {
-        return;
-      }
-      await _controller.updateSettings(saved);
-    }
   }
 
   Future<PaneEditorCommandOutcome> _deleteSource(
@@ -422,31 +431,43 @@ class _SynapseWorkspaceState extends ConsumerState<SynapseWorkspace> {
   Widget _buildWorkspace(BuildContext context) {
     return WorkspaceAppearanceScope(
       appearance: _workspaceAppearance,
-      child: CupertinoPageScaffold(
-        backgroundColor: workspaceBackgroundColor,
-        child: SafeArea(
-          top: false,
-          bottom: false,
-          child: LayoutBuilder(
-            builder: (context, constraints) {
-              final narrow = constraints.maxWidth < 900;
-              return Column(
-                children: [
-                  WorkspaceChromeTitlebar(
-                    workspace: _workspace,
-                    controller: _controller,
-                    narrow: narrow,
-                    usesNativeMacTitlebar: _usesNativeMacTitlebar,
-                    onOpenSettings: _openSettings,
-                  ),
-                  Expanded(
-                    child: narrow ? _buildNarrowLayout() : _buildWideLayout(),
-                  ),
-                ],
-              );
-            },
+      child: Stack(
+        children: [
+          CupertinoPageScaffold(
+            backgroundColor: workspaceBackgroundColor,
+            child: SafeArea(
+              top: false,
+              bottom: false,
+              child: LayoutBuilder(
+                builder: (context, constraints) {
+                  final narrow = constraints.maxWidth < 900;
+                  return Column(
+                    children: [
+                      WorkspaceChromeTitlebar(
+                        workspace: _workspace,
+                        controller: _controller,
+                        narrow: narrow,
+                        usesNativeMacTitlebar: _usesNativeMacTitlebar,
+                        onOpenSettings: _openSettings,
+                      ),
+                      Expanded(
+                        child: narrow
+                            ? _buildNarrowLayout()
+                            : _buildWideLayout(),
+                      ),
+                    ],
+                  );
+                },
+              ),
+            ),
           ),
-        ),
+          if (_openingSettings)
+            const Positioned.fill(
+              child: IgnorePointer(
+                child: Center(child: CupertinoActivityIndicator()),
+              ),
+            ),
+        ],
       ),
     );
   }
@@ -637,7 +658,7 @@ class _SynapseWorkspaceState extends ConsumerState<SynapseWorkspace> {
   }
 
   Widget _buildLeftPaneFooter() {
-    final busy = _busy || _autoSaving;
+    final busy = _busy || _autoSaving || _openingSettings;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -688,7 +709,7 @@ class _SynapseWorkspaceState extends ConsumerState<SynapseWorkspace> {
   }
 
   Widget _buildLeftCollapsedRail() {
-    final busy = _busy || _autoSaving;
+    final busy = _busy || _autoSaving || _openingSettings;
     return WorkspaceCollapsedRail(
       key: const Key('left-pane-collapsed-rail'),
       children: [

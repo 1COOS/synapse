@@ -1,6 +1,4 @@
-import 'vault_location_store.dart';
-
-export 'vault_location_store.dart' show VaultLocation;
+import '../../application/settings/vault_location.dart';
 
 final class VaultAccessLease {
   const VaultAccessLease({required this.location, required this.token});

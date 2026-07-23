@@ -47,6 +47,43 @@ void main() {
     expect(body['model'], 'chat-model');
   });
 
+  test(
+    'tests vision connection with a real multimodal request shape',
+    () async {
+      http.Request? captured;
+      final provider = OpenAICompatibleProvider(
+        config: config,
+        client: MockClient((request) async {
+          captured = request;
+          return http.Response(
+            jsonEncode({
+              'choices': [
+                {
+                  'message': {'content': 'Synapse 视觉模型连接成功'},
+                },
+              ],
+            }),
+            200,
+            headers: {'content-type': 'application/json'},
+          );
+        }),
+      );
+
+      final result = await provider.testVisionConnection([1, 2, 3]);
+
+      expect(result, 'Synapse 视觉模型连接成功');
+      expect(
+        captured!.url.toString(),
+        'https://api.example.com/v1/chat/completions',
+      );
+      final body = jsonDecode(captured!.body) as Map<String, Object?>;
+      expect(body['model'], 'vision-model');
+      final encoded = jsonEncode(body);
+      expect(encoded, contains('data:image/png;base64,AQID'));
+      expect(encoded, contains('image_url'));
+    },
+  );
+
   test('uses chat model for text-only outline proposals', () async {
     http.Request? captured;
     final provider = OpenAICompatibleProvider(

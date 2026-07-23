@@ -7,8 +7,7 @@ import 'package:synapse/domain/vault/vault_resource.dart';
 import 'package:synapse/infrastructure/ai/ai_provider.dart';
 import 'package:synapse/infrastructure/bootstrap/workspace_dependencies_factory.dart';
 import 'package:synapse/infrastructure/config/settings_store.dart';
-import 'package:synapse/infrastructure/config/synapse_settings.dart';
-import 'package:synapse/infrastructure/config/vault_access_gateway.dart';
+import 'package:synapse/application/settings/synapse_settings.dart';
 import 'package:synapse/infrastructure/input/image_input_service.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
 import 'package:synapse/presentation/workspace/controller/workspace_controller.dart';
@@ -260,6 +259,142 @@ void main() {
     );
 
     test(
+      'preference-only settings keep runtime and editor context current',
+      () async {
+        final vault = MemoryVaultBackend();
+        final note = await vault.createNote(
+          parentPath: '',
+          title: 'Preferences',
+        );
+        final settingsStore = FakeSettingsStore();
+        var runtimeBuilds = 0;
+        final container = ProviderContainer(
+          overrides: [
+            workspaceDependenciesProvider.overrideWithValue(
+              createWorkspaceDependencies(
+                initialVault: vault,
+                settingsStore: settingsStore,
+                searchIndexFactory: (_, _) {
+                  runtimeBuilds += 1;
+                  return _RecordingSearchIndex();
+                },
+              ),
+            ),
+          ],
+        );
+        addTearDown(container.dispose);
+        final initial = await container.read(
+          workspaceControllerProvider.future,
+        );
+        final controller = container.read(workspaceControllerProvider.notifier);
+        final context = controller.capturePaneEditorContext(
+          initial.focusedPaneId,
+        )!;
+
+        final result = await controller.updateSettings(
+          initial.settings.copyWith(
+            preferences: initial.preferences.copyWith(noteFontSize: 18),
+          ),
+        );
+
+        expect(result, WorkspaceActionResult.committed);
+        expect(runtimeBuilds, 1);
+        expect(controller.isPaneEditorContextCurrent(context), isTrue);
+        expect(controller.sessionFor(note.id), isNotNull);
+        expect(settingsStore.preservingApiKeySaveCount, 1);
+      },
+    );
+
+    test(
+      'unchanged settings are a no-op without persistence or runtime work',
+      () async {
+        final settingsStore = FakeSettingsStore();
+        var runtimeBuilds = 0;
+        final container = ProviderContainer(
+          overrides: [
+            workspaceDependenciesProvider.overrideWithValue(
+              createWorkspaceDependencies(
+                initialVault: MemoryVaultBackend(),
+                settingsStore: settingsStore,
+                searchIndexFactory: (_, _) {
+                  runtimeBuilds += 1;
+                  return _RecordingSearchIndex();
+                },
+              ),
+            ),
+          ],
+        );
+        addTearDown(container.dispose);
+        final initial = await container.read(
+          workspaceControllerProvider.future,
+        );
+        final controller = container.read(workspaceControllerProvider.notifier);
+
+        final result = await controller.updateSettings(initial.settings);
+
+        expect(result, WorkspaceActionResult.committed);
+        expect(runtimeBuilds, 1);
+        expect(settingsStore.savedSettings, isEmpty);
+      },
+    );
+
+    test(
+      'preference-only settings do not wait for or stale an editor mutation',
+      () async {
+        final vault = _GatedAddImageVaultBackend();
+        final note = await vault.createNote(
+          parentPath: '',
+          title: 'Preferences',
+        );
+        final settingsStore = FakeSettingsStore();
+        final container = ProviderContainer(
+          overrides: [
+            workspaceDependenciesProvider.overrideWithValue(
+              createWorkspaceDependencies(
+                initialVault: vault,
+                imageInput: FakeImageInputService(
+                  pickedImage: const ImportedImage(
+                    filename: 'preferences.png',
+                    mimeType: 'image/png',
+                    bytes: tinyPng,
+                  ),
+                ),
+                settingsStore: settingsStore,
+              ),
+            ),
+          ],
+        );
+        addTearDown(container.dispose);
+        addTearDown(vault.releaseAddImage);
+        final initial = await container.read(
+          workspaceControllerProvider.future,
+        );
+        final controller = container.read(workspaceControllerProvider.notifier);
+        final context = controller.capturePaneEditorContext(
+          initial.focusedPaneId,
+        )!;
+        final importing = controller.importImage(context);
+        await vault.addImageStarted.future;
+
+        var settingsCompleted = false;
+        final updating = controller.updateSettings(
+          initial.settings.copyWith(
+            preferences: initial.preferences.copyWith(noteFontSize: 18),
+          ),
+        );
+        unawaited(updating.then((_) => settingsCompleted = true));
+        await Future<void>.delayed(Duration.zero);
+
+        expect(settingsCompleted, isTrue);
+        expect(controller.isPaneEditorContextCurrent(context), isTrue);
+        vault.releaseAddImage();
+        expect(await importing, PaneEditorCommandOutcome.committed);
+        expect(await updating, WorkspaceActionResult.committed);
+        expect(controller.sessionFor(note.id)!.note.sources, hasLength(1));
+      },
+    );
+
+    test(
       'settings runtime replacement waits for an entered editor mutation',
       () async {
         final vault = _GatedAddImageVaultBackend();
@@ -293,7 +428,9 @@ void main() {
           initial.focusedPaneId,
         )!;
         final nextSettings = initial.settings.copyWith(
-          preferences: initial.preferences.copyWith(noteFontSize: 18),
+          providerConfig: initial.providerConfig.copyWith(
+            baseUrl: 'https://api.example.com/v1',
+          ),
         );
 
         final importing = controller.importImage(context);
@@ -448,7 +585,12 @@ void main() {
             createWorkspaceDependencies(
               initialVault: MemoryVaultBackend(),
               settingsStore: store,
-              providerConfigTester: (config) async {
+              applicationMetadataLoader: () async => const ApplicationMetadata(
+                version: '2.3.4',
+                buildNumber: '42',
+                platformMode: '测试桌面端',
+              ),
+              modelCapabilityTester: (config, capability) async {
                 testedConfig = config;
                 return '连接成功';
               },
@@ -470,8 +612,13 @@ void main() {
       expect(model.initialSettings.providerConfig.apiKey, 'secret');
       expect(model.canSave, isFalse);
       expect(model.unavailableMessage, '当前平台不支持保存设置');
+      expect(model.applicationMetadata.version, '2.3.4');
+      expect(model.applicationMetadata.buildNumber, '42');
       expect(
-        await controller.testProviderConfig(settings.providerConfig),
+        await controller.testModelCapability(
+          settings.providerConfig,
+          ModelCapability.chat,
+        ),
         '连接成功',
       );
       expect(testedConfig, settings.providerConfig);

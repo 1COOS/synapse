@@ -1,5 +1,7 @@
 import '../../../application/search/search_index.dart';
 import '../../../application/settings/provider_config.dart';
+import '../../../application/settings/settings_capabilities.dart';
+import '../../../application/settings/vault_location.dart';
 import '../../../infrastructure/ai/ai_provider.dart';
 import '../../../infrastructure/config/settings_store.dart';
 import '../../../infrastructure/config/vault_access_gateway.dart';
@@ -13,7 +15,10 @@ typedef VaultBackendFactory = VaultBackend Function(String rootPath);
 typedef SearchIndexFactory =
     SearchIndex Function(AiProvider provider, bool semanticSearchEnabled);
 typedef AiProviderFactory = WorkspaceAiProvider Function(ProviderConfig config);
-typedef AiProviderConfigTester = Future<String> Function(ProviderConfig config);
+typedef ModelCapabilityTester =
+    Future<String> Function(ProviderConfig config, ModelCapability capability);
+typedef VaultRootRevealer = Future<void> Function(String rootPath);
+typedef ApplicationMetadataLoader = Future<ApplicationMetadata> Function();
 typedef WorkspaceBackgroundTaskErrorReporter =
     void Function(Object error, StackTrace stackTrace);
 typedef VaultLocationPicker = Future<VaultLocation?> Function();
@@ -54,7 +59,9 @@ final class WorkspaceDependencies {
     required this.createDefaultVault,
     required this.createAiProvider,
     required this.createRuntime,
-    required this.testProviderConfig,
+    required this.testModelCapability,
+    required this.revealVault,
+    required this.loadApplicationMetadata,
     required this.pickVaultLocation,
     required this.restoreVaultAccess,
     required this.vaultAccessGateway,
@@ -81,7 +88,9 @@ final class WorkspaceDependencies {
   final VaultBackend Function() createDefaultVault;
   final AiProviderFactory createAiProvider;
   final WorkspaceRuntimeFactory createRuntime;
-  final AiProviderConfigTester testProviderConfig;
+  final ModelCapabilityTester testModelCapability;
+  final VaultRootRevealer revealVault;
+  final ApplicationMetadataLoader loadApplicationMetadata;
   final VaultLocationPicker pickVaultLocation;
   final VaultAccessRestorer restoreVaultAccess;
   final VaultAccessGateway? vaultAccessGateway;

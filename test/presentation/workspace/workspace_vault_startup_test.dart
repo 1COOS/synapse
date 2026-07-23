@@ -9,7 +9,7 @@ import 'package:synapse/domain/vault/vault_resource.dart';
 import 'package:synapse/application/search/search_index.dart';
 import 'package:synapse/infrastructure/ai/mock_ai_provider.dart';
 import 'package:synapse/infrastructure/bootstrap/workspace_dependencies_factory.dart';
-import 'package:synapse/infrastructure/config/synapse_settings.dart';
+import 'package:synapse/application/settings/synapse_settings.dart';
 import 'package:synapse/infrastructure/config/vault_directory_access.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
 

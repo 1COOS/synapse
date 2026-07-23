@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:synapse/infrastructure/config/file_vault_location_store.dart';
+import 'package:synapse/application/settings/vault_location.dart';
 import 'package:synapse/infrastructure/config/vault_location_store.dart';
 
 void main() {

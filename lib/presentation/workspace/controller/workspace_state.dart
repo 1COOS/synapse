@@ -1,9 +1,9 @@
 import 'package:flutter/foundation.dart';
 
 import '../../../application/search/search_index.dart';
+import '../../../application/settings/synapse_settings.dart';
 import '../../../domain/vault/vault_migration.dart';
 import '../../../domain/vault/vault_resource.dart';
-import '../../../infrastructure/config/synapse_settings.dart';
 import '../state/note_materials_registry.dart';
 import '../state/split_workspace_controller.dart';
 

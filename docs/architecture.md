@@ -44,7 +44,7 @@ infrastructure
   Vault backend、设置与 Keychain、AI、搜索、平台 gateway
 ```
 
-`application/` 与 `domain/` 不得 import/export `infrastructure/`；架构测试会扫描并阻止反向依赖。`AiProvider`、`VaultBackend` 和 post-commit error 的真实 port 定义位于 `application/ports/`，旧 infrastructure 路径只保留兼容 re-export。`ProviderConfig` 位于 `application/settings/`，不再混入 Vault domain。
+`application/` 与 `domain/` 不得 import/export `infrastructure/`；架构测试会扫描并阻止反向依赖。`AiProvider`、`VaultBackend` 和 post-commit error 的真实 port 定义位于 `application/ports/`，旧 infrastructure 路径只保留兼容 re-export。`ProviderConfig`、`VaultLocation`、`WorkspacePreferences`、`SynapseSettings`、数值约束和 `SettingsChangeSet` 位于 `application/settings/`；infrastructure 只负责 codec、持久化、迁移和平台实现，不保留旧设置值对象的兼容转发层。
 
 [main.dart](../lib/main.dart) 与 [workspace_dependencies_factory.dart](../lib/infrastructure/bootstrap/workspace_dependencies_factory.dart) 组成 composition root。具体 Vault、Settings、AI、Search、图片输入和平台 gateway 在 bootstrap/infrastructure 层创建；[workspace.dart](../lib/presentation/cupertino/workspace.dart) 只负责 Provider/Consumer 连接、FocusNode、临时输入和 screen glue，不再构造具体基础设施。
 
@@ -104,7 +104,7 @@ test/
 - `controller/`：`WorkspaceController`、不可变 `WorkspaceState`、依赖/runtime 及 startup、document、editor、resource、search、state-commit collaborators；
 - `state/`：session registry、save coordinator、split controller、materials registry、mutation barrier、commit batch；
 - `editor/`：Pane context、Live Markdown、表格、图片与 context menu；
-- `presentation/cupertino/workspace/`：布局、titlebar、资源树、搜索、素材、设置、note pane 和通用控件。
+- `presentation/cupertino/workspace/`：布局、titlebar、资源树、搜索、素材、设置、note pane 和通用控件；设置进一步拆为弹窗外壳、私有 draft controller 和六个 section 组件。
 
 当前代码尺寸基线：
 
@@ -267,7 +267,32 @@ macOS 目录选择或 bookmark 恢复通过 Dart MethodChannel 和 Swift token m
 
 每个成功的 `startAccessingSecurityScopedResource()` 必须对应一次 `stopAccessingSecurityScopedResource()`。lease token 重复释放保持幂等，非法原生 payload 也会尽力释放已返回 token。
 
-## 9. Keychain 与配置安全
+## 9. 设置架构与差异更新
+
+`SynapseSettingsCodec` 固定读写 schema version 2，保持现有 JSON 字段和迁移文件名不变。编码永远排除 API Key；解码按字段恢复，未知字段忽略，单个坏值不会废弃整个文件：
+
+- 自动保存延迟收敛到 `250–10000ms`；
+- 粘贴图片宽度收敛到 `120–2400px`；
+- 字号收敛到 `10–28px`；
+- 可解析但越界的数值收敛到最近边界；不可解析值恢复默认值；
+- 所有恢复信息通过 `SettingsLoadResult` 返回并展示，其他有效字段继续加载；
+- legacy `provider_config.json` / `vault_location.json` 仍迁移到统一 `settings.json` 后删除。
+
+设置弹窗的私有 draft controller 持有字段 controller、校验、dirty 基线、API Key 显隐/清除意图、保存状态和 Chat/Vision/Embedding 测试状态。API Key 只存在于 startup coordinator 私有 settings baseline 与弹窗生命周期，不进入 Riverpod observable state。异步 `onSave` 返回 `WorkspaceSettingsSaveResult`；只有 committed 才关闭，busy/failed 保留草稿和完整错误。
+
+`SettingsChangeSet.between(previous, next)` 决定更新路径：
+
+1. 无变化直接返回成功/no-op，不写文件、不创建 runtime；
+2. 仅外观、默认模式、自动保存或图片宽度变化时，只持久化并发布新状态，同时更新 split 默认模式；不等待 mutation、不失效 editor context、不替换 AI/search runtime；
+3. Provider、API Key、模型、Embedding 或语义搜索变化时，执行 candidate runtime → 持久化 → 原子安装；失败释放 candidate 并保留旧 runtime；
+4. Vault 变化拒绝进入普通设置保存，继续使用独立 Vault lease/切换事务；
+5. API Key 与 `settingsForEditing` 基线比较；未变化走 `savePreservingApiKey`，只有替换或明确清除才访问 Keychain。
+
+模型测试按 `chat / vision / embedding` 能力注入。Chat 发送短文本，Vision 使用内置最小图片发起真实多模态请求，Embedding 要求非空有限数值向量；临时 Provider 在每项完成后释放，测试不持久化草稿。`VaultRevealer` 是可注入平台 port；macOS 实现固定调用 `Process.run('/usr/bin/open', ['-R', rootPath])`，不拼接 shell，路径缺失或不存在返回明确错误，Web/Windows 返回不支持。
+
+`WorkspaceSettingsDialogModel` 只携带弹窗需要的仓库根路径、平台能力、版本环境、存储说明和已加载的 API Key 配置状态。版本与构建号由 `package_info_plus` 提供；关于分区不得为了展示状态主动读写或探测 Keychain。Web/H5 model 将所有编辑、测试、保存、Finder 和仓库能力关闭。
+
+## 10. Keychain 与配置安全
 
 `macos/Runner/DebugProfile.entitlements` 和 `Release.entitlements` 均包含插件要求的空 `keychain-access-groups`。`LocalDebug.entitlements` 不包含 Keychain Sharing，使无证书环境可以 ad-hoc 签名运行；该配置下 API Key 操作必须 fail-closed。API Key 只进入 Keychain：
 
@@ -285,7 +310,7 @@ Keychain、签名或 entitlement 异常必须明确报错并 fail-closed。Local
 
 详细运行与排障见 [macOS 生产说明](./macos-production.md)。
 
-## 10. AI、OCR 与 Proposal
+## 11. AI、OCR 与 Proposal
 
 `AiProvider` 隔离真实 OpenAI-compatible Provider 与 Mock Provider。配置支持 `baseURL`、`apiKey`、`chatModel`、`visionModel` 和可选 `embeddingModel`。
 
@@ -297,7 +322,7 @@ Keychain、签名或 entitlement 异常必须明确报错并 fail-closed。Local
 
 当前 proposal 数据仍是 Markdown 片段，结构化 patch、diff、局部采纳和冲突处理属于后续演进。
 
-## 11. 搜索与缓存
+## 12. 搜索与缓存
 
 `SearchIndex` 统一 memory/sqlite 实现和 `dispose` 契约；`PersistentSearchIndex` 额外提供持久 fingerprint 能力。macOS 有真实 Vault root 时默认打开 `.synapse-cache/search.sqlite`，Web、无 root runtime 或 SQLite 打开失败时使用 memory fallback。
 
@@ -305,9 +330,9 @@ Keychain、签名或 entitlement 异常必须明确报错并 fail-closed。Local
 
 删除 `.synapse-cache` 不得损失 Markdown、附件或 `sources.json`。当前搜索索引可以从 Markdown 自动重建，但尚未把附件内容与 source sidecar 纳入检索；从裸 attachments 反推完整素材清单仍是后续工作。
 
-## 12. 测试与质量边界
+## 13. 测试与质量边界
 
-当前基线为 `flutter test --no-pub --concurrency=1` 670/670、`flutter analyze --no-pub` 无 issue。现有 70 个测试文件覆盖架构边界、状态竞态、Vault 事务、迁移、搜索、Keychain 与 UI 行为。
+当前基线为 `flutter test --no-pub` 760/760、`flutter analyze --no-pub` 无 issue。现有 72 个测试文件覆盖架构边界、状态竞态、Vault 事务、迁移、搜索、Keychain、设置契约与 UI 行为。
 
 重点测试面包括：
 
@@ -323,7 +348,7 @@ Keychain、签名或 entitlement 异常必须明确报错并 fail-closed。Local
 
 最终本地 production gate 的完整顺序见 [开发文档](./development.md)；当前只记录代码基线，不能据此宣称最终 macOS gate 已通过。本轮不新增 GitHub Actions。
 
-## 13. 真实风险与下一步
+## 14. 真实风险与下一步
 
 | 风险/未完成项 | 影响 | 后续方向 |
 | --- | --- | --- |
