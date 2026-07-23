@@ -44,6 +44,7 @@ final class WorkspaceSourcesPane extends StatefulWidget {
 
 final class _WorkspaceSourcesPaneState extends State<WorkspaceSourcesPane> {
   final _focusNode = FocusNode();
+  bool _generatingProposal = false;
 
   @override
   void dispose() {
@@ -171,16 +172,15 @@ final class _WorkspaceSourcesPaneState extends State<WorkspaceSourcesPane> {
               const SectionDivider(),
               PrimaryButton(
                 key: const Key('generate-proposal-button'),
-                label: '生成建议',
+                label: _generatingProposal ? '生成中…' : '生成建议',
                 icon: CupertinoIcons.sparkles,
+                busy: _generatingProposal,
                 onPressed:
                     materials.selectedSourceIds.isEmpty ||
                         busy ||
                         widget.workspace.reloadRequired
                     ? null
-                    : () async {
-                        await widget.controller.generateProposal(editorContext);
-                      },
+                    : _generateProposal,
               ),
               const SizedBox(height: 12),
               const PaneSubheading('AI 建议'),
@@ -237,6 +237,36 @@ final class _WorkspaceSourcesPaneState extends State<WorkspaceSourcesPane> {
     return pane == null
         ? null
         : widget.controller.capturePaneEditorContext(pane.paneId);
+  }
+
+  Future<void> _generateProposal() async {
+    final editorContext = _captureFocusedEditorContext();
+    final unavailableMessage = widget.controller
+        .proposalGenerationUnavailableMessage(editorContext);
+    if (unavailableMessage != null) {
+      await showCupertinoDialog<void>(
+        context: context,
+        builder: (context) => CupertinoAlertDialog(
+          title: const Text('无法生成 AI 建议'),
+          content: Text(unavailableMessage),
+          actions: [
+            CupertinoDialogAction(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('知道了'),
+            ),
+          ],
+        ),
+      );
+      return;
+    }
+    setState(() => _generatingProposal = true);
+    try {
+      await widget.controller.generateProposal(editorContext);
+    } finally {
+      if (mounted) {
+        setState(() => _generatingProposal = false);
+      }
+    }
   }
 
   KeyEventResult _handleKeyEvent(

@@ -111,7 +111,16 @@ final class WorkspaceStartupCoordinator {
       }
       return '模型设置已保存；未配置 Embedding，语义搜索关闭';
     }
-    return '请先在设置中配置模型';
+    final missing = <String>[
+      if (config.normalizedBaseUrl.isEmpty) 'Base URL',
+      if (!config.hasUsableKey) 'API Key',
+      if (config.chatModel.trim().isEmpty) 'Chat Model',
+      if (config.visionModel.trim().isEmpty) 'Vision Model',
+    ];
+    if (missing.length == 1 && missing.single == 'API Key') {
+      return 'API Key 未配置或需要重新输入，请在设置中重新保存模型配置。';
+    }
+    return '请先在设置中补全模型配置：${missing.join('、')}。';
   }
 
   Future<SettingsLoadResult> beginSettingsLoad() {

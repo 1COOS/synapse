@@ -90,7 +90,7 @@ final class WorkspaceMarkdownRenderer {
     String markdown, {
     required ImagePreviewMode mode,
     required PaneEditorContext editorContext,
-    VoidCallback? onImageTap,
+    ValueChanged<String>? onImageTap,
   }) {
     final styleSheet = _noteMarkdownStyleSheet(markdown);
     return MarkdownBody(
@@ -164,7 +164,7 @@ final class WorkspaceMarkdownRenderer {
   Widget buildLivePreviewBlock(
     String markdown, {
     required PaneEditorContext editorContext,
-    VoidCallback? onImageTap,
+    ValueChanged<String>? onImageTap,
   }) {
     if (markdown.trim().isEmpty) {
       return const SizedBox(height: 12);
@@ -227,7 +227,7 @@ final class WorkspaceMarkdownRenderer {
     MarkdownImageConfig config, {
     required ImagePreviewMode mode,
     required PaneEditorContext editorContext,
-    VoidCallback? onImageTap,
+    ValueChanged<String>? onImageTap,
   }) {
     final src = safeUriDecode(config.uri.toString());
     final source = _imageSourceForMarkdownSrc(editorContext, src);
@@ -267,8 +267,7 @@ final class WorkspaceMarkdownRenderer {
                 controller.resolvePaneEditorContext(editorContext) == null) {
               return;
             }
-            onImageTap?.call();
-            _setSelectedPreviewImageSrc(src);
+            onImageTap?.call(normalizeImageSrc(src));
           },
           onWidthChanged: (value) {
             if (controller.isBusy ||

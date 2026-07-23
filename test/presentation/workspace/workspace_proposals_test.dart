@@ -211,10 +211,24 @@ void main() {
     expect(find.text('经文截图.png'), findsOneWidget);
   });
 
-  testWidgets('prompts users to configure a model before AI actions', (
+  testWidgets('shows an in-pane prompt when the API key must be re-entered', (
     tester,
   ) async {
-    await pumpWorkspace(tester, vault: MemoryVaultBackend());
+    await pumpWorkspace(
+      tester,
+      vault: MemoryVaultBackend(),
+      settingsStore: FakeSettingsStore(
+        initialSettings: const SynapseSettings(
+          providerConfig: ProviderConfig(
+            baseUrl: 'https://api.example.com/v1',
+            apiKey: '',
+            chatModel: 'chat-model',
+            visionModel: 'vision-model',
+            embeddingModel: '',
+          ),
+        ),
+      ),
+    );
     await tester.pumpAndSettle();
 
     await tester.tap(find.byType(Image).first);
@@ -222,7 +236,8 @@ void main() {
     await tester.tap(find.byKey(const Key('generate-proposal-button')));
     await tester.pump(const Duration(milliseconds: 250));
 
-    expect(find.textContaining('请先在设置中配置模型'), findsOneWidget);
+    expect(find.byType(CupertinoAlertDialog), findsOneWidget);
+    expect(find.textContaining('API Key 未配置或需要重新输入'), findsOneWidget);
   });
 
   testWidgets('gated image OCR keeps its pane target after focus changes', (
@@ -259,6 +274,15 @@ void main() {
 
     await tester.tap(find.byKey(const Key('generate-proposal-button')));
     await aiProvider.extractionStarted.future;
+    await tester.pump();
+    expect(
+      find.descendant(
+        of: find.byKey(const Key('generate-proposal-button')),
+        matching: find.byType(CupertinoActivityIndicator),
+      ),
+      findsOneWidget,
+    );
+    expect(find.text('生成中…'), findsOneWidget);
     tester
         .widget<GestureDetector>(find.byKey(const Key('split-pane-pane-2')))
         .onTap!();

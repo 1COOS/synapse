@@ -3,6 +3,39 @@ const minMarkdownImageWidth = 120;
 const maxMarkdownImageWidth = 1200;
 
 final htmlImageTagPattern = RegExp(r'<img\s+[^>]*>', caseSensitive: false);
+final markdownImageTagPattern = RegExp(r'!\[[^\]]*\]\([^)]+\)');
+
+final class MarkdownImageReference {
+  const MarkdownImageReference({
+    required this.start,
+    required this.end,
+    required this.src,
+  });
+
+  final int start;
+  final int end;
+  final String src;
+}
+
+final class MarkdownImageGapInsertion {
+  const MarkdownImageGapInsertion({
+    required this.markdown,
+    required this.insertionOffset,
+  });
+
+  final String markdown;
+  final int insertionOffset;
+}
+
+final class MarkdownImageRemoval {
+  const MarkdownImageRemoval({
+    required this.markdown,
+    required this.insertionOffset,
+  });
+
+  final String markdown;
+  final int insertionOffset;
+}
 
 String escapeHtmlAttribute(String value) {
   return value
@@ -139,6 +172,133 @@ RegExpMatch? findImageTagMatch(String markdown, String src) {
   return null;
 }
 
+MarkdownImageReference? findMarkdownImageReference({
+  required String markdown,
+  required String src,
+  int start = 0,
+  int? end,
+}) {
+  final rangeStart = start.clamp(0, markdown.length).toInt();
+  final rangeEnd = (end ?? markdown.length)
+      .clamp(rangeStart, markdown.length)
+      .toInt();
+  final wanted = normalizeImageSrc(src);
+  final references = <MarkdownImageReference>[];
+
+  for (final match in htmlImageTagPattern.allMatches(markdown, rangeStart)) {
+    if (match.start >= rangeEnd) {
+      break;
+    }
+    final tag = match.group(0)!;
+    final candidate = htmlAttribute(tag, 'src');
+    if (candidate != null &&
+        match.end <= rangeEnd &&
+        normalizeImageSrc(candidate) == wanted) {
+      references.add(
+        MarkdownImageReference(
+          start: match.start,
+          end: match.end,
+          src: candidate,
+        ),
+      );
+    }
+  }
+  for (final match in markdownImageTagPattern.allMatches(
+    markdown,
+    rangeStart,
+  )) {
+    if (match.start >= rangeEnd) {
+      break;
+    }
+    final tag = match.group(0)!;
+    final candidate = _markdownImageSrc(tag);
+    if (candidate != null &&
+        match.end <= rangeEnd &&
+        normalizeImageSrc(candidate) == wanted) {
+      references.add(
+        MarkdownImageReference(
+          start: match.start,
+          end: match.end,
+          src: candidate,
+        ),
+      );
+    }
+  }
+  references.sort((left, right) => left.start.compareTo(right.start));
+  return references.isEmpty ? null : references.first;
+}
+
+MarkdownImageGapInsertion insertBlankLineAfterMarkdownImage({
+  required String markdown,
+  required MarkdownImageReference reference,
+}) {
+  final lineBreak = _preferredLineBreak(markdown, reference.end);
+  var whitespaceEnd = reference.end;
+  while (whitespaceEnd < markdown.length &&
+      _isHorizontalWhitespace(markdown.codeUnitAt(whitespaceEnd))) {
+    whitespaceEnd += 1;
+  }
+
+  final lineBreakLength = _lineBreakLengthAt(markdown, whitespaceEnd);
+  if (lineBreakLength > 0) {
+    final withoutHorizontalWhitespace = markdown.replaceRange(
+      reference.end,
+      whitespaceEnd,
+      '',
+    );
+    final insertionOffset = reference.end + lineBreakLength;
+    return MarkdownImageGapInsertion(
+      markdown: withoutHorizontalWhitespace.replaceRange(
+        insertionOffset,
+        insertionOffset,
+        lineBreak,
+      ),
+      insertionOffset: insertionOffset,
+    );
+  }
+
+  final replacement = '$lineBreak$lineBreak';
+  return MarkdownImageGapInsertion(
+    markdown: markdown.replaceRange(reference.end, whitespaceEnd, replacement),
+    insertionOffset: reference.end + lineBreak.length,
+  );
+}
+
+MarkdownImageRemoval removeMarkdownImageReference({
+  required String markdown,
+  required MarkdownImageReference reference,
+}) {
+  final lineStart = _lineStart(markdown, reference.start);
+  final lineContentEnd = _lineContentEnd(markdown, reference.end);
+  final lineEnd = lineContentEnd + _lineBreakLengthAt(markdown, lineContentEnd);
+  final beforeOnLine = markdown.substring(lineStart, reference.start);
+  final afterOnLine = markdown.substring(reference.end, lineContentEnd);
+
+  if (beforeOnLine.trim().isEmpty && afterOnLine.trim().isEmpty) {
+    final before = markdown.substring(0, lineStart);
+    final after = markdown.substring(lineEnd);
+    final joined = _joinAfterImageLineRemoval(
+      before,
+      after,
+      preferredLineBreak: _preferredLineBreak(markdown, reference.start),
+    );
+    return MarkdownImageRemoval(
+      markdown: joined,
+      insertionOffset: before.length.clamp(0, joined.length).toInt(),
+    );
+  }
+
+  final updated = removeImageTagAt(
+    markdown: markdown,
+    start: reference.start,
+    end: reference.end,
+  );
+  return MarkdownImageRemoval(
+    markdown: updated,
+    insertionOffset: reference.start.clamp(0, updated.length).toInt(),
+  );
+}
+
 String removeImageTagAt({
   required String markdown,
   required int start,
@@ -221,4 +381,111 @@ bool _isWhitespace(int codeUnit) {
       codeUnit == 0x09 ||
       codeUnit == 0x0A ||
       codeUnit == 0x0D;
+}
+
+bool _isHorizontalWhitespace(int codeUnit) {
+  return codeUnit == 0x20 || codeUnit == 0x09;
+}
+
+String? _markdownImageSrc(String tag) {
+  final match = RegExp(
+    r'^!\[[^\]]*\]\(\s*(?:<([^>]+)>|([^\s)]+))',
+  ).firstMatch(tag);
+  return match?.group(1) ?? match?.group(2);
+}
+
+int _lineStart(String text, int offset) {
+  if (offset <= 0) {
+    return 0;
+  }
+  final newline = text.lastIndexOf('\n', offset - 1);
+  return newline == -1 ? 0 : newline + 1;
+}
+
+int _lineContentEnd(String text, int offset) {
+  final newline = text.indexOf('\n', offset);
+  if (newline == -1) {
+    return text.length;
+  }
+  return newline > 0 && text.codeUnitAt(newline - 1) == 0x0D
+      ? newline - 1
+      : newline;
+}
+
+int _lineBreakLengthAt(String text, int offset) {
+  if (offset < 0 || offset >= text.length) {
+    return 0;
+  }
+  if (text.startsWith('\r\n', offset)) {
+    return 2;
+  }
+  final codeUnit = text.codeUnitAt(offset);
+  return codeUnit == 0x0A || codeUnit == 0x0D ? 1 : 0;
+}
+
+String _preferredLineBreak(String text, int offset) {
+  if (offset < text.length && text.startsWith('\r\n', offset)) {
+    return '\r\n';
+  }
+  if (offset >= 2 && text.substring(offset - 2, offset) == '\r\n') {
+    return '\r\n';
+  }
+  return text.contains('\r\n') ? '\r\n' : '\n';
+}
+
+String _joinAfterImageLineRemoval(
+  String before,
+  String after, {
+  required String preferredLineBreak,
+}) {
+  if (before.isEmpty) {
+    return after.replaceFirst(RegExp(r'^(?:(?:\r\n|\n|\r))+'), '');
+  }
+  if (after.isEmpty) {
+    final trailing = _trailingLineBreaks(before);
+    if (trailing.count == 0) {
+      return before;
+    }
+    return '${before.substring(0, trailing.start)}$preferredLineBreak';
+  }
+
+  final trailing = _trailingLineBreaks(before);
+  final leading = _leadingLineBreaks(after);
+  final desiredBreaks = (trailing.count + leading.count).clamp(1, 2).toInt();
+  return '${before.substring(0, trailing.start)}'
+      '${List.filled(desiredBreaks, preferredLineBreak).join()}'
+      '${after.substring(leading.end)}';
+}
+
+({int count, int start}) _trailingLineBreaks(String text) {
+  var cursor = text.length;
+  var count = 0;
+  while (cursor > 0) {
+    if (cursor >= 2 && text.substring(cursor - 2, cursor) == '\r\n') {
+      cursor -= 2;
+      count += 1;
+      continue;
+    }
+    final codeUnit = text.codeUnitAt(cursor - 1);
+    if (codeUnit != 0x0A && codeUnit != 0x0D) {
+      break;
+    }
+    cursor -= 1;
+    count += 1;
+  }
+  return (count: count, start: cursor);
+}
+
+({int count, int end}) _leadingLineBreaks(String text) {
+  var cursor = 0;
+  var count = 0;
+  while (cursor < text.length) {
+    final length = _lineBreakLengthAt(text, cursor);
+    if (length == 0) {
+      break;
+    }
+    cursor += length;
+    count += 1;
+  }
+  return (count: count, end: cursor);
 }

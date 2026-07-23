@@ -86,6 +86,121 @@ void main() {
         '$tag\n\n',
       );
     });
+
+    test('inserts a persistent blank line between inline images', () {
+      const first = '<img src="note.assets/first.png" width="320">';
+      const second = '<img src="note.assets/second.png" width="360">';
+      const markdown = '$first $second';
+      final reference = findMarkdownImageReference(
+        markdown: markdown,
+        src: 'note.assets/first.png',
+      )!;
+
+      final inserted = insertBlankLineAfterMarkdownImage(
+        markdown: markdown,
+        reference: reference,
+      );
+
+      expect(inserted.markdown, '$first\n\n$second');
+      expect(inserted.insertionOffset, first.length + 1);
+    });
+
+    test('adds another persistent blank line after a block image', () {
+      const first = '<img src="note.assets/first.png" width="320">';
+      const second = '<img src="note.assets/second.png" width="360">';
+      const markdown = '$first\n\n$second';
+      final reference = findMarkdownImageReference(
+        markdown: markdown,
+        src: 'note.assets/first.png',
+      )!;
+
+      final inserted = insertBlankLineAfterMarkdownImage(
+        markdown: markdown,
+        reference: reference,
+      );
+
+      expect(inserted.markdown, '$first\n\n\n$second');
+      expect(inserted.insertionOffset, first.length + 1);
+    });
+  });
+
+  group('image removal', () {
+    const first = '<img src="note.assets/first.png" width="320">';
+    const second = '<img src="note.assets/second.png" width="360">';
+
+    test('removes only the selected inline image reference', () {
+      const markdown = 'before $first $second after';
+      final reference = findMarkdownImageReference(
+        markdown: markdown,
+        src: 'note.assets/first.png',
+      )!;
+
+      final removed = removeMarkdownImageReference(
+        markdown: markdown,
+        reference: reference,
+      );
+
+      expect(removed.markdown, 'before $second after');
+      expect(removed.insertionOffset, 'before '.length);
+    });
+
+    test('removes a standalone image without leaving extra separators', () {
+      const markdown = 'before\n\n$first\n\nafter';
+      final reference = findMarkdownImageReference(
+        markdown: markdown,
+        src: 'note.assets/first.png',
+      )!;
+
+      final removed = removeMarkdownImageReference(
+        markdown: markdown,
+        reference: reference,
+      );
+
+      expect(removed.markdown, 'before\n\nafter');
+    });
+
+    test('removes standalone images cleanly at document boundaries', () {
+      final leadingReference = findMarkdownImageReference(
+        markdown: '$first\n\nsecond',
+        src: 'note.assets/first.png',
+      )!;
+      final trailingReference = findMarkdownImageReference(
+        markdown: 'first\n\n$second',
+        src: 'note.assets/second.png',
+      )!;
+
+      expect(
+        removeMarkdownImageReference(
+          markdown: '$first\n\nsecond',
+          reference: leadingReference,
+        ).markdown,
+        'second',
+      );
+      expect(
+        removeMarkdownImageReference(
+          markdown: 'first\n\n$second',
+          reference: trailingReference,
+        ).markdown,
+        'first\n',
+      );
+    });
+
+    test('finds and removes a standard Markdown image reference', () {
+      const markdown =
+          '![first](note.assets/first.png) '
+          '![second](note.assets/second.png)';
+      final reference = findMarkdownImageReference(
+        markdown: markdown,
+        src: 'note.assets/first.png',
+      )!;
+
+      final removed = removeMarkdownImageReference(
+        markdown: markdown,
+        reference: reference,
+      );
+
+      expect(removed.markdown, '![second](note.assets/second.png)');
+    });
   });
 
   test('normalizes percent encoded and escaped image sources', () {

@@ -16,8 +16,6 @@ import 'markdown_image_transform.dart';
 import 'markdown_table_editor.dart';
 import 'pane_editor_context.dart';
 
-final _markdownImageTagPattern = RegExp(r'!\[[^\]]*\]\([^)]+\)');
-
 class NoteEditorPasteAvailability {
   const NoteEditorPasteAvailability({
     required this.hasText,
@@ -45,6 +43,7 @@ class LiveMarkdownEditor extends StatefulWidget {
     required this.onFocusPane,
     required this.pasteAvailability,
     required this.onPaste,
+    required this.onImageSelectionChanged,
     required this.previewBuilder,
   });
 
@@ -56,7 +55,8 @@ class LiveMarkdownEditor extends StatefulWidget {
   final Future<NoteEditorPasteAvailability> Function() pasteAvailability;
   final Future<PaneEditorCommandOutcome> Function(TextEditingValue target)
   onPaste;
-  final Widget Function(String markdown, {VoidCallback? onImageTap})
+  final ValueChanged<String?> onImageSelectionChanged;
+  final Widget Function(String markdown, {ValueChanged<String>? onImageTap})
   previewBuilder;
 
   @override
@@ -74,6 +74,9 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
   var _openContextMenuCount = 0;
   var _autofocusInsertedTable = false;
   var _tableReordering = false;
+  String? _selectedImageSrc;
+  int? _selectedImageBlockStart;
+  var _persistentBlankInsertion = false;
 
   @override
   void initState() {
@@ -95,6 +98,7 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
     if (!widget.focused && _editorController.activeOffset != null) {
       _blockFocusNode.unfocus();
       _editorFocusNode.unfocus();
+      _clearSelectedImageTarget(notify: false);
       _editorController.clearActiveBlock();
     } else if (_editorController.activeOffset != null) {
       _syncBlockController();
@@ -244,6 +248,8 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
       _clearActiveBlock();
       return;
     }
+    _clearSelectedImageTarget();
+    _persistentBlankInsertion = false;
     final table = _tableForBlock(block);
     widget.onFocusPane();
     setState(() {
@@ -310,8 +316,11 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
   }
 
   void _replaceActiveBlock(String text) {
-    if (!_editorController.replaceActiveBlock(text) ||
-        !_editorController.activeTrailingInsertion) {
+    if (!_editorController.replaceActiveBlock(text)) {
+      return;
+    }
+    if (!_editorController.activeTrailingInsertion) {
+      _persistentBlankInsertion = false;
       return;
     }
     _focusBlockEditor();
@@ -332,6 +341,15 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
     }
     final offset = selection.extentOffset;
     final key = event.logicalKey;
+    if ((key == LogicalKeyboardKey.enter ||
+            key == LogicalKeyboardKey.numpadEnter) &&
+        _persistentBlankInsertion &&
+        _editorController.activeTrailingInsertion &&
+        value.text.isEmpty &&
+        offset == 0) {
+      _insertPersistentBlankLineAtActiveInsertion();
+      return KeyEventResult.handled;
+    }
     if (key == LogicalKeyboardKey.backspace &&
         !_editorController.activeTrailingInsertion &&
         value.text.isNotEmpty &&
@@ -368,6 +386,147 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
           : KeyEventResult.ignored;
     }
     return KeyEventResult.ignored;
+  }
+
+  KeyEventResult _handleEditorSessionKeyEvent(FocusNode node, KeyEvent event) {
+    if ((event is! KeyDownEvent && event is! KeyRepeatEvent) ||
+        _selectedImageSrc == null ||
+        !widget.enabled ||
+        widget.busy ||
+        HardwareKeyboard.instance.isShiftPressed ||
+        HardwareKeyboard.instance.isAltPressed ||
+        HardwareKeyboard.instance.isControlPressed ||
+        HardwareKeyboard.instance.isMetaPressed) {
+      return KeyEventResult.ignored;
+    }
+    final key = event.logicalKey;
+    if (key == LogicalKeyboardKey.enter ||
+        key == LogicalKeyboardKey.numpadEnter) {
+      return _insertBlankLineAfterSelectedImage()
+          ? KeyEventResult.handled
+          : KeyEventResult.ignored;
+    }
+    if (key == LogicalKeyboardKey.backspace ||
+        key == LogicalKeyboardKey.delete) {
+      return _deleteSelectedImageReference()
+          ? KeyEventResult.handled
+          : KeyEventResult.ignored;
+    }
+    return KeyEventResult.ignored;
+  }
+
+  bool _insertBlankLineAfterSelectedImage() {
+    final target = _selectedImageReference();
+    if (target == null) {
+      _clearSelectedImageTarget();
+      return false;
+    }
+    final inserted = insertBlankLineAfterMarkdownImage(
+      markdown: widget.controller.text,
+      reference: target,
+    );
+    _clearSelectedImageTarget();
+    _persistentBlankInsertion = true;
+    _editorController.beginDocumentUpdate();
+    widget.controller.value = TextEditingValue(
+      text: inserted.markdown,
+      selection: TextSelection.collapsed(offset: inserted.insertionOffset),
+    );
+    _editorController.endDocumentUpdate();
+    setState(() {
+      _editorController.activateOffset(
+        inserted.insertionOffset,
+        trailingInsertion: true,
+      );
+      _syncBlockController();
+    });
+    _focusBlockEditor();
+    return true;
+  }
+
+  void _insertPersistentBlankLineAtActiveInsertion() {
+    final insertionOffset = _editorController.activeInsertionOffset;
+    if (insertionOffset == null) {
+      return;
+    }
+    final markdown = widget.controller.text;
+    final lineBreak = markdown.contains('\r\n') ? '\r\n' : '\n';
+    final updated = markdown.replaceRange(
+      insertionOffset,
+      insertionOffset,
+      lineBreak,
+    );
+    _editorController.beginDocumentUpdate();
+    widget.controller.value = TextEditingValue(
+      text: updated,
+      selection: TextSelection.collapsed(offset: insertionOffset),
+    );
+    _editorController.endDocumentUpdate();
+    _editorController.activateOffset(insertionOffset, trailingInsertion: true);
+    _syncBlockController();
+    if (mounted) {
+      setState(() {});
+    }
+    _focusBlockEditor();
+  }
+
+  bool _deleteSelectedImageReference() {
+    final target = _selectedImageReference();
+    if (target == null) {
+      _clearSelectedImageTarget();
+      return false;
+    }
+    final removed = removeMarkdownImageReference(
+      markdown: widget.controller.text,
+      reference: target,
+    );
+    _clearSelectedImageTarget();
+    _persistentBlankInsertion = false;
+    _editorController.beginDocumentUpdate();
+    widget.controller.value = TextEditingValue(
+      text: removed.markdown,
+      selection: TextSelection.collapsed(offset: removed.insertionOffset),
+    );
+    _editorController.endDocumentUpdate();
+    setState(() {
+      _editorController.clearActiveBlock();
+    });
+    _editorFocusNode.requestFocus();
+    return true;
+  }
+
+  MarkdownImageReference? _selectedImageReference() {
+    final src = _selectedImageSrc;
+    final blockStart = _selectedImageBlockStart;
+    if (src == null || blockStart == null) {
+      return null;
+    }
+    final markdown = widget.controller.text;
+    final blocks = splitMarkdownLiveBlocks(markdown);
+    for (final block in blocks) {
+      if (block.start != blockStart) {
+        continue;
+      }
+      final reference = findMarkdownImageReference(
+        markdown: markdown,
+        src: src,
+        start: block.start,
+        end: block.end,
+      );
+      return reference;
+    }
+    return null;
+  }
+
+  void _clearSelectedImageTarget({bool notify = true}) {
+    if (_selectedImageSrc == null && _selectedImageBlockStart == null) {
+      return;
+    }
+    _selectedImageSrc = null;
+    _selectedImageBlockStart = null;
+    if (notify) {
+      widget.onImageSelectionChanged(null);
+    }
   }
 
   bool _deleteCurrentBlockAndMovePrevious() {
@@ -600,6 +759,8 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
     if (_tableForBlock(block) != null || _blockHasPreviewImage(block)) {
       return;
     }
+    _clearSelectedImageTarget();
+    _persistentBlankInsertion = false;
     widget.onFocusPane();
     final editableText = _editorController.editableTextForBlock(block);
     final offset = _clampOffset(selectionOffset ?? 0, editableText.length);
@@ -793,6 +954,8 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
   }
 
   void _activateTrailingTextBlock() {
+    _clearSelectedImageTarget();
+    _persistentBlankInsertion = false;
     widget.onFocusPane();
     setState(() {
       _editorController.activateOffset(
@@ -805,7 +968,13 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
   }
 
   void _clearActiveBlock() {
+    final hadImageSelection = _selectedImageSrc != null;
+    _clearSelectedImageTarget();
+    _persistentBlankInsertion = false;
     if (_editorController.activeOffset == null) {
+      if (hadImageSelection && mounted) {
+        setState(() {});
+      }
       return;
     }
     _blockFocusNode.unfocus();
@@ -815,9 +984,22 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
     });
   }
 
-  void _handleImagePreviewTap() {
+  void _handleImagePreviewTap(MarkdownLiveBlock block, String src) {
     widget.onFocusPane();
-    _clearActiveBlock();
+    final normalizedSrc = normalizeImageSrc(src);
+    _persistentBlankInsertion = false;
+    setState(() {
+      _selectedImageSrc = normalizedSrc;
+      _selectedImageBlockStart = block.start;
+      _editorController.activateOffset(block.start);
+      _editorController.beginDocumentUpdate();
+      widget.controller.selection = TextSelection.collapsed(
+        offset: block.start,
+      );
+      _editorController.endDocumentUpdate();
+    });
+    widget.onImageSelectionChanged(normalizedSrc);
+    _focusEditorSession();
   }
 
   @override
@@ -837,6 +1019,7 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
         onTapOutside: (_) => _clearActiveBlock(),
         child: Focus(
           focusNode: _editorFocusNode,
+          onKeyEvent: _handleEditorSessionKeyEvent,
           onFocusChange: _handleEditorFocusChanged,
           child: GestureDetector(
             behavior: HitTestBehavior.translucent,
@@ -904,11 +1087,16 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
 
   Widget _buildBlock(MarkdownLiveBlock block, int index, int? activeIndex) {
     if (block.isBlank) {
+      final lineBreakCount = RegExp(
+        r'\r\n|\n|\r',
+      ).allMatches(block.text).length;
       return GestureDetector(
         key: Key('live-markdown-block-preview-$index'),
         behavior: HitTestBehavior.opaque,
         onTap: _clearActiveBlock,
-        child: const SizedBox(height: 12),
+        child: SizedBox(
+          height: 12.0 * (lineBreakCount == 0 ? 1 : lineBreakCount),
+        ),
       );
     }
     final hasPreviewImage = _blockHasPreviewImage(block);
@@ -923,7 +1111,6 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
     return GestureDetector(
       key: Key('live-markdown-block-preview-$index'),
       behavior: HitTestBehavior.opaque,
-      onTap: hasPreviewImage ? _handleImagePreviewTap : null,
       onTapUp: hasPreviewImage
           ? null
           : (details) =>
@@ -940,12 +1127,12 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
                 key: Key('live-markdown-image-preview-$index'),
                 child: widget.previewBuilder(
                   block.text,
-                  onImageTap: _handleImagePreviewTap,
+                  onImageTap: (src) => _handleImagePreviewTap(block, src),
                 ),
               )
             : widget.previewBuilder(
                 block.text,
-                onImageTap: () => _activateBlock(block),
+                onImageTap: (_) => _activateBlock(block),
               ),
       ),
     );
@@ -1067,7 +1254,7 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
   bool _blockHasPreviewImage(MarkdownLiveBlock block) {
     return block.kind == MarkdownLiveBlockKind.image ||
         htmlImageTagPattern.hasMatch(block.text) ||
-        _markdownImageTagPattern.hasMatch(block.text);
+        markdownImageTagPattern.hasMatch(block.text);
   }
 
   bool _activeBlockIsTable() {

@@ -596,6 +596,18 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
     );
   }
 
+  String? proposalGenerationUnavailableMessage(
+    editor_context.PaneEditorContext? context,
+  ) {
+    if (context == null || resolvePaneEditorContext(context) == null) {
+      return '请先选择或创建笔记';
+    }
+    if (!_startup.hasUsableAiProvider) {
+      return _startup.modelConfigurationMessage();
+    }
+    return null;
+  }
+
   bool isPaneEditorContextLocked(editor_context.PaneEditorContext context) {
     final resolved = resolvePaneEditorContext(context);
     return resolved != null &&
@@ -663,18 +675,17 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
   Future<editor_context.PaneEditorCommandOutcome> generateProposal(
     editor_context.PaneEditorContext? context,
   ) {
-    if (context == null) {
+    final unavailableMessage = proposalGenerationUnavailableMessage(context);
+    if (unavailableMessage != null) {
+      _setMessage(unavailableMessage);
       return Future.value(editor_context.PaneEditorCommandOutcome.unchanged);
     }
-    if (!_startup.hasUsableAiProvider) {
-      _setMessage(_startup.modelConfigurationMessage());
-      return Future.value(editor_context.PaneEditorCommandOutcome.unchanged);
-    }
+    final target = context!;
     return _editorOperations.withSaveScope(
-      context,
+      target,
       () => _editorOperations.runOperation(
-        () => _editor.generateProposal(context),
-        context: context,
+        () => _editor.generateProposal(target),
+        context: target,
       ),
     );
   }

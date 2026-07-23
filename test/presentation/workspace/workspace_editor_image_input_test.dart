@@ -127,6 +127,216 @@ void main() {
     expect(find.textContaining('<img'), findsNothing);
   });
 
+  testWidgets(
+    'enter after a selected inline image persists a writable blank line',
+    (tester) async {
+      final vault = CountingUpdateVaultBackend(seedExampleData: false);
+      final note = await vault.createNote(parentPath: '', title: 'Image Study');
+      final first = await vault.addImageSource(
+        noteId: note.id,
+        filename: 'first.png',
+        mimeType: 'image/png',
+        bytes: tinyPng,
+      );
+      await vault.addImageSource(
+        noteId: note.id,
+        filename: 'second.png',
+        mimeType: 'image/png',
+        bytes: tinyPng,
+      );
+      const firstTag =
+          '<img src="Image Study.assets/attachments/first.png" width="320">';
+      const secondTag =
+          '<img src="Image Study.assets/attachments/second.png" width="320">';
+      const original = '# Image Study\n\n$firstTag $secondTag';
+      await vault.updateMarkdown(noteId: note.id, markdown: original);
+      vault.updateCalls = 0;
+      vault.lastSavedMarkdown = null;
+
+      await pumpWorkspace(tester, vault: vault);
+      await tester.pumpAndSettle();
+      final editor = tester.widget<LiveMarkdownEditor>(
+        find.byType(LiveMarkdownEditor),
+      );
+
+      await tester.tap(find.byKey(Key('preview-image-tap-${first.id}')));
+      await tester.pumpAndSettle();
+
+      expect(editor.controller.text, original);
+      expect(vault.updateCalls, 0);
+
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.pumpAndSettle();
+
+      const withBlankLine = '# Image Study\n\n$firstTag\n\n$secondTag';
+      expect(editor.controller.text, withBlankLine);
+      expect(activeLiveMarkdownTextField(tester).controller.text, isEmpty);
+      expect(activeLiveMarkdownTextField(tester).focusNode.hasFocus, isTrue);
+      expect(find.textContaining('<img'), findsNothing);
+
+      await tester.pump(const Duration(milliseconds: 1000));
+      await tester.pump();
+
+      expect(vault.lastSavedMarkdown, contains('$firstTag\n\n$secondTag'));
+
+      tester.testTextInput.enterText('between images');
+      await tester.pumpAndSettle();
+
+      expect(
+        editor.controller.text,
+        '# Image Study\n\n$firstTag\n\nbetween images\n\n$secondTag',
+      );
+    },
+  );
+
+  testWidgets('repeated enter after an image adds visible blank lines', (
+    tester,
+  ) async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Image Study');
+    final first = await vault.addImageSource(
+      noteId: note.id,
+      filename: 'first.png',
+      mimeType: 'image/png',
+      bytes: tinyPng,
+    );
+    await vault.addImageSource(
+      noteId: note.id,
+      filename: 'second.png',
+      mimeType: 'image/png',
+      bytes: tinyPng,
+    );
+    const firstTag =
+        '<img src="Image Study.assets/attachments/first.png" width="320">';
+    const secondTag =
+        '<img src="Image Study.assets/attachments/second.png" width="320">';
+    await vault.updateMarkdown(
+      noteId: note.id,
+      markdown: '$firstTag $secondTag',
+    );
+
+    await pumpWorkspace(tester, vault: vault);
+    await tester.tap(find.byKey(Key('preview-image-tap-${first.id}')));
+    await tester.pumpAndSettle();
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.pumpAndSettle();
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.pumpAndSettle();
+
+    final editor = tester.widget<LiveMarkdownEditor>(
+      find.byType(LiveMarkdownEditor),
+    );
+    expect(editor.controller.text, '$firstTag\n\n\n$secondTag');
+    expect(
+      tester
+          .getSize(find.byKey(const Key('live-markdown-block-preview-1')))
+          .height,
+      24,
+    );
+    expect(activeLiveMarkdownTextField(tester).focusNode.hasFocus, isTrue);
+  });
+
+  testWidgets('blank line after a block image remains after focus moves', (
+    tester,
+  ) async {
+    final vault = CountingUpdateVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Image Study');
+    final first = await vault.addImageSource(
+      noteId: note.id,
+      filename: 'first.png',
+      mimeType: 'image/png',
+      bytes: tinyPng,
+    );
+    await vault.addImageSource(
+      noteId: note.id,
+      filename: 'second.png',
+      mimeType: 'image/png',
+      bytes: tinyPng,
+    );
+    const firstTag =
+        '<img src="Image Study.assets/attachments/first.png" width="320">';
+    const secondTag =
+        '<img src="Image Study.assets/attachments/second.png" width="320">';
+    await vault.updateMarkdown(
+      noteId: note.id,
+      markdown: '$firstTag\n$secondTag',
+    );
+    vault.updateCalls = 0;
+    vault.lastSavedMarkdown = null;
+
+    await pumpWorkspace(tester, vault: vault);
+    await tester.tap(find.byKey(Key('preview-image-tap-${first.id}')));
+    await tester.pumpAndSettle();
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('live-markdown-end-edit-target')));
+    await tester.pump(const Duration(milliseconds: 1000));
+    await tester.pump();
+
+    final editor = tester.widget<LiveMarkdownEditor>(
+      find.byType(LiveMarkdownEditor),
+    );
+    expect(editor.controller.text, '$firstTag\n\n$secondTag');
+    expect(vault.lastSavedMarkdown, contains('$firstTag\n\n$secondTag'));
+  });
+
+  for (final deletion in <(String, LogicalKeyboardKey)>[
+    ('backspace', LogicalKeyboardKey.backspace),
+    ('delete', LogicalKeyboardKey.delete),
+  ]) {
+    testWidgets('${deletion.$1} removes only the selected image reference', (
+      tester,
+    ) async {
+      final vault = CountingUpdateVaultBackend(seedExampleData: false);
+      final note = await vault.createNote(parentPath: '', title: 'Image Study');
+      final first = await vault.addImageSource(
+        noteId: note.id,
+        filename: 'first.png',
+        mimeType: 'image/png',
+        bytes: tinyPng,
+      );
+      final second = await vault.addImageSource(
+        noteId: note.id,
+        filename: 'second.png',
+        mimeType: 'image/png',
+        bytes: tinyPng,
+      );
+      const firstTag =
+          '<img src="Image Study.assets/attachments/first.png" width="320">';
+      const secondTag =
+          '<img src="Image Study.assets/attachments/second.png" width="320">';
+      const original = 'before\n\n$firstTag $secondTag\n\nafter';
+      await vault.updateMarkdown(noteId: note.id, markdown: original);
+      vault.updateCalls = 0;
+      vault.lastSavedMarkdown = null;
+
+      await pumpWorkspace(tester, vault: vault);
+      await tester.tap(find.byKey(Key('preview-image-tap-${first.id}')));
+      await tester.pumpAndSettle();
+
+      await tester.sendKeyEvent(deletion.$2);
+      await tester.pumpAndSettle();
+
+      final editor = tester.widget<LiveMarkdownEditor>(
+        find.byType(LiveMarkdownEditor),
+      );
+      expect(editor.controller.text, 'before\n\n$secondTag\n\nafter');
+      expect(find.byKey(Key('preview-image-${first.id}')), findsNothing);
+      expect(find.byKey(Key('preview-image-${second.id}')), findsOneWidget);
+      expect(find.textContaining('<img'), findsNothing);
+      expect(
+        (await vault.listSources(note.id)).map((source) => source.id).toSet(),
+        {first.id, second.id},
+      );
+
+      await tester.pump(const Duration(milliseconds: 1000));
+      await tester.pump();
+
+      expect(vault.lastSavedMarkdown, isNot(contains(firstTag)));
+      expect(vault.lastSavedMarkdown, contains(secondTag));
+    });
+  }
+
   testWidgets('can continue writing below a trailing image', (tester) async {
     final vault = CountingUpdateVaultBackend(seedExampleData: false);
     final note = await vault.createNote(parentPath: '', title: 'Image Study');

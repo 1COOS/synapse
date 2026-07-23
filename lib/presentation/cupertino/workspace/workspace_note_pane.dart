@@ -399,6 +399,8 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
                         _noteEditorPasteAvailability(editorContext),
                     onPaste: (target) =>
                         _pasteIntoNoteEditor(editorContext, target),
+                    onImageSelectionChanged:
+                        _controller.setSelectedPreviewImageSrc,
                     previewBuilder: (markdown, {onImageTap}) =>
                         _markdownRenderer.buildLivePreviewBlock(
                           markdown,

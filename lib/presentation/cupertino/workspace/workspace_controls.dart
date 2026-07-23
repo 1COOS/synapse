@@ -52,11 +52,13 @@ class PrimaryButton extends StatelessWidget {
     required this.label,
     required this.icon,
     required this.onPressed,
+    this.busy = false,
   });
 
   final String label;
   final IconData icon;
   final VoidCallback? onPressed;
+  final bool busy;
   @override
   Widget build(BuildContext context) {
     final enabled = onPressed != null;
@@ -74,7 +76,13 @@ class PrimaryButton extends StatelessWidget {
           mainAxisSize: MainAxisSize.min,
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Icon(icon, size: 17, color: CupertinoColors.white),
+            if (busy)
+              const CupertinoActivityIndicator(
+                radius: 8,
+                color: CupertinoColors.white,
+              )
+            else
+              Icon(icon, size: 17, color: CupertinoColors.white),
             const SizedBox(width: 6),
             Flexible(
               child: Text(
