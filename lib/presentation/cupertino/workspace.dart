@@ -8,6 +8,7 @@ import '../../domain/markdown/markdown_document.dart';
 import '../../domain/vault/vault_resource.dart';
 import '../workspace/controller/workspace_controller.dart';
 import '../workspace/editor/pane_editor_context.dart';
+import '../workspace/outline_navigation.dart';
 import '../workspace/state/note_document_session.dart';
 import '../workspace/state/split_workspace_controller.dart';
 import 'browser_context_menu_guard.dart';
@@ -49,6 +50,7 @@ class SynapseWorkspace extends ConsumerStatefulWidget {
 
 class _SynapseWorkspaceState extends ConsumerState<SynapseWorkspace> {
   final _searchController = TextEditingController();
+  final _outlineNavigationController = WorkspaceOutlineNavigationController();
   bool _openingSettings = false;
 
   late WorkspaceState _workspace;
@@ -139,6 +141,7 @@ class _SynapseWorkspaceState extends ConsumerState<SynapseWorkspace> {
   @override
   void dispose() {
     _searchController.dispose();
+    _outlineNavigationController.dispose();
     super.dispose();
   }
 
@@ -610,10 +613,7 @@ class _SynapseWorkspaceState extends ConsumerState<SynapseWorkspace> {
           const SectionDivider(),
           const PaneSubheading('大纲'),
           const SizedBox(height: 8),
-          Expanded(
-            flex: 3,
-            child: OutlineTree(nodes: _activeNote?.outline ?? const []),
-          ),
+          Expanded(flex: 3, child: _buildActiveOutline()),
         ],
       ],
     );
@@ -654,6 +654,44 @@ class _SynapseWorkspaceState extends ConsumerState<SynapseWorkspace> {
             ),
           ),
       ],
+    );
+  }
+
+  Widget _buildActiveOutline() {
+    final session = _activeSession;
+    _outlineNavigationController.setContext(
+      noteId: session?.noteId,
+      paneId: _focusedPane?.paneId,
+    );
+    if (session == null) {
+      return OutlineTree(
+        nodes: const [],
+        activeNodeId: null,
+        onNodeSelected: _outlineNavigationController.reveal,
+      );
+    }
+    return AnimatedBuilder(
+      animation: _outlineNavigationController,
+      builder: (context, child) {
+        return ListenableBuilder(
+          listenable: session,
+          builder: (context, child) {
+            final nodes = extractOutline(session.controller.text);
+            final activeNodeId =
+                flattenOutlineNodes(nodes).any(
+                  (node) =>
+                      node.id == _outlineNavigationController.activeNodeId,
+                )
+                ? _outlineNavigationController.activeNodeId
+                : null;
+            return OutlineTree(
+              nodes: nodes,
+              activeNodeId: activeNodeId,
+              onNodeSelected: _outlineNavigationController.reveal,
+            );
+          },
+        );
+      },
     );
   }
 
@@ -760,6 +798,14 @@ class _SynapseWorkspaceState extends ConsumerState<SynapseWorkspace> {
   }
 
   Widget _buildRightCollapsedRail() {
+    final noteId = _focusedPane?.noteId;
+    final pendingCount = noteId == null
+        ? 0
+        : _workspace
+              .materialsFor(noteId)
+              .proposals
+              .where((proposal) => proposal.status == ProposalStatus.pending)
+              .length;
     return WorkspaceCollapsedRail(
       key: const Key('right-pane-collapsed-rail'),
       children: [
@@ -770,10 +816,9 @@ class _SynapseWorkspaceState extends ConsumerState<SynapseWorkspace> {
           onPressed: () => setState(() => _rightPaneCollapsed = false),
         ),
         const SizedBox(height: 8),
-        const Icon(
-          CupertinoIcons.photo_on_rectangle,
-          size: 20,
-          color: workspaceMutedColor,
+        _RightWorkflowRailAction(
+          pendingCount: pendingCount,
+          onPressed: () => setState(() => _rightPaneCollapsed = false),
         ),
       ],
     );
@@ -822,7 +867,11 @@ class _SynapseWorkspaceState extends ConsumerState<SynapseWorkspace> {
         ),
       );
     }
-    return WorkspaceNotePane(workspace: _workspace, controller: _controller);
+    return WorkspaceNotePane(
+      workspace: _workspace,
+      controller: _controller,
+      outlineNavigationController: _outlineNavigationController,
+    );
   }
 
   Widget _buildSourcePane() {
@@ -834,6 +883,54 @@ class _SynapseWorkspaceState extends ConsumerState<SynapseWorkspace> {
       controller: _controller,
       onDeleteSource: _deleteSource,
       onDeleteProposal: _deleteProposal,
+    );
+  }
+}
+
+final class _RightWorkflowRailAction extends StatelessWidget {
+  const _RightWorkflowRailAction({
+    required this.pendingCount,
+    required this.onPressed,
+  });
+
+  final int pendingCount;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    final accentColor = WorkspaceAppearanceScope.of(context).accentColor;
+    return Stack(
+      clipBehavior: Clip.none,
+      children: [
+        IconAction(
+          key: const Key('right-workflow-rail-button'),
+          label: pendingCount == 0 ? '展开素材与 AI' : '展开素材与 AI，$pendingCount 条待处理',
+          icon: CupertinoIcons.photo_on_rectangle,
+          onPressed: onPressed,
+        ),
+        if (pendingCount > 0)
+          Positioned(
+            top: 0,
+            right: -2,
+            child: Container(
+              constraints: const BoxConstraints(minWidth: 16, minHeight: 16),
+              padding: const EdgeInsets.symmetric(horizontal: 4),
+              decoration: BoxDecoration(
+                color: accentColor,
+                borderRadius: BorderRadius.circular(8),
+              ),
+              alignment: Alignment.center,
+              child: Text(
+                pendingCount > 9 ? '9+' : '$pendingCount',
+                style: const TextStyle(
+                  color: CupertinoColors.white,
+                  fontSize: 10,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+          ),
+      ],
     );
   }
 }

@@ -229,6 +229,8 @@ final class WorkspaceChromeTitlebar extends StatelessWidget {
             size: 20,
             color: workspaceMutedColor,
           ),
+          const SizedBox(width: 7),
+          const Text('素材与 AI', style: TextStyle(fontWeight: FontWeight.w600)),
           const Spacer(),
           IconAction(
             key: const Key('collapse-right-pane-button'),

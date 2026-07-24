@@ -101,9 +101,19 @@ class LiveMarkdownEditorController extends ChangeNotifier {
       return false;
     }
     final selection = _document.selection;
-    _activeOffset = selection.isValid
+    final nextOffset = selection.isValid
         ? _clampOffset(selection.extentOffset, _document.text.length)
         : _clampOffset(_activeOffset!, _document.text.length);
+    if (selection.isValid &&
+        splitMarkdownLiveBlocks(_document.text).any(
+          (block) =>
+              block.kind == MarkdownLiveBlockKind.image &&
+              block.end == nextOffset,
+        )) {
+      activateOffset(nextOffset, trailingInsertion: true);
+      return true;
+    }
+    _activeOffset = nextOffset;
     if (_activeTrailingInsertion) {
       _activeTrailingInsertion = false;
       _activeInsertionOffset = null;

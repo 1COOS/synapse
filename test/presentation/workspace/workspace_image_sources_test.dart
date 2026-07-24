@@ -5,6 +5,7 @@ import 'package:synapse/domain/vault/vault_resource.dart';
 import 'package:synapse/infrastructure/input/image_input_service.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
 import 'package:synapse/presentation/cupertino/workspace/workspace_resources.dart';
+import 'package:synapse/presentation/cupertino/workspace/workspace_sources.dart';
 
 import '../../support/workspace_fakes.dart';
 import '../../support/workspace_harness.dart';
@@ -22,6 +23,58 @@ void main() {
     expect(tester.takeException(), isNull);
     expect(find.text('AI 建议'), findsOneWidget);
   });
+
+  testWidgets(
+    'collapses selected sources after generation and preserves the selection',
+    (tester) async {
+      final vault = MemoryVaultBackend(seedExampleData: false);
+      final note = await vault.createNote(parentPath: '', title: 'Workflow');
+      await vault.addImageSource(
+        noteId: note.id,
+        filename: 'first.png',
+        mimeType: 'image/png',
+        bytes: tinyPng,
+      );
+      await vault.addImageSource(
+        noteId: note.id,
+        filename: 'second.png',
+        mimeType: 'image/png',
+        bytes: tinyPng,
+      );
+      final aiProvider = GatedAiProvider(extractedText: '连续工作流 OCR');
+
+      await pumpWorkspace(tester, vault: vault, aiProvider: aiProvider);
+
+      expect(find.byKey(const Key('sources-expanded-content')), findsOneWidget);
+      await tester.tap(find.bySemanticsLabel('first.png'));
+      await tester.tap(find.bySemanticsLabel('second.png'));
+      await tester.pump();
+      expect(find.text('图片素材 · 已选 2 张'), findsOneWidget);
+
+      await tester.tap(find.byKey(const Key('generate-proposal-button')));
+      await aiProvider.extractionStarted.future;
+      aiProvider.releaseExtraction();
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const Key('sources-collapsed-summary')),
+        findsOneWidget,
+      );
+      expect(find.byKey(const Key('sources-expanded-content')), findsNothing);
+      expect(find.textContaining('连续工作流 OCR'), findsOneWidget);
+
+      await tester.tap(find.byKey(const Key('toggle-sources-section-button')));
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const Key('sources-expanded-content')), findsOneWidget);
+      expect(
+        tester
+            .widgetList<ImageSourceTile>(find.byType(ImageSourceTile))
+            .every((tile) => tile.selected),
+        isTrue,
+      );
+    },
+  );
 
   testWidgets('imports an image from the file button', (tester) async {
     final imageInput = FakeImageInputService(

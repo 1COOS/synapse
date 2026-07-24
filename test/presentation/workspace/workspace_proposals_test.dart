@@ -143,6 +143,210 @@ void main() {
     expect(copiedText, '藏有二义\n├── 摄彼胜义故\n└── 依彼故');
   });
 
+  testWidgets(
+    'applies a pending proposal after flushing the dirty note exactly once',
+    (tester) async {
+      final vault = MemoryVaultBackend(seedExampleData: false);
+      final note = await vault.createNote(parentPath: '', title: 'Apply Study');
+      const proposalMarkdown = '## AI 整理结果\n\n忠实转写内容';
+      final now = DateTime.now().toUtc();
+      await vault.saveProposal(
+        AiProposal(
+          id: 'apply-proposal',
+          noteId: note.id,
+          sourceIds: const [],
+          title: '待写入建议',
+          proposedMarkdown: proposalMarkdown,
+          status: ProposalStatus.pending,
+          createdAt: now,
+          updatedAt: now,
+        ),
+      );
+
+      await pumpWorkspace(
+        tester,
+        vault: vault,
+        settingsStore: FakeSettingsStore(
+          initialSettings: const SynapseSettings(
+            preferences: WorkspacePreferences(
+              defaultNoteMode: WorkspaceDefaultNoteMode.source,
+              semanticSearchEnabled: true,
+              pastedImageWidth: 480,
+              autoSaveDelayMillis: 10000,
+            ),
+          ),
+        ),
+      );
+      await enterTextInLiveMarkdownBlock(tester, '# Apply Study\n尚未自动保存的正文');
+
+      await tester.tap(find.byKey(const Key('apply-proposal-button')));
+      await tester.pumpAndSettle();
+
+      expect(find.text('追加到当前笔记？'), findsOneWidget);
+      expect(find.textContaining('追加到笔记末尾'), findsOneWidget);
+
+      await tester.tap(find.byKey(const Key('confirm-apply-proposal-button')));
+      await tester.pumpAndSettle();
+
+      final updated = await vault.readNote(note.id);
+      expect(updated.markdown, contains('尚未自动保存的正文'));
+      expect(updated.markdown, contains(proposalMarkdown));
+      expect(
+        updated.markdown.indexOf('尚未自动保存的正文'),
+        lessThan(updated.markdown.indexOf(proposalMarkdown)),
+      );
+      expect(
+        (await vault.listProposals(note.id)).single.status,
+        ProposalStatus.applied,
+      );
+      expect(find.text('已写入'), findsOneWidget);
+      expect(find.byKey(const Key('apply-proposal-button')), findsNothing);
+    },
+  );
+
+  testWidgets('shows only one expanded proposal and defaults to the latest', (
+    tester,
+  ) async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'History');
+    final now = DateTime.now().toUtc();
+    await vault.saveProposal(
+      AiProposal(
+        id: 'older-proposal',
+        noteId: note.id,
+        sourceIds: const [],
+        title: '历史建议',
+        proposedMarkdown: '历史建议正文',
+        status: ProposalStatus.applied,
+        createdAt: now.subtract(const Duration(days: 1)),
+        updatedAt: now.subtract(const Duration(days: 1)),
+      ),
+    );
+    await vault.saveProposal(
+      AiProposal(
+        id: 'latest-proposal',
+        noteId: note.id,
+        sourceIds: const [],
+        title: '最新建议',
+        proposedMarkdown: '最新建议正文',
+        status: ProposalStatus.pending,
+        createdAt: now,
+        updatedAt: now,
+      ),
+    );
+
+    await pumpWorkspace(tester, vault: vault);
+
+    expect(find.text('最新建议正文'), findsOneWidget);
+    expect(find.text('历史建议正文'), findsNothing);
+
+    await tester.tap(find.byKey(const Key('proposal-toggle-older-proposal')));
+    await tester.pumpAndSettle();
+
+    expect(find.text('最新建议正文'), findsNothing);
+    expect(find.text('历史建议正文'), findsOneWidget);
+    expect(find.text('已写入'), findsOneWidget);
+  });
+
+  testWidgets('rolls back a failed proposal apply without showing applied', (
+    tester,
+  ) async {
+    final vault = _FailingApplyVault();
+    final note = await vault.createNote(parentPath: '', title: 'Rollback');
+    final before = (await vault.readNote(note.id)).markdown;
+    final now = DateTime.now().toUtc();
+    await vault.saveProposal(
+      AiProposal(
+        id: 'failing-apply',
+        noteId: note.id,
+        sourceIds: const [],
+        title: '失败建议',
+        proposedMarkdown: '不应残留的正文',
+        status: ProposalStatus.pending,
+        createdAt: now,
+        updatedAt: now,
+      ),
+    );
+    final reportedErrors = <FlutterErrorDetails>[];
+    final previousOnError = FlutterError.onError;
+    FlutterError.onError = reportedErrors.add;
+    addTearDown(() => FlutterError.onError = previousOnError);
+
+    await pumpWorkspace(tester, vault: vault);
+    await tester.tap(find.byKey(const Key('apply-proposal-button')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('confirm-apply-proposal-button')));
+    await tester.pumpAndSettle();
+    FlutterError.onError = previousOnError;
+
+    expect(vault.updateProposalCalls, 1);
+    expect((await vault.readNote(note.id)).markdown, before);
+    expect(
+      (await vault.listProposals(note.id)).single.status,
+      ProposalStatus.pending,
+    );
+    expect(find.text('已写入'), findsNothing);
+    expect(reportedErrors, hasLength(1));
+    expect(find.textContaining('后端操作可能已完成，请重新加载工作区'), findsOneWidget);
+  });
+
+  testWidgets('delayed proposal apply keeps its originating pane target', (
+    tester,
+  ) async {
+    final vault = _GatedApplyVault();
+    addTearDown(vault.releaseAppend);
+    final alpha = await vault.createNote(parentPath: '', title: 'Alpha');
+    final beta = await vault.createNote(parentPath: '', title: 'Beta');
+    final now = DateTime.now().toUtc();
+    await vault.saveProposal(
+      AiProposal(
+        id: 'gated-apply',
+        noteId: alpha.id,
+        sourceIds: const [],
+        title: 'Alpha 建议',
+        proposedMarkdown: '只应写入 Alpha',
+        status: ProposalStatus.pending,
+        createdAt: now,
+        updatedAt: now,
+      ),
+    );
+
+    await pumpWorkspace(tester, vault: vault, size: const Size(1600, 900));
+    await tester.tap(find.byKey(const Key('split-pane-right-button')));
+    await tester.pump(const Duration(milliseconds: 250));
+    await tester.tap(find.byKey(Key('resource-row-${beta.id}')));
+    await tester.pump(const Duration(milliseconds: 250));
+    tester
+        .widget<GestureDetector>(find.byKey(const Key('split-pane-pane-1')))
+        .onTap!();
+    await tester.pump();
+
+    await tester.tap(find.byKey(const Key('apply-proposal-button')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('confirm-apply-proposal-button')));
+    await vault.appendStarted.future;
+
+    tester
+        .widget<GestureDetector>(find.byKey(const Key('split-pane-pane-2')))
+        .onTap!();
+    await tester.pump();
+    vault.releaseAppend();
+    await tester.pumpAndSettle();
+
+    expect((await vault.readNote(alpha.id)).markdown, contains('只应写入 Alpha'));
+    expect(
+      (await vault.readNote(beta.id)).markdown,
+      isNot(contains('只应写入 Alpha')),
+    );
+    expect(find.text('Alpha 建议'), findsNothing);
+
+    tester
+        .widget<GestureDetector>(find.byKey(const Key('split-pane-pane-1')))
+        .onTap!();
+    await tester.pumpAndSettle();
+    expect(find.text('已写入'), findsOneWidget);
+  });
+
   testWidgets('stale clipboard failure after pane rebind is contained', (
     tester,
   ) async {
@@ -300,6 +504,9 @@ void main() {
         .onTap!();
     await tester.pumpAndSettle();
     expect(find.text(ocr), findsOneWidget);
+    expect(find.byKey(const Key('sources-collapsed-summary')), findsOneWidget);
+    await tester.tap(find.byKey(const Key('toggle-sources-section-button')));
+    await tester.pumpAndSettle();
     expect(
       tester.widget<ImageSourceTile>(find.byType(ImageSourceTile)).source.state,
       SourceState.processed,
@@ -855,6 +1062,43 @@ final class _StaleProposalPostCommitFailureVault extends MemoryVaultBackend {
       cause: cause,
       causeStackTrace: StackTrace.current,
     );
+  }
+}
+
+final class _FailingApplyVault extends MemoryVaultBackend {
+  _FailingApplyVault() : super(seedExampleData: false);
+
+  int updateProposalCalls = 0;
+
+  @override
+  Future<AiProposal> updateProposal(AiProposal proposal) {
+    updateProposalCalls += 1;
+    throw StateError('proposal apply update failed');
+  }
+}
+
+final class _GatedApplyVault extends MemoryVaultBackend {
+  _GatedApplyVault() : super(seedExampleData: false);
+
+  final appendStarted = Completer<void>();
+  final _appendRelease = Completer<void>();
+
+  void releaseAppend() {
+    if (!_appendRelease.isCompleted) {
+      _appendRelease.complete();
+    }
+  }
+
+  @override
+  Future<VaultNoteContent> appendMarkdown({
+    required String noteId,
+    required String markdown,
+  }) async {
+    if (!appendStarted.isCompleted) {
+      appendStarted.complete();
+    }
+    await _appendRelease.future;
+    return super.appendMarkdown(noteId: noteId, markdown: markdown);
   }
 }
 

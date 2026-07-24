@@ -127,6 +127,154 @@ void main() {
     expect(find.textContaining('<img'), findsNothing);
   });
 
+  testWidgets('text alongside an image uses the full editable flow', (
+    tester,
+  ) async {
+    final vault = CountingUpdateVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Image Study');
+    final source = await vault.addImageSource(
+      noteId: note.id,
+      filename: 'captioned.png',
+      mimeType: 'image/png',
+      bytes: tinyPng,
+    );
+    const imageTag =
+        '<img src="Image Study.assets/attachments/captioned.png" width="320">';
+    await vault.updateMarkdown(
+      noteId: note.id,
+      markdown: '# Image Study\n\n说明文字 $imageTag',
+    );
+
+    await pumpWorkspace(tester, vault: vault);
+    await tester.pumpAndSettle();
+
+    final imagePreview = find.byKey(const Key('live-markdown-image-preview-2'));
+    final previewBounds = tester.getRect(imagePreview);
+    await tester.tapAt(
+      Offset(previewBounds.left + 8, previewBounds.bottom - 8),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(Key('preview-image-${source.id}')), findsOneWidget);
+    expect(find.byKey(const Key('note-editor')), findsOneWidget);
+    final noteEditor = activeLiveMarkdownTextField(tester);
+    expect(noteEditor.controller.text, '说明文字 $imageTag');
+    expect(
+      activeLiveMarkdownTextSpan(tester).toPlainText(),
+      noteEditor.controller.text,
+    );
+
+    await setActiveLiveMarkdownSelection(
+      tester,
+      const TextSelection(baseOffset: 0, extentOffset: 4),
+    );
+    await openNoteContextMenu(tester);
+
+    expect(find.byKey(const Key('note-menu-copy')), findsOneWidget);
+    expect(find.byKey(const Key('note-menu-cut')), findsOneWidget);
+    expect(find.byKey(const Key('note-menu-paste')), findsOneWidget);
+    expect(find.byKey(const Key('note-menu-insert')), findsOneWidget);
+    expect(find.byKey(const Key('note-menu-text-format')), findsOneWidget);
+    expect(find.byKey(const Key('note-menu-paragraph')), findsOneWidget);
+    expect(find.byKey(const Key('note-menu-list')), findsOneWidget);
+
+    final mouse = await hoverNoteMenuItem(
+      tester,
+      const Key('note-menu-text-format'),
+    );
+    final boldItem = find.byKey(const Key('note-menu-bold'));
+    final boldPosition = tester.getCenter(boldItem);
+    await mouse.moveTo(boldPosition);
+    await mouse.down(boldPosition);
+    await tester.pump();
+    await mouse.up();
+    await tester.pumpAndSettle();
+    await mouse.removePointer();
+
+    expect(noteEditor.controller.text, '**说明文字** $imageTag');
+    expect(find.byKey(Key('preview-image-${source.id}')), findsOneWidget);
+  });
+
+  testWidgets('enter before a right inline image moves it to the next line', (
+    tester,
+  ) async {
+    final vault = CountingUpdateVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Image Study');
+    final first = await vault.addImageSource(
+      noteId: note.id,
+      filename: 'first.png',
+      mimeType: 'image/png',
+      bytes: tinyPng,
+    );
+    final second = await vault.addImageSource(
+      noteId: note.id,
+      filename: 'second.png',
+      mimeType: 'image/png',
+      bytes: tinyPng,
+    );
+    const firstTag =
+        '<img src="Image Study.assets/attachments/first.png" width="320">';
+    const secondTag =
+        '<img src="Image Study.assets/attachments/second.png" width="320">';
+    const mixedLine = '说明文字 $firstTag $secondTag';
+    await vault.updateMarkdown(
+      noteId: note.id,
+      markdown: '# Image Study\n\n$mixedLine',
+    );
+
+    await pumpWorkspace(tester, vault: vault);
+    await tester.pumpAndSettle();
+
+    final imagePreview = find.byKey(const Key('live-markdown-image-preview-2'));
+    final previewBounds = tester.getRect(imagePreview);
+    await tester.tapAt(
+      Offset(previewBounds.left + 8, previewBounds.bottom - 8),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(Key('preview-image-${first.id}')), findsOneWidget);
+    expect(find.byKey(Key('preview-image-${second.id}')), findsOneWidget);
+    final insertionOffset = mixedLine.indexOf(secondTag);
+    final noteEditor = activeLiveMarkdownTextField(tester);
+    noteEditor.focusNode.requestFocus();
+    await setActiveLiveMarkdownSelection(
+      tester,
+      TextSelection.collapsed(offset: insertionOffset),
+    );
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
+    await tester.pump();
+    expect(
+      activeLiveMarkdownTextField(tester).controller.selection.extentOffset,
+      insertionOffset + secondTag.length,
+    );
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowLeft);
+    await tester.pump();
+    expect(
+      activeLiveMarkdownTextField(tester).controller.selection.extentOffset,
+      insertionOffset,
+    );
+
+    final editableTextState = activeLiveMarkdownEditableTextState(tester);
+    editableTextState.updateEditingValue(
+      TextEditingValue(
+        text: mixedLine.replaceRange(insertionOffset, insertionOffset, '\n'),
+        selection: TextSelection.collapsed(offset: insertionOffset + 1),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final editor = tester.widget<LiveMarkdownEditor>(
+      find.byType(LiveMarkdownEditor),
+    );
+    expect(
+      editor.controller.text,
+      '# Image Study\n\n说明文字 $firstTag \n$secondTag',
+    );
+    expect(find.byKey(Key('preview-image-${first.id}')), findsOneWidget);
+    expect(find.byKey(Key('preview-image-${second.id}')), findsOneWidget);
+    expect(find.textContaining('<img', findRichText: true), findsNothing);
+  });
+
   testWidgets(
     'enter after a selected inline image persists a writable blank line',
     (tester) async {
@@ -480,6 +628,141 @@ void main() {
     expect(note.markdown, contains(expectedImageTag));
     expect(note.markdown, isNot(contains(' alt=')));
     expect(find.textContaining('图片已粘贴到笔记：1783082971508.png'), findsOneWidget);
+  });
+
+  testWidgets('image paste keeps the caret at a middle insertion point', (
+    tester,
+  ) async {
+    final vault = CountingUpdateVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Focus Study');
+    await vault.updateMarkdown(
+      noteId: note.id,
+      markdown: '# Focus Renamed\n\nMiddle text\n\nBottom',
+    );
+    final imageInput = FakeImageInputService(
+      pastedImage: const ImportedImage(
+        filename: 'focus.png',
+        mimeType: 'image/png',
+        bytes: tinyPng,
+      ),
+    );
+
+    await pumpWorkspace(tester, vault: vault, imageInput: imageInput);
+    await switchToSourceMode(tester);
+    await activateLiveMarkdownBlock(tester, blockIndex: 2);
+    await setActiveLiveMarkdownSelection(
+      tester,
+      const TextSelection.collapsed(offset: 6),
+    );
+
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.metaLeft);
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.keyV);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.keyV);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.metaLeft);
+    await tester.pumpAndSettle();
+
+    final noteEditor = activeLiveMarkdownTextField(tester);
+    expect(noteEditor.controller.text, isEmpty);
+    expect(
+      noteEditor.controller.selection,
+      const TextSelection.collapsed(offset: 0),
+    );
+    expect(noteEditor.focusNode.hasFocus, isTrue);
+
+    tester.testTextInput.enterText('continued');
+    await tester.pumpAndSettle();
+    final editor = tester.widget<LiveMarkdownEditor>(
+      find.byType(LiveMarkdownEditor),
+    );
+    expect(
+      editor.controller.text.indexOf('focus.png'),
+      lessThan(editor.controller.text.indexOf('continued')),
+    );
+    expect(
+      editor.controller.text.indexOf('continued'),
+      lessThan(editor.controller.text.indexOf(' text')),
+    );
+  });
+
+  testWidgets('image paste keeps focus inside an existing mixed image block', (
+    tester,
+  ) async {
+    final vault = CountingUpdateVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Focus Study');
+    await vault.addImageSource(
+      noteId: note.id,
+      filename: 'existing.png',
+      mimeType: 'image/png',
+      bytes: tinyPng,
+    );
+    const existingTag =
+        '<img src="Focus Study.assets/attachments/existing.png" width="320">';
+    await vault.updateMarkdown(
+      noteId: note.id,
+      markdown: '# Focus Study\n\nBefore $existingTag after\n\nBottom',
+    );
+    final imageInput = FakeImageInputService(
+      pastedImage: const ImportedImage(
+        filename: 'pasted.png',
+        mimeType: 'image/png',
+        bytes: tinyPng,
+      ),
+    );
+
+    await pumpWorkspace(tester, vault: vault, imageInput: imageInput);
+    await switchToSourceMode(tester);
+    final mixedPreview = find.byKey(const Key('live-markdown-image-preview-2'));
+    final bounds = tester.getRect(mixedPreview);
+    await tester.tapAt(Offset(bounds.left + 8, bounds.bottom - 8));
+    await tester.pumpAndSettle();
+    await setActiveLiveMarkdownSelection(
+      tester,
+      const TextSelection.collapsed(offset: 7),
+    );
+
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.metaLeft);
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.keyV);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.keyV);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.metaLeft);
+    await tester.pumpAndSettle();
+
+    final noteEditor = activeLiveMarkdownTextField(tester);
+    expect(noteEditor.controller.text, isEmpty);
+    expect(
+      noteEditor.controller.selection,
+      const TextSelection.collapsed(offset: 0),
+    );
+    expect(noteEditor.focusNode.hasFocus, isTrue);
+  });
+
+  testWidgets('image paste into an empty note keeps a caret after the image', (
+    tester,
+  ) async {
+    final vault = CountingUpdateVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Empty Study');
+    await vault.updateMarkdown(noteId: note.id, markdown: '');
+    final imageInput = FakeImageInputService(
+      pastedImage: const ImportedImage(
+        filename: 'empty.png',
+        mimeType: 'image/png',
+        bytes: tinyPng,
+      ),
+    );
+
+    await pumpWorkspace(tester, vault: vault, imageInput: imageInput);
+    await switchToSourceMode(tester);
+    await activateLiveMarkdownBlock(tester);
+
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.metaLeft);
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.keyV);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.keyV);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.metaLeft);
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('note-editor')), findsOneWidget);
+    final noteEditor = activeLiveMarkdownTextField(tester);
+    expect(noteEditor.controller.text, isEmpty);
+    expect(noteEditor.focusNode.hasFocus, isTrue);
   });
 
   testWidgets('delayed pane paste keeps its target after focus changes', (

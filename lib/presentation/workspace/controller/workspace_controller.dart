@@ -703,6 +703,22 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
     );
   }
 
+  Future<editor_context.PaneEditorCommandOutcome> applyProposal(
+    editor_context.PaneEditorContext context,
+    AiProposal proposal,
+  ) {
+    if (proposal.status != ProposalStatus.pending) {
+      return Future.value(editor_context.PaneEditorCommandOutcome.unchanged);
+    }
+    return _editorOperations.withSaveScope(
+      context,
+      () => _editorOperations.runOperation(
+        () => _editor.applyProposal(context, proposal),
+        context: context,
+      ),
+    );
+  }
+
   Future<editor_context.PaneEditorCommandOutcome> copyProposal(
     editor_context.PaneEditorContext context,
     AiProposal proposal,

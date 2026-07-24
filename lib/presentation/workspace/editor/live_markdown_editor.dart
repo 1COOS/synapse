@@ -5,9 +5,11 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 
+import '../../../domain/vault/vault_resource.dart';
 import '../../cupertino/markdown_context_commands.dart';
 import '../../cupertino/markdown_live_blocks.dart';
 import '../../cupertino/workspace/workspace_theme.dart';
+import '../outline_navigation.dart';
 import 'live_markdown_context_menu.dart';
 import 'live_markdown_editable_text.dart';
 import 'live_markdown_editor_controller.dart';
@@ -36,7 +38,10 @@ class NoteEditorPasteAvailability {
 class LiveMarkdownEditor extends StatefulWidget {
   const LiveMarkdownEditor({
     super.key,
+    required this.paneId,
     required this.controller,
+    required this.outlineNodes,
+    required this.outlineNavigationController,
     required this.enabled,
     required this.busy,
     required this.focused,
@@ -47,7 +52,10 @@ class LiveMarkdownEditor extends StatefulWidget {
     required this.previewBuilder,
   });
 
+  final String paneId;
   final TextEditingController controller;
+  final List<OutlineNode> outlineNodes;
+  final WorkspaceOutlineNavigationController outlineNavigationController;
   final bool enabled;
   final bool busy;
   final bool focused;
@@ -69,6 +77,7 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
   final _editorFocusNode = FocusNode();
   final _scrollController = ScrollController();
   final _scrollViewportKey = GlobalKey();
+  late final WorkspaceOutlineViewportCoordinator _outlineViewport;
   final _activeTextEditorKey = GlobalKey();
   final _editingSessionTapGroup = Object();
   var _openContextMenuCount = 0;
@@ -84,6 +93,13 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
     _editorController = LiveMarkdownEditorController(
       document: widget.controller,
     )..addListener(_handleEditorControllerChanged);
+    _outlineViewport = WorkspaceOutlineViewportCoordinator(
+      navigation: widget.outlineNavigationController,
+      scrollController: _scrollController,
+      viewportKey: _scrollViewportKey,
+      paneId: widget.paneId,
+      isFocused: () => widget.focused,
+    );
     widget.controller.addListener(_handleFullDocumentChanged);
   }
 
@@ -109,6 +125,7 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
   void dispose() {
     widget.controller.removeListener(_handleFullDocumentChanged);
     _editorController.dispose();
+    _outlineViewport.dispose();
     _blockFocusNode.dispose();
     _editorFocusNode.dispose();
     _scrollController.dispose();
@@ -203,6 +220,9 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
       return;
     }
     setState(() {});
+    if (widget.focused && _editorController.activeTrailingInsertion) {
+      _focusBlockEditor();
+    }
   }
 
   void _handleBlockSelectionChanged(
@@ -219,10 +239,17 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
       _editorController.setSelectionTarget(null);
       return;
     }
+    _clearSelectedImageTarget();
     widget.onFocusPane();
-    final normalized = _editorController.normalizedSelectionForValue(
-      _editorController.blockController.value.copyWith(selection: selection),
+    final normalized = _normalizeInlineImageSelection(
+      _editorController.blockController.text,
+      _editorController.normalizedSelectionForValue(
+        _editorController.blockController.value.copyWith(selection: selection),
+      ),
     );
+    if (_editorController.blockController.selection != normalized) {
+      _editorController.blockController.selection = normalized;
+    }
     _updateActiveOffsetFromBlockSelection(block, selection: normalized);
     if (!normalized.isCollapsed) {
       _editorController.setSelectionTarget(
@@ -351,6 +378,14 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
       return KeyEventResult.handled;
     }
     if (key == LogicalKeyboardKey.backspace &&
+        _deleteInlineImageAtCaret(value, offset, backspace: true)) {
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.delete &&
+        _deleteInlineImageAtCaret(value, offset, backspace: false)) {
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.backspace &&
         !_editorController.activeTrailingInsertion &&
         value.text.isNotEmpty &&
         value.text.runes.length == 1 &&
@@ -363,6 +398,14 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
         value.text.isEmpty &&
         offset == 0) {
       _moveToAdjacentTextBlock(previous: true, cancelInsertion: true);
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.arrowLeft &&
+        _moveCaretAcrossInlineImage(value.text, offset, previous: true)) {
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.arrowRight &&
+        _moveCaretAcrossInlineImage(value.text, offset, previous: false)) {
       return KeyEventResult.handled;
     }
     if (key == LogicalKeyboardKey.arrowLeft && offset == 0) {
@@ -386,6 +429,84 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
           : KeyEventResult.ignored;
     }
     return KeyEventResult.ignored;
+  }
+
+  TextSelection _normalizeInlineImageSelection(
+    String text,
+    TextSelection selection,
+  ) {
+    var start = selection.start;
+    var end = selection.end;
+    for (final match in _inlineImageMatches(text)) {
+      if (selection.isCollapsed && start > match.start && start < match.end) {
+        start = match.end;
+        end = match.end;
+        break;
+      }
+      if (start > match.start && start < match.end) {
+        start = match.start;
+      }
+      if (end > match.start && end < match.end) {
+        end = match.end;
+      }
+    }
+    return TextSelection(baseOffset: start, extentOffset: end);
+  }
+
+  bool _deleteInlineImageAtCaret(
+    TextEditingValue value,
+    int offset, {
+    required bool backspace,
+  }) {
+    for (final match in _inlineImageMatches(value.text)) {
+      final deletesImage = backspace
+          ? offset > match.start && offset <= match.end
+          : offset >= match.start && offset < match.end;
+      if (!deletesImage) {
+        continue;
+      }
+      _clearSelectedImageTarget();
+      _editorController.applyBlockValue(
+        value.copyWith(
+          text: value.text.replaceRange(match.start, match.end, ''),
+          selection: TextSelection.collapsed(offset: match.start),
+          composing: TextRange.empty,
+        ),
+      );
+      return true;
+    }
+    return false;
+  }
+
+  bool _moveCaretAcrossInlineImage(
+    String text,
+    int offset, {
+    required bool previous,
+  }) {
+    for (final match in _inlineImageMatches(text)) {
+      final crossesImage = previous
+          ? offset > match.start && offset <= match.end
+          : offset >= match.start && offset < match.end;
+      if (!crossesImage) {
+        continue;
+      }
+      final nextOffset = previous ? match.start : match.end;
+      final selection = TextSelection.collapsed(offset: nextOffset);
+      _editorController.blockController.selection = selection;
+      final block = _editorController.currentActiveTextBlock();
+      if (block != null) {
+        _updateActiveOffsetFromBlockSelection(block, selection: selection);
+      }
+      return true;
+    }
+    return false;
+  }
+
+  List<RegExpMatch> _inlineImageMatches(String text) {
+    return <RegExpMatch>[
+      ...htmlImageTagPattern.allMatches(text),
+      ...markdownImageTagPattern.allMatches(text),
+    ]..sort((left, right) => left.start.compareTo(right.start));
   }
 
   KeyEventResult _handleEditorSessionKeyEvent(FocusNode node, KeyEvent event) {
@@ -665,7 +786,8 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
   bool _isKeyboardEditableTextBlock(MarkdownLiveBlock block) {
     return !block.isBlank &&
         _tableForBlock(block) == null &&
-        !_blockHasPreviewImage(block);
+        (!_blockHasPreviewImage(block) ||
+            markdownHasTextAlongsideImage(block.text));
   }
 
   void _handleEditorControllerChanged() {
@@ -756,7 +878,9 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
       _clearActiveBlock();
       return;
     }
-    if (_tableForBlock(block) != null || _blockHasPreviewImage(block)) {
+    if (_tableForBlock(block) != null ||
+        (_blockHasPreviewImage(block) &&
+            !markdownHasTextAlongsideImage(block.text))) {
       return;
     }
     _clearSelectedImageTarget();
@@ -799,7 +923,8 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
     for (final candidate in blocks.reversed) {
       if (!candidate.isBlank &&
           _tableForBlock(candidate) == null &&
-          !_blockHasPreviewImage(candidate)) {
+          (!_blockHasPreviewImage(candidate) ||
+              markdownHasTextAlongsideImage(candidate.text))) {
         block = candidate;
         break;
       }
@@ -1027,6 +1152,17 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
   @override
   Widget build(BuildContext context) {
     final blocks = splitMarkdownLiveBlocks(widget.controller.text);
+    final outlineByBlock = outlineNodesByBlockIndex(
+      widget.controller.text,
+      blocks,
+      widget.outlineNodes,
+    );
+    _outlineViewport.update(
+      navigation: widget.outlineNavigationController,
+      paneId: widget.paneId,
+      isFocused: () => widget.focused,
+      nodes: widget.outlineNodes,
+    );
     final activeOffset = _editorController.activeOffset;
     final activeIndex =
         activeOffset == null || _editorController.activeTrailingInsertion
@@ -1065,7 +1201,12 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
                     for (var index = 0; index < blocks.length; index += 1) ...[
-                      _buildBlock(blocks[index], index, activeIndex),
+                      _buildOutlineAwareBlock(
+                        blocks[index],
+                        index,
+                        activeIndex,
+                        outlineByBlock[index],
+                      ),
                       if (activeInsertionOffset == blocks[index].end)
                         _buildVirtualTrailingTextBlockEditor(index + 1),
                     ],
@@ -1107,6 +1248,24 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
     );
   }
 
+  Widget _buildOutlineAwareBlock(
+    MarkdownLiveBlock block,
+    int index,
+    int? activeIndex,
+    OutlineNode? outlineNode,
+  ) {
+    final child = _buildBlock(block, index, activeIndex);
+    if (outlineNode == null) {
+      return child;
+    }
+    return WorkspaceOutlineHeadingAnchor(
+      coordinator: _outlineViewport,
+      node: outlineNode,
+      accentColor: WorkspaceAppearanceScope.of(context).accentColor,
+      child: child,
+    );
+  }
+
   Widget _buildBlock(MarkdownLiveBlock block, int index, int? activeIndex) {
     if (block.isBlank) {
       final lineBreakCount = RegExp(
@@ -1121,22 +1280,23 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
       );
     }
     final hasPreviewImage = _blockHasPreviewImage(block);
+    final hasEditableInlineText = markdownHasTextAlongsideImage(block.text);
     final table = _tableForBlock(block);
     if (index == activeIndex && table != null) {
       return _buildTableBlockEditor(block, index, table);
     }
-    if (index == activeIndex && !hasPreviewImage) {
+    if (index == activeIndex && (!hasPreviewImage || hasEditableInlineText)) {
       return _buildTextBlockEditor(block, index);
     }
 
     return GestureDetector(
       key: Key('live-markdown-block-preview-$index'),
       behavior: HitTestBehavior.opaque,
-      onTapUp: hasPreviewImage
+      onTapUp: hasPreviewImage && !hasEditableInlineText
           ? null
           : (details) =>
                 _activateBlock(block, globalPosition: details.globalPosition),
-      onSecondaryTapDown: hasPreviewImage
+      onSecondaryTapDown: hasPreviewImage && !hasEditableInlineText
           ? null
           : (details) {
               _activateBlockAndOpenContextMenu(block, details.globalPosition);
@@ -1206,6 +1366,13 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
   }) {
     final appearance = WorkspaceAppearanceScope.of(context);
     final baseTextStyle = _textStyleForBlock(block, appearance);
+    _editorController.blockController.inlineImageBuilder =
+        block != null && markdownHasTextAlongsideImage(block.text)
+        ? (source) => widget.previewBuilder(
+            source,
+            onImageTap: (src) => _handleImagePreviewTap(block, src),
+          )
+        : null;
     return KeyedSubtree(
       key: widget.focused ? const Key('note-editor') : null,
       child: LiveMarkdownEditableText(

@@ -4,9 +4,12 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../domain/markdown/markdown_document.dart';
+import '../../../domain/vault/vault_resource.dart';
 import '../../workspace/controller/workspace_controller.dart';
 import '../../workspace/editor/live_markdown_editor.dart';
 import '../../workspace/editor/pane_editor_context.dart';
+import '../../workspace/outline_navigation.dart';
 import '../../workspace/state/note_document_session.dart';
 import '../../workspace/state/split_workspace_controller.dart';
 import 'workspace_controls.dart';
@@ -20,10 +23,12 @@ final class WorkspaceNotePane extends ConsumerStatefulWidget {
     super.key,
     required this.workspace,
     required this.controller,
+    required this.outlineNavigationController,
   });
 
   final WorkspaceState workspace;
   final WorkspaceController controller;
+  final WorkspaceOutlineNavigationController outlineNavigationController;
 
   @override
   ConsumerState<WorkspaceNotePane> createState() => _WorkspaceNotePaneState();
@@ -175,6 +180,9 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
       child: ListenableBuilder(
         listenable: session ?? _emptyMarkdownController,
         builder: (context, child) {
+          final outlineNodes = session == null
+              ? const <OutlineNode>[]
+              : extractOutline(session.controller.text);
           return DecoratedBox(
             decoration: BoxDecoration(
               color: workspaceSurfaceColor,
@@ -194,8 +202,17 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
                               : _markdownRenderer.buildReadingPreview(
                                   session: session,
                                   editorContext: editorContext!,
+                                  paneId: pane.paneId,
+                                  focused: focused,
+                                  outlineNodes: outlineNodes,
+                                  outlineNavigationController:
+                                      widget.outlineNavigationController,
                                 )
-                        : _buildNoteEditor(session: session, pane: pane),
+                        : _buildNoteEditor(
+                            session: session,
+                            pane: pane,
+                            outlineNodes: outlineNodes,
+                          ),
                   ),
                   Positioned(
                     top: 10,
@@ -308,7 +325,11 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
     return KeyedSubtree(key: Key('note-mode-$suffix'), child: button);
   }
 
-  Widget _buildNoteEditor({NoteDocumentSession? session, SplitLeaf? pane}) {
+  Widget _buildNoteEditor({
+    NoteDocumentSession? session,
+    SplitLeaf? pane,
+    List<OutlineNode> outlineNodes = const [],
+  }) {
     final resolvedSession = pane == null ? session ?? _activeSession : session;
     final resolvedPane = pane ?? _focusedPane;
     final editorContext = _capturePaneEditorContext(
@@ -381,7 +402,11 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
                     ),
                   )
                 : LiveMarkdownEditor(
+                    paneId: resolvedPane?.paneId ?? 'pane-1',
                     controller: resolvedSession.controller,
+                    outlineNodes: outlineNodes,
+                    outlineNavigationController:
+                        widget.outlineNavigationController,
                     enabled:
                         !_busy &&
                         !_reloadRequired &&

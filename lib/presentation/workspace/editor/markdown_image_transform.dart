@@ -5,6 +5,19 @@ const maxMarkdownImageWidth = 1200;
 final htmlImageTagPattern = RegExp(r'<img\s+[^>]*>', caseSensitive: false);
 final markdownImageTagPattern = RegExp(r'!\[[^\]]*\]\([^)]+\)');
 
+bool markdownHasTextAlongsideImage(String markdown) {
+  final hasImage =
+      htmlImageTagPattern.hasMatch(markdown) ||
+      markdownImageTagPattern.hasMatch(markdown);
+  if (!hasImage) {
+    return false;
+  }
+  final withoutImages = markdown
+      .replaceAll(htmlImageTagPattern, '')
+      .replaceAll(markdownImageTagPattern, '');
+  return withoutImages.trim().isNotEmpty;
+}
+
 final class MarkdownImageReference {
   const MarkdownImageReference({
     required this.start,

@@ -217,11 +217,12 @@ final class WorkspaceEditorCoordinator {
                   noteIds: {oldNoteId},
                 );
                 final selection = _normalizedSelection(target);
+                final imageTag = _imageMarkdownTag(targetSession.note, source);
                 final replacement = blockImageInsertion(
                   text: target.text,
                   start: selection.start,
                   end: selection.end,
-                  tag: _imageMarkdownTag(targetSession.note, source),
+                  tag: imageTag,
                 );
                 final updatedBody = target.text.replaceRange(
                   selection.start,
@@ -322,7 +323,26 @@ final class WorkspaceEditorCoordinator {
         },
       ),
     );
-    return _editorResult(result, context);
+    final outcome = _editorResult(result, context);
+    final current = _resolve(context);
+    if (outcome == PaneEditorCommandOutcome.committed &&
+        result is Committed<_SourceHydration> &&
+        current != null &&
+        identical(current.session, targetSession)) {
+      final body = current.session.controller.text;
+      final reference = findMarkdownImageReference(
+        markdown: body,
+        src: _markdownAttachmentSrc(result.value.note, result.value.source),
+      );
+      if (reference != null) {
+        current.session.setSelectionProgrammatically(
+          TextSelection.collapsed(
+            offset: _caretOffsetAfterImageReference(body, reference),
+          ),
+        );
+      }
+    }
+    return outcome;
   }
 
   Future<PaneEditorCommandOutcome> generateProposal(
@@ -470,6 +490,58 @@ final class WorkspaceEditorCoordinator {
     return _editorResult(result, context);
   }
 
+  Future<PaneEditorCommandOutcome> applyProposal(
+    PaneEditorContext context,
+    AiProposal proposal,
+  ) async {
+    final resolved = _resolve(context);
+    if (resolved == null) {
+      return PaneEditorCommandOutcome.staleTarget;
+    }
+    if (proposal.noteId != resolved.noteId ||
+        proposal.status != ProposalStatus.pending) {
+      return PaneEditorCommandOutcome.unchanged;
+    }
+    final targetSession = resolved.session;
+    final runtime = _runtimes.requireCurrent();
+    final result = await _mutations.run<_NoteHydration>(
+      WorkspaceMutationPlan<_NoteHydration>(
+        affectedNoteIds: {targetSession.noteId},
+        dirtyDisposition: DirtyDisposition.flush,
+        commitBackend: () async {
+          _requireCurrentMutationTarget(context, targetSession);
+          final noteId = targetSession.noteId;
+          await runtime.proposalService.applyProposal(proposal.id);
+          return WorkspaceBackendCommit(
+            postCommitHydrate: () async {
+              final note = await runtime.vault.readNote(noteId);
+              return VaultMutationDelta(
+                value: _NoteHydration(
+                  note: note,
+                  proposals: await runtime.vault.listProposals(noteId),
+                ),
+                refreshedNotesByNewId: {note.id: note},
+              );
+            },
+          );
+        },
+        prepareCommit: (delta) {
+          if (_resolve(context) == null) {
+            return _commits.prepare(delta);
+          }
+          final note = delta.value.note;
+          return _commits.prepare(
+            delta,
+            upsertedNotesById: {note.id: note},
+            replacementProposalsByNoteId: {note.id: delta.value.proposals},
+            patch: const WorkspaceStatePatch(message: 'AI 建议已追加到当前笔记'),
+          );
+        },
+      ),
+    );
+    return _editorResult(result, context);
+  }
+
   Future<PaneEditorCommandOutcome> saveSession(
     PaneEditorContext context,
     NoteDocumentSession session, {
@@ -579,6 +651,20 @@ final class WorkspaceEditorCoordinator {
     final src = _markdownAttachmentSrc(note, source);
     return '<img src="${escapeHtmlAttribute(src)}" '
         'width="${_readState().preferences.pastedImageWidth}">';
+  }
+
+  int _caretOffsetAfterImageReference(
+    String markdown,
+    MarkdownImageReference reference,
+  ) {
+    final lineBreakLength = markdown.startsWith('\r\n', reference.end)
+        ? 2
+        : reference.end < markdown.length &&
+              (markdown.codeUnitAt(reference.end) == 0x0A ||
+                  markdown.codeUnitAt(reference.end) == 0x0D)
+        ? 1
+        : 0;
+    return reference.end + lineBreakLength;
   }
 
   String _noteEditorPastedImageFilename(String filename) {

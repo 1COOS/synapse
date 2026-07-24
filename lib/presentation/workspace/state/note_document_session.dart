@@ -106,6 +106,16 @@ final class NoteDocumentSession extends ChangeNotifier {
     notifyListeners();
   }
 
+  void setSelectionProgrammatically(TextSelection selection) {
+    _ensureActive();
+    _isProgrammaticChange = true;
+    try {
+      _controller.selection = selection;
+    } finally {
+      _isProgrammaticChange = false;
+    }
+  }
+
   void setSavePhase(NoteSavePhase phase, {Object? error}) {
     _ensureActive();
     if (phase == NoteSavePhase.disposed) {

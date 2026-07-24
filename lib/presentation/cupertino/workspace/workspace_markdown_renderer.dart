@@ -14,6 +14,7 @@ import '../../workspace/editor/markdown_image_transform.dart';
 import '../../workspace/editor/markdown_table_editor.dart';
 import '../../workspace/editor/pane_editor_context.dart';
 import '../../workspace/editor/preview_image_block.dart';
+import '../../workspace/outline_navigation.dart';
 import '../../workspace/state/note_document_session.dart';
 import '../markdown_live_blocks.dart';
 import 'workspace_theme.dart';
@@ -37,21 +38,19 @@ final class WorkspaceMarkdownRenderer {
   Widget buildReadingPreview({
     required NoteDocumentSession session,
     required PaneEditorContext editorContext,
+    required String paneId,
+    required bool focused,
+    required List<OutlineNode> outlineNodes,
+    required WorkspaceOutlineNavigationController outlineNavigationController,
   }) {
-    final markdown = MarkdownDocument.parse(session.controller.text).body;
-    final blocks = splitMarkdownLiveBlocks(markdown);
-    return CupertinoScrollbar(
-      child: SingleChildScrollView(
-        key: const Key('markdown-reading-preview'),
-        padding: const EdgeInsets.fromLTRB(16, 54, 16, 16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            for (var index = 0; index < blocks.length; index += 1)
-              _buildReadingMarkdownBlock(blocks[index], index, editorContext),
-          ],
-        ),
-      ),
+    return _WorkspaceReadingPreview(
+      renderer: this,
+      session: session,
+      editorContext: editorContext,
+      paneId: paneId,
+      focused: focused,
+      outlineNodes: outlineNodes,
+      outlineNavigationController: outlineNavigationController,
     );
   }
 
@@ -512,6 +511,113 @@ final class WorkspaceMarkdownRenderer {
     }
     final assetsDirectory = '${p.basenameWithoutExtension(note.path)}.assets';
     return '$assetsDirectory/$attachmentPath'.replaceAll('\\', '/');
+  }
+}
+
+final class _WorkspaceReadingPreview extends StatefulWidget {
+  const _WorkspaceReadingPreview({
+    required this.renderer,
+    required this.session,
+    required this.editorContext,
+    required this.paneId,
+    required this.focused,
+    required this.outlineNodes,
+    required this.outlineNavigationController,
+  });
+
+  final WorkspaceMarkdownRenderer renderer;
+  final NoteDocumentSession session;
+  final PaneEditorContext editorContext;
+  final String paneId;
+  final bool focused;
+  final List<OutlineNode> outlineNodes;
+  final WorkspaceOutlineNavigationController outlineNavigationController;
+
+  @override
+  State<_WorkspaceReadingPreview> createState() =>
+      _WorkspaceReadingPreviewState();
+}
+
+final class _WorkspaceReadingPreviewState
+    extends State<_WorkspaceReadingPreview> {
+  final _scrollController = ScrollController();
+  final _scrollViewportKey = GlobalKey();
+  late final WorkspaceOutlineViewportCoordinator _outlineViewport;
+
+  @override
+  void initState() {
+    super.initState();
+    _outlineViewport = WorkspaceOutlineViewportCoordinator(
+      navigation: widget.outlineNavigationController,
+      scrollController: _scrollController,
+      viewportKey: _scrollViewportKey,
+      paneId: widget.paneId,
+      isFocused: () => widget.focused,
+    );
+  }
+
+  @override
+  void dispose() {
+    _outlineViewport.dispose();
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final markdown = MarkdownDocument.parse(
+      widget.session.controller.text,
+    ).body;
+    final blocks = splitMarkdownLiveBlocks(markdown);
+    final outlineByBlock = outlineNodesByBlockIndex(
+      markdown,
+      blocks,
+      widget.outlineNodes,
+    );
+    _outlineViewport.update(
+      navigation: widget.outlineNavigationController,
+      paneId: widget.paneId,
+      isFocused: () => widget.focused,
+      nodes: widget.outlineNodes,
+    );
+    final accentColor = widget.renderer._appearance.accentColor;
+    return CupertinoScrollbar(
+      controller: _scrollController,
+      child: KeyedSubtree(
+        key: Key('markdown-reading-preview-${widget.paneId}'),
+        child: KeyedSubtree(
+          key: widget.focused ? const Key('markdown-reading-preview') : null,
+          child: SingleChildScrollView(
+            key: _scrollViewportKey,
+            controller: _scrollController,
+            padding: const EdgeInsets.fromLTRB(16, 54, 16, 16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                for (var index = 0; index < blocks.length; index += 1)
+                  if (outlineByBlock[index] case final node?)
+                    WorkspaceOutlineHeadingAnchor(
+                      coordinator: _outlineViewport,
+                      node: node,
+                      accentColor: accentColor,
+                      child: widget.renderer._buildReadingMarkdownBlock(
+                        blocks[index],
+                        index,
+                        widget.editorContext,
+                      ),
+                    )
+                  else
+                    widget.renderer._buildReadingMarkdownBlock(
+                      blocks[index],
+                      index,
+                      widget.editorContext,
+                    ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
   }
 }
 

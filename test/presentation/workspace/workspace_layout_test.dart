@@ -24,6 +24,7 @@ void main() {
     expect(find.byKey(const Key('left-pane-mode-search')), findsOneWidget);
     expect(find.byKey(const Key('center-pane-title-icon')), findsNothing);
     expect(find.byKey(const Key('right-pane-title-icon')), findsOneWidget);
+    expect(find.text('素材与 AI'), findsOneWidget);
     expect(find.text('Synapse'), findsNothing);
     expect(find.text('AI 建议'), findsOneWidget);
     expect(find.byKey(const Key('note-mode-reading')), findsOneWidget);
@@ -95,6 +96,8 @@ void main() {
     expect(find.byKey(const Key('source-pane')), findsNothing);
     expect(find.byKey(const Key('right-pane-collapsed-rail')), findsOneWidget);
     expect(find.byKey(const Key('expand-right-pane-button')), findsOneWidget);
+    expect(find.byKey(const Key('right-workflow-rail-button')), findsOneWidget);
+    expect(find.bySemanticsLabel('展开素材与 AI，1 条待处理'), findsOneWidget);
     expect(find.byKey(const Key('note-pane')), findsOneWidget);
   });
 
