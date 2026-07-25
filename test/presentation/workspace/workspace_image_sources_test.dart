@@ -21,7 +21,73 @@ void main() {
     );
 
     expect(tester.takeException(), isNull);
-    expect(find.text('AI 建议'), findsOneWidget);
+    final materialsTitle = tester.widget<Text>(find.text('图片素材 · 已选 0 张'));
+    final proposalsTitle = tester.widget<Text>(find.text('AI 建议'));
+    expect(materialsTitle.style?.fontSize, 13);
+    expect(materialsTitle.style?.fontWeight, FontWeight.w600);
+    expect(proposalsTitle.style?.fontSize, 13);
+    expect(proposalsTitle.style?.fontWeight, FontWeight.w600);
+  });
+
+  testWidgets('resizes the image area and keeps the ratio after collapsing', (
+    tester,
+  ) async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Resizable');
+    for (var index = 0; index < 4; index += 1) {
+      await vault.addImageSource(
+        noteId: note.id,
+        filename: 'image-$index.png',
+        mimeType: 'image/png',
+        bytes: tinyPng,
+      );
+    }
+    final now = DateTime.now().toUtc();
+    await vault.saveProposal(
+      AiProposal(
+        id: 'resizable-proposal',
+        noteId: note.id,
+        sourceIds: const [],
+        title: '建议',
+        proposedMarkdown: '建议正文',
+        status: ProposalStatus.pending,
+        createdAt: now,
+        updatedAt: now,
+      ),
+    );
+
+    await pumpWorkspace(tester, vault: vault);
+
+    final sources = find.byKey(const Key('sources-expanded-content'));
+    final proposals = find.byKey(const Key('proposal-history-list'));
+    final resizeHandle = find.byKey(const Key('sources-resize-handle'));
+    final beforeSourcesHeight = tester.getSize(sources).height;
+    final beforeProposalsHeight = tester.getSize(proposals).height;
+    final beforeSourcesRect = tester.getRect(sources);
+    final resizeHandleRect = tester.getRect(resizeHandle);
+    expect(beforeSourcesHeight, greaterThan(300));
+    expect(
+      resizeHandleRect.center.dy,
+      closeTo(beforeSourcesRect.bottom, 0.1),
+      reason: 'the draggable hit area should be centered on the image edge',
+    );
+
+    await tester.dragFrom(
+      Offset(beforeSourcesRect.center.dx, beforeSourcesRect.bottom),
+      const Offset(0, 60),
+    );
+    await tester.pumpAndSettle();
+
+    final resizedSourcesHeight = tester.getSize(sources).height;
+    expect(resizedSourcesHeight, greaterThan(beforeSourcesHeight));
+    expect(tester.getSize(proposals).height, lessThan(beforeProposalsHeight));
+
+    await tester.tap(find.byKey(const Key('toggle-sources-section-button')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('toggle-sources-section-button')));
+    await tester.pumpAndSettle();
+
+    expect(tester.getSize(sources).height, closeTo(resizedSourcesHeight, 1));
   });
 
   testWidgets(
@@ -91,6 +157,8 @@ void main() {
       imageInput: imageInput,
     );
 
+    expect(find.text('导入'), findsNothing);
+    expect(find.byTooltip('导入图片'), findsOneWidget);
     await tester.tap(find.byKey(const Key('add-image-button')));
     await tester.pump(const Duration(milliseconds: 250));
 
@@ -436,6 +504,86 @@ void main() {
     expect(await vault.listSources(note.id), isEmpty);
   });
 
+  testWidgets('deletes selected image sources as one confirmed batch', (
+    tester,
+  ) async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Image Batch');
+    final first = await vault.addImageSource(
+      noteId: note.id,
+      filename: 'first.png',
+      mimeType: 'image/png',
+      bytes: tinyPng,
+    );
+    final second = await vault.addImageSource(
+      noteId: note.id,
+      filename: 'second.png',
+      mimeType: 'image/png',
+      bytes: tinyPng,
+    );
+
+    await pumpWorkspace(tester, vault: vault);
+    await tester.tap(find.bySemanticsLabel('first.png'));
+    await tester.tap(find.bySemanticsLabel('second.png'));
+    await tester.pump();
+
+    await tester.tap(find.byKey(const Key('delete-selected-images-button')));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('删除 2 张图片素材'), findsOneWidget);
+
+    await tester.tap(find.text('取消'));
+    await tester.pumpAndSettle();
+    expect(await vault.listSources(note.id), hasLength(2));
+    expect(find.text('图片素材 · 已选 2 张'), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('delete-selected-images-button')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('删除'));
+    await tester.pumpAndSettle();
+
+    expect(await vault.listSources(note.id), isEmpty);
+    expect(find.text('图片素材 · 已选 0 张'), findsOneWidget);
+    await expectLater(
+      vault.readSourceAttachment(first),
+      throwsA(isA<StateError>()),
+    );
+    await expectLater(
+      vault.readSourceAttachment(second),
+      throwsA(isA<StateError>()),
+    );
+  });
+
+  testWidgets('rolls back every image when a batch delete fails', (
+    tester,
+  ) async {
+    final vault = _FailingBatchDeleteVault();
+    final note = await vault.createNote(parentPath: '', title: 'Rollback');
+    await vault.addImageSource(
+      noteId: note.id,
+      filename: 'first.png',
+      mimeType: 'image/png',
+      bytes: tinyPng,
+    );
+    await vault.addImageSource(
+      noteId: note.id,
+      filename: 'second.png',
+      mimeType: 'image/png',
+      bytes: tinyPng,
+    );
+
+    await pumpWorkspace(tester, vault: vault);
+    await tester.tap(find.bySemanticsLabel('first.png'));
+    await tester.tap(find.bySemanticsLabel('second.png'));
+    await tester.pump();
+    await tester.tap(find.byKey(const Key('delete-selected-images-button')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('删除'));
+    await tester.pumpAndSettle();
+
+    expect(await vault.listSources(note.id), hasLength(2));
+    expect(find.text('图片素材 · 已选 2 张'), findsOneWidget);
+  });
+
   testWidgets(
     'source delete hydration failure requires reload and never retries',
     (tester) async {
@@ -576,6 +724,21 @@ final class _ProposalHydrationFailureVault extends MemoryVaultBackend {
       throw StateError('post-proposal listProposals failed');
     }
     return super.listProposals(noteId);
+  }
+}
+
+final class _FailingBatchDeleteVault extends MemoryVaultBackend {
+  _FailingBatchDeleteVault() : super(seedExampleData: false);
+
+  int deleteSourceCalls = 0;
+
+  @override
+  Future<void> deleteSource(SourceItem source) async {
+    deleteSourceCalls += 1;
+    await super.deleteSource(source);
+    if (deleteSourceCalls == 2) {
+      throw StateError('second source delete failed');
+    }
   }
 }
 

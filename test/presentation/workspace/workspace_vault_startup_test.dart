@@ -506,10 +506,7 @@ void main() {
       await pumpWorkspace(tester, vault: null, dependencies: dependencies);
 
       expect(find.text('First'), findsWidgets);
-      expect(
-        primaryButtonColor(tester, const Key('add-image-button')),
-        CupertinoColors.systemBlue,
-      );
+      expect(workspaceAccentColor(tester), CupertinoColors.systemBlue);
 
       await tester.tap(find.byKey(const Key('vault-location-button')));
       await tester.pumpAndSettle();
@@ -525,10 +522,7 @@ void main() {
       expect(providerConfigs.last.embeddingModel, 'loaded-embedding');
       expect(semanticSearchFlags, [false, true, true]);
       expect(find.text('Second'), findsWidgets);
-      expect(
-        primaryButtonColor(tester, const Key('add-image-button')),
-        CupertinoColors.systemGreen,
-      );
+      expect(workspaceAccentColor(tester), CupertinoColors.systemGreen);
       expect(find.byKey(const Key('markdown-reading-preview')), findsOneWidget);
     },
   );

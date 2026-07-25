@@ -415,6 +415,25 @@ class _SynapseWorkspaceState extends ConsumerState<SynapseWorkspace> {
         : PaneEditorCommandOutcome.unchanged;
   }
 
+  Future<PaneEditorCommandOutcome> _deleteSources(
+    PaneEditorContext editorContext,
+    List<SourceItem> sources,
+  ) async {
+    if (sources.isEmpty) {
+      return PaneEditorCommandOutcome.unchanged;
+    }
+    final confirmed = await _confirmDelete(
+      title: '删除 ${sources.length} 张图片素材',
+      message: '将删除所选图片素材和对应附件文件。此操作不可撤销。',
+    );
+    if (!_controller.isPaneEditorContextCurrent(editorContext)) {
+      return PaneEditorCommandOutcome.staleTarget;
+    }
+    return confirmed
+        ? _controller.deleteSources(editorContext, sources)
+        : PaneEditorCommandOutcome.unchanged;
+  }
+
   Future<PaneEditorCommandOutcome> _deleteProposal(
     PaneEditorContext editorContext,
     AiProposal proposal,
@@ -428,6 +447,25 @@ class _SynapseWorkspaceState extends ConsumerState<SynapseWorkspace> {
     }
     return confirmed
         ? _controller.deleteProposal(editorContext, proposal)
+        : PaneEditorCommandOutcome.unchanged;
+  }
+
+  Future<PaneEditorCommandOutcome> _deleteProposals(
+    PaneEditorContext editorContext,
+    List<AiProposal> proposals,
+  ) async {
+    if (proposals.isEmpty) {
+      return PaneEditorCommandOutcome.unchanged;
+    }
+    final confirmed = await _confirmDelete(
+      title: '删除 ${proposals.length} 条 AI 建议',
+      message: '将删除所选 AI 建议。已经追加到笔记的内容不会受影响。',
+    );
+    if (!_controller.isPaneEditorContextCurrent(editorContext)) {
+      return PaneEditorCommandOutcome.staleTarget;
+    }
+    return confirmed
+        ? _controller.deleteProposals(editorContext, proposals)
         : PaneEditorCommandOutcome.unchanged;
   }
 
@@ -882,7 +920,9 @@ class _SynapseWorkspaceState extends ConsumerState<SynapseWorkspace> {
       workspace: _workspace,
       controller: _controller,
       onDeleteSource: _deleteSource,
+      onDeleteSources: _deleteSources,
       onDeleteProposal: _deleteProposal,
+      onDeleteProposals: _deleteProposals,
     );
   }
 }

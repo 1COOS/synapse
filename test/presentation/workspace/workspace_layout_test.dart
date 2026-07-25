@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:synapse/domain/vault/vault_resource.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
@@ -24,7 +25,7 @@ void main() {
     expect(find.byKey(const Key('left-pane-mode-search')), findsOneWidget);
     expect(find.byKey(const Key('center-pane-title-icon')), findsNothing);
     expect(find.byKey(const Key('right-pane-title-icon')), findsOneWidget);
-    expect(find.text('素材与 AI'), findsOneWidget);
+    expect(find.text('素材与 AI'), findsNothing);
     expect(find.text('Synapse'), findsNothing);
     expect(find.text('AI 建议'), findsOneWidget);
     expect(find.byKey(const Key('note-mode-reading')), findsOneWidget);
@@ -50,25 +51,73 @@ void main() {
     expect(find.text('加入文本'), findsNothing);
   });
 
-  testWidgets('keeps macOS titlebar controls aligned with the left pane', (
+  testWidgets('keeps compact macOS titlebar controls aligned in one row', (
     tester,
   ) async {
     debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
     try {
       await pumpWorkspace(tester, vault: MemoryVaultBackend());
 
+      final titlebarRect = tester.getRect(
+        find.byKey(const Key('workspace-titlebar')),
+      );
       final leftPaneRight = tester
           .getRect(find.byKey(const Key('resource-pane')))
           .right;
-      final collapseCenter = tester.getCenter(
-        find.byKey(const Key('collapse-left-pane-button')),
-      );
+      final titlebarControlKeys = [
+        const Key('left-pane-mode-resources'),
+        const Key('left-pane-mode-search'),
+        const Key('collapse-left-pane-button'),
+        const Key('split-pane-left-button'),
+        const Key('collapse-right-pane-button'),
+      ];
 
-      expect(collapseCenter.dx, lessThan(leftPaneRight));
+      expect(titlebarRect.height, 32);
+      for (final key in titlebarControlKeys) {
+        final controlRect = tester.getRect(find.byKey(key));
+        expect(controlRect.height, 28, reason: '$key should be compact');
+        expect(
+          controlRect.center.dy,
+          closeTo(titlebarRect.center.dy, 0.1),
+          reason: '$key should align with the native titlebar row',
+        );
+      }
+      expect(
+        tester.getRect(find.byKey(const Key('left-pane-mode-resources'))).left,
+        greaterThanOrEqualTo(78),
+      );
+      expect(
+        tester.getCenter(find.byKey(const Key('collapse-left-pane-button'))).dx,
+        lessThan(leftPaneRight),
+      );
       expect(find.byKey(const Key('center-pane-title-icon')), findsNothing);
     } finally {
       debugDefaultTargetPlatformOverride = null;
     }
+  });
+
+  testWidgets('shows subtle hover feedback on compact titlebar actions', (
+    tester,
+  ) async {
+    await pumpWorkspace(tester, vault: MemoryVaultBackend());
+
+    final action = find.byKey(const Key('split-pane-left-button'));
+    final decorationFinder = find.descendant(
+      of: action,
+      matching: find.byType(AnimatedContainer),
+    );
+    final before = tester.widget<AnimatedContainer>(decorationFinder);
+    final beforeColor = (before.decoration! as BoxDecoration).color;
+
+    final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+    addTearDown(mouse.removePointer);
+    await mouse.addPointer(location: Offset.zero);
+    await mouse.moveTo(tester.getCenter(action));
+    await tester.pumpAndSettle();
+
+    final after = tester.widget<AnimatedContainer>(decorationFinder);
+    final afterColor = (after.decoration! as BoxDecoration).color;
+    expect(afterColor, isNot(beforeColor));
   });
 
   testWidgets('collapses side panes to icon rails and keeps footer actions', (
@@ -99,6 +148,21 @@ void main() {
     expect(find.byKey(const Key('right-workflow-rail-button')), findsOneWidget);
     expect(find.bySemanticsLabel('展开素材与 AI，1 条待处理'), findsOneWidget);
     expect(find.byKey(const Key('note-pane')), findsOneWidget);
+    expect(find.text('素材与 AI'), findsNothing);
+    expect(
+      find.byKey(const Key('titlebar-expand-right-pane-button')),
+      findsOneWidget,
+    );
+
+    await tester.tap(
+      find.byKey(const Key('titlebar-expand-right-pane-button')),
+    );
+    await tester.pump(const Duration(milliseconds: 250));
+
+    expect(find.byKey(const Key('source-pane')), findsOneWidget);
+    expect(find.byKey(const Key('right-pane-title-icon')), findsOneWidget);
+    expect(find.byKey(const Key('collapse-right-pane-button')), findsOneWidget);
+    expect(find.text('素材与 AI'), findsNothing);
   });
 
   testWidgets('searches the whole vault from the left pane and opens results', (
@@ -230,6 +294,19 @@ void main() {
     expect(find.byKey(const Key('workspace-section-control')), findsOneWidget);
     expect(find.byKey(const Key('resource-pane')), findsOneWidget);
     expect(find.byKey(const Key('note-pane')), findsNothing);
+    final narrowTitlebarRect = tester.getRect(
+      find.byKey(const Key('workspace-titlebar')),
+    );
+    expect(narrowTitlebarRect.height, 32);
+    for (final key in [
+      const Key('left-pane-mode-resources'),
+      const Key('left-pane-mode-search'),
+      const Key('settings-button'),
+    ]) {
+      final controlRect = tester.getRect(find.byKey(key));
+      expect(controlRect.height, 28);
+      expect(controlRect.center.dy, closeTo(narrowTitlebarRect.center.dy, 0.1));
+    }
 
     await tester.tap(find.text('素材'));
     await tester.pump(const Duration(milliseconds: 250));

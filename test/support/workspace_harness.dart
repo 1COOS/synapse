@@ -16,6 +16,7 @@ import 'package:synapse/infrastructure/input/image_input_service.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
 import 'package:synapse/infrastructure/vault/vault_backend.dart';
 import 'package:synapse/main.dart';
+import 'package:synapse/presentation/cupertino/workspace/workspace_theme.dart';
 import 'package:synapse/presentation/workspace/controller/workspace_dependencies.dart';
 import 'package:synapse/presentation/workspace/controller/workspace_controller.dart';
 import 'package:synapse/presentation/workspace/state/workspace_mutation_barrier.dart';
@@ -456,14 +457,15 @@ Color previewImageFrameBorderColor(WidgetTester tester, SourceItem source) {
   return border.top.color;
 }
 
-Color? primaryButtonColor(WidgetTester tester, Key key) {
-  final button = tester.widget<CupertinoButton>(
-    find.descendant(
-      of: find.byKey(key),
-      matching: find.byType(CupertinoButton),
-    ),
+Color workspaceAccentColor(WidgetTester tester) {
+  final scope = find.ancestor(
+    of: find.byKey(const Key('source-pane')),
+    matching: find.byType(WorkspaceAppearanceScope),
   );
-  return button.color;
+  return tester
+      .widget<WorkspaceAppearanceScope>(scope.first)
+      .appearance
+      .accentColor;
 }
 
 bool spanHasBoldText(InlineSpan span, String text) {

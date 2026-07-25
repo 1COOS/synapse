@@ -4,7 +4,6 @@ import 'package:flutter/cupertino.dart';
 
 import '../../workspace/controller/workspace_controller.dart';
 import '../../workspace/state/split_workspace_controller.dart';
-import 'workspace_controls.dart';
 import 'workspace_theme.dart';
 import 'workspace_titlebar.dart';
 
@@ -39,8 +38,8 @@ final class WorkspaceChromeTitlebar extends StatelessWidget {
     return Container(
       key: const Key('workspace-titlebar'),
       height: workspaceTitlebarHeight,
-      decoration: const BoxDecoration(
-        color: workspaceSurfaceColor,
+      color: workspaceSurfaceColor,
+      foregroundDecoration: const BoxDecoration(
         border: Border(bottom: BorderSide(color: workspaceLineColor)),
       ),
       child: Row(
@@ -57,34 +56,36 @@ final class WorkspaceChromeTitlebar extends StatelessWidget {
     return Container(
       key: const Key('workspace-titlebar'),
       height: workspaceTitlebarHeight,
-      padding: const EdgeInsets.symmetric(horizontal: 12),
-      decoration: const BoxDecoration(
-        color: workspaceSurfaceColor,
+      padding: const EdgeInsets.symmetric(horizontal: 6),
+      color: workspaceSurfaceColor,
+      foregroundDecoration: const BoxDecoration(
         border: Border(bottom: BorderSide(color: workspaceLineColor)),
       ),
       child: Row(
         children: [
-          IconAction(
+          ModeIconAction(
             key: const Key('left-pane-mode-resources'),
             label: '资源列表',
             icon: CupertinoIcons.folder,
+            selected: workspace.leftMode == WorkspaceLeftMode.resources,
             onPressed: () {
               controller.setLeftMode(WorkspaceLeftMode.resources);
               controller.setNarrowSection(WorkspaceSection.resources);
             },
           ),
-          const SizedBox(width: 6),
-          IconAction(
+          const SizedBox(width: 4),
+          ModeIconAction(
             key: const Key('left-pane-mode-search'),
             label: '搜索',
             icon: CupertinoIcons.search,
+            selected: workspace.leftMode == WorkspaceLeftMode.search,
             onPressed: () {
               controller.setLeftMode(WorkspaceLeftMode.search);
               controller.setNarrowSection(WorkspaceSection.resources);
             },
           ),
           const Spacer(),
-          IconAction(
+          TitlebarIconAction(
             key: const Key('settings-button'),
             label: '设置',
             icon: CupertinoIcons.gear,
@@ -103,7 +104,7 @@ final class WorkspaceChromeTitlebar extends StatelessWidget {
         return const SizedBox.shrink();
       }
       return WorkspaceTitlebarStrip(
-        child: IconAction(
+        child: TitlebarIconAction(
           key: const Key('titlebar-expand-left-pane-button'),
           label: '展开左栏',
           icon: CupertinoIcons.sidebar_left,
@@ -113,9 +114,9 @@ final class WorkspaceChromeTitlebar extends StatelessWidget {
     }
     final leadingInset = usesNativeMacTitlebar
         ? workspaceMacTitlebarControlReserve
-        : 10.0;
+        : 6.0;
     return Padding(
-      padding: EdgeInsets.only(left: leadingInset, right: 10),
+      padding: EdgeInsets.only(left: leadingInset, right: 6),
       child: Align(
         alignment: Alignment.center,
         child: Row(
@@ -128,7 +129,7 @@ final class WorkspaceChromeTitlebar extends StatelessWidget {
               onPressed: () =>
                   controller.setLeftMode(WorkspaceLeftMode.resources),
             ),
-            const SizedBox(width: 6),
+            const SizedBox(width: 4),
             ModeIconAction(
               key: const Key('left-pane-mode-search'),
               label: '搜索',
@@ -137,7 +138,7 @@ final class WorkspaceChromeTitlebar extends StatelessWidget {
               onPressed: () => controller.setLeftMode(WorkspaceLeftMode.search),
             ),
             const Spacer(),
-            IconAction(
+            TitlebarIconAction(
               key: const Key('collapse-left-pane-button'),
               label: '折叠左栏',
               icon: CupertinoIcons.sidebar_left,
@@ -167,7 +168,7 @@ final class WorkspaceChromeTitlebar extends StatelessWidget {
                 ? null
                 : () => controller.splitFocused(SplitDirection.left),
           ),
-          const SizedBox(width: 6),
+          const SizedBox(width: 4),
           SplitIconAction(
             key: const Key('split-pane-right-button'),
             label: '向右分屏',
@@ -176,7 +177,7 @@ final class WorkspaceChromeTitlebar extends StatelessWidget {
                 ? null
                 : () => controller.splitFocused(SplitDirection.right),
           ),
-          const SizedBox(width: 6),
+          const SizedBox(width: 4),
           SplitIconAction(
             key: const Key('split-pane-up-button'),
             label: '向上分屏',
@@ -185,7 +186,7 @@ final class WorkspaceChromeTitlebar extends StatelessWidget {
                 ? null
                 : () => controller.splitFocused(SplitDirection.up),
           ),
-          const SizedBox(width: 6),
+          const SizedBox(width: 4),
           SplitIconAction(
             key: const Key('split-pane-down-button'),
             label: '向下分屏',
@@ -194,12 +195,11 @@ final class WorkspaceChromeTitlebar extends StatelessWidget {
                 ? null
                 : () => controller.splitFocused(SplitDirection.down),
           ),
-          const SizedBox(width: 10),
-          ModeIconAction(
+          const SizedBox(width: 8),
+          TitlebarIconAction(
             key: const Key('close-split-pane-button'),
             label: '关闭分屏',
             icon: CupertinoIcons.xmark,
-            selected: false,
             onPressed: controlsDisabled || _paneCount(workspace.splitRoot) <= 1
                 ? null
                 : () => unawaited(controller.closeFocusedPane()),
@@ -212,7 +212,7 @@ final class WorkspaceChromeTitlebar extends StatelessWidget {
   Widget _buildRightTitlebar() {
     if (workspace.rightPaneCollapsed) {
       return WorkspaceTitlebarStrip(
-        child: IconAction(
+        child: TitlebarIconAction(
           key: const Key('titlebar-expand-right-pane-button'),
           label: '展开右栏',
           icon: CupertinoIcons.sidebar_right,
@@ -226,13 +226,11 @@ final class WorkspaceChromeTitlebar extends StatelessWidget {
           const Icon(
             CupertinoIcons.photo_on_rectangle,
             key: Key('right-pane-title-icon'),
-            size: 20,
+            size: 16,
             color: workspaceMutedColor,
           ),
-          const SizedBox(width: 7),
-          const Text('素材与 AI', style: TextStyle(fontWeight: FontWeight.w600)),
           const Spacer(),
-          IconAction(
+          TitlebarIconAction(
             key: const Key('collapse-right-pane-button'),
             label: '折叠右栏',
             icon: CupertinoIcons.sidebar_right,

@@ -7,6 +7,12 @@ import '../../workspace/outline_navigation.dart';
 import 'workspace_controls.dart';
 import 'workspace_theme.dart';
 
+const workspaceRightPaneTitleStyle = TextStyle(
+  color: workspaceTextColor,
+  fontSize: 13,
+  fontWeight: FontWeight.w600,
+);
+
 class ImageSourceTile extends StatefulWidget {
   const ImageSourceTile({
     super.key,
@@ -247,11 +253,16 @@ class ProposalCard extends StatelessWidget {
     super.key,
     required this.proposal,
     required this.expanded,
+    required this.selectionMode,
+    required this.selected,
+    required this.selectionKey,
     required this.toggleKey,
+    required this.expandKey,
     required this.copyKey,
     required this.deleteKey,
     required this.applyKey,
     required this.busy,
+    required this.onToggleSelected,
     required this.onToggleExpanded,
     required this.onCopy,
     required this.onDelete,
@@ -260,11 +271,16 @@ class ProposalCard extends StatelessWidget {
 
   final AiProposal proposal;
   final bool expanded;
+  final bool selectionMode;
+  final bool selected;
+  final Key selectionKey;
   final Key toggleKey;
+  final Key expandKey;
   final Key copyKey;
   final Key deleteKey;
   final Key applyKey;
   final bool busy;
+  final VoidCallback onToggleSelected;
   final VoidCallback onToggleExpanded;
   final VoidCallback onCopy;
   final VoidCallback onDelete;
@@ -278,7 +294,10 @@ class ProposalCard extends StatelessWidget {
       padding: const EdgeInsets.all(10),
       decoration: BoxDecoration(
         color: workspaceSurfaceColor,
-        border: Border.all(color: workspaceSoftLineColor),
+        border: Border.all(
+          color: selected ? accentColor : workspaceSoftLineColor,
+          width: selected ? 2 : 1,
+        ),
         borderRadius: workspaceBorderRadius,
       ),
       child: Column(
@@ -286,13 +305,28 @@ class ProposalCard extends StatelessWidget {
         children: [
           Row(
             children: [
+              if (selectionMode) ...[
+                IconAction(
+                  key: selectionKey,
+                  label: selected ? '取消选择建议' : '选择建议',
+                  icon: selected
+                      ? CupertinoIcons.check_mark_circled_solid
+                      : CupertinoIcons.circle,
+                  onPressed: busy ? null : onToggleSelected,
+                ),
+                const SizedBox(width: 4),
+              ],
               Expanded(
                 child: CupertinoButton(
                   key: toggleKey,
                   minimumSize: Size.zero,
                   padding: EdgeInsets.zero,
                   alignment: Alignment.centerLeft,
-                  onPressed: onToggleExpanded,
+                  onPressed: busy
+                      ? null
+                      : selectionMode
+                      ? onToggleSelected
+                      : onToggleExpanded,
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
@@ -300,10 +334,7 @@ class ProposalCard extends StatelessWidget {
                         proposal.title,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          color: workspaceTextColor,
-                          fontWeight: FontWeight.w700,
-                        ),
+                        style: workspaceRightPaneTitleStyle,
                       ),
                       const SizedBox(height: 3),
                       Text(
@@ -319,6 +350,7 @@ class ProposalCard extends StatelessWidget {
                 ),
               ),
               IconAction(
+                key: expandKey,
                 label: expanded ? '收起建议' : '展开建议',
                 icon: expanded
                     ? CupertinoIcons.chevron_up
@@ -330,51 +362,53 @@ class ProposalCard extends StatelessWidget {
           if (expanded) ...[
             const SizedBox(height: 8),
             _SelectableTextBlock(proposal.proposedMarkdown),
-            const SizedBox(height: 10),
-            Row(
-              children: [
-                IconAction(
-                  key: copyKey,
-                  label: '复制建议',
-                  icon: CupertinoIcons.doc_on_doc,
-                  onPressed: busy ? null : onCopy,
-                ),
-                const SizedBox(width: 4),
-                if (proposal.status == ProposalStatus.pending)
-                  Expanded(
-                    child: CupertinoButton(
-                      key: applyKey,
-                      minimumSize: const Size(38, 38),
-                      padding: const EdgeInsets.symmetric(horizontal: 12),
-                      color: busy ? CupertinoColors.systemGrey4 : accentColor,
-                      borderRadius: workspaceBorderRadius,
-                      onPressed: busy ? null : onApply,
-                      child: const Text(
-                        '追加到笔记',
-                        style: TextStyle(color: CupertinoColors.white),
-                      ),
-                    ),
-                  )
-                else
-                  Expanded(
-                    child: Text(
-                      _proposalStatusLabel(proposal.status),
-                      textAlign: TextAlign.center,
-                      style: const TextStyle(
-                        color: workspaceMutedColor,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
+            if (!selectionMode) ...[
+              const SizedBox(height: 10),
+              Row(
+                children: [
+                  IconAction(
+                    key: copyKey,
+                    label: '复制建议',
+                    icon: CupertinoIcons.doc_on_doc,
+                    onPressed: busy ? null : onCopy,
                   ),
-                const SizedBox(width: 4),
-                IconAction(
-                  key: deleteKey,
-                  label: '删除建议',
-                  icon: CupertinoIcons.trash,
-                  onPressed: busy ? null : onDelete,
-                ),
-              ],
-            ),
+                  const SizedBox(width: 4),
+                  if (proposal.status == ProposalStatus.pending)
+                    Expanded(
+                      child: CupertinoButton(
+                        key: applyKey,
+                        minimumSize: const Size(38, 38),
+                        padding: const EdgeInsets.symmetric(horizontal: 12),
+                        color: busy ? CupertinoColors.systemGrey4 : accentColor,
+                        borderRadius: workspaceBorderRadius,
+                        onPressed: busy ? null : onApply,
+                        child: const Text(
+                          '追加到笔记',
+                          style: TextStyle(color: CupertinoColors.white),
+                        ),
+                      ),
+                    )
+                  else
+                    Expanded(
+                      child: Text(
+                        _proposalStatusLabel(proposal.status),
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(
+                          color: workspaceMutedColor,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                  const SizedBox(width: 4),
+                  IconAction(
+                    key: deleteKey,
+                    label: '删除建议',
+                    icon: CupertinoIcons.trash,
+                    onPressed: busy ? null : onDelete,
+                  ),
+                ],
+              ),
+            ],
           ],
         ],
       ),

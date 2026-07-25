@@ -189,10 +189,7 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('Alpha'), findsWidgets);
-      expect(
-        primaryButtonColor(tester, const Key('add-image-button')),
-        CupertinoColors.systemPurple,
-      );
+      expect(workspaceAccentColor(tester), CupertinoColors.systemPurple);
     },
   );
 
@@ -226,10 +223,7 @@ void main() {
       await pumpWorkspace(tester, vault: null, dependencies: dependencies);
       final oldProvider = providers.last;
       final oldIndex = indexes.last;
-      expect(
-        primaryButtonColor(tester, const Key('add-image-button')),
-        CupertinoColors.systemBlue,
-      );
+      expect(workspaceAccentColor(tester), CupertinoColors.systemBlue);
 
       await _enterReplacementSettings(tester);
       failRuntimeBuild = true;
@@ -244,10 +238,7 @@ void main() {
         settingsStore.currentSettings.providerConfig.baseUrl,
         'https://old.example.com/v1',
       );
-      expect(
-        primaryButtonColor(tester, const Key('add-image-button')),
-        CupertinoColors.systemBlue,
-      );
+      expect(workspaceAccentColor(tester), CupertinoColors.systemBlue);
       expect(
         find.textContaining('settings runtime build failed'),
         findsOneWidget,
@@ -308,10 +299,7 @@ void main() {
         settingsStore.currentSettings.providerConfig.baseUrl,
         'https://old.example.com/v1',
       );
-      expect(
-        primaryButtonColor(tester, const Key('add-image-button')),
-        CupertinoColors.systemBlue,
-      );
+      expect(workspaceAccentColor(tester), CupertinoColors.systemBlue);
       expect(find.textContaining('settings save failed'), findsOneWidget);
 
       await tester.tap(find.text('取消'));

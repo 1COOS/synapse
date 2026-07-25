@@ -23,6 +23,9 @@ void main() {
     await pumpWorkspace(tester, vault: vault);
 
     expect(find.text('图片 OCR 整理建议'), findsOneWidget);
+    final proposalTitle = tester.widget<Text>(find.text('图片 OCR 整理建议'));
+    expect(proposalTitle.style?.fontSize, 13);
+    expect(proposalTitle.style?.fontWeight, FontWeight.w600);
 
     await tester.tap(find.byKey(const Key('delete-proposal-button')));
     await tester.pumpAndSettle();
@@ -32,6 +35,165 @@ void main() {
 
     expect(find.text('图片 OCR 整理建议'), findsNothing);
     expect(await vault.listProposals('preview-note.md'), isEmpty);
+  });
+
+  testWidgets('batch manages, selects all, and selectively deletes proposals', (
+    tester,
+  ) async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Batch');
+    await vault.updateMarkdown(noteId: note.id, markdown: '# Batch\nkept');
+    final markdownBeforeDelete = (await vault.readNote(note.id)).markdown;
+    final now = DateTime.now().toUtc();
+    for (final entry in [
+      ('first', ProposalStatus.pending, now),
+      (
+        'second',
+        ProposalStatus.applied,
+        now.subtract(const Duration(minutes: 1)),
+      ),
+      (
+        'third',
+        ProposalStatus.rejected,
+        now.subtract(const Duration(minutes: 2)),
+      ),
+    ]) {
+      await vault.saveProposal(
+        AiProposal(
+          id: entry.$1,
+          noteId: note.id,
+          sourceIds: const [],
+          title: entry.$1,
+          proposedMarkdown: '${entry.$1} body',
+          status: entry.$2,
+          createdAt: entry.$3,
+          updatedAt: entry.$3,
+        ),
+      );
+    }
+
+    await pumpWorkspace(tester, vault: vault);
+    await tester.tap(find.byKey(const Key('proposal-batch-mode-button')));
+    await tester.pump();
+
+    expect(find.byKey(const Key('proposal-select-first')), findsOneWidget);
+    expect(find.byKey(const Key('proposal-select-second')), findsOneWidget);
+    expect(find.byKey(const Key('proposal-select-third')), findsOneWidget);
+    expect(find.byKey(const Key('copy-proposal-button')), findsNothing);
+
+    await tester.tap(find.byKey(const Key('proposal-select-all-button')));
+    await tester.pump();
+    expect(find.text('已选 3/3 条'), findsOneWidget);
+    await tester.tap(find.byKey(const Key('proposal-select-all-button')));
+    await tester.pump();
+    expect(find.text('已选 0/3 条'), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('proposal-select-first')));
+    await tester.tap(find.byKey(const Key('proposal-select-second')));
+    await tester.pump();
+    expect(find.text('已选 2/3 条'), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('delete-selected-proposals-button')));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('删除 2 条 AI 建议'), findsOneWidget);
+    await tester.tap(find.text('取消'));
+    await tester.pumpAndSettle();
+    expect(find.text('已选 2/3 条'), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('delete-selected-proposals-button')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('删除'));
+    await tester.pumpAndSettle();
+
+    expect(
+      (await vault.listProposals(note.id)).map((proposal) => proposal.id),
+      ['third'],
+    );
+    expect((await vault.readNote(note.id)).markdown, markdownBeforeDelete);
+    expect(find.byKey(const Key('proposal-batch-mode-button')), findsOneWidget);
+    expect(
+      find.byKey(const Key('exit-proposal-batch-mode-button')),
+      findsNothing,
+    );
+  });
+
+  testWidgets('rolls back every proposal when a batch delete fails', (
+    tester,
+  ) async {
+    final vault = _FailingProposalBatchDeleteVault();
+    final note = await vault.createNote(parentPath: '', title: 'Rollback');
+    final now = DateTime.now().toUtc();
+    for (final id in ['first', 'second']) {
+      await vault.saveProposal(
+        AiProposal(
+          id: id,
+          noteId: note.id,
+          sourceIds: const [],
+          title: id,
+          proposedMarkdown: '$id body',
+          status: ProposalStatus.pending,
+          createdAt: now,
+          updatedAt: now,
+        ),
+      );
+    }
+
+    await pumpWorkspace(tester, vault: vault);
+    await tester.tap(find.byKey(const Key('proposal-batch-mode-button')));
+    await tester.pump();
+    await tester.tap(find.byKey(const Key('proposal-select-all-button')));
+    await tester.pump();
+    await tester.tap(find.byKey(const Key('delete-selected-proposals-button')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('删除'));
+    await tester.pumpAndSettle();
+
+    expect(await vault.listProposals(note.id), hasLength(2));
+    expect(find.text('已选 2/2 条'), findsOneWidget);
+    expect(
+      find.byKey(const Key('exit-proposal-batch-mode-button')),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('switching notes exits proposal batch management', (
+    tester,
+  ) async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final alpha = await vault.createNote(parentPath: '', title: 'Alpha');
+    final beta = await vault.createNote(parentPath: '', title: 'Beta');
+    final now = DateTime.now().toUtc();
+    for (final note in [alpha, beta]) {
+      await vault.saveProposal(
+        AiProposal(
+          id: '${note.title}-proposal',
+          noteId: note.id,
+          sourceIds: const [],
+          title: '${note.title} proposal',
+          proposedMarkdown: note.title,
+          status: ProposalStatus.pending,
+          createdAt: now,
+          updatedAt: now,
+        ),
+      );
+    }
+
+    await pumpWorkspace(tester, vault: vault);
+    await tester.tap(find.byKey(const Key('proposal-batch-mode-button')));
+    await tester.pump();
+    await tester.tap(find.byKey(const Key('proposal-select-Alpha-proposal')));
+    await tester.pump();
+    expect(find.text('已选 1/1 条'), findsOneWidget);
+
+    await tester.tap(find.byKey(Key('resource-row-${beta.id}')));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('proposal-batch-mode-button')), findsOneWidget);
+    expect(
+      find.byKey(const Key('exit-proposal-batch-mode-button')),
+      findsNothing,
+    );
+    expect(find.text('已选 1/1 条'), findsNothing);
   });
 
   testWidgets(
@@ -1099,6 +1261,21 @@ final class _GatedApplyVault extends MemoryVaultBackend {
     }
     await _appendRelease.future;
     return super.appendMarkdown(noteId: noteId, markdown: markdown);
+  }
+}
+
+final class _FailingProposalBatchDeleteVault extends MemoryVaultBackend {
+  _FailingProposalBatchDeleteVault() : super(seedExampleData: false);
+
+  int deleteProposalCalls = 0;
+
+  @override
+  Future<void> deleteProposal(String proposalId) async {
+    deleteProposalCalls += 1;
+    await super.deleteProposal(proposalId);
+    if (deleteProposalCalls == 2) {
+      throw StateError('second proposal delete failed');
+    }
   }
 }
 

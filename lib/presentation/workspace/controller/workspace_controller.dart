@@ -648,14 +648,16 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
 
   Future<editor_context.PaneEditorCommandOutcome> pasteIntoNote(
     editor_context.PaneEditorContext? context,
-    TextEditingValue? target,
-  ) {
+    TextEditingValue? target, {
+    bool lineInsertion = false,
+  }) {
     if (context == null || target == null) {
       _setMessage('请先选择或创建笔记');
       return Future.value(editor_context.PaneEditorCommandOutcome.unchanged);
     }
     return _editorOperations.runOperation(
-      () => _editor.pasteIntoNote(context, target),
+      () =>
+          _editor.pasteIntoNote(context, target, lineInsertion: lineInsertion),
       context: context,
     );
   }
@@ -694,10 +696,17 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
     editor_context.PaneEditorContext context,
     AiProposal proposal,
   ) {
+    return deleteProposals(context, [proposal]);
+  }
+
+  Future<editor_context.PaneEditorCommandOutcome> deleteProposals(
+    editor_context.PaneEditorContext context,
+    List<AiProposal> proposals,
+  ) {
     return _editorOperations.withSaveScope(
       context,
       () => _editorOperations.runOperation(
-        () => _editor.deleteProposal(context, proposal),
+        () => _editor.deleteProposals(context, proposals),
         context: context,
       ),
     );
@@ -757,10 +766,17 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
     editor_context.PaneEditorContext context,
     SourceItem source,
   ) {
+    return deleteSources(context, [source]);
+  }
+
+  Future<editor_context.PaneEditorCommandOutcome> deleteSources(
+    editor_context.PaneEditorContext context,
+    List<SourceItem> sources,
+  ) {
     return _editorOperations.withSaveScope(
       context,
       () => _editorOperations.runOperation(
-        () => _editor.deleteSource(context, source),
+        () => _editor.deleteSources(context, sources),
         context: context,
       ),
     );

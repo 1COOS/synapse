@@ -46,11 +46,11 @@ const workspaceResourceMenuAnchorStyle = MenuStyle(
   shadowColor: WidgetStatePropertyAll(Color(0x00000000)),
   surfaceTintColor: WidgetStatePropertyAll(Color(0x00000000)),
 );
-const workspaceTitlebarHeight = 52.0;
+const workspaceTitlebarHeight = 32.0;
 const workspaceLeftPaneWidth = 292.0;
 const workspaceRightPaneWidth = 380.0;
 const workspaceCollapsedPaneWidth = 52.0;
-const workspaceMacTitlebarControlReserve = 148.0;
+const workspaceMacTitlebarControlReserve = 78.0;
 const workspaceNoteWorkspaceGutter = 12.0;
 
 class WorkspaceAppearance {

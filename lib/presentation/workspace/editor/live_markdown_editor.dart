@@ -35,6 +35,12 @@ class NoteEditorPasteAvailability {
   bool get canPaste => hasText || hasImage;
 }
 
+typedef NoteEditorPasteCallback =
+    Future<PaneEditorCommandOutcome> Function(
+      TextEditingValue target, {
+      bool lineInsertion,
+    });
+
 class LiveMarkdownEditor extends StatefulWidget {
   const LiveMarkdownEditor({
     super.key,
@@ -61,8 +67,7 @@ class LiveMarkdownEditor extends StatefulWidget {
   final bool focused;
   final VoidCallback onFocusPane;
   final Future<NoteEditorPasteAvailability> Function() pasteAvailability;
-  final Future<PaneEditorCommandOutcome> Function(TextEditingValue target)
-  onPaste;
+  final NoteEditorPasteCallback onPaste;
   final ValueChanged<String?> onImageSelectionChanged;
   final Widget Function(String markdown, {ValueChanged<String>? onImageTap})
   previewBuilder;
@@ -1044,9 +1049,10 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
       return;
     }
     dismissAllMacContextMenus();
+    final lineInsertion = _editorController.activeTrailingInsertion;
     _editorController.syncDocumentSelectionFromBlock(menuTarget: menuTarget);
     final target = widget.controller.value;
-    await widget.onPaste(target);
+    await widget.onPaste(target, lineInsertion: lineInsertion);
     if (mounted) {
       _syncBlockController();
     }
@@ -1390,6 +1396,7 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
         onChanged: _replaceActiveBlock,
         onTap: onTap,
         onSelectionChanged: _handleBlockSelectionChanged,
+        onPaste: () => unawaited(_pasteFromContextMenu()),
         onKeyEvent: _handleBlockKeyEvent,
       ),
     );

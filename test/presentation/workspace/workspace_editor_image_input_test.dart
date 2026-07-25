@@ -1275,6 +1275,99 @@ void main() {
     expect(vault.lastSavedMarkdown, contains('普通剪贴板文本'));
   });
 
+  testWidgets('text paste intent uses the note paste pipeline on a new line', (
+    tester,
+  ) async {
+    const pastedText = '②欲界有段食,有香、味。鼻、舌二根只在欲界起作用';
+    final vault = CountingUpdateVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Paste Study');
+    await vault.updateMarkdown(noteId: note.id, markdown: pastedText);
+    final imageInput = FakeImageInputService();
+    mockClipboardText(pastedText);
+
+    await pumpWorkspace(tester, vault: vault, imageInput: imageInput);
+    await switchToSourceMode(tester);
+    await activateLiveMarkdownBlock(tester, blockIndex: 0);
+    await setActiveLiveMarkdownSelection(
+      tester,
+      const TextSelection.collapsed(offset: pastedText.length),
+    );
+    tester.testTextInput.updateEditingValue(
+      const TextEditingValue(
+        text: '$pastedText\n',
+        selection: TextSelection.collapsed(offset: pastedText.length + 1),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final editableText = activeLiveMarkdownEditableText();
+    Actions.invoke(
+      tester.element(editableText),
+      const PasteTextIntent(SelectionChangedCause.keyboard),
+    );
+    await tester.pumpAndSettle();
+
+    expect(imageInput.pasteCalls, 1);
+    expect(
+      liveMarkdownDocumentController(tester, paneId: 1).text,
+      '$pastedText\n$pastedText',
+    );
+    expect(
+      activeLiveMarkdownTextField(tester).controller.text,
+      '$pastedText\n$pastedText',
+    );
+    expect(
+      find.byKey(const Key('live-markdown-block-preview-1')),
+      findsNothing,
+    );
+  });
+
+  testWidgets('overlapping keyboard paste routes commit text only once', (
+    tester,
+  ) async {
+    const pastedText = '②欲界有段食,有香、味。鼻、舌二根只在欲界起作用';
+    final vault = CountingUpdateVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Paste Race');
+    await vault.updateMarkdown(noteId: note.id, markdown: '# 粘贴竞态\n');
+    final imageInput = GatedImageInputService();
+    mockClipboardText(pastedText);
+
+    await pumpWorkspace(tester, vault: vault, imageInput: imageInput);
+    await switchToSourceMode(tester);
+    await activateLiveMarkdownBlock(tester, blockIndex: 0);
+    await setActiveLiveMarkdownSelection(
+      tester,
+      const TextSelection.collapsed(offset: 6),
+    );
+    tester.testTextInput.updateEditingValue(
+      const TextEditingValue(
+        text: '# 粘贴竞态\n',
+        selection: TextSelection.collapsed(offset: 7),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.metaLeft);
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.keyV);
+    await imageInput.pasteStarted.future;
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.keyV);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.metaLeft);
+    Actions.invoke(
+      tester.element(activeLiveMarkdownEditableText()),
+      const PasteTextIntent(SelectionChangedCause.keyboard),
+    );
+
+    imageInput.releasePaste();
+    await tester.pumpAndSettle();
+
+    expect(imageInput.pasteCalls, 1);
+    expect(
+      liveMarkdownDocumentController(tester, paneId: 1).text,
+      '# 粘贴竞态\n$pastedText',
+    );
+    expect(activeLiveMarkdownTextField(tester).controller.text, pastedText);
+  });
+
   testWidgets('shows guidance when pasting an image without an active note', (
     tester,
   ) async {

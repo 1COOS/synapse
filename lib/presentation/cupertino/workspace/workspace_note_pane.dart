@@ -37,6 +37,7 @@ final class WorkspaceNotePane extends ConsumerStatefulWidget {
 final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
   final _emptyMarkdownController = TextEditingController();
   final _editorPasteFocusNode = FocusNode();
+  Future<PaneEditorCommandOutcome>? _pasteIntoNoteOperation;
 
   WorkspaceController get _controller => widget.controller;
   WorkspaceState get _workspace => widget.workspace;
@@ -96,8 +97,33 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
 
   Future<PaneEditorCommandOutcome> _pasteIntoNoteEditor(
     PaneEditorContext? editorContext,
-    TextEditingValue? target,
-  ) => _controller.pasteIntoNote(editorContext, target);
+    TextEditingValue? target, {
+    bool lineInsertion = false,
+  }) {
+    final inFlight = _pasteIntoNoteOperation;
+    if (inFlight != null) {
+      return inFlight;
+    }
+    final operation = _controller.pasteIntoNote(
+      editorContext,
+      target,
+      lineInsertion: lineInsertion,
+    );
+    _pasteIntoNoteOperation = operation;
+    unawaited(
+      operation.then<void>(
+        (_) => _clearPasteOperation(operation),
+        onError: (Object _, StackTrace _) => _clearPasteOperation(operation),
+      ),
+    );
+    return operation;
+  }
+
+  void _clearPasteOperation(Future<PaneEditorCommandOutcome> operation) {
+    if (identical(_pasteIntoNoteOperation, operation)) {
+      _pasteIntoNoteOperation = null;
+    }
+  }
 
   Future<NoteEditorPasteAvailability> _noteEditorPasteAvailability(
     PaneEditorContext? editorContext,
@@ -422,8 +448,12 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
                     },
                     pasteAvailability: () =>
                         _noteEditorPasteAvailability(editorContext),
-                    onPaste: (target) =>
-                        _pasteIntoNoteEditor(editorContext, target),
+                    onPaste: (target, {lineInsertion = false}) =>
+                        _pasteIntoNoteEditor(
+                          editorContext,
+                          target,
+                          lineInsertion: lineInsertion,
+                        ),
                     onImageSelectionChanged:
                         _controller.setSelectedPreviewImageSrc,
                     previewBuilder: (markdown, {onImageTap}) =>

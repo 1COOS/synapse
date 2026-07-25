@@ -199,10 +199,7 @@ void main() {
       ),
     );
 
-    expect(
-      primaryButtonColor(tester, const Key('add-image-button')),
-      CupertinoColors.systemPurple,
-    );
+    expect(workspaceAccentColor(tester), CupertinoColors.systemPurple);
   });
 
   testWidgets('applies configured note font size to preview and editors', (

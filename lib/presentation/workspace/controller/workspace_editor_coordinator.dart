@@ -156,8 +156,9 @@ final class WorkspaceEditorCoordinator {
 
   Future<PaneEditorCommandOutcome> pasteIntoNote(
     PaneEditorContext context,
-    TextEditingValue target,
-  ) async {
+    TextEditingValue target, {
+    bool lineInsertion = false,
+  }) async {
     if (_resolvePasteTarget(context, target) == null) {
       return PaneEditorCommandOutcome.staleTarget;
     }
@@ -176,7 +177,12 @@ final class WorkspaceEditorCoordinator {
     if (text == null || text.isEmpty) {
       return PaneEditorCommandOutcome.unchanged;
     }
-    _replaceEditorSelection(resolved.session, text, target: target);
+    _replaceEditorSelection(
+      resolved.session,
+      text,
+      target: target,
+      lineInsertion: lineInsertion,
+    );
     return PaneEditorCommandOutcome.committed;
   }
 
@@ -449,12 +455,30 @@ final class WorkspaceEditorCoordinator {
   Future<PaneEditorCommandOutcome> deleteProposal(
     PaneEditorContext context,
     AiProposal proposal,
+  ) {
+    return deleteProposals(context, [proposal]);
+  }
+
+  Future<PaneEditorCommandOutcome> deleteProposals(
+    PaneEditorContext context,
+    Iterable<AiProposal> proposals,
   ) async {
+    final uniqueProposals = <String, AiProposal>{
+      for (final proposal in proposals) proposal.id: proposal,
+    }.values.toList(growable: false);
+    if (uniqueProposals.isEmpty) {
+      return PaneEditorCommandOutcome.unchanged;
+    }
     final resolved = _resolve(context);
     if (resolved == null) {
       return PaneEditorCommandOutcome.staleTarget;
     }
     final targetSession = resolved.session;
+    if (uniqueProposals.any(
+      (proposal) => proposal.noteId != targetSession.noteId,
+    )) {
+      return PaneEditorCommandOutcome.staleTarget;
+    }
     final vault = _runtimes.requireCurrent().vault;
     final result = await _mutations.run<_NoteHydration>(
       WorkspaceMutationPlan<_NoteHydration>(
@@ -463,7 +487,14 @@ final class WorkspaceEditorCoordinator {
         commitBackend: () async {
           _requireCurrentMutationTarget(context, targetSession);
           final noteId = targetSession.noteId;
-          await vault.deleteProposal(proposal.id);
+          await vault.runMutationTransaction(
+            label: 'delete-proposals',
+            action: () async {
+              for (final proposal in uniqueProposals) {
+                await vault.deleteProposal(proposal.id);
+              }
+            },
+          );
           return WorkspaceBackendCommit(
             postCommitHydrate: () async {
               final note = await vault.readNote(noteId);
@@ -483,7 +514,11 @@ final class WorkspaceEditorCoordinator {
           replacementProposalsByNoteId: {
             delta.value.note.id: delta.value.proposals,
           },
-          patch: const WorkspaceStatePatch(message: 'AI 建议已删除'),
+          patch: WorkspaceStatePatch(
+            message: uniqueProposals.length == 1
+                ? 'AI 建议已删除'
+                : '已删除 ${uniqueProposals.length} 条 AI 建议',
+          ),
         ),
       ),
     );
@@ -570,7 +605,20 @@ final class WorkspaceEditorCoordinator {
   Future<PaneEditorCommandOutcome> deleteSource(
     PaneEditorContext context,
     SourceItem source,
+  ) {
+    return deleteSources(context, [source]);
+  }
+
+  Future<PaneEditorCommandOutcome> deleteSources(
+    PaneEditorContext context,
+    Iterable<SourceItem> sources,
   ) async {
+    final requestedSources = <String, SourceItem>{
+      for (final source in sources) source.id: source,
+    }.values.toList(growable: false);
+    if (requestedSources.isEmpty) {
+      return PaneEditorCommandOutcome.unchanged;
+    }
     final resolved = _resolve(context);
     if (resolved == null) {
       return PaneEditorCommandOutcome.staleTarget;
@@ -583,13 +631,25 @@ final class WorkspaceEditorCoordinator {
         dirtyDisposition: DirtyDisposition.flush,
         commitBackend: () async {
           _requireCurrentMutationTarget(context, targetSession);
-          final currentSource = targetSession.note.sources
-              .where((candidate) => candidate.id == source.id)
-              .firstOrNull;
-          if (currentSource == null) {
-            throw StateError('Source not found: ${source.id}');
+          final currentById = {
+            for (final source in targetSession.note.sources) source.id: source,
+          };
+          final currentSources = <SourceItem>[];
+          for (final source in requestedSources) {
+            final current = currentById[source.id];
+            if (current == null) {
+              throw StateError('Source not found: ${source.id}');
+            }
+            currentSources.add(current);
           }
-          await vault.deleteSource(currentSource);
+          await vault.runMutationTransaction(
+            label: 'delete-sources',
+            action: () async {
+              for (final source in currentSources) {
+                await vault.deleteSource(source);
+              }
+            },
+          );
           return WorkspaceBackendCommit(
             postCommitHydrate: () async {
               final note = await vault.readNote(targetSession.noteId);
@@ -606,7 +666,7 @@ final class WorkspaceEditorCoordinator {
           final note = delta.value.note;
           final selected = Set<String>.of(
             _materials.snapshotFor(note.id).selectedSourceIds,
-          )..remove(source.id);
+          )..removeAll(requestedSources.map((source) => source.id));
           return _commits.prepare(
             delta,
             upsertedNotesById: {note.id: note},
@@ -614,7 +674,9 @@ final class WorkspaceEditorCoordinator {
             selectedSourceIdsByNoteId: {note.id: selected},
             patch: WorkspaceStatePatch(
               resources: delta.resources,
-              message: '素材已删除',
+              message: requestedSources.length == 1
+                  ? '素材已删除'
+                  : '已删除 ${requestedSources.length} 个素材',
               selectedPreviewImageSrc: null,
             ),
           );
@@ -689,20 +751,39 @@ final class WorkspaceEditorCoordinator {
     NoteDocumentSession session,
     String replacement, {
     required TextEditingValue target,
+    bool lineInsertion = false,
   }) {
     final controller = session.controller;
     final selection = _normalizedSelection(target);
+    final prefix = lineInsertion
+        ? _lineInsertionPrefix(target.text, selection.start)
+        : '';
+    final suffix = lineInsertion
+        ? _lineInsertionSuffix(target.text, selection.end)
+        : '';
+    final inserted = '$prefix$replacement$suffix';
     controller.value = target.copyWith(
-      text: target.text.replaceRange(
-        selection.start,
-        selection.end,
-        replacement,
-      ),
+      text: target.text.replaceRange(selection.start, selection.end, inserted),
       selection: TextSelection.collapsed(
-        offset: selection.start + replacement.length,
+        offset: selection.start + prefix.length + replacement.length,
       ),
       composing: TextRange.empty,
     );
+  }
+
+  String _lineInsertionPrefix(String text, int offset) {
+    final before = text.substring(0, offset);
+    if (before.isEmpty || before.endsWith('\n')) {
+      return '';
+    }
+    return '\n';
+  }
+
+  String _lineInsertionSuffix(String text, int offset) {
+    if (offset >= text.length || text.startsWith('\n', offset)) {
+      return '';
+    }
+    return '\n';
   }
 
   TextSelection _normalizedSelection(TextEditingValue value) {

@@ -134,10 +134,7 @@ void main() {
       expect(indexes.single.disposeCalls, 0);
       expect(providers.first.disposeCalls, 0);
       expect(providers.last.disposeCalls, 1);
-      expect(
-        primaryButtonColor(tester, const Key('add-image-button')),
-        CupertinoColors.systemBlue,
-      );
+      expect(workspaceAccentColor(tester), CupertinoColors.systemBlue);
       expect(find.textContaining('startup runtime build failed'), findsNothing);
       expect(
         find.byKey(const Key('live-markdown-block-preview-0')),
@@ -190,10 +187,7 @@ void main() {
       expect(runtimeBuilds, 2);
       expect(providers.first.disposeCalls, 0);
       expect(providers.last.disposeCalls, 1);
-      expect(
-        primaryButtonColor(tester, const Key('add-image-button')),
-        CupertinoColors.systemBlue,
-      );
+      expect(workspaceAccentColor(tester), CupertinoColors.systemBlue);
 
       await tester.tap(find.byKey(const Key('settings-button')));
       await tester.pumpAndSettle();
@@ -262,10 +256,7 @@ void main() {
         settingsStore.currentSettings.providerConfig.baseUrl,
         'https://new.example.com/v1',
       );
-      expect(
-        primaryButtonColor(tester, const Key('add-image-button')),
-        CupertinoColors.systemPurple,
-      );
+      expect(workspaceAccentColor(tester), CupertinoColors.systemPurple);
       await _runSearch(tester);
       final userProvider = providers.singleWhere(
         (provider) => provider.id == 'https://new.example.com/v1',
