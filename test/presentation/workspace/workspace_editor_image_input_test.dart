@@ -630,6 +630,72 @@ void main() {
     expect(find.textContaining('图片已粘贴到笔记：1783082971508.png'), findsOneWidget);
   });
 
+  testWidgets('image paste keeps the latest edited area visible', (
+    tester,
+  ) async {
+    final vault = CountingUpdateVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Long Study');
+    await vault.updateMarkdown(
+      noteId: note.id,
+      markdown: List.generate(
+        80,
+        (index) => 'Paragraph $index with enough text to fill the editor.',
+      ).join('\n\n'),
+    );
+    final imageInput = FakeImageInputService(
+      pastedImage: const ImportedImage(
+        filename: 'bottom.png',
+        mimeType: 'image/png',
+        bytes: tinyPng,
+      ),
+    );
+
+    await pumpWorkspace(tester, vault: vault, imageInput: imageInput);
+    await switchToSourceMode(tester);
+
+    final scrollable = tester
+        .stateList<ScrollableState>(
+          find.descendant(
+            of: find.byType(LiveMarkdownEditor),
+            matching: find.byType(Scrollable),
+          ),
+        )
+        .singleWhere((state) => state.position.axis == Axis.vertical);
+    scrollable.position.jumpTo(scrollable.position.maxScrollExtent);
+    await tester.pump();
+    await tester.tap(find.byKey(const Key('live-markdown-end-edit-target')));
+    await tester.pump();
+
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.metaLeft);
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.keyV);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.keyV);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.metaLeft);
+    await tester.pumpAndSettle();
+
+    expect(scrollable.position.pixels, greaterThan(0));
+    final viewport = tester.getRect(find.byType(LiveMarkdownEditor));
+    final endTarget = tester.getRect(
+      find.byKey(const Key('live-markdown-end-edit-target')),
+    );
+    expect(endTarget.top, lessThan(viewport.bottom));
+    expect(endTarget.bottom, greaterThan(viewport.top));
+
+    await tester.tap(find.byKey(const Key('note-mode-reading')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('note-mode-source')));
+    await tester.pumpAndSettle();
+
+    final restoredScrollable = tester
+        .stateList<ScrollableState>(
+          find.descendant(
+            of: find.byType(LiveMarkdownEditor),
+            matching: find.byType(Scrollable),
+          ),
+        )
+        .singleWhere((state) => state.position.axis == Axis.vertical);
+    expect(restoredScrollable.position.pixels, greaterThan(0));
+  });
+
   testWidgets('image paste keeps the caret at a middle insertion point', (
     tester,
   ) async {

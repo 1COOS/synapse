@@ -45,6 +45,7 @@ class LiveMarkdownEditor extends StatefulWidget {
   const LiveMarkdownEditor({
     super.key,
     required this.paneId,
+    required this.noteId,
     required this.controller,
     required this.outlineNodes,
     required this.outlineNavigationController,
@@ -59,6 +60,7 @@ class LiveMarkdownEditor extends StatefulWidget {
   });
 
   final String paneId;
+  final String noteId;
   final TextEditingController controller;
   final List<OutlineNode> outlineNodes;
   final WorkspaceOutlineNavigationController outlineNavigationController;
@@ -157,6 +159,25 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
         return;
       }
       _blockFocusNode.requestFocus();
+      _scheduleKeepLatestEditVisible();
+    });
+  }
+
+  void _scheduleKeepLatestEditVisible() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_scrollController.hasClients) {
+        return;
+      }
+      final targetContext = _activeTextEditorKey.currentContext;
+      if (targetContext == null) {
+        return;
+      }
+      unawaited(
+        Scrollable.ensureVisible(
+          targetContext,
+          alignmentPolicy: ScrollPositionAlignmentPolicy.keepVisibleAtEnd,
+        ),
+      );
     });
   }
 
@@ -225,6 +246,7 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
       return;
     }
     setState(() {});
+    _scheduleKeepLatestEditVisible();
     if (widget.focused && _editorController.activeTrailingInsertion) {
       _focusBlockEditor();
     }
@@ -815,6 +837,7 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
         }
       });
     }
+    _scheduleKeepLatestEditVisible();
   }
 
   Widget _buildContextMenu(
@@ -1055,6 +1078,7 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
     await widget.onPaste(target, lineInsertion: lineInsertion);
     if (mounted) {
       _syncBlockController();
+      _scheduleKeepLatestEditVisible();
     }
   }
 
@@ -1195,9 +1219,12 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
               _openContextMenuAtDocumentEnd(blocks, details.globalPosition);
             },
             child: CupertinoScrollbar(
+              key: _scrollViewportKey,
               controller: _scrollController,
               child: SingleChildScrollView(
-                key: _scrollViewportKey,
+                key: PageStorageKey<String>(
+                  'live-markdown-scroll-${widget.paneId}-${widget.noteId}',
+                ),
                 controller: _scrollController,
                 physics: _tableReordering
                     ? const NeverScrollableScrollPhysics()

@@ -428,7 +428,11 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
                     ),
                   )
                 : LiveMarkdownEditor(
+                    key: ValueKey(
+                      'live-markdown-editor-${resolvedPane?.paneId}-${resolvedSession.noteId}',
+                    ),
                     paneId: resolvedPane?.paneId ?? 'pane-1',
+                    noteId: resolvedSession.noteId,
                     controller: resolvedSession.controller,
                     outlineNodes: outlineNodes,
                     outlineNavigationController:
