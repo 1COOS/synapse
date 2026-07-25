@@ -13,6 +13,8 @@ List<Widget> buildLiveMarkdownContextMenuItems({
   required bool canPaste,
   required bool hasText,
   required bool busy,
+  required VoidCallback onUndo,
+  required VoidCallback onRedo,
   required Future<void> Function(MarkdownCommandTarget? target) onPaste,
 }) {
   final commandState = controller.commandState(menuTarget: menuTarget);
@@ -21,6 +23,21 @@ List<Widget> buildLiveMarkdownContextMenuItems({
   final canFormat = canEdit && commandState.canFormat;
   final shortcuts = _contextMenuShortcuts();
   return [
+    NoteMenuAction(
+      itemKey: const Key('note-menu-undo'),
+      label: '撤销',
+      enabled: canEdit && controller.canUndo,
+      shortcutLabel: shortcuts.undo,
+      onPressed: onUndo,
+    ),
+    NoteMenuAction(
+      itemKey: const Key('note-menu-redo'),
+      label: '重做',
+      enabled: canEdit && controller.canRedo,
+      shortcutLabel: shortcuts.redo,
+      onPressed: onRedo,
+    ),
+    const NoteMenuSeparator(key: Key('note-menu-separator-history')),
     NoteMenuAction(
       itemKey: const Key('note-menu-copy'),
       label: '复制',
@@ -266,10 +283,17 @@ List<Widget> buildLiveMarkdownContextMenuItems({
   ];
 }
 
-({String bold, String italic, String pastePlain}) _contextMenuShortcuts() {
+({String undo, String redo, String bold, String italic, String pastePlain})
+_contextMenuShortcuts() {
   final usesMacSymbols =
       !kIsWeb && defaultTargetPlatform == TargetPlatform.macOS;
   return usesMacSymbols
-      ? (bold: '⌘B', italic: '⌘I', pastePlain: '⇧⌘V')
-      : (bold: 'Ctrl+B', italic: 'Ctrl+I', pastePlain: 'Ctrl+Shift+V');
+      ? (undo: '⌘Z', redo: '⇧⌘Z', bold: '⌘B', italic: '⌘I', pastePlain: '⇧⌘V')
+      : (
+          undo: 'Ctrl+Z',
+          redo: 'Ctrl+Shift+Z',
+          bold: 'Ctrl+B',
+          italic: 'Ctrl+I',
+          pastePlain: 'Ctrl+Shift+V',
+        );
 }

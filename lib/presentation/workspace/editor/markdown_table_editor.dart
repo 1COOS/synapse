@@ -41,6 +41,11 @@ class MarkdownTableFrame extends StatefulWidget {
     this.onInteractionEnd,
     this.verticalScrollController,
     this.verticalViewportKey,
+    this.selected = false,
+    this.selectionTargetKey,
+    this.onFrameTap,
+    this.onFrameSecondaryTapDown,
+    this.onContentTap,
   });
 
   final Key? surfaceKey;
@@ -63,6 +68,11 @@ class MarkdownTableFrame extends StatefulWidget {
   final VoidCallback? onInteractionEnd;
   final ScrollController? verticalScrollController;
   final GlobalKey? verticalViewportKey;
+  final bool selected;
+  final Key? selectionTargetKey;
+  final VoidCallback? onFrameTap;
+  final GestureTapDownCallback? onFrameSecondaryTapDown;
+  final VoidCallback? onContentTap;
 
   @override
   State<MarkdownTableFrame> createState() => _MarkdownTableFrameState();
@@ -154,29 +164,57 @@ class _MarkdownTableFrameState extends State<MarkdownTableFrame> {
           SizedBox(
             key: widget.surfaceKey,
             width: tableWidth,
-            child: Table(
-              columnWidths: {
-                for (var index = 0; index < columnWidths.length; index += 1)
-                  index: FixedColumnWidth(columnWidths[index]),
-              },
-              border: TableBorder.all(color: workspaceSoftLineColor),
-              defaultVerticalAlignment: TableCellVerticalAlignment.middle,
+            child: Stack(
               children: [
-                _buildTableRow(
-                  context: context,
-                  rowIndex: 0,
-                  cells: widget.table.header,
-                ),
-                for (
-                  var rowIndex = 0;
-                  rowIndex < widget.table.rows.length;
-                  rowIndex += 1
-                )
-                  _buildTableRow(
-                    context: context,
-                    rowIndex: rowIndex + 1,
-                    cells: widget.table.rows[rowIndex],
+                GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: widget.onContentTap,
+                  child: Table(
+                    columnWidths: {
+                      for (
+                        var index = 0;
+                        index < columnWidths.length;
+                        index += 1
+                      )
+                        index: FixedColumnWidth(columnWidths[index]),
+                    },
+                    border: TableBorder.all(color: workspaceSoftLineColor),
+                    defaultVerticalAlignment: TableCellVerticalAlignment.middle,
+                    children: [
+                      _buildTableRow(
+                        context: context,
+                        rowIndex: 0,
+                        cells: widget.table.header,
+                      ),
+                      for (
+                        var rowIndex = 0;
+                        rowIndex < widget.table.rows.length;
+                        rowIndex += 1
+                      )
+                        _buildTableRow(
+                          context: context,
+                          rowIndex: rowIndex + 1,
+                          cells: widget.table.rows[rowIndex],
+                        ),
+                    ],
                   ),
+                ),
+                if (widget.selected)
+                  Positioned.fill(
+                    child: IgnorePointer(
+                      child: DecoratedBox(
+                        decoration: BoxDecoration(
+                          border: Border.all(
+                            color: appearance.accentColor,
+                            width: 2,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                if (widget.onFrameTap != null ||
+                    widget.onFrameSecondaryTapDown != null)
+                  ..._buildFrameSelectionTargets(),
               ],
             ),
           ),
@@ -224,6 +262,43 @@ class _MarkdownTableFrameState extends State<MarkdownTableFrame> {
         ],
       ),
     );
+  }
+
+  List<Widget> _buildFrameSelectionTargets() {
+    Widget target({Key? key}) {
+      return GestureDetector(
+        key: key,
+        behavior: HitTestBehavior.opaque,
+        onTap: widget.onFrameTap,
+        onSecondaryTapDown: widget.onFrameSecondaryTapDown,
+      );
+    }
+
+    const extent = 7.0;
+    return [
+      Positioned(
+        top: 0,
+        left: 0,
+        right: 0,
+        height: extent,
+        child: target(key: widget.selectionTargetKey),
+      ),
+      Positioned(bottom: 0, left: 0, right: 0, height: extent, child: target()),
+      Positioned(
+        top: extent,
+        bottom: extent,
+        left: 0,
+        width: extent,
+        child: target(),
+      ),
+      Positioned(
+        top: extent,
+        bottom: extent,
+        right: 0,
+        width: extent,
+        child: target(),
+      ),
+    ];
   }
 
   TableRow _buildTableRow({
@@ -1085,6 +1160,7 @@ class LiveMarkdownTableEditor extends StatefulWidget {
     this.verticalViewportKey,
     this.onReorderStateChanged,
     required this.onFocusPane,
+    required this.onDeleteTable,
     required this.onChanged,
   });
 
@@ -1099,6 +1175,7 @@ class LiveMarkdownTableEditor extends StatefulWidget {
   final GlobalKey? verticalViewportKey;
   final ValueChanged<bool>? onReorderStateChanged;
   final VoidCallback onFocusPane;
+  final VoidCallback onDeleteTable;
   final ValueChanged<MarkdownLiveTable> onChanged;
 
   @override
@@ -1355,6 +1432,13 @@ class _LiveMarkdownTableEditorState extends State<LiveMarkdownTableEditor> {
                 onPressed: () => _deleteColumn(row, column),
               ),
             ],
+          ),
+          const NoteMenuSeparator(),
+          NoteMenuAction(
+            itemKey: const Key('note-menu-delete-table'),
+            label: '删除表格',
+            enabled: widget.enabled,
+            onPressed: widget.onDeleteTable,
           ),
         ],
       ),

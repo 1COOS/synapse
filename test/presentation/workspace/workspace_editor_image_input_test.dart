@@ -1,6 +1,8 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -10,67 +12,111 @@ import 'package:synapse/infrastructure/input/image_input_service.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
 import 'package:synapse/presentation/workspace/editor/live_markdown_editor.dart';
 import 'package:synapse/presentation/workspace/editor/pane_editor_context.dart';
+import 'package:synapse/presentation/workspace/editor/preview_image_block.dart';
 
 import '../../support/workspace_fakes.dart';
 import '../../support/workspace_harness.dart';
 
 void main() {
-  testWidgets('live editor never shows image source tags', (tester) async {
-    final vault = CountingUpdateVaultBackend(seedExampleData: false);
-    final note = await vault.createNote(parentPath: '', title: 'Image Study');
-    final source = await vault.addImageSource(
-      noteId: note.id,
-      filename: 'pasted.png',
-      mimeType: 'image/png',
-      bytes: tinyPng,
-    );
-    await vault.updateMarkdown(
-      noteId: note.id,
-      markdown:
-          '# Image Study\n\n'
-          '<img src="Image Study.assets/attachments/pasted.png" '
-          'width="360">',
-    );
-    vault.updateCalls = 0;
-    vault.lastSavedMarkdown = null;
+  testWidgets(
+    'selected block image exposes a selectable deletable source tag',
+    (tester) async {
+      final vault = CountingUpdateVaultBackend(seedExampleData: false);
+      final note = await vault.createNote(parentPath: '', title: 'Image Study');
+      final source = await vault.addImageSource(
+        noteId: note.id,
+        filename: 'pasted.png',
+        mimeType: 'image/png',
+        bytes: tinyPng,
+      );
+      await vault.updateMarkdown(
+        noteId: note.id,
+        markdown:
+            '# Image Study\n\n'
+            '<img src="Image Study.assets/attachments/pasted.png" '
+            'width="360">',
+      );
+      vault.updateCalls = 0;
+      vault.lastSavedMarkdown = null;
 
-    await pumpWorkspace(tester, vault: vault);
-    await tester.pumpAndSettle();
+      await pumpWorkspace(tester, vault: vault);
+      await tester.pumpAndSettle();
 
-    expect(find.byKey(Key('preview-image-${source.id}')), findsOneWidget);
-    expect(find.textContaining('<img'), findsNothing);
-    expect(
-      find.byKey(const Key('live-markdown-image-tag-editor-2')),
-      findsNothing,
-    );
+      expect(find.byKey(Key('preview-image-${source.id}')), findsOneWidget);
+      expect(find.textContaining('<img'), findsNothing);
+      expect(
+        find.byKey(const Key('live-markdown-image-tag-editor-2')),
+        findsNothing,
+      );
 
-    await tester.tap(find.byKey(Key('preview-image-tap-${source.id}')));
-    await tester.pumpAndSettle();
+      await tester.tap(find.byKey(Key('preview-image-tap-${source.id}')));
+      await tester.pumpAndSettle();
 
-    expect(find.byKey(Key('preview-image-${source.id}')), findsOneWidget);
-    expect(
-      find.byKey(const Key('live-markdown-image-preview-2')),
-      findsOneWidget,
-    );
-    expect(
-      find.descendant(
-        of: find.byKey(const Key('live-markdown-image-preview-2')),
-        matching: find.byType(Image),
-      ),
-      findsOneWidget,
-    );
-    expect(
-      previewImageFrameBorderColor(tester, source),
-      CupertinoColors.activeBlue,
-    );
-    expect(find.byKey(const Key('live-markdown-block-editor-2')), findsNothing);
-    expect(
-      find.byKey(const Key('live-markdown-image-tag-editor-2')),
-      findsNothing,
-    );
-    expect(find.byKey(const Key('note-editor')), findsNothing);
-    expect(find.textContaining('<img'), findsNothing);
-  });
+      final imageTagEditor = find.byKey(
+        const Key('live-markdown-image-tag-editor-2'),
+      );
+      expect(imageTagEditor, findsOneWidget);
+      expect(find.byKey(Key('preview-image-${source.id}')), findsOneWidget);
+      expect(
+        previewImageFrameBorderColor(tester, source),
+        CupertinoColors.activeBlue,
+      );
+      expect(
+        find.byKey(const Key('live-markdown-block-editor-2')),
+        findsOneWidget,
+      );
+      expect(find.byKey(const Key('note-editor')), findsOneWidget);
+      final noteEditor = activeLiveMarkdownTextField(tester);
+      expect(
+        noteEditor.controller.text,
+        '<img src="Image Study.assets/attachments/pasted.png" width="360">',
+      );
+      await setActiveLiveMarkdownSelection(
+        tester,
+        TextSelection(
+          baseOffset: 0,
+          extentOffset: noteEditor.controller.text.length,
+        ),
+      );
+      expect(noteEditor.controller.selection.isCollapsed, isFalse);
+
+      activeLiveMarkdownEditableTextState(tester).updateEditingValue(
+        const TextEditingValue(
+          text: '',
+          selection: TextSelection.collapsed(offset: 0),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final editor = tester.widget<LiveMarkdownEditor>(
+        find.byType(LiveMarkdownEditor),
+      );
+      expect(editor.controller.text, '# Image Study\n\n');
+      expect(find.byKey(Key('preview-image-${source.id}')), findsNothing);
+
+      final undoModifier =
+          !kIsWeb && defaultTargetPlatform == TargetPlatform.macOS
+          ? LogicalKeyboardKey.metaLeft
+          : LogicalKeyboardKey.controlLeft;
+      await tester.sendKeyDownEvent(undoModifier);
+      await tester.sendKeyEvent(LogicalKeyboardKey.keyZ);
+      await tester.sendKeyUpEvent(undoModifier);
+      await tester.pumpAndSettle();
+
+      expect(editor.controller.text, contains('attachments/pasted.png'));
+      expect(find.byKey(Key('preview-image-${source.id}')), findsOneWidget);
+
+      await tester.sendKeyDownEvent(undoModifier);
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+      await tester.sendKeyEvent(LogicalKeyboardKey.keyZ);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+      await tester.sendKeyUpEvent(undoModifier);
+      await tester.pumpAndSettle();
+
+      expect(editor.controller.text, '# Image Study\n\n');
+      expect(find.byKey(Key('preview-image-${source.id}')), findsNothing);
+    },
+  );
 
   testWidgets('live editor keeps image preview for mixed image blocks', (
     tester,
@@ -121,10 +167,13 @@ void main() {
     );
     expect(
       find.byKey(const Key('live-markdown-image-tag-editor-2')),
-      findsNothing,
+      findsOneWidget,
     );
-    expect(find.byKey(const Key('note-editor')), findsNothing);
-    expect(find.textContaining('<img'), findsNothing);
+    expect(find.byKey(const Key('note-editor')), findsOneWidget);
+    expect(
+      activeLiveMarkdownTextField(tester).controller.text,
+      '$firstTag $secondTag',
+    );
   });
 
   testWidgets('text alongside an image uses the full editable flow', (
@@ -272,7 +321,11 @@ void main() {
     );
     expect(find.byKey(Key('preview-image-${first.id}')), findsOneWidget);
     expect(find.byKey(Key('preview-image-${second.id}')), findsOneWidget);
-    expect(find.textContaining('<img', findRichText: true), findsNothing);
+    expect(
+      find.byKey(const Key('live-markdown-image-tag-editor-3')),
+      findsOneWidget,
+    );
+    expect(activeLiveMarkdownTextField(tester).controller.text, secondTag);
   });
 
   testWidgets(
@@ -633,6 +686,7 @@ void main() {
   testWidgets('image paste keeps the latest edited area visible', (
     tester,
   ) async {
+    final largePng = File('web/icons/Icon-512.png').readAsBytesSync();
     final vault = CountingUpdateVaultBackend(seedExampleData: false);
     final note = await vault.createNote(parentPath: '', title: 'Long Study');
     await vault.updateMarkdown(
@@ -643,10 +697,10 @@ void main() {
       ).join('\n\n'),
     );
     final imageInput = FakeImageInputService(
-      pastedImage: const ImportedImage(
+      pastedImage: ImportedImage(
         filename: 'bottom.png',
         mimeType: 'image/png',
-        bytes: tinyPng,
+        bytes: largePng,
       ),
     );
 
@@ -663,22 +717,41 @@ void main() {
         .singleWhere((state) => state.position.axis == Axis.vertical);
     scrollable.position.jumpTo(scrollable.position.maxScrollExtent);
     await tester.pump();
-    await tester.tap(find.byKey(const Key('live-markdown-end-edit-target')));
-    await tester.pump();
-
+    await activateLiveMarkdownBlock(tester, blockIndex: 158);
+    final lastParagraphEditor = activeLiveMarkdownTextField(tester);
+    await setActiveLiveMarkdownSelection(
+      tester,
+      TextSelection.collapsed(
+        offset: lastParagraphEditor.controller.text.length,
+      ),
+    );
     await tester.sendKeyDownEvent(LogicalKeyboardKey.metaLeft);
     await tester.sendKeyDownEvent(LogicalKeyboardKey.keyV);
     await tester.sendKeyUpEvent(LogicalKeyboardKey.keyV);
     await tester.sendKeyUpEvent(LogicalKeyboardKey.metaLeft);
     await tester.pumpAndSettle();
+    final placeholderEditorTop = tester
+        .getRect(find.byKey(const Key('note-editor')))
+        .top;
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 100)),
+    );
+    await tester.pump();
+    final decodedEditorTop = tester
+        .getRect(find.byKey(const Key('note-editor')))
+        .top;
+    expect(decodedEditorTop, closeTo(placeholderEditorTop, 0.5));
+    await tester.pumpAndSettle();
 
     expect(scrollable.position.pixels, greaterThan(0));
     final viewport = tester.getRect(find.byType(LiveMarkdownEditor));
-    final endTarget = tester.getRect(
-      find.byKey(const Key('live-markdown-end-edit-target')),
-    );
-    expect(endTarget.top, lessThan(viewport.bottom));
-    expect(endTarget.bottom, greaterThan(viewport.top));
+    final pastedImage = tester.getRect(find.byType(PreviewImageBlock));
+    final activeEditor = tester.getRect(find.byKey(const Key('note-editor')));
+    expect(pastedImage.height, greaterThan(96));
+    expect(pastedImage.top, lessThan(viewport.bottom));
+    expect(pastedImage.bottom, greaterThan(viewport.top));
+    expect(activeEditor.top, lessThan(viewport.bottom));
+    expect(activeEditor.bottom, greaterThan(viewport.top));
 
     await tester.tap(find.byKey(const Key('note-mode-reading')));
     await tester.pumpAndSettle();

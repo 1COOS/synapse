@@ -1447,6 +1447,56 @@ void main() {
     );
   });
 
+  testWidgets('editor context menu exposes working undo and redo', (
+    tester,
+  ) async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Undo Study');
+    await vault.updateMarkdown(noteId: note.id, markdown: 'Alpha beta\n');
+
+    await pumpWorkspace(tester, vault: vault);
+    await switchToSourceMode(tester);
+    await activateLiveMarkdownBlock(tester, blockIndex: 0);
+    activeLiveMarkdownEditableTextState(tester).updateEditingValue(
+      const TextEditingValue(
+        text: 'Alpha beta gamma',
+        selection: TextSelection.collapsed(offset: 16),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await openNoteContextMenu(tester);
+    final macShortcuts =
+        !kIsWeb && defaultTargetPlatform == TargetPlatform.macOS;
+    expect(find.byKey(const Key('note-menu-undo')), findsOneWidget);
+    expect(find.text('撤销'), findsOneWidget);
+    expect(find.text(macShortcuts ? '⌘Z' : 'Ctrl+Z'), findsOneWidget);
+    expect(find.byKey(const Key('note-menu-redo')), findsOneWidget);
+    expect(find.text('重做'), findsOneWidget);
+    expect(find.text(macShortcuts ? '⇧⌘Z' : 'Ctrl+Shift+Z'), findsOneWidget);
+
+    final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+    await clickNoteMenuItemWithMouse(
+      tester,
+      mouse,
+      const Key('note-menu-undo'),
+    );
+    expect(activeLiveMarkdownTextField(tester).controller.text, 'Alpha beta');
+
+    await openNoteContextMenu(tester);
+    await clickNoteMenuItemWithMouse(
+      tester,
+      mouse,
+      const Key('note-menu-redo'),
+    );
+    await mouse.removePointer();
+
+    expect(
+      activeLiveMarkdownTextField(tester).controller.text,
+      'Alpha beta gamma',
+    );
+  });
+
   testWidgets(
     'paragraph menu exposes only product heading levels one to four',
     (tester) async {

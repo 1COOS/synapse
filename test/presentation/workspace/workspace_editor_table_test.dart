@@ -1,6 +1,11 @@
+import 'dart:async';
+
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:synapse/infrastructure/input/image_input_service.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
 import 'package:synapse/presentation/cupertino/workspace/workspace_context_menu.dart';
 import 'package:synapse/presentation/workspace/editor/markdown_context_menu.dart';
@@ -42,6 +47,645 @@ bool tableMenuItemEnabled(WidgetTester tester, Key key) {
 }
 
 void main() {
+  testWidgets(
+    'deleting text between tables keeps a hidden markdown separator',
+    (tester) async {
+      final vault = MemoryVaultBackend(seedExampleData: false);
+      final note = await vault.createNote(parentPath: '', title: 'Two Tables');
+      const firstTable = '| A |\n|---|\n| 1 |\n';
+      const secondTable = '| B |\n|---|\n| 2 |\n';
+      await vault.updateMarkdown(
+        noteId: note.id,
+        markdown: '${firstTable}Between\n$secondTable',
+      );
+
+      await pumpWorkspace(tester, vault: vault);
+      await activateLiveMarkdownBlock(tester, blockIndex: 1);
+      activeLiveMarkdownEditableTextState(tester).updateEditingValue(
+        const TextEditingValue(
+          text: '',
+          selection: TextSelection.collapsed(offset: 0),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        liveMarkdownDocumentController(tester, paneId: 1).text,
+        '$firstTable\n$secondTable',
+      );
+      expect(find.byType(Table), findsNWidgets(2));
+      expect(
+        tester
+            .getSize(find.byKey(const Key('live-markdown-table-separator-1')))
+            .height,
+        0,
+      );
+      expect(find.byKey(const Key('note-editor')), findsNothing);
+
+      await tester.tap(find.byKey(const Key('note-mode-reading')));
+      await tester.pumpAndSettle();
+      expect(
+        tester
+            .getSize(
+              find.byKey(const Key('live-markdown-reading-table-separator-1')),
+            )
+            .height,
+        0,
+      );
+    },
+  );
+
+  testWidgets(
+    'table frame selection deletes the whole table and supports undo',
+    (tester) async {
+      final vault = MemoryVaultBackend(seedExampleData: false);
+      final note = await vault.createNote(parentPath: '', title: 'Two Tables');
+      const firstTable = '| A |\n|---|\n| 1 |\n';
+      const secondTable = '| B |\n|---|\n| 2 |\n';
+      await vault.updateMarkdown(
+        noteId: note.id,
+        markdown: '$firstTable\n$secondTable',
+      );
+
+      await pumpWorkspace(tester, vault: vault);
+      await tester.tap(find.byKey(const Key('table-frame-selection-target-0')));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const Key('live-markdown-table-selection-0')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const Key('live-markdown-table-editor-0')),
+        findsNothing,
+      );
+
+      await tester.sendKeyEvent(LogicalKeyboardKey.delete);
+      await tester.pumpAndSettle();
+      expect(find.byType(Table), findsOneWidget);
+      expect(
+        liveMarkdownDocumentController(tester, paneId: 1).text,
+        secondTable,
+      );
+
+      await _sendUndoShortcut(tester);
+      expect(find.byType(Table), findsNWidgets(2));
+      expect(
+        liveMarkdownDocumentController(tester, paneId: 1).text,
+        contains('| A |'),
+      );
+
+      await tester.tap(
+        find.byKey(const Key('table-frame-selection-target-0')),
+        buttons: kSecondaryMouseButton,
+      );
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('note-menu-delete-table')), findsOneWidget);
+      final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+      await clickTableMenuItemWithMouse(
+        tester,
+        mouse,
+        const Key('note-menu-delete-table'),
+      );
+      await mouse.removePointer();
+      expect(find.byType(Table), findsOneWidget);
+
+      await _sendUndoShortcut(tester);
+      await tester.tap(find.byKey(const Key('table-frame-selection-target-0')));
+      await tester.pumpAndSettle();
+      await tester.sendKeyEvent(LogicalKeyboardKey.backspace);
+      await tester.pumpAndSettle();
+      expect(find.byType(Table), findsOneWidget);
+      expect(
+        liveMarkdownDocumentController(tester, paneId: 1).text,
+        secondTable,
+      );
+    },
+  );
+
+  testWidgets('table frame selection and cell editing are mutually exclusive', (
+    tester,
+  ) async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Table Select');
+    await vault.updateMarkdown(
+      noteId: note.id,
+      markdown: '| A |\n|---|\n| 1 |\n',
+    );
+
+    await pumpWorkspace(
+      tester,
+      vault: vault,
+      imageInput: FakeImageInputService(),
+    );
+    await tester.tap(find.byKey(const Key('table-frame-selection-target-0')));
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const Key('live-markdown-table-selection-0')),
+      findsOneWidget,
+    );
+
+    await tester.tap(find.text('1'));
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const Key('live-markdown-table-selection-0')),
+      findsNothing,
+    );
+    expect(
+      find.byKey(const Key('live-markdown-table-editor-0')),
+      findsOneWidget,
+    );
+
+    await tester.tap(find.byKey(const Key('live-markdown-end-edit-target')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('table-frame-selection-target-0')));
+    await tester.pumpAndSettle();
+    await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const Key('live-markdown-table-selection-0')),
+      findsNothing,
+    );
+  });
+
+  testWidgets('selected table menu and shortcuts copy cut and paste', (
+    tester,
+  ) async {
+    final clipboard = _TableTestClipboard();
+    clipboard.install();
+    const table =
+        '<!-- synapse-table width="480" -->\n'
+        '| A | B |\n'
+        '|---|---|\n'
+        '| 1 | first<br>second |\n';
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(
+      parentPath: '',
+      title: 'Table Clipboard',
+    );
+    await vault.updateMarkdown(noteId: note.id, markdown: table);
+
+    await pumpWorkspace(
+      tester,
+      vault: vault,
+      imageInput: FakeImageInputService(),
+    );
+    await tester.tap(
+      find.byKey(const Key('table-frame-selection-target-0')),
+      buttons: kSecondaryMouseButton,
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('note-menu-undo')), findsOneWidget);
+    expect(find.byKey(const Key('note-menu-redo')), findsOneWidget);
+    expect(find.byKey(const Key('note-menu-copy')), findsOneWidget);
+    expect(find.byKey(const Key('note-menu-cut')), findsOneWidget);
+    expect(find.byKey(const Key('note-menu-paste')), findsOneWidget);
+    expect(find.byKey(const Key('note-menu-delete-table')), findsOneWidget);
+
+    var mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+    await clickTableMenuItemWithMouse(
+      tester,
+      mouse,
+      const Key('note-menu-copy'),
+    );
+    await mouse.removePointer();
+    expect(clipboard.text, table);
+
+    await tester.tap(find.byKey(const Key('table-frame-selection-target-0')));
+    await tester.pumpAndSettle();
+    clipboard.text = null;
+    await _sendPrimaryShortcut(tester, LogicalKeyboardKey.keyC);
+    expect(clipboard.text, table);
+
+    await _sendPrimaryShortcut(tester, LogicalKeyboardKey.keyV);
+    expect(find.byType(Table), findsNWidgets(2));
+    await _sendUndoShortcut(tester);
+    await tester.tap(find.byKey(const Key('live-markdown-end-edit-target')));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('table-frame-selection-target-0')));
+    await tester.pumpAndSettle();
+    await _sendPrimaryShortcut(tester, LogicalKeyboardKey.keyX);
+    expect(liveMarkdownDocumentController(tester, paneId: 1).text, isEmpty);
+    expect(clipboard.text, table);
+
+    await _sendUndoShortcut(tester);
+    await tester.tap(find.byKey(const Key('live-markdown-end-edit-target')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('table-frame-selection-target-0')));
+    await tester.pumpAndSettle();
+    await _sendPrimaryShortcut(tester, LogicalKeyboardKey.keyV);
+    expect(find.byType(Table), findsNWidgets(2));
+    expect(
+      liveMarkdownDocumentController(tester, paneId: 1).text,
+      '$table\n$table',
+    );
+  });
+
+  testWidgets(
+    'selected table delegates ordinary text paste to the last caret',
+    (tester) async {
+      const table = '| A |\n|---|\n| 1 |\n';
+      const original = 'BeforeAfter\n\n$table';
+      final clipboard = _TableTestClipboard(text: ' plain');
+      clipboard.install();
+      final vault = MemoryVaultBackend(seedExampleData: false);
+      final note = await vault.createNote(parentPath: '', title: 'Plain Paste');
+      await vault.updateMarkdown(noteId: note.id, markdown: original);
+
+      await pumpWorkspace(
+        tester,
+        vault: vault,
+        imageInput: FakeImageInputService(),
+      );
+      await activateLiveMarkdownBlock(tester, blockIndex: 0);
+      activeLiveMarkdownEditableTextState(tester).updateEditingValue(
+        const TextEditingValue(
+          text: 'BeforeAfter',
+          selection: TextSelection.collapsed(offset: 6),
+        ),
+      );
+      await tester.pump();
+      await tester.tap(find.byKey(const Key('table-frame-selection-target-2')));
+      await tester.pumpAndSettle();
+      await _sendPrimaryShortcut(tester, LogicalKeyboardKey.keyV);
+
+      expect(
+        liveMarkdownDocumentController(tester, paneId: 1).text,
+        'Before plainAfter\n\n$table',
+      );
+      expect(find.byKey(const Key('note-editor')), findsOneWidget);
+    },
+  );
+
+  testWidgets('selected table delegates image paste to the last caret', (
+    tester,
+  ) async {
+    const table = '| A |\n|---|\n| 1 |\n';
+    const original = 'BeforeAfter\n\n$table';
+    final clipboard = _TableTestClipboard();
+    clipboard.install();
+    final imageInput = FakeImageInputService(
+      pastedImage: const ImportedImage(
+        filename: 'table-caret.png',
+        mimeType: 'image/png',
+        bytes: tinyPng,
+      ),
+    );
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(
+      parentPath: '',
+      title: 'Table Image Paste',
+    );
+    await vault.updateMarkdown(noteId: note.id, markdown: original);
+
+    await pumpWorkspace(tester, vault: vault, imageInput: imageInput);
+    await activateLiveMarkdownBlock(tester, blockIndex: 0);
+    activeLiveMarkdownEditableTextState(tester).updateEditingValue(
+      const TextEditingValue(
+        text: 'BeforeAfter',
+        selection: TextSelection.collapsed(offset: 6),
+      ),
+    );
+    await tester.pump();
+    await tester.tap(find.byKey(const Key('table-frame-selection-target-2')));
+    await tester.pumpAndSettle();
+    await _sendPrimaryShortcut(tester, LogicalKeyboardKey.keyV);
+
+    final markdown = liveMarkdownDocumentController(tester, paneId: 1).text;
+    expect(imageInput.pasteCalls, 1);
+    expect(markdown, contains('table-caret.png'));
+    expect(
+      markdown.indexOf('Before'),
+      lessThan(markdown.indexOf('table-caret.png')),
+    );
+    expect(
+      markdown.indexOf('table-caret.png'),
+      lessThan(markdown.indexOf('After')),
+    );
+    expect(markdown, endsWith(table));
+  });
+
+  testWidgets('selected table paste uses the last real text caret', (
+    tester,
+  ) async {
+    const pastedTable = '| P |\n|---|\n| 9 |\n';
+    const originalTable = '| O |\n|---|\n| 1 |\n';
+    const original = 'BeforeAfter\n\n$originalTable';
+    final clipboard = _TableTestClipboard(text: pastedTable);
+    clipboard.install();
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Table Paste');
+    await vault.updateMarkdown(noteId: note.id, markdown: original);
+
+    await pumpWorkspace(
+      tester,
+      vault: vault,
+      imageInput: FakeImageInputService(),
+    );
+    await activateLiveMarkdownBlock(tester, blockIndex: 0);
+    activeLiveMarkdownEditableTextState(tester).updateEditingValue(
+      const TextEditingValue(
+        text: 'BeforeAfter',
+        selection: TextSelection.collapsed(offset: 6),
+      ),
+    );
+    await tester.pump();
+    await tester.tap(
+      find.byKey(const Key('table-frame-selection-target-2')),
+      buttons: kSecondaryMouseButton,
+    );
+    await tester.pumpAndSettle();
+    expect(tableMenuItemEnabled(tester, const Key('note-menu-paste')), isTrue);
+    final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+    await clickTableMenuItemWithMouse(
+      tester,
+      mouse,
+      const Key('note-menu-paste'),
+    );
+    await mouse.removePointer();
+
+    expect(
+      liveMarkdownDocumentController(tester, paneId: 1).text,
+      'Before\n\n$pastedTable\nAfter\n\n$originalTable',
+    );
+    expect(
+      find.byKey(const Key('live-markdown-table-selection-2')),
+      findsOneWidget,
+    );
+
+    await _sendUndoShortcut(tester);
+    expect(liveMarkdownDocumentController(tester, paneId: 1).text, original);
+    expect(
+      liveMarkdownDocumentController(tester, paneId: 1).selection,
+      const TextSelection.collapsed(offset: 6),
+    );
+  });
+
+  testWidgets('table paste without a text caret inserts before the selection', (
+    tester,
+  ) async {
+    const pastedTable = '| P |\n|---|\n| 9 |\n';
+    const selectedTable = '| O |\n|---|\n| 1 |\n';
+    final clipboard = _TableTestClipboard(text: pastedTable);
+    clipboard.install();
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(
+      parentPath: '',
+      title: 'Table Fallback',
+    );
+    await vault.updateMarkdown(noteId: note.id, markdown: selectedTable);
+
+    await pumpWorkspace(tester, vault: vault);
+    await tester.tap(find.byKey(const Key('table-frame-selection-target-0')));
+    await tester.pumpAndSettle();
+    await _sendPrimaryShortcut(tester, LogicalKeyboardKey.keyV);
+
+    expect(
+      liveMarkdownDocumentController(tester, paneId: 1).text,
+      '$pastedTable\n$selectedTable',
+    );
+    expect(
+      find.byKey(const Key('live-markdown-table-selection-0')),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('cut does not delete a stale selected table', (tester) async {
+    final clipboard = _TableTestClipboard(gateSetData: true);
+    clipboard.install();
+    const table = '| A |\n|---|\n| 1 |\n';
+    const changed = '${table}After changed\n';
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Stale Cut');
+    await vault.updateMarkdown(noteId: note.id, markdown: '${table}After\n');
+
+    await pumpWorkspace(tester, vault: vault);
+    await tester.tap(find.byKey(const Key('table-frame-selection-target-0')));
+    await tester.pumpAndSettle();
+    await _sendPrimaryShortcut(tester, LogicalKeyboardKey.keyX, settle: false);
+    await clipboard.setDataStarted.future;
+    liveMarkdownDocumentController(tester, paneId: 1).text = changed;
+    clipboard.releaseSetData();
+    await tester.pumpAndSettle();
+
+    expect(liveMarkdownDocumentController(tester, paneId: 1).text, changed);
+  });
+
+  testWidgets('table paste does not write to a stale selected table', (
+    tester,
+  ) async {
+    const table = '| A |\n|---|\n| 1 |\n';
+    const changed = '${table}After changed\n';
+    final clipboard = _TableTestClipboard(
+      text: '| P |\n|---|\n| 9 |\n',
+      gateGetData: true,
+    );
+    clipboard.install();
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Stale Paste');
+    await vault.updateMarkdown(noteId: note.id, markdown: '${table}After\n');
+
+    await pumpWorkspace(tester, vault: vault);
+    await tester.tap(find.byKey(const Key('table-frame-selection-target-0')));
+    await tester.pumpAndSettle();
+    await _sendPrimaryShortcut(tester, LogicalKeyboardKey.keyV, settle: false);
+    await clipboard.getDataStarted.future;
+    liveMarkdownDocumentController(tester, paneId: 1).text = changed;
+    clipboard.releaseGetData();
+    await tester.pumpAndSettle();
+
+    expect(liveMarkdownDocumentController(tester, paneId: 1).text, changed);
+  });
+
+  testWidgets('selected table drags before arbitrary markdown blocks', (
+    tester,
+  ) async {
+    const table = '| A |\n|---|\n| 1 |\n';
+    const markdown = '# Title\n\nBefore\n\n$table\n![image](a.png)\n';
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Table Drag');
+    await vault.updateMarkdown(noteId: note.id, markdown: markdown);
+
+    await pumpWorkspace(tester, vault: vault);
+    await tester.tap(find.byKey(const Key('table-frame-selection-target-4')));
+    await tester.pumpAndSettle();
+    final source = find.byKey(const Key('markdown-table-block-drag-source-4'));
+    final target = find.byKey(const Key('markdown-table-block-drop-target-0'));
+    final gesture = await tester.startGesture(
+      tester.getCenter(source),
+      kind: PointerDeviceKind.mouse,
+    );
+    await gesture.moveBy(const Offset(0, -12));
+    await tester.pump();
+    final targetRect = tester.getRect(target);
+    await gesture.moveTo(Offset(targetRect.center.dx, targetRect.top + 2));
+    await tester.pump();
+    expect(
+      find.byWidgetPredicate(
+        (widget) =>
+            widget.key.toString().contains('markdown-table-block-drop-line'),
+      ),
+      findsOneWidget,
+    );
+    await gesture.up();
+    await tester.pumpAndSettle();
+
+    expect(
+      liveMarkdownDocumentController(tester, paneId: 1).text,
+      '$table\n# Title\n\nBefore\n\n![image](a.png)\n',
+    );
+    expect(
+      find.byKey(const Key('live-markdown-table-selection-0')),
+      findsOneWidget,
+    );
+
+    await _sendUndoShortcut(tester);
+    expect(liveMarkdownDocumentController(tester, paneId: 1).text, markdown);
+    await _sendRedoShortcut(tester);
+    expect(
+      liveMarkdownDocumentController(tester, paneId: 1).text,
+      '$table\n# Title\n\nBefore\n\n![image](a.png)\n',
+    );
+  });
+
+  testWidgets(
+    'dropping a selected table at its current block boundary is a no-op',
+    (tester) async {
+      const table = '| A |\n|---|\n| 1 |\n';
+      const markdown = 'Before\n\n\n$table\nAfter\n';
+      final vault = MemoryVaultBackend(seedExampleData: false);
+      final note = await vault.createNote(parentPath: '', title: 'Table No-op');
+      await vault.updateMarkdown(noteId: note.id, markdown: markdown);
+
+      await pumpWorkspace(tester, vault: vault);
+      await tester.tap(find.byKey(const Key('table-frame-selection-target-2')));
+      await tester.pumpAndSettle();
+      final source = find.byKey(
+        const Key('markdown-table-block-drag-source-2'),
+      );
+      final target = find.byKey(
+        const Key('markdown-table-block-drop-target-0'),
+      );
+      final gesture = await tester.startGesture(
+        tester.getCenter(source),
+        kind: PointerDeviceKind.mouse,
+      );
+      await gesture.moveBy(const Offset(0, -12));
+      await tester.pump();
+      final targetRect = tester.getRect(target);
+      await gesture.moveTo(Offset(targetRect.center.dx, targetRect.bottom - 2));
+      await tester.pump();
+      await gesture.up();
+      await tester.pumpAndSettle();
+
+      expect(liveMarkdownDocumentController(tester, paneId: 1).text, markdown);
+      expect(
+        find.byKey(const Key('live-markdown-table-selection-2')),
+        findsOneWidget,
+      );
+    },
+  );
+
+  testWidgets('selected table block drag auto-scrolls and stops on cancel', (
+    tester,
+  ) async {
+    const table = '| A |\n|---|\n| 1 |\n';
+    final trailing = List.generate(
+      48,
+      (index) => 'Paragraph $index\n\n',
+    ).join();
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Table Scroll');
+    await vault.updateMarkdown(noteId: note.id, markdown: '$table\n$trailing');
+
+    await pumpWorkspace(tester, vault: vault);
+    await tester.tap(find.byKey(const Key('table-frame-selection-target-0')));
+    await tester.pumpAndSettle();
+    final vertical = tester
+        .stateList<ScrollableState>(find.byType(Scrollable))
+        .firstWhere(
+          (state) =>
+              state.axisDirection == AxisDirection.down &&
+              state.position.maxScrollExtent > 0,
+        );
+    final source = find.byKey(const Key('markdown-table-block-drag-source-0'));
+    final gesture = await tester.startGesture(
+      tester.getCenter(source),
+      kind: PointerDeviceKind.mouse,
+    );
+    await gesture.moveBy(const Offset(0, 12));
+    await tester.pump();
+    final viewportRect = tester.getRect(find.byWidget(vertical.widget));
+    await gesture.moveTo(
+      Offset(tester.getCenter(source).dx, viewportRect.bottom - 2),
+    );
+    await tester.pump(const Duration(milliseconds: 180));
+    expect(vertical.position.pixels, greaterThan(0));
+    await gesture.cancel();
+    await tester.pump();
+    final stoppedOffset = vertical.position.pixels;
+    await tester.pump(const Duration(milliseconds: 180));
+    expect(vertical.position.pixels, stoppedOffset);
+  });
+
+  testWidgets('enter on a selected table activates text after its separator', (
+    tester,
+  ) async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Two Tables');
+    const firstTable = '| A |\n|---|\n| 1 |\n';
+    const secondTable = '| B |\n|---|\n| 2 |\n';
+    const markdown = '$firstTable\n$secondTable';
+    await vault.updateMarkdown(noteId: note.id, markdown: markdown);
+
+    await pumpWorkspace(tester, vault: vault);
+    await tester.tap(find.byKey(const Key('table-frame-selection-target-0')));
+    await tester.pumpAndSettle();
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('note-editor')), findsOneWidget);
+    expect(activeLiveMarkdownTextField(tester).controller.text, isEmpty);
+    expect(activeLiveMarkdownTextField(tester).focusNode.hasFocus, isTrue);
+    expect(liveMarkdownDocumentController(tester, paneId: 1).text, markdown);
+
+    tester.testTextInput.enterText('Between');
+    await tester.pumpAndSettle();
+    expect(
+      liveMarkdownDocumentController(tester, paneId: 1).text,
+      '$firstTable\nBetween\n\n$secondTable',
+    );
+    expect(find.byType(Table), findsNWidgets(2));
+  });
+
+  testWidgets('enter on the last selected table creates trailing text space', (
+    tester,
+  ) async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Last Table');
+    const table = '| A |\n|---|\n| 1 |\n';
+    await vault.updateMarkdown(noteId: note.id, markdown: table);
+
+    await pumpWorkspace(tester, vault: vault);
+    await tester.tap(find.byKey(const Key('table-frame-selection-target-0')));
+    await tester.pumpAndSettle();
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('note-editor')), findsOneWidget);
+    expect(activeLiveMarkdownTextField(tester).controller.text, isEmpty);
+    expect(liveMarkdownDocumentController(tester, paneId: 1).text, table);
+
+    tester.testTextInput.enterText('After');
+    await tester.pumpAndSettle();
+    expect(
+      liveMarkdownDocumentController(tester, paneId: 1).text,
+      '$table\nAfter',
+    );
+  });
+
   testWidgets('live editor keeps table style when a table is clicked', (
     tester,
   ) async {
@@ -1220,4 +1864,107 @@ void main() {
       480,
     );
   });
+}
+
+Future<void> _sendUndoShortcut(WidgetTester tester) async {
+  await _sendPrimaryShortcut(tester, LogicalKeyboardKey.keyZ);
+}
+
+Future<void> _sendRedoShortcut(WidgetTester tester) async {
+  await _sendPrimaryShortcut(tester, LogicalKeyboardKey.keyZ, shift: true);
+}
+
+Future<void> _sendPrimaryShortcut(
+  WidgetTester tester,
+  LogicalKeyboardKey key, {
+  bool settle = true,
+  bool shift = false,
+}) async {
+  final modifier = !kIsWeb && defaultTargetPlatform == TargetPlatform.macOS
+      ? LogicalKeyboardKey.metaLeft
+      : LogicalKeyboardKey.controlLeft;
+  await tester.sendKeyDownEvent(modifier);
+  if (shift) {
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+  }
+  await tester.sendKeyEvent(key);
+  if (shift) {
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+  }
+  await tester.sendKeyUpEvent(modifier);
+  if (settle) {
+    await tester.pumpAndSettle();
+  }
+}
+
+class _TableTestClipboard {
+  _TableTestClipboard({
+    this.text,
+    this.gateSetData = false,
+    this.gateGetData = false,
+  });
+
+  String? text;
+  final bool gateSetData;
+  final bool gateGetData;
+  final setDataStarted = Completer<void>();
+  final getDataStarted = Completer<void>();
+  Completer<void>? _setDataRelease;
+  Completer<void>? _getDataRelease;
+
+  void install() {
+    if (gateSetData) {
+      _setDataRelease = Completer<void>();
+    }
+    if (gateGetData) {
+      _getDataRelease = Completer<void>();
+    }
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(SystemChannels.platform, (call) async {
+          if (call.method == 'Clipboard.hasStrings') {
+            return <String, Object?>{'value': text != null && text!.isNotEmpty};
+          }
+          if (call.method == 'Clipboard.getData') {
+            if (!getDataStarted.isCompleted) {
+              getDataStarted.complete();
+            }
+            await _getDataRelease?.future;
+            return text == null ? null : <String, Object?>{'text': text};
+          }
+          if (call.method == 'Clipboard.setData') {
+            final arguments = call.arguments as Map<Object?, Object?>?;
+            text = arguments?['text'] as String?;
+            if (!setDataStarted.isCompleted) {
+              setDataStarted.complete();
+            }
+            await _setDataRelease?.future;
+            return null;
+          }
+          return null;
+        });
+    addTearDown(() {
+      if (_setDataRelease != null && !_setDataRelease!.isCompleted) {
+        _setDataRelease!.complete();
+      }
+      if (_getDataRelease != null && !_getDataRelease!.isCompleted) {
+        _getDataRelease!.complete();
+      }
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(SystemChannels.platform, null);
+    });
+  }
+
+  void releaseSetData() {
+    final release = _setDataRelease;
+    if (release != null && !release.isCompleted) {
+      release.complete();
+    }
+  }
+
+  void releaseGetData() {
+    final release = _getDataRelease;
+    if (release != null && !release.isCompleted) {
+      release.complete();
+    }
+  }
 }

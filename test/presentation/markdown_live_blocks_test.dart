@@ -88,6 +88,120 @@ void main() {}
     expect(replaced, '# Title\n\nnew paragraph\n\n- first\n- second\n');
   });
 
+  test('normalizes only blank separators between distinct tables', () {
+    const firstTable = '| A |\n|---|\n| 1 |\n';
+    const secondTable = '| B |\n|---|\n| 2 |\n';
+    const markdown = '$firstTable\n\n\n$secondTable';
+
+    final normalized = normalizeMarkdownTableSeparators(markdown);
+    final blocks = splitMarkdownLiveBlocks(normalized);
+
+    expect(normalized, '$firstTable\n$secondTable');
+    expect(blocks.map((block) => block.kind), [
+      MarkdownLiveBlockKind.table,
+      MarkdownLiveBlockKind.blank,
+      MarkdownLiveBlockKind.table,
+    ]);
+    expect(markdownBlockIsHiddenTableSeparator(blocks, 1), isTrue);
+  });
+
+  test('copies only a complete table block with canonical line endings', () {
+    const markdown =
+        '\n<!-- synapse-table width="480" -->\r\n'
+        '| A | B |\r\n'
+        '|---|---|\r\n'
+        '| 1 | first<br>second |\r\n\r\n';
+
+    expect(
+      markdownTableClipboardText(markdown),
+      '<!-- synapse-table width="480" -->\n'
+      '| A | B |\n'
+      '|---|---|\n'
+      '| 1 | first<br>second |\n',
+    );
+    expect(markdownTableClipboardText('Before\n\n$markdown'), isNull);
+  });
+
+  test('inserts a table as a standalone block at a text caret', () {
+    const table = '| A |\n|---|\n| 1 |\n';
+    final inserted = insertMarkdownTableBlock(
+      markdown: 'BeforeAfter\n',
+      tableMarkdown: table,
+      selectionStart: 6,
+      selectionEnd: 6,
+    )!;
+
+    expect(inserted.markdown, 'Before\n\n$table\nAfter\n');
+    expect(
+      splitMarkdownLiveBlocks(
+        inserted.markdown,
+      ).where((block) => !block.isBlank).map((block) => block.kind),
+      [
+        MarkdownLiveBlockKind.paragraph,
+        MarkdownLiveBlockKind.table,
+        MarkdownLiveBlockKind.paragraph,
+      ],
+    );
+    expect(inserted.tableStart, inserted.markdown.indexOf('| A |'));
+  });
+
+  test('removes one structural separator without swallowing extra blanks', () {
+    const table = '| A |\n|---|\n| 1 |\n';
+    const markdown = 'Before\n\n$table\n\n\nAfter\n';
+    final tableStart = markdown.indexOf('| A |');
+    final removed = removeMarkdownTableBlock(
+      markdown: markdown,
+      tableStart: tableStart,
+    )!;
+
+    expect(removed.markdown, 'Before\n\n\n\nAfter\n');
+  });
+
+  test('moves a table around arbitrary markdown blocks', () {
+    const table = '| A |\n|---|\n| 1 |\n';
+    const markdown = '# Title\n\nBefore\n\n$table\n![image](a.png)\n';
+    final moved = moveMarkdownTableBlock(
+      markdown: markdown,
+      tableStart: markdown.indexOf('| A |'),
+      targetOffset: 0,
+    )!;
+
+    expect(moved.markdown, '$table\n# Title\n\nBefore\n\n![image](a.png)\n');
+    expect(moved.tableStart, 0);
+  });
+
+  test('moving a table to its current block boundary is a no-op', () {
+    const table = '| A |\n|---|\n| 1 |\n';
+    const markdown = 'Before\n\n\n$table\nAfter\n';
+    final blocks = splitMarkdownLiveBlocks(markdown);
+    final previous = blocks.firstWhere(
+      (block) => block.kind == MarkdownLiveBlockKind.paragraph,
+    );
+    final moved = moveMarkdownTableBlock(
+      markdown: markdown,
+      tableStart: markdown.indexOf('| A |'),
+      targetOffset: previous.end,
+    )!;
+
+    expect(moved.markdown, markdown);
+    expect(moved.tableStart, markdown.indexOf('| A |'));
+  });
+
+  test('moving beside another table keeps one hidden separator', () {
+    const first = '| A |\n|---|\n| 1 |\n';
+    const second = '| B |\n|---|\n| 2 |\n';
+    const markdown = '${first}Text\n\n$second';
+    final moved = moveMarkdownTableBlock(
+      markdown: markdown,
+      tableStart: markdown.indexOf('| B |'),
+      targetOffset: 0,
+    )!;
+    final blocks = splitMarkdownLiveBlocks(moved.markdown);
+
+    expect(moved.markdown, '$second\n${first}Text\n');
+    expect(markdownBlockIsHiddenTableSeparator(blocks, 1), isTrue);
+  });
+
   test('parses and serializes markdown tables as stable pipe tables', () {
     const markdown =
         '| Name | Score |\n'

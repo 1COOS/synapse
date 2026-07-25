@@ -160,6 +160,371 @@ int markdownBlockIndexForOffset(List<MarkdownLiveBlock> blocks, int offset) {
   return blocks.length - 1;
 }
 
+bool markdownBlockIsBetweenTables(List<MarkdownLiveBlock> blocks, int index) {
+  if (index < 0 || index >= blocks.length) {
+    return false;
+  }
+  final previous = _nearestNonBlankBlock(blocks, index, previous: true);
+  final next = _nearestNonBlankBlock(blocks, index, previous: false);
+  return previous?.kind == MarkdownLiveBlockKind.table &&
+      next?.kind == MarkdownLiveBlockKind.table;
+}
+
+bool markdownBlockIsHiddenTableSeparator(
+  List<MarkdownLiveBlock> blocks,
+  int index,
+) {
+  return index >= 0 &&
+      index < blocks.length &&
+      blocks[index].isBlank &&
+      markdownBlockIsBetweenTables(blocks, index);
+}
+
+String normalizeMarkdownTableSeparators(String markdown) {
+  final blocks = splitMarkdownLiveBlocks(markdown);
+  if (blocks.length < 3) {
+    return markdown;
+  }
+  final lineBreak = markdown.contains('\r\n') ? '\r\n' : '\n';
+  final replacements = <({int start, int end})>[];
+  for (var index = 0; index < blocks.length; index += 1) {
+    if (!markdownBlockIsHiddenTableSeparator(blocks, index)) {
+      continue;
+    }
+    final previous = _nearestNonBlankBlockIndex(blocks, index, previous: true);
+    final next = _nearestNonBlankBlockIndex(blocks, index, previous: false);
+    if (previous == null || next == null) {
+      continue;
+    }
+    replacements.add((start: blocks[previous].end, end: blocks[next].start));
+  }
+  var normalized = markdown;
+  for (final replacement in replacements.reversed) {
+    normalized = normalized.replaceRange(
+      replacement.start,
+      replacement.end,
+      lineBreak,
+    );
+  }
+  return normalized;
+}
+
+String? markdownTableClipboardText(String markdown) {
+  final table = _completeMarkdownTableBlock(
+    markdown,
+    lineBreak: '\n',
+    trailingNewline: true,
+  );
+  return table;
+}
+
+({String markdown, int removedStart, int removedEnd})?
+removeMarkdownTableBlock({required String markdown, required int tableStart}) {
+  final blocks = splitMarkdownLiveBlocks(markdown);
+  final tableIndex = blocks.indexWhere(
+    (block) =>
+        block.start == tableStart && block.kind == MarkdownLiveBlockKind.table,
+  );
+  if (tableIndex < 0) {
+    return null;
+  }
+  final table = blocks[tableIndex];
+  var removeStart = table.start;
+  var removeEnd = table.end;
+  if (tableIndex + 1 < blocks.length && blocks[tableIndex + 1].isBlank) {
+    removeEnd += _leadingLineBreakLength(blocks[tableIndex + 1].text);
+  } else if (tableIndex > 0 && blocks[tableIndex - 1].isBlank) {
+    removeStart -= _trailingLineBreakLength(blocks[tableIndex - 1].text);
+  }
+  return (
+    markdown: normalizeMarkdownTableSeparators(
+      markdown.replaceRange(removeStart, removeEnd, ''),
+    ),
+    removedStart: removeStart,
+    removedEnd: removeEnd,
+  );
+}
+
+({String markdown, int tableStart, int tableEnd})? insertMarkdownTableBlock({
+  required String markdown,
+  required String tableMarkdown,
+  required int selectionStart,
+  required int selectionEnd,
+}) {
+  final lineBreak = markdown.contains('\r\n') ? '\r\n' : '\n';
+  final tableCore = _completeMarkdownTableBlock(
+    tableMarkdown,
+    lineBreak: lineBreak,
+    trailingNewline: false,
+  );
+  if (tableCore == null) {
+    return null;
+  }
+  final start = selectionStart.clamp(0, markdown.length).toInt();
+  final end = selectionEnd.clamp(0, markdown.length).toInt();
+  final replaceStart = start < end ? start : end;
+  final replaceEnd = start < end ? end : start;
+  final before = markdown.substring(0, replaceStart);
+  final after = markdown.substring(replaceEnd);
+  final prefix = _standaloneBlockPrefix(before, lineBreak);
+  final suffix = _standaloneBlockSuffix(after, lineBreak);
+  final approximateStart = before.length + prefix.length;
+  final inserted = '$before$prefix$tableCore$suffix$after';
+  final normalized = normalizeMarkdownTableSeparators(inserted);
+  final insertedBlock = _nearestMatchingTableBlock(
+    normalized,
+    tableCore: tableCore,
+    approximateStart: approximateStart,
+    lineBreak: lineBreak,
+  );
+  if (insertedBlock == null) {
+    return null;
+  }
+  return (
+    markdown: normalized,
+    tableStart: insertedBlock.start,
+    tableEnd: insertedBlock.end,
+  );
+}
+
+({String markdown, int tableStart, int tableEnd})? moveMarkdownTableBlock({
+  required String markdown,
+  required int tableStart,
+  required int targetOffset,
+}) {
+  final blocks = splitMarkdownLiveBlocks(markdown);
+  final table = blocks.cast<MarkdownLiveBlock?>().firstWhere(
+    (block) =>
+        block?.start == tableStart &&
+        block?.kind == MarkdownLiveBlockKind.table,
+    orElse: () => null,
+  );
+  if (table == null) {
+    return null;
+  }
+  final resolvedTarget = targetOffset.clamp(0, markdown.length).toInt();
+  final tableIndex = blocks.indexWhere(
+    (block) => block.start == table.start && block.end == table.end,
+  );
+  if (_markdownTableMoveKeepsPosition(
+    markdown: markdown,
+    blocks: blocks,
+    tableIndex: tableIndex,
+    targetOffset: resolvedTarget,
+  )) {
+    return (markdown: markdown, tableStart: table.start, tableEnd: table.end);
+  }
+  if (resolvedTarget >= table.start && resolvedTarget <= table.end) {
+    return (markdown: markdown, tableStart: table.start, tableEnd: table.end);
+  }
+  final removed = removeMarkdownTableBlock(
+    markdown: markdown,
+    tableStart: table.start,
+  );
+  if (removed == null) {
+    return null;
+  }
+  final mappedTarget = _remapOffsetAfterChange(
+    before: markdown,
+    after: removed.markdown,
+    offset: resolvedTarget,
+  );
+  return insertMarkdownTableBlock(
+    markdown: removed.markdown,
+    tableMarkdown: table.text,
+    selectionStart: mappedTarget,
+    selectionEnd: mappedTarget,
+  );
+}
+
+bool _markdownTableMoveKeepsPosition({
+  required String markdown,
+  required List<MarkdownLiveBlock> blocks,
+  required int tableIndex,
+  required int targetOffset,
+}) {
+  if (tableIndex < 0 || tableIndex >= blocks.length) {
+    return false;
+  }
+  final table = blocks[tableIndex];
+  final previous = _nearestNonBlankBlock(blocks, tableIndex, previous: true);
+  final next = _nearestNonBlankBlock(blocks, tableIndex, previous: false);
+  return (previous != null && targetOffset == previous.end) ||
+      (next != null && targetOffset == next.start) ||
+      (previous == null && table.start == 0 && targetOffset == 0) ||
+      (next == null &&
+          table.end == markdown.length &&
+          targetOffset == markdown.length);
+}
+
+String? _completeMarkdownTableBlock(
+  String markdown, {
+  required String lineBreak,
+  required bool trailingNewline,
+}) {
+  final normalized = markdown.replaceAll('\r\n', '\n').replaceAll('\r', '\n');
+  final blocks = splitMarkdownLiveBlocks(normalized);
+  final nonBlank = blocks.where((block) => !block.isBlank).toList();
+  if (nonBlank.length != 1 ||
+      nonBlank.single.kind != MarkdownLiveBlockKind.table ||
+      parseMarkdownLiveTable(nonBlank.single.text) == null) {
+    return null;
+  }
+  final core = nonBlank.single.text.replaceFirst(RegExp(r'\n+$'), '');
+  final adapted = core.replaceAll('\n', lineBreak);
+  return trailingNewline ? '$adapted$lineBreak' : adapted;
+}
+
+MarkdownLiveBlock? _nearestMatchingTableBlock(
+  String markdown, {
+  required String tableCore,
+  required int approximateStart,
+  required String lineBreak,
+}) {
+  MarkdownLiveBlock? best;
+  int? bestDistance;
+  for (final block in splitMarkdownLiveBlocks(markdown)) {
+    if (block.kind != MarkdownLiveBlockKind.table) {
+      continue;
+    }
+    final candidateCore = _completeMarkdownTableBlock(
+      block.text,
+      lineBreak: lineBreak,
+      trailingNewline: false,
+    );
+    if (candidateCore != tableCore) {
+      continue;
+    }
+    final distance = (block.start - approximateStart).abs();
+    if (bestDistance == null || distance < bestDistance) {
+      best = block;
+      bestDistance = distance;
+    }
+  }
+  return best;
+}
+
+String _standaloneBlockPrefix(String before, String lineBreak) {
+  if (before.isEmpty) {
+    return '';
+  }
+  final count = _trailingLineBreakCount(before, lineBreak);
+  if (count >= 2) {
+    return '';
+  }
+  return count == 1 ? lineBreak : '$lineBreak$lineBreak';
+}
+
+String _standaloneBlockSuffix(String after, String lineBreak) {
+  if (after.isEmpty) {
+    return lineBreak;
+  }
+  final count = _leadingLineBreakCount(after, lineBreak);
+  if (count >= 2) {
+    return '';
+  }
+  return count == 1 ? lineBreak : '$lineBreak$lineBreak';
+}
+
+int _leadingLineBreakCount(String text, String lineBreak) {
+  var count = 0;
+  var offset = 0;
+  while (text.startsWith(lineBreak, offset)) {
+    count += 1;
+    offset += lineBreak.length;
+  }
+  return count;
+}
+
+int _trailingLineBreakCount(String text, String lineBreak) {
+  var count = 0;
+  var offset = text.length;
+  while (offset >= lineBreak.length &&
+      text.substring(offset - lineBreak.length, offset) == lineBreak) {
+    count += 1;
+    offset -= lineBreak.length;
+  }
+  return count;
+}
+
+int _leadingLineBreakLength(String text) {
+  if (text.startsWith('\r\n')) {
+    return 2;
+  }
+  return text.startsWith('\n') || text.startsWith('\r') ? 1 : 0;
+}
+
+int _trailingLineBreakLength(String text) {
+  if (text.endsWith('\r\n')) {
+    return 2;
+  }
+  return text.endsWith('\n') || text.endsWith('\r') ? 1 : 0;
+}
+
+int _remapOffsetAfterChange({
+  required String before,
+  required String after,
+  required int offset,
+}) {
+  final resolvedOffset = offset.clamp(0, before.length).toInt();
+  var prefix = 0;
+  final prefixLimit = before.length < after.length
+      ? before.length
+      : after.length;
+  while (prefix < prefixLimit &&
+      before.codeUnitAt(prefix) == after.codeUnitAt(prefix)) {
+    prefix += 1;
+  }
+  var suffix = 0;
+  while (suffix < before.length - prefix &&
+      suffix < after.length - prefix &&
+      before.codeUnitAt(before.length - suffix - 1) ==
+          after.codeUnitAt(after.length - suffix - 1)) {
+    suffix += 1;
+  }
+  if (resolvedOffset <= prefix) {
+    return resolvedOffset;
+  }
+  if (resolvedOffset >= before.length - suffix) {
+    return after.length - (before.length - resolvedOffset);
+  }
+  return prefix;
+}
+
+MarkdownLiveBlock? _nearestNonBlankBlock(
+  List<MarkdownLiveBlock> blocks,
+  int index, {
+  required bool previous,
+}) {
+  final resolvedIndex = _nearestNonBlankBlockIndex(
+    blocks,
+    index,
+    previous: previous,
+  );
+  return resolvedIndex == null ? null : blocks[resolvedIndex];
+}
+
+int? _nearestNonBlankBlockIndex(
+  List<MarkdownLiveBlock> blocks,
+  int index, {
+  required bool previous,
+}) {
+  if (previous) {
+    for (var candidate = index - 1; candidate >= 0; candidate -= 1) {
+      if (!blocks[candidate].isBlank) {
+        return candidate;
+      }
+    }
+    return null;
+  }
+  for (var candidate = index + 1; candidate < blocks.length; candidate += 1) {
+    if (!blocks[candidate].isBlank) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
 String replaceMarkdownLiveBlock({
   required String markdown,
   required MarkdownLiveBlock block,

@@ -57,8 +57,14 @@ final class WorkspaceMarkdownRenderer {
   Widget _buildReadingMarkdownBlock(
     MarkdownLiveBlock block,
     int index,
-    PaneEditorContext editorContext,
-  ) {
+    PaneEditorContext editorContext, {
+    bool hiddenTableSeparator = false,
+  }) {
+    if (hiddenTableSeparator) {
+      return SizedBox.shrink(
+        key: Key('live-markdown-reading-table-separator-$index'),
+      );
+    }
     if (block.isBlank) {
       return const SizedBox(height: 12);
     }
@@ -164,6 +170,11 @@ final class WorkspaceMarkdownRenderer {
     String markdown, {
     required PaneEditorContext editorContext,
     ValueChanged<String>? onImageTap,
+    bool tableSelected = false,
+    Key? tableSelectionTargetKey,
+    VoidCallback? onTableFrameTap,
+    GestureTapDownCallback? onTableFrameSecondaryTapDown,
+    VoidCallback? onTableContentTap,
   }) {
     if (markdown.trim().isEmpty) {
       return const SizedBox(height: 12);
@@ -173,6 +184,11 @@ final class WorkspaceMarkdownRenderer {
       return MarkdownTableFrame(
         table: table,
         cellBuilder: _buildReadOnlyTableCell,
+        selected: tableSelected,
+        selectionTargetKey: tableSelectionTargetKey,
+        onFrameTap: onTableFrameTap,
+        onFrameSecondaryTapDown: onTableFrameSecondaryTapDown,
+        onContentTap: onTableContentTap,
       );
     }
     return _buildMarkdownBody(
@@ -604,6 +620,8 @@ final class _WorkspaceReadingPreviewState
                         blocks[index],
                         index,
                         widget.editorContext,
+                        hiddenTableSeparator:
+                            markdownBlockIsHiddenTableSeparator(blocks, index),
                       ),
                     )
                   else
@@ -611,6 +629,10 @@ final class _WorkspaceReadingPreviewState
                       blocks[index],
                       index,
                       widget.editorContext,
+                      hiddenTableSeparator: markdownBlockIsHiddenTableSeparator(
+                        blocks,
+                        index,
+                      ),
                     ),
               ],
             ),

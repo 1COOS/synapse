@@ -460,11 +460,25 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
                         ),
                     onImageSelectionChanged:
                         _controller.setSelectedPreviewImageSrc,
-                    previewBuilder: (markdown, {onImageTap}) =>
-                        _markdownRenderer.buildLivePreviewBlock(
+                    previewBuilder:
+                        (
+                          markdown, {
+                          onImageTap,
+                          tableSelected,
+                          tableSelectionTargetKey,
+                          onTableFrameTap,
+                          onTableFrameSecondaryTapDown,
+                          onTableContentTap,
+                        }) => _markdownRenderer.buildLivePreviewBlock(
                           markdown,
                           editorContext: editorContext!,
                           onImageTap: onImageTap,
+                          tableSelected: tableSelected ?? false,
+                          tableSelectionTargetKey: tableSelectionTargetKey,
+                          onTableFrameTap: onTableFrameTap,
+                          onTableFrameSecondaryTapDown:
+                              onTableFrameSecondaryTapDown,
+                          onTableContentTap: onTableContentTap,
                         ),
                   ),
           ),

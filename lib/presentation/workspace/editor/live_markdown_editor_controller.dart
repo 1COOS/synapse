@@ -8,9 +8,21 @@ import 'markdown_styled_controller.dart';
 
 class LiveMarkdownEditorController extends ChangeNotifier {
   LiveMarkdownEditorController({required TextEditingController document})
-    : _document = document;
+    : _document = document,
+      _historyValue = document.value {
+    _document.addListener(_handleDocumentHistoryChanged);
+  }
+
+  static const _historyLimit = 100;
+  static const _historyCoalescingDelay = Duration(milliseconds: 500);
 
   TextEditingController _document;
+  TextEditingValue _historyValue;
+  final List<TextEditingValue> _undoHistory = [];
+  final List<TextEditingValue> _redoHistory = [];
+  DateTime? _lastHistoryChangeAt;
+  bool _historyGroupOpen = false;
+  bool _restoringHistory = false;
   int _documentGeneration = 0;
   final blockController = MarkdownStyledTextEditingController();
   int? _activeOffset;
@@ -27,6 +39,8 @@ class LiveMarkdownEditorController extends ChangeNotifier {
   bool get updatingDocument => _updatingDocument;
   bool get activeTrailingInsertion => _activeTrailingInsertion;
   int? get activeInsertionOffset => _activeInsertionOffset;
+  bool get canUndo => _undoHistory.isNotEmpty;
+  bool get canRedo => _redoHistory.isNotEmpty;
 
   MarkdownInsertion? takePendingInsertionFocus() {
     final pending = _pendingInsertionFocus;
@@ -35,7 +49,13 @@ class LiveMarkdownEditorController extends ChangeNotifier {
   }
 
   void replaceDocument(TextEditingController document) {
+    _document.removeListener(_handleDocumentHistoryChanged);
+    _endUndoGroup();
     _document = document;
+    _historyValue = document.value;
+    _undoHistory.clear();
+    _redoHistory.clear();
+    _document.addListener(_handleDocumentHistoryChanged);
     _documentGeneration += 1;
     _activeOffset = null;
     _activeSelectionTarget = null;
@@ -45,8 +65,110 @@ class LiveMarkdownEditorController extends ChangeNotifier {
 
   @override
   void dispose() {
+    _document.removeListener(_handleDocumentHistoryChanged);
     blockController.dispose();
     super.dispose();
+  }
+
+  void endUndoGroup() {
+    _endUndoGroup();
+  }
+
+  bool undo() {
+    if (!canUndo) {
+      return false;
+    }
+    _endUndoGroup();
+    final current = _document.value;
+    final target = _undoHistory.removeLast();
+    _pushHistoryValue(_redoHistory, current);
+    _restoreHistoryValue(target);
+    notifyListeners();
+    return true;
+  }
+
+  bool redo() {
+    if (!canRedo) {
+      return false;
+    }
+    _endUndoGroup();
+    final current = _document.value;
+    final target = _redoHistory.removeLast();
+    _pushHistoryValue(_undoHistory, current);
+    _restoreHistoryValue(target);
+    notifyListeners();
+    return true;
+  }
+
+  void _handleDocumentHistoryChanged() {
+    final next = _document.value;
+    if (_restoringHistory) {
+      _historyValue = next;
+      return;
+    }
+    if (_historyValue.text == next.text) {
+      _historyValue = next;
+      return;
+    }
+    final now = DateTime.now();
+    final coalescesWithPrevious =
+        _historyGroupOpen &&
+        _lastHistoryChangeAt != null &&
+        now.difference(_lastHistoryChangeAt!) <= _historyCoalescingDelay;
+    if (!coalescesWithPrevious) {
+      _pushHistoryValue(_undoHistory, _historyValue);
+    }
+    _redoHistory.clear();
+    _historyValue = next;
+    _historyGroupOpen = true;
+    _lastHistoryChangeAt = now;
+  }
+
+  void _endUndoGroup() {
+    _historyGroupOpen = false;
+    _lastHistoryChangeAt = null;
+  }
+
+  void _pushHistoryValue(
+    List<TextEditingValue> history,
+    TextEditingValue value,
+  ) {
+    if (history.isNotEmpty && history.last.text == value.text) {
+      history[history.length - 1] = value;
+      return;
+    }
+    history.add(value.copyWith(composing: TextRange.empty));
+    if (history.length > _historyLimit) {
+      history.removeAt(0);
+    }
+  }
+
+  void _restoreHistoryValue(TextEditingValue value) {
+    final selection = value.selection.isValid
+        ? TextSelection(
+            baseOffset: _clampOffset(
+              value.selection.baseOffset,
+              value.text.length,
+            ),
+            extentOffset: _clampOffset(
+              value.selection.extentOffset,
+              value.text.length,
+            ),
+            affinity: value.selection.affinity,
+            isDirectional: value.selection.isDirectional,
+          )
+        : TextSelection.collapsed(offset: value.text.length);
+    _restoringHistory = true;
+    try {
+      _document.value = value.copyWith(
+        selection: selection,
+        composing: TextRange.empty,
+      );
+      _historyValue = _document.value;
+    } finally {
+      _restoringHistory = false;
+    }
+    _activeSelectionTarget = null;
   }
 
   void activateOffset(
@@ -185,6 +307,13 @@ class LiveMarkdownEditorController extends ChangeNotifier {
     final block = blocks[index];
     final editableText = editableTextForBlock(block);
     final blockSelection = blockController.selection;
+    if (text.trim().isEmpty && markdownBlockIsBetweenTables(blocks, index)) {
+      return _replaceTableBridgeWithSeparator(
+        markdown: markdown,
+        blocks: blocks,
+        blockIndex: index,
+      );
+    }
     if (_shouldBeginBlockInsertion(
       block: block,
       editableText: editableText,
@@ -220,6 +349,51 @@ class LiveMarkdownEditorController extends ChangeNotifier {
     _activeOffset = _clampOffset(nextOffset, updated.length);
     _activeSelectionTarget = null;
     _activeTrailingInsertion = false;
+    notifyListeners();
+    return true;
+  }
+
+  bool _replaceTableBridgeWithSeparator({
+    required String markdown,
+    required List<MarkdownLiveBlock> blocks,
+    required int blockIndex,
+  }) {
+    int? previousTableIndex;
+    for (var index = blockIndex - 1; index >= 0; index -= 1) {
+      if (blocks[index].isBlank) {
+        continue;
+      }
+      previousTableIndex = index;
+      break;
+    }
+    int? nextTableIndex;
+    for (var index = blockIndex + 1; index < blocks.length; index += 1) {
+      if (blocks[index].isBlank) {
+        continue;
+      }
+      nextTableIndex = index;
+      break;
+    }
+    if (previousTableIndex == null || nextTableIndex == null) {
+      return false;
+    }
+    final lineBreak = markdown.contains('\r\n') ? '\r\n' : '\n';
+    final insertionOffset = blocks[previousTableIndex].end;
+    final updated = markdown.replaceRange(
+      insertionOffset,
+      blocks[nextTableIndex].start,
+      lineBreak,
+    );
+    _updatingDocument = true;
+    _document.value = TextEditingValue(
+      text: updated,
+      selection: TextSelection.collapsed(offset: insertionOffset),
+    );
+    _updatingDocument = false;
+    _activeOffset = null;
+    _activeSelectionTarget = null;
+    _activeTrailingInsertion = false;
+    _activeInsertionOffset = null;
     notifyListeners();
     return true;
   }
@@ -403,6 +577,7 @@ class LiveMarkdownEditorController extends ChangeNotifier {
   }
 
   void applyBlockValue(TextEditingValue value) {
+    _endUndoGroup();
     _activeSelectionTarget = null;
     blockController.value = value;
     replaceActiveBlock(value.text);
