@@ -17,6 +17,7 @@ import 'markdown_context_menu.dart';
 import 'markdown_image_transform.dart';
 import 'markdown_table_editor.dart';
 import 'pane_editor_context.dart';
+import 'preview_image_block.dart';
 
 class NoteEditorPasteAvailability {
   const NoteEditorPasteAvailability({
@@ -41,6 +42,9 @@ typedef NoteEditorPasteCallback =
       bool lineInsertion,
     });
 
+typedef NoteEditorCopyImageCallback =
+    Future<PaneEditorCommandOutcome> Function(String sourceId, {bool cutting});
+
 class LiveMarkdownEditor extends StatefulWidget {
   const LiveMarkdownEditor({
     super.key,
@@ -55,6 +59,7 @@ class LiveMarkdownEditor extends StatefulWidget {
     required this.onFocusPane,
     required this.pasteAvailability,
     required this.onPaste,
+    required this.onCopyImage,
     required this.onImageSelectionChanged,
     required this.previewBuilder,
   });
@@ -70,10 +75,12 @@ class LiveMarkdownEditor extends StatefulWidget {
   final VoidCallback onFocusPane;
   final Future<NoteEditorPasteAvailability> Function() pasteAvailability;
   final NoteEditorPasteCallback onPaste;
+  final NoteEditorCopyImageCallback onCopyImage;
   final ValueChanged<String?> onImageSelectionChanged;
   final Widget Function(
     String markdown, {
     ValueChanged<String>? onImageTap,
+    PreviewImageSecondaryTapCallback? onImageSecondaryTapUp,
     bool? tableSelected,
     Key? tableSelectionTargetKey,
     VoidCallback? onTableFrameTap,
@@ -99,6 +106,7 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
   var _autofocusInsertedTable = false;
   var _tableReordering = false;
   String? _selectedImageSrc;
+  String? _selectedImageSourceId;
   int? _selectedImageBlockStart;
   int? _selectedTableBlockStart;
   int? _lastTextCaretOffset;
@@ -1146,6 +1154,41 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
     await Clipboard.setData(ClipboardData(text: clipboardText));
   }
 
+  Future<void> _copySelectedImage() async {
+    final sourceId = _selectedImageSourceId;
+    if (sourceId == null || _selectedImageReference() == null) {
+      _clearSelectedImageTarget();
+      return;
+    }
+    dismissAllMacContextMenus();
+    await widget.onCopyImage(sourceId);
+  }
+
+  Future<void> _cutSelectedImage() async {
+    final sourceId = _selectedImageSourceId;
+    final reference = _selectedImageReference();
+    if (sourceId == null || reference == null) {
+      _clearSelectedImageTarget();
+      return;
+    }
+    final capturedController = widget.controller;
+    final capturedNoteId = widget.noteId;
+    final capturedMarkdown = widget.controller.text;
+    dismissAllMacContextMenus();
+    final outcome = await widget.onCopyImage(sourceId, cutting: true);
+    if (outcome != PaneEditorCommandOutcome.committed ||
+        !_selectedImageSnapshotIsCurrent(
+          controller: capturedController,
+          noteId: capturedNoteId,
+          documentText: capturedMarkdown,
+          sourceId: sourceId,
+          reference: reference,
+        )) {
+      return;
+    }
+    _deleteSelectedImageReference();
+  }
+
   Future<void> _cutSelectedTable() async {
     if (!widget.enabled || widget.busy) {
       return;
@@ -1222,6 +1265,23 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
       );
       return;
     }
+    await _pasteNonTableAtRememberedCaret(
+      targetOffset: targetOffset,
+      lineInsertion: lineInsertion,
+    );
+  }
+
+  Future<void> _pasteSelectedImageAtRememberedCaret() async {
+    final targetOffset = _lastTextCaretOffset;
+    if (!widget.enabled ||
+        widget.busy ||
+        targetOffset == null ||
+        _selectedImageSourceId == null ||
+        _selectedImageReference() == null) {
+      return;
+    }
+    final lineInsertion = _lastTextCaretWasLineInsertion;
+    dismissAllMacContextMenus();
     await _pasteNonTableAtRememberedCaret(
       targetOffset: targetOffset,
       lineInsertion: lineInsertion,
@@ -1340,6 +1400,27 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
         current.text == blockText;
   }
 
+  bool _selectedImageSnapshotIsCurrent({
+    required TextEditingController controller,
+    required String noteId,
+    required String documentText,
+    required String sourceId,
+    required MarkdownImageReference reference,
+  }) {
+    if (!mounted ||
+        !identical(widget.controller, controller) ||
+        widget.noteId != noteId ||
+        widget.controller.text != documentText ||
+        _selectedImageSourceId != sourceId) {
+      return false;
+    }
+    final current = _selectedImageReference();
+    return current != null &&
+        current.start == reference.start &&
+        current.end == reference.end &&
+        current.src == reference.src;
+  }
+
   int _resolvedRememberedCaretOffset({required int fallback}) {
     return _clampOffset(
       _lastTextCaretOffset ?? fallback,
@@ -1428,10 +1509,13 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
   }
 
   void _clearSelectedImageTarget({bool notify = true}) {
-    if (_selectedImageSrc == null && _selectedImageBlockStart == null) {
+    if (_selectedImageSrc == null &&
+        _selectedImageSourceId == null &&
+        _selectedImageBlockStart == null) {
       return;
     }
     _selectedImageSrc = null;
+    _selectedImageSourceId = null;
     _selectedImageBlockStart = null;
     if (notify) {
       widget.onImageSelectionChanged(null);
@@ -1741,6 +1825,76 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
         context,
         TextSelectionToolbarAnchors(primaryAnchor: globalPosition),
         menuTarget: resolvedTarget,
+      ),
+      debugRequiredFor: widget,
+    );
+  }
+
+  void _showSelectedImageContextMenuAt(
+    MarkdownLiveBlock block,
+    Offset globalPosition,
+  ) {
+    final sourceId = _selectedImageSourceId;
+    final reference = _selectedImageReference();
+    if (sourceId == null ||
+        reference == null ||
+        _selectedImageBlockStart != block.start) {
+      return;
+    }
+    final menuTarget = _editorController.captureCommandTargetForMenu();
+    final appearance = WorkspaceAppearanceScope.of(context);
+    ContextMenuController().show(
+      context: context,
+      contextMenuBuilder: (context) => _EditorContextMenuLifecycle(
+        onOpen: _retainContextMenuInteraction,
+        onClose: _releaseContextMenuInteraction,
+        child: WorkspaceAppearanceScope(
+          appearance: appearance,
+          child: FutureBuilder<NoteEditorPasteAvailability>(
+            future: widget.pasteAvailability(),
+            initialData: NoteEditorPasteAvailability.empty,
+            builder: (context, snapshot) {
+              final availability =
+                  snapshot.data ?? NoteEditorPasteAvailability.empty;
+              final canEdit = widget.enabled && !widget.busy;
+              final imageTargetIsCurrent =
+                  _selectedImageSourceId == sourceId &&
+                  _selectedImageBlockStart == block.start &&
+                  _selectedImageReference() != null;
+              return NoteContextMenuToolbar(
+                anchors: TextSelectionToolbarAnchors(
+                  primaryAnchor: globalPosition,
+                ),
+                tapRegionGroupId: _editingSessionTapGroup,
+                child: NoteContextMenu(
+                  onInteractionStart: _retainContextMenuInteraction,
+                  onInteractionEnd: _releaseContextMenuInteraction,
+                  children: buildLiveMarkdownContextMenuItems(
+                    controller: _editorController,
+                    menuTarget: menuTarget,
+                    tapRegionGroupId: _editingSessionTapGroup,
+                    canEdit: canEdit,
+                    canPaste: availability.canPaste,
+                    hasText: false,
+                    busy: widget.busy,
+                    onUndo: _undo,
+                    onRedo: _redo,
+                    onPaste: (_) => _pasteSelectedImageAtRememberedCaret(),
+                    canCopyOverride: imageTargetIsCurrent,
+                    onCopyOverride: _copySelectedImage,
+                    canCutOverride: imageTargetIsCurrent && canEdit,
+                    onCutOverride: _cutSelectedImage,
+                    canPasteOverride:
+                        imageTargetIsCurrent &&
+                        canEdit &&
+                        availability.canPaste &&
+                        _lastTextCaretOffset != null,
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
       ),
       debugRequiredFor: widget,
     );
@@ -2104,6 +2258,30 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
   }
 
   void _handleImagePreviewTap(MarkdownLiveBlock block, String src) {
+    _selectImagePreview(block, src);
+  }
+
+  void _handleImagePreviewSecondaryTap(
+    MarkdownLiveBlock block,
+    String sourceId,
+    String src,
+    TapUpDetails details,
+  ) {
+    _selectImagePreview(block, src, sourceId: sourceId);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted &&
+          _selectedImageSourceId == sourceId &&
+          _selectedImageBlockStart == block.start) {
+        _showSelectedImageContextMenuAt(block, details.globalPosition);
+      }
+    });
+  }
+
+  void _selectImagePreview(
+    MarkdownLiveBlock block,
+    String src, {
+    String? sourceId,
+  }) {
     _editorController.endUndoGroup();
     _cancelPasteViewportTransaction();
     _clearSelectedTableTarget();
@@ -2112,6 +2290,7 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
     _persistentBlankInsertion = false;
     setState(() {
       _selectedImageSrc = normalizedSrc;
+      _selectedImageSourceId = sourceId;
       _selectedImageBlockStart = block.start;
       _editorController.activateOffset(block.start);
       _editorController.beginDocumentUpdate();
@@ -2573,9 +2752,16 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
       behavior: HitTestBehavior.opaque,
       onTapUp: (details) =>
           _activateBlock(block, globalPosition: details.globalPosition),
-      onSecondaryTapDown: (details) {
-        _activateBlockAndOpenContextMenu(block, details.globalPosition);
-      },
+      onSecondaryTapDown: hasPreviewImage
+          ? null
+          : (details) {
+              _activateBlockAndOpenContextMenu(block, details.globalPosition);
+            },
+      onSecondaryTapUp: hasPreviewImage
+          ? (details) {
+              _activateBlockAndOpenContextMenu(block, details.globalPosition);
+            }
+          : null,
       child: Padding(
         padding: const EdgeInsets.symmetric(vertical: 3),
         child: hasPreviewImage
@@ -2584,6 +2770,13 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
                 child: widget.previewBuilder(
                   block.text,
                   onImageTap: (src) => _handleImagePreviewTap(block, src),
+                  onImageSecondaryTapUp: (sourceId, src, details) =>
+                      _handleImagePreviewSecondaryTap(
+                        block,
+                        sourceId,
+                        src,
+                        details,
+                      ),
                 ),
               )
             : widget.previewBuilder(
@@ -2662,7 +2855,7 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
       behavior: HitTestBehavior.opaque,
       onTapUp: (details) =>
           _activateBlock(block, globalPosition: details.globalPosition),
-      onSecondaryTapDown: (details) {
+      onSecondaryTapUp: (details) {
         _activateBlockAndOpenContextMenu(block, details.globalPosition);
       },
       child: Padding(
@@ -2680,6 +2873,13 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
               child: widget.previewBuilder(
                 block.text,
                 onImageTap: (src) => _handleImagePreviewTap(block, src),
+                onImageSecondaryTapUp: (sourceId, src, details) =>
+                    _handleImagePreviewSecondaryTap(
+                      block,
+                      sourceId,
+                      src,
+                      details,
+                    ),
               ),
             ),
           ],
@@ -2741,6 +2941,8 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
         ? (source) => widget.previewBuilder(
             source,
             onImageTap: (src) => _handleImagePreviewTap(block, src),
+            onImageSecondaryTapUp: (sourceId, src, details) =>
+                _handleImagePreviewSecondaryTap(block, sourceId, src, details),
           )
         : null;
     return KeyedSubtree(

@@ -96,6 +96,7 @@ final class WorkspaceMarkdownRenderer {
     required ImagePreviewMode mode,
     required PaneEditorContext editorContext,
     ValueChanged<String>? onImageTap,
+    PreviewImageSecondaryTapCallback? onImageSecondaryTapUp,
   }) {
     final styleSheet = _noteMarkdownStyleSheet(markdown);
     return MarkdownBody(
@@ -109,6 +110,7 @@ final class WorkspaceMarkdownRenderer {
         mode: mode,
         editorContext: editorContext,
         onImageTap: onImageTap,
+        onImageSecondaryTapUp: onImageSecondaryTapUp,
       ),
       styleSheetTheme: MarkdownStyleSheetBaseTheme.cupertino,
       styleSheet: styleSheet,
@@ -170,6 +172,7 @@ final class WorkspaceMarkdownRenderer {
     String markdown, {
     required PaneEditorContext editorContext,
     ValueChanged<String>? onImageTap,
+    PreviewImageSecondaryTapCallback? onImageSecondaryTapUp,
     bool tableSelected = false,
     Key? tableSelectionTargetKey,
     VoidCallback? onTableFrameTap,
@@ -196,6 +199,7 @@ final class WorkspaceMarkdownRenderer {
       mode: ImagePreviewMode.editing,
       editorContext: editorContext,
       onImageTap: onImageTap,
+      onImageSecondaryTapUp: onImageSecondaryTapUp,
     );
   }
 
@@ -243,6 +247,7 @@ final class WorkspaceMarkdownRenderer {
     required ImagePreviewMode mode,
     required PaneEditorContext editorContext,
     ValueChanged<String>? onImageTap,
+    PreviewImageSecondaryTapCallback? onImageSecondaryTapUp,
   }) {
     final src = safeUriDecode(config.uri.toString());
     final source = _imageSourceForMarkdownSrc(editorContext, src);
@@ -284,6 +289,16 @@ final class WorkspaceMarkdownRenderer {
             }
             onImageTap?.call(normalizeImageSrc(src));
           },
+          onSecondaryTapUp:
+              mode == ImagePreviewMode.editing &&
+                  onImageSecondaryTapUp != null &&
+                  controller.resolvePaneEditorContext(editorContext) != null
+              ? (details) => onImageSecondaryTapUp(
+                  source.id,
+                  normalizeImageSrc(src),
+                  details,
+                )
+              : null,
           onWidthChanged: (value) {
             if (controller.isBusy ||
                 controller.isPaneEditorContextLocked(editorContext)) {

@@ -558,6 +558,7 @@ class FakeImageInputService implements ImageInputService {
   final ImportedImage? pastedImage;
   int pickCalls = 0;
   int pasteCalls = 0;
+  final copiedImages = <List<int>>[];
 
   @override
   Future<ImportedImage?> pickImage() async {
@@ -574,6 +575,11 @@ class FakeImageInputService implements ImageInputService {
   Future<ImportedImage?> pasteImage() async {
     pasteCalls += 1;
     return pastedImage;
+  }
+
+  @override
+  Future<void> writeClipboardImage(List<int> bytes) async {
+    copiedImages.add(List<int>.of(bytes));
   }
 }
 
@@ -599,6 +605,7 @@ class GatedImageInputService implements ImageInputService {
   final _canPasteRelease = Completer<void>();
   int pickCalls = 0;
   int pasteCalls = 0;
+  final copiedImages = <List<int>>[];
 
   void releasePick() {
     if (!_pickRelease.isCompleted) {
@@ -653,6 +660,11 @@ class GatedImageInputService implements ImageInputService {
       throw pasteError!;
     }
     return pastedImage;
+  }
+
+  @override
+  Future<void> writeClipboardImage(List<int> bytes) async {
+    copiedImages.add(List<int>.of(bytes));
   }
 }
 

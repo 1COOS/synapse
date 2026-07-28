@@ -662,6 +662,18 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
     );
   }
 
+  Future<editor_context.PaneEditorCommandOutcome> copyImage(
+    editor_context.PaneEditorContext context,
+    String sourceId, {
+    String successMessage = '图片已复制到剪贴板',
+  }) {
+    return _editorOperations.runCommand(
+      () => _editor.copyImage(context, sourceId),
+      context: context,
+      successMessage: successMessage,
+    );
+  }
+
   Future<NoteEditorPasteAvailability> notePasteAvailability(
     editor_context.PaneEditorContext? context,
   ) {

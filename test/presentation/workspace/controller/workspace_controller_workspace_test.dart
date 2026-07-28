@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:synapse/domain/vault/vault_resource.dart';
@@ -495,6 +497,53 @@ void main() {
       },
     );
 
+    test(
+      'image copy rejects a pane rebound while reading attachment bytes',
+      () async {
+        final vault = _GatedAttachmentReadVaultBackend();
+        final alpha = await vault.createNote(parentPath: '', title: 'Alpha');
+        final source = await vault.addImageSource(
+          noteId: alpha.id,
+          filename: 'alpha.png',
+          mimeType: 'image/png',
+          bytes: tinyPng,
+        );
+        final beta = await vault.createNote(parentPath: '', title: 'Beta');
+        final imageInput = FakeImageInputService();
+        final container = ProviderContainer(
+          overrides: [
+            workspaceDependenciesProvider.overrideWithValue(
+              createWorkspaceDependencies(
+                initialVault: vault,
+                imageInput: imageInput,
+                settingsStore: FakeSettingsStore(),
+              ),
+            ),
+          ],
+        );
+        addTearDown(container.dispose);
+        final initial = await container.read(
+          workspaceControllerProvider.future,
+        );
+        final controller = container.read(workspaceControllerProvider.notifier);
+        final context = controller.capturePaneEditorContext(
+          initial.focusedPaneId,
+        )!;
+
+        final copying = controller.copyImage(context, source.id);
+        await vault.readStarted.future;
+        final betaResource = _findResource(
+          container.read(workspaceControllerProvider).requireValue.resources,
+          beta.id,
+        )!;
+        await controller.selectResource(betaResource);
+        vault.releaseRead();
+
+        expect(await copying, PaneEditorCommandOutcome.staleTarget);
+        expect(imageInput.copiedImages, isEmpty);
+      },
+    );
+
     test('autosave title changes remap the full workspace snapshot', () async {
       final vault = MemoryVaultBackend(seedExampleData: false);
       final note = await vault.createNote(parentPath: '', title: 'Alpha');
@@ -606,4 +655,26 @@ VaultResourceNode? _findResourceByPath(
     }
   }
   return null;
+}
+
+final class _GatedAttachmentReadVaultBackend extends MemoryVaultBackend {
+  _GatedAttachmentReadVaultBackend() : super(seedExampleData: false);
+
+  final readStarted = Completer<void>();
+  final _readRelease = Completer<void>();
+
+  void releaseRead() {
+    if (!_readRelease.isCompleted) {
+      _readRelease.complete();
+    }
+  }
+
+  @override
+  Future<List<int>> readSourceAttachment(SourceItem source) async {
+    if (!readStarted.isCompleted) {
+      readStarted.complete();
+    }
+    await _readRelease.future;
+    return super.readSourceAttachment(source);
+  }
 }

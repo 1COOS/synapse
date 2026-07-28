@@ -458,12 +458,19 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
                           target,
                           lineInsertion: lineInsertion,
                         ),
+                    onCopyImage: (sourceId, {cutting = false}) =>
+                        _controller.copyImage(
+                          editorContext!,
+                          sourceId,
+                          successMessage: cutting ? '图片已剪切' : '图片已复制到剪贴板',
+                        ),
                     onImageSelectionChanged:
                         _controller.setSelectedPreviewImageSrc,
                     previewBuilder:
                         (
                           markdown, {
                           onImageTap,
+                          onImageSecondaryTapUp,
                           tableSelected,
                           tableSelectionTargetKey,
                           onTableFrameTap,
@@ -473,6 +480,7 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
                           markdown,
                           editorContext: editorContext!,
                           onImageTap: onImageTap,
+                          onImageSecondaryTapUp: onImageSecondaryTapUp,
                           tableSelected: tableSelected ?? false,
                           tableSelectionTargetKey: tableSelectionTargetKey,
                           onTableFrameTap: onTableFrameTap,

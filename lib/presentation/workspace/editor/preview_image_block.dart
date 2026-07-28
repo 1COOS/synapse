@@ -12,6 +12,9 @@ enum ImagePreviewMode { reading, editing }
 
 enum _ImageResizeSide { left, right }
 
+typedef PreviewImageSecondaryTapCallback =
+    void Function(String sourceId, String src, TapUpDetails details);
+
 final class PreviewImageDragData {
   const PreviewImageDragData({required this.sourceId, required this.src});
 
@@ -29,6 +32,7 @@ class PreviewImageBlock extends StatefulWidget {
     required this.selectedImageSrc,
     required this.imageBytes,
     required this.onTap,
+    this.onSecondaryTapUp,
     required this.onWidthChanged,
     required this.onImageDropped,
   });
@@ -40,6 +44,7 @@ class PreviewImageBlock extends StatefulWidget {
   final String? selectedImageSrc;
   final Future<List<int>> imageBytes;
   final VoidCallback onTap;
+  final GestureTapUpCallback? onSecondaryTapUp;
   final ValueChanged<double> onWidthChanged;
   final void Function(
     PreviewImageDragData dragged,
@@ -341,6 +346,7 @@ class _PreviewImageBlockState extends State<PreviewImageBlock> {
         key: Key('preview-image-tap-${widget.source.id}'),
         behavior: HitTestBehavior.opaque,
         onTap: widget.onTap,
+        onSecondaryTapUp: widget.onSecondaryTapUp,
         child: DecoratedBox(
           decoration: BoxDecoration(
             border: Border.all(

@@ -186,6 +186,33 @@ final class WorkspaceEditorCoordinator {
     return PaneEditorCommandOutcome.committed;
   }
 
+  Future<PaneEditorCommandOutcome> copyImage(
+    PaneEditorContext context,
+    String sourceId,
+  ) async {
+    var resolved = _resolve(context);
+    if (resolved == null) {
+      return PaneEditorCommandOutcome.staleTarget;
+    }
+    final source = _imageSourceForId(resolved.session, sourceId);
+    if (source == null) {
+      return PaneEditorCommandOutcome.unchanged;
+    }
+    final bytes = await readSourceAttachment(source);
+    resolved = _resolve(context);
+    if (resolved == null) {
+      return PaneEditorCommandOutcome.staleTarget;
+    }
+    final currentSource = _imageSourceForId(resolved.session, sourceId);
+    if (currentSource == null || !_sameImageSource(source, currentSource)) {
+      return PaneEditorCommandOutcome.staleTarget;
+    }
+    await _imageInput.writeClipboardImage(bytes);
+    return _resolve(context) == null
+        ? PaneEditorCommandOutcome.staleTarget
+        : PaneEditorCommandOutcome.committed;
+  }
+
   Future<PaneEditorCommandOutcome> _insertPastedImage({
     required PaneEditorContext context,
     required ImportedImage image,
@@ -707,6 +734,24 @@ final class WorkspaceEditorCoordinator {
 
   Future<List<int>> readSourceAttachment(SourceItem source) {
     return _runtimes.requireCurrent().vault.readSourceAttachment(source);
+  }
+
+  SourceItem? _imageSourceForId(NoteDocumentSession session, String sourceId) {
+    for (final source in session.note.sources) {
+      if (source.id == sourceId &&
+          source.type == SourceType.image &&
+          source.attachmentPath != null) {
+        return source;
+      }
+    }
+    return null;
+  }
+
+  bool _sameImageSource(SourceItem expected, SourceItem actual) {
+    return expected.id == actual.id &&
+        expected.noteId == actual.noteId &&
+        expected.attachmentPath == actual.attachmentPath &&
+        expected.updatedAt == actual.updatedAt;
   }
 
   String _imageMarkdownTag(VaultNoteContent note, SourceItem source) {

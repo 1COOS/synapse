@@ -16,6 +16,11 @@ List<Widget> buildLiveMarkdownContextMenuItems({
   required VoidCallback onUndo,
   required VoidCallback onRedo,
   required Future<void> Function(MarkdownCommandTarget? target) onPaste,
+  bool? canCopyOverride,
+  Future<void> Function()? onCopyOverride,
+  bool? canCutOverride,
+  Future<void> Function()? onCutOverride,
+  bool? canPasteOverride,
 }) {
   final commandState = controller.commandState(menuTarget: menuTarget);
   final hasSelection = commandState.hasSelection;
@@ -41,20 +46,23 @@ List<Widget> buildLiveMarkdownContextMenuItems({
     NoteMenuAction(
       itemKey: const Key('note-menu-copy'),
       label: '复制',
-      enabled: hasSelection,
-      onPressed: () => controller.copySelection(menuTarget: menuTarget),
+      enabled: canCopyOverride ?? hasSelection,
+      onPressed:
+          onCopyOverride ??
+          () => controller.copySelection(menuTarget: menuTarget),
     ),
     NoteMenuAction(
       itemKey: const Key('note-menu-cut'),
       label: '剪切',
-      enabled: canEdit && hasSelection,
-      onPressed: () =>
-          controller.cutSelection(menuTarget: menuTarget, busy: busy),
+      enabled: canCutOverride ?? (canEdit && hasSelection),
+      onPressed:
+          onCutOverride ??
+          () => controller.cutSelection(menuTarget: menuTarget, busy: busy),
     ),
     NoteMenuAction(
       itemKey: const Key('note-menu-paste'),
       label: '粘贴',
-      enabled: canEdit && canPaste,
+      enabled: canPasteOverride ?? (canEdit && canPaste),
       onPressed: () => onPaste(menuTarget),
     ),
     NoteMenuAction(

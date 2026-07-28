@@ -21,6 +21,8 @@ abstract class ImageInputService {
   Future<bool> canPasteImage();
 
   Future<ImportedImage?> pasteImage();
+
+  Future<void> writeClipboardImage(List<int> bytes);
 }
 
 class PlatformImageInputService implements ImageInputService {
@@ -60,6 +62,11 @@ class PlatformImageInputService implements ImageInputService {
       mimeType: 'image/png',
       bytes: Uint8List.fromList(bytes),
     );
+  }
+
+  @override
+  Future<void> writeClipboardImage(List<int> bytes) {
+    return Pasteboard.writeImage(Uint8List.fromList(bytes));
   }
 
   String _mimeTypeForName(String filename) {

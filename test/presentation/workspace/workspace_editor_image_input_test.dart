@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -16,6 +17,22 @@ import 'package:synapse/presentation/workspace/editor/preview_image_block.dart';
 
 import '../../support/workspace_fakes.dart';
 import '../../support/workspace_harness.dart';
+
+Future<void> clickImageNoteMenuItem(WidgetTester tester, Key itemKey) async {
+  final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+  final position = tester.getCenter(find.byKey(itemKey));
+  await mouse.moveTo(position);
+  await mouse.down(position);
+  await tester.pump();
+  await mouse.up();
+  await tester.pumpAndSettle();
+  await mouse.removePointer();
+}
+
+bool imageNoteMenuItemEnabled(WidgetTester tester, Key itemKey) {
+  return tester.widget<Semantics>(find.byKey(itemKey)).properties.enabled ??
+      false;
+}
 
 void main() {
   testWidgets(
@@ -174,6 +191,217 @@ void main() {
       activeLiveMarkdownTextField(tester).controller.text,
       '$firstTag $secondTag',
     );
+  });
+
+  testWidgets(
+    'image context menu copies the exact mixed-block image and needs a remembered caret to paste',
+    (tester) async {
+      final largePng = File('web/icons/Icon-512.png').readAsBytesSync();
+      final vault = CountingUpdateVaultBackend(seedExampleData: false);
+      final note = await vault.createNote(parentPath: '', title: 'Image Menu');
+      final first = await vault.addImageSource(
+        noteId: note.id,
+        filename: 'first.png',
+        mimeType: 'image/png',
+        bytes: tinyPng,
+      );
+      final second = await vault.addImageSource(
+        noteId: note.id,
+        filename: 'second.png',
+        mimeType: 'image/png',
+        bytes: largePng,
+      );
+      const firstTag =
+          '<img src="Image Menu.assets/attachments/first.png" width="320">';
+      const secondTag =
+          '<img src="Image Menu.assets/attachments/second.png" width="320">';
+      const original = '说明 $firstTag $secondTag';
+      await vault.updateMarkdown(noteId: note.id, markdown: original);
+      final imageInput = FakeImageInputService(
+        pastedImage: const ImportedImage(
+          filename: 'available.png',
+          mimeType: 'image/png',
+          bytes: tinyPng,
+        ),
+      );
+
+      await pumpWorkspace(tester, vault: vault, imageInput: imageInput);
+      await tester.tap(
+        find.byKey(Key('preview-image-tap-${second.id}')),
+        buttons: kSecondaryMouseButton,
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const Key('note-context-menu')), findsOneWidget);
+      expect(
+        imageNoteMenuItemEnabled(tester, const Key('note-menu-copy')),
+        isTrue,
+      );
+      expect(
+        imageNoteMenuItemEnabled(tester, const Key('note-menu-paste')),
+        isFalse,
+      );
+
+      await clickImageNoteMenuItem(tester, const Key('note-menu-copy'));
+
+      expect(imageInput.copiedImages, [largePng]);
+      expect(
+        tester
+            .widget<LiveMarkdownEditor>(find.byType(LiveMarkdownEditor))
+            .controller
+            .text,
+        original,
+      );
+      expect((await vault.listSources(note.id)).map((source) => source.id), [
+        first.id,
+        second.id,
+      ]);
+    },
+  );
+
+  testWidgets('image context menu cuts only the note reference', (
+    tester,
+  ) async {
+    final vault = CountingUpdateVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Image Cut');
+    final source = await vault.addImageSource(
+      noteId: note.id,
+      filename: 'cut.png',
+      mimeType: 'image/png',
+      bytes: tinyPng,
+    );
+    const imageTag =
+        '<img src="Image Cut.assets/attachments/cut.png" width="320">';
+    await vault.updateMarkdown(
+      noteId: note.id,
+      markdown: 'before\n\n$imageTag\n\nafter',
+    );
+    final imageInput = FakeImageInputService();
+
+    await pumpWorkspace(tester, vault: vault, imageInput: imageInput);
+    await tester.tap(
+      find.byKey(Key('preview-image-tap-${source.id}')),
+      buttons: kSecondaryMouseButton,
+    );
+    await tester.pumpAndSettle();
+
+    expect(
+      imageNoteMenuItemEnabled(tester, const Key('note-menu-cut')),
+      isTrue,
+    );
+    await clickImageNoteMenuItem(tester, const Key('note-menu-cut'));
+
+    final editor = tester.widget<LiveMarkdownEditor>(
+      find.byType(LiveMarkdownEditor),
+    );
+    expect(imageInput.copiedImages, [tinyPng]);
+    expect(editor.controller.text, isNot(contains(imageTag)));
+    expect(find.byKey(Key('preview-image-${source.id}')), findsNothing);
+    expect((await vault.listSources(note.id)).map((item) => item.id), [
+      source.id,
+    ]);
+  });
+
+  testWidgets('image context menu pastes text at the remembered text caret', (
+    tester,
+  ) async {
+    final vault = CountingUpdateVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Text Paste');
+    final source = await vault.addImageSource(
+      noteId: note.id,
+      filename: 'original.png',
+      mimeType: 'image/png',
+      bytes: tinyPng,
+    );
+    const imageTag =
+        '<img src="Text Paste.assets/attachments/original.png" width="320">';
+    await vault.updateMarkdown(noteId: note.id, markdown: 'Alpha\n\n$imageTag');
+    final imageInput = FakeImageInputService();
+    mockClipboardText('X');
+
+    await pumpWorkspace(tester, vault: vault, imageInput: imageInput);
+    await activateLiveMarkdownBlock(tester, blockIndex: 0);
+    await setActiveLiveMarkdownSelection(
+      tester,
+      const TextSelection.collapsed(offset: 2),
+    );
+    await tester.tap(
+      find.byKey(Key('preview-image-tap-${source.id}')),
+      buttons: kSecondaryMouseButton,
+    );
+    await tester.pumpAndSettle();
+
+    expect(
+      imageNoteMenuItemEnabled(tester, const Key('note-menu-paste')),
+      isTrue,
+    );
+    await clickImageNoteMenuItem(tester, const Key('note-menu-paste'));
+
+    final editor = tester.widget<LiveMarkdownEditor>(
+      find.byType(LiveMarkdownEditor),
+    );
+    expect(editor.controller.text, 'AlXpha\n\n$imageTag');
+    expect(editor.controller.text, contains(imageTag));
+    expect(imageInput.pasteCalls, 1);
+  });
+
+  testWidgets('image context menu imports an image at the remembered caret', (
+    tester,
+  ) async {
+    final vault = CountingUpdateVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Image Paste');
+    final source = await vault.addImageSource(
+      noteId: note.id,
+      filename: 'original.png',
+      mimeType: 'image/png',
+      bytes: tinyPng,
+    );
+    const originalTag =
+        '<img src="Image Paste.assets/attachments/original.png" width="320">';
+    await vault.updateMarkdown(
+      noteId: note.id,
+      markdown: 'Alpha\n\n$originalTag',
+    );
+    final imageInput = FakeImageInputService(
+      pastedImage: const ImportedImage(
+        filename: 'copied.png',
+        mimeType: 'image/png',
+        bytes: tinyPng,
+      ),
+    );
+    mockClipboardText(null);
+
+    await pumpWorkspace(tester, vault: vault, imageInput: imageInput);
+    await activateLiveMarkdownBlock(tester, blockIndex: 0);
+    await setActiveLiveMarkdownSelection(
+      tester,
+      const TextSelection.collapsed(offset: 2),
+    );
+    await tester.tap(
+      find.byKey(Key('preview-image-tap-${source.id}')),
+      buttons: kSecondaryMouseButton,
+    );
+    await tester.pumpAndSettle();
+
+    expect(
+      imageNoteMenuItemEnabled(tester, const Key('note-menu-paste')),
+      isTrue,
+    );
+    await clickImageNoteMenuItem(tester, const Key('note-menu-paste'));
+
+    final editor = tester.widget<LiveMarkdownEditor>(
+      find.byType(LiveMarkdownEditor),
+    );
+    final pastedImageOffset = editor.controller.text.indexOf('copied.png');
+    expect(
+      pastedImageOffset,
+      greaterThan(editor.controller.text.indexOf('Al')),
+    );
+    expect(pastedImageOffset, lessThan(editor.controller.text.indexOf('pha')));
+    expect(editor.controller.text, contains(originalTag));
+    expect(await vault.listSources(note.id), hasLength(2));
+    expect(imageInput.pasteCalls, 1);
+    expect(activeLiveMarkdownTextField(tester).focusNode.hasFocus, isTrue);
   });
 
   testWidgets('text alongside an image uses the full editable flow', (
