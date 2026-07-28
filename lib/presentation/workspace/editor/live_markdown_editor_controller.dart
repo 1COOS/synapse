@@ -226,8 +226,9 @@ class LiveMarkdownEditorController extends ChangeNotifier {
     final nextOffset = selection.isValid
         ? _clampOffset(selection.extentOffset, _document.text.length)
         : _clampOffset(_activeOffset!, _document.text.length);
+    final blocks = splitMarkdownLiveBlocks(_document.text);
     if (selection.isValid &&
-        splitMarkdownLiveBlocks(_document.text).any(
+        blocks.any(
           (block) =>
               block.kind == MarkdownLiveBlockKind.image &&
               block.end == nextOffset,
@@ -241,7 +242,11 @@ class LiveMarkdownEditorController extends ChangeNotifier {
       _activeInsertionOffset = null;
     }
     clearStaleSelectionTarget();
-    syncBlockController();
+    final activeIndex = nonBlankBlockIndexForOffset(blocks, nextOffset);
+    final selectionOffset = activeIndex == null
+        ? null
+        : nextOffset - blocks[activeIndex].start;
+    syncBlockController(selectionOffset: selectionOffset);
     return true;
   }
 

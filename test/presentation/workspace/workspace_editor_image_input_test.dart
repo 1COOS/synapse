@@ -683,6 +683,197 @@ void main() {
     expect(find.textContaining('图片已粘贴到笔记：1783082971508.png'), findsOneWidget);
   });
 
+  testWidgets('image paste near the top preserves every viewport phase', (
+    tester,
+  ) async {
+    final largePng = File('web/icons/Icon-512.png').readAsBytesSync();
+    const firstParagraph = 'Top paragraph ready for an image.';
+    final vault = CountingUpdateVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Top Image');
+    await vault.updateMarkdown(
+      noteId: note.id,
+      markdown: <String>[
+        firstParagraph,
+        ...List.generate(
+          79,
+          (index) => 'Paragraph $index with enough text to fill the editor.',
+        ),
+      ].join('\n\n'),
+    );
+    final imageInput = GatedImageInputService(
+      pastedImage: ImportedImage(
+        filename: 'top.png',
+        mimeType: 'image/png',
+        bytes: largePng,
+      ),
+    );
+    addTearDown(imageInput.releasePaste);
+
+    await pumpWorkspace(tester, vault: vault, imageInput: imageInput);
+    await switchToSourceMode(tester);
+    await activateLiveMarkdownBlock(tester, blockIndex: 0);
+    await setActiveLiveMarkdownSelection(
+      tester,
+      const TextSelection.collapsed(offset: firstParagraph.length),
+    );
+
+    final scrollController = tester
+        .widget<SingleChildScrollView>(
+          find.descendant(
+            of: find.byType(LiveMarkdownEditor),
+            matching: find.byType(SingleChildScrollView),
+          ),
+        )
+        .controller!;
+    scrollController.jumpTo(0);
+    await tester.pump();
+    final initialOffset = scrollController.position.pixels;
+    final sampledOffsets = <double>[initialOffset];
+    void recordOffset() => sampledOffsets.add(scrollController.position.pixels);
+    scrollController.addListener(recordOffset);
+    addTearDown(() => scrollController.removeListener(recordOffset));
+    final pasteModifier =
+        !kIsWeb && defaultTargetPlatform == TargetPlatform.macOS
+        ? LogicalKeyboardKey.metaLeft
+        : LogicalKeyboardKey.controlLeft;
+
+    await tester.sendKeyDownEvent(pasteModifier);
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.keyV);
+    await imageInput.pasteStarted.future;
+    await tester.pump();
+    final inFlightOffset = scrollController.position.pixels;
+
+    imageInput.releasePaste();
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.keyV);
+    await tester.sendKeyUpEvent(pasteModifier);
+    await tester.pump();
+    final committedOffset = scrollController.position.pixels;
+    await tester.pumpAndSettle();
+    final placeholderOffset = scrollController.position.pixels;
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 100)),
+    );
+    await tester.pump();
+    final decodedOffset = scrollController.position.pixels;
+    await tester.pumpAndSettle();
+    final settledOffset = scrollController.position.pixels;
+    await tester.pump(const Duration(milliseconds: 1000));
+    await tester.pumpAndSettle();
+    final autoSavedOffset = scrollController.position.pixels;
+
+    for (final offset in sampledOffsets) {
+      expect(offset, closeTo(initialOffset, 0.5));
+    }
+    expect(inFlightOffset, closeTo(initialOffset, 0.5));
+    expect(committedOffset, closeTo(initialOffset, 0.5));
+    expect(placeholderOffset, closeTo(initialOffset, 0.5));
+    expect(decodedOffset, closeTo(initialOffset, 0.5));
+    expect(settledOffset, closeTo(initialOffset, 0.5));
+    expect(autoSavedOffset, closeTo(initialOffset, 0.5));
+    expect(
+      scrollController.position.pixels,
+      lessThan(scrollController.position.maxScrollExtent - 100),
+    );
+
+    final viewport = tester.getRect(find.byType(LiveMarkdownEditor));
+    final pastedImage = tester.getRect(find.byType(PreviewImageBlock));
+    expect(pastedImage.height, greaterThan(96));
+    expect(pastedImage.top, lessThan(viewport.bottom));
+    expect(pastedImage.bottom, greaterThan(viewport.top));
+    expect(activeLiveMarkdownTextField(tester).focusNode.hasFocus, isTrue);
+  });
+
+  testWidgets('image paste in the middle preserves the current viewport', (
+    tester,
+  ) async {
+    final largePng = File('web/icons/Icon-512.png').readAsBytesSync();
+    final paragraphs = List.generate(
+      80,
+      (index) => 'Paragraph $index with enough text to fill the editor.',
+    );
+    final vault = CountingUpdateVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Middle Image');
+    await vault.updateMarkdown(
+      noteId: note.id,
+      markdown: paragraphs.join('\n\n'),
+    );
+    final imageInput = GatedImageInputService(
+      pastedImage: ImportedImage(
+        filename: 'middle.png',
+        mimeType: 'image/png',
+        bytes: largePng,
+      ),
+    );
+    addTearDown(imageInput.releasePaste);
+
+    await pumpWorkspace(tester, vault: vault, imageInput: imageInput);
+    await switchToSourceMode(tester);
+    const middleBlockIndex = 80;
+    await tester.ensureVisible(
+      find.byKey(const Key('live-markdown-block-preview-$middleBlockIndex')),
+    );
+    await tester.pumpAndSettle();
+    await activateLiveMarkdownBlock(tester, blockIndex: middleBlockIndex);
+    await setActiveLiveMarkdownSelection(
+      tester,
+      TextSelection.collapsed(offset: paragraphs[40].length),
+    );
+
+    final scrollController = tester
+        .widget<SingleChildScrollView>(
+          find.descendant(
+            of: find.byType(LiveMarkdownEditor),
+            matching: find.byType(SingleChildScrollView),
+          ),
+        )
+        .controller!;
+    final initialOffset = scrollController.position.pixels;
+    expect(initialOffset, greaterThan(100));
+    expect(
+      initialOffset,
+      lessThan(scrollController.position.maxScrollExtent - 100),
+    );
+    final sampledOffsets = <double>[initialOffset];
+    void recordOffset() => sampledOffsets.add(scrollController.position.pixels);
+    scrollController.addListener(recordOffset);
+    addTearDown(() => scrollController.removeListener(recordOffset));
+    final pasteModifier =
+        !kIsWeb && defaultTargetPlatform == TargetPlatform.macOS
+        ? LogicalKeyboardKey.metaLeft
+        : LogicalKeyboardKey.controlLeft;
+
+    await tester.sendKeyDownEvent(pasteModifier);
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.keyV);
+    await imageInput.pasteStarted.future;
+    await tester.pump();
+    imageInput.releasePaste();
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.keyV);
+    await tester.sendKeyUpEvent(pasteModifier);
+    await tester.pumpAndSettle();
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 100)),
+    );
+    await tester.pump();
+    await tester.pumpAndSettle();
+    await tester.pump(const Duration(milliseconds: 1000));
+    await tester.pumpAndSettle();
+
+    for (final offset in sampledOffsets) {
+      expect(offset, closeTo(initialOffset, 0.5));
+    }
+    expect(scrollController.position.pixels, closeTo(initialOffset, 0.5));
+    expect(
+      scrollController.position.pixels,
+      lessThan(scrollController.position.maxScrollExtent - 100),
+    );
+    final viewport = tester.getRect(find.byType(LiveMarkdownEditor));
+    final pastedImage = tester.getRect(find.byType(PreviewImageBlock));
+    expect(pastedImage.height, greaterThan(96));
+    expect(pastedImage.top, lessThan(viewport.bottom));
+    expect(pastedImage.bottom, greaterThan(viewport.top));
+    expect(activeLiveMarkdownTextField(tester).focusNode.hasFocus, isTrue);
+  });
+
   testWidgets('image paste keeps the latest edited area visible', (
     tester,
   ) async {
@@ -725,11 +916,31 @@ void main() {
         offset: lastParagraphEditor.controller.text.length,
       ),
     );
-    await tester.sendKeyDownEvent(LogicalKeyboardKey.metaLeft);
+    scrollable.position.jumpTo(scrollable.position.maxScrollExtent);
+    await tester.pump();
+    final endDistances = <double>[
+      (scrollable.position.maxScrollExtent - scrollable.position.pixels).abs(),
+    ];
+    void recordEndDistance() {
+      endDistances.add(
+        (scrollable.position.maxScrollExtent - scrollable.position.pixels)
+            .abs(),
+      );
+    }
+
+    scrollable.position.addListener(recordEndDistance);
+    final pasteModifier =
+        !kIsWeb && defaultTargetPlatform == TargetPlatform.macOS
+        ? LogicalKeyboardKey.metaLeft
+        : LogicalKeyboardKey.controlLeft;
+    await tester.sendKeyDownEvent(pasteModifier);
     await tester.sendKeyDownEvent(LogicalKeyboardKey.keyV);
     await tester.sendKeyUpEvent(LogicalKeyboardKey.keyV);
-    await tester.sendKeyUpEvent(LogicalKeyboardKey.metaLeft);
+    await tester.sendKeyUpEvent(pasteModifier);
     await tester.pumpAndSettle();
+    final placeholderEndDistance =
+        (scrollable.position.maxScrollExtent - scrollable.position.pixels)
+            .abs();
     final placeholderEditorTop = tester
         .getRect(find.byKey(const Key('note-editor')))
         .top;
@@ -737,11 +948,25 @@ void main() {
       () => Future<void>.delayed(const Duration(milliseconds: 100)),
     );
     await tester.pump();
+    final decodedEndDistance =
+        (scrollable.position.maxScrollExtent - scrollable.position.pixels)
+            .abs();
     final decodedEditorTop = tester
         .getRect(find.byKey(const Key('note-editor')))
         .top;
     expect(decodedEditorTop, closeTo(placeholderEditorTop, 0.5));
     await tester.pumpAndSettle();
+    final settledEndDistance =
+        (scrollable.position.maxScrollExtent - scrollable.position.pixels)
+            .abs();
+
+    for (final distance in endDistances) {
+      expect(distance, lessThan(0.5));
+    }
+    expect(placeholderEndDistance, lessThan(0.5));
+    expect(decodedEndDistance, lessThan(0.5));
+    expect(settledEndDistance, lessThan(0.5));
+    scrollable.position.removeListener(recordEndDistance);
 
     expect(scrollable.position.pixels, greaterThan(0));
     final viewport = tester.getRect(find.byType(LiveMarkdownEditor));
@@ -767,6 +992,293 @@ void main() {
         )
         .singleWhere((state) => state.position.axis == Axis.vertical);
     expect(restoredScrollable.position.pixels, greaterThan(0));
+  });
+
+  testWidgets('text paste near the top keeps focus and scroll position', (
+    tester,
+  ) async {
+    const firstParagraph = 'Top paragraph ready for pasted text.';
+    const pastedText =
+        ' first pasted line\nsecond pasted line\nthird pasted line';
+    final vault = CountingUpdateVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Long Paste');
+    await vault.updateMarkdown(
+      noteId: note.id,
+      markdown: <String>[
+        firstParagraph,
+        ...List.generate(
+          79,
+          (index) => 'Paragraph $index with enough text to fill the editor.',
+        ),
+      ].join('\n\n'),
+    );
+    final imageInput = GatedImageInputService();
+    addTearDown(imageInput.releasePaste);
+    mockClipboardText(pastedText);
+
+    await pumpWorkspace(tester, vault: vault, imageInput: imageInput);
+    await switchToSourceMode(tester);
+    await activateLiveMarkdownBlock(tester, blockIndex: 0);
+    await setActiveLiveMarkdownSelection(
+      tester,
+      const TextSelection.collapsed(offset: firstParagraph.length),
+    );
+
+    final scrollController = tester
+        .widget<SingleChildScrollView>(
+          find.descendant(
+            of: find.byType(LiveMarkdownEditor),
+            matching: find.byType(SingleChildScrollView),
+          ),
+        )
+        .controller!;
+    scrollController.jumpTo(0);
+    await tester.pump();
+    final initialOffset = scrollController.position.pixels;
+    final pasteModifier =
+        !kIsWeb && defaultTargetPlatform == TargetPlatform.macOS
+        ? LogicalKeyboardKey.metaLeft
+        : LogicalKeyboardKey.controlLeft;
+
+    await tester.sendKeyDownEvent(pasteModifier);
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.keyV);
+    await imageInput.pasteStarted.future;
+    await tester.pump();
+    final inFlightOffset = scrollController.position.pixels;
+
+    imageInput.releasePaste();
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.keyV);
+    await tester.sendKeyUpEvent(pasteModifier);
+    await tester.pump();
+    final committedOffset = scrollController.position.pixels;
+    await tester.pumpAndSettle();
+    final settledOffset = scrollController.position.pixels;
+
+    final documentController = liveMarkdownDocumentController(
+      tester,
+      paneId: 1,
+    );
+    expect(documentController.text, startsWith('$firstParagraph$pastedText'));
+    expect(
+      documentController.selection,
+      TextSelection.collapsed(
+        offset: firstParagraph.length + pastedText.length,
+      ),
+    );
+    expect(find.byKey(const Key('note-editor')), findsOneWidget);
+    final noteEditor = activeLiveMarkdownTextField(tester);
+    expect(noteEditor.focusNode.hasFocus, isTrue);
+    expect(noteEditor.controller.text, endsWith('third pasted line'));
+    expect(
+      noteEditor.controller.selection.extentOffset,
+      noteEditor.controller.text.length,
+    );
+    expect(inFlightOffset, closeTo(initialOffset, 0.5));
+    expect(committedOffset, closeTo(initialOffset, 0.5));
+    expect(settledOffset, closeTo(initialOffset, 0.5));
+
+    final viewport = tester.getRect(find.byType(LiveMarkdownEditor));
+    final activeEditor = tester.getRect(find.byKey(const Key('note-editor')));
+    expect(activeEditor.top, lessThan(viewport.bottom));
+    expect(activeEditor.bottom, greaterThan(viewport.top));
+
+    tester.testTextInput.enterText('${noteEditor.controller.text} continued');
+    await tester.pumpAndSettle();
+    expect(
+      liveMarkdownDocumentController(tester, paneId: 1).text,
+      startsWith('$firstParagraph$pastedText continued'),
+    );
+  });
+
+  testWidgets('small text paste at the bottom keeps the viewport still', (
+    tester,
+  ) async {
+    const lastParagraph = 'Bottom paragraph ready for a small paste.';
+    const pastedText = 'first pasted line\nsecond pasted line';
+    final vault = CountingUpdateVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Still Paste');
+    await vault.updateMarkdown(
+      noteId: note.id,
+      markdown: <String>[
+        ...List.generate(
+          79,
+          (index) => 'Paragraph $index with enough text to fill the editor.',
+        ),
+        lastParagraph,
+      ].join('\n\n'),
+    );
+    final imageInput = GatedImageInputService();
+    addTearDown(imageInput.releasePaste);
+    mockClipboardText(pastedText);
+
+    await pumpWorkspace(tester, vault: vault, imageInput: imageInput);
+    await switchToSourceMode(tester);
+    final scrollController = tester
+        .widget<SingleChildScrollView>(
+          find.descendant(
+            of: find.byType(LiveMarkdownEditor),
+            matching: find.byType(SingleChildScrollView),
+          ),
+        )
+        .controller!;
+    scrollController.jumpTo(scrollController.position.maxScrollExtent);
+    await tester.pump();
+    await tester.tap(find.byKey(const Key('live-markdown-end-edit-target')));
+    await tester.pump();
+    scrollController.jumpTo(scrollController.position.maxScrollExtent);
+    await tester.pump();
+    final initialOffset = scrollController.position.pixels;
+    final pasteModifier =
+        !kIsWeb && defaultTargetPlatform == TargetPlatform.macOS
+        ? LogicalKeyboardKey.metaLeft
+        : LogicalKeyboardKey.controlLeft;
+
+    await tester.sendKeyDownEvent(pasteModifier);
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.keyV);
+    await imageInput.pasteStarted.future;
+    await tester.pump();
+    expect(scrollController.position.pixels, closeTo(initialOffset, 0.5));
+
+    imageInput.releasePaste();
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.keyV);
+    await tester.sendKeyUpEvent(pasteModifier);
+    await tester.pump();
+    expect(scrollController.position.pixels, closeTo(initialOffset, 0.5));
+    await tester.pumpAndSettle();
+    expect(scrollController.position.pixels, closeTo(initialOffset, 0.5));
+
+    final noteEditor = activeLiveMarkdownTextField(tester);
+    expect(noteEditor.focusNode.hasFocus, isTrue);
+    final editableState = activeLiveMarkdownEditableTextState(tester);
+    final caret = editableState.renderEditable.getLocalRectForCaret(
+      TextPosition(offset: noteEditor.controller.selection.extentOffset),
+    );
+    final caretCenter = editableState.renderEditable.localToGlobal(
+      caret.center,
+    );
+    final viewport = tester.getRect(find.byType(LiveMarkdownEditor));
+    expect(caretCenter.dy, greaterThanOrEqualTo(viewport.top));
+    expect(caretCenter.dy, lessThanOrEqualTo(viewport.bottom));
+
+    await tester.pump(const Duration(milliseconds: 1000));
+    await tester.pumpAndSettle();
+    expect(scrollController.position.pixels, closeTo(initialOffset, 0.5));
+  });
+
+  testWidgets('text paste at the bottom keeps the pasted caret visible', (
+    tester,
+  ) async {
+    const lastParagraph = 'Bottom paragraph ready for pasted text.';
+    final pastedText = List.generate(
+      200,
+      (index) => 'pasted line $index with enough text to grow the editor',
+    ).join('\n');
+    final vault = CountingUpdateVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Bottom Paste');
+    await vault.updateMarkdown(
+      noteId: note.id,
+      markdown: <String>[
+        ...List.generate(
+          79,
+          (index) => 'Paragraph $index with enough text to fill the editor.',
+        ),
+        lastParagraph,
+      ].join('\n\n'),
+    );
+    final imageInput = GatedImageInputService();
+    addTearDown(imageInput.releasePaste);
+    mockClipboardText(pastedText);
+
+    await pumpWorkspace(tester, vault: vault, imageInput: imageInput);
+    await switchToSourceMode(tester);
+    final scrollController = tester
+        .widget<SingleChildScrollView>(
+          find.descendant(
+            of: find.byType(LiveMarkdownEditor),
+            matching: find.byType(SingleChildScrollView),
+          ),
+        )
+        .controller!;
+    scrollController.jumpTo(scrollController.position.maxScrollExtent);
+    await tester.pump();
+    await tester.tap(find.byKey(const Key('live-markdown-end-edit-target')));
+    await tester.pump();
+    expect(activeLiveMarkdownTextField(tester).controller.text, isEmpty);
+    scrollController.jumpTo(scrollController.position.maxScrollExtent);
+    await tester.pump();
+    final initialOffset = scrollController.position.pixels;
+    final pasteModifier =
+        !kIsWeb && defaultTargetPlatform == TargetPlatform.macOS
+        ? LogicalKeyboardKey.metaLeft
+        : LogicalKeyboardKey.controlLeft;
+
+    await tester.sendKeyDownEvent(pasteModifier);
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.keyV);
+    await imageInput.pasteStarted.future;
+    await tester.pump();
+    expect(scrollController.position.pixels, closeTo(initialOffset, 0.5));
+
+    imageInput.releasePaste();
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.keyV);
+    await tester.sendKeyUpEvent(pasteModifier);
+    await tester.pump();
+    await tester.pumpAndSettle();
+
+    final documentController = liveMarkdownDocumentController(
+      tester,
+      paneId: 1,
+    );
+    expect(documentController.text, endsWith('$lastParagraph\n$pastedText'));
+    expect(
+      documentController.selection,
+      TextSelection.collapsed(offset: documentController.text.length),
+    );
+    final noteEditor = activeLiveMarkdownTextField(tester);
+    expect(noteEditor.focusNode.hasFocus, isTrue);
+    expect(
+      noteEditor.controller.selection.extentOffset,
+      noteEditor.controller.text.length,
+    );
+
+    final editableState = activeLiveMarkdownEditableTextState(tester);
+    final caret = editableState.renderEditable.getLocalRectForCaret(
+      TextPosition(offset: noteEditor.controller.selection.extentOffset),
+    );
+    final caretCenter = editableState.renderEditable.localToGlobal(
+      caret.center,
+    );
+    final viewport = tester.getRect(find.byType(LiveMarkdownEditor));
+    expect(caretCenter.dy, greaterThanOrEqualTo(viewport.top));
+    expect(caretCenter.dy, lessThanOrEqualTo(viewport.bottom));
+    expect(scrollController.position.pixels, greaterThan(initialOffset + 100));
+    expect(
+      scrollController.position.pixels,
+      closeTo(scrollController.position.maxScrollExtent, 0.5),
+    );
+
+    final committedOffset = scrollController.position.pixels;
+    await tester.pump(const Duration(milliseconds: 1000));
+    await tester.pumpAndSettle();
+    final savedEditor = activeLiveMarkdownTextField(tester);
+    expect(savedEditor.focusNode.hasFocus, isTrue);
+    final savedEditableState = activeLiveMarkdownEditableTextState(tester);
+    final savedCaret = savedEditableState.renderEditable.getLocalRectForCaret(
+      TextPosition(offset: savedEditor.controller.selection.extentOffset),
+    );
+    final savedCaretCenter = savedEditableState.renderEditable.localToGlobal(
+      savedCaret.center,
+    );
+    expect(savedCaretCenter.dy, greaterThanOrEqualTo(viewport.top));
+    expect(savedCaretCenter.dy, lessThanOrEqualTo(viewport.bottom));
+    expect(scrollController.position.pixels, closeTo(committedOffset, 0.5));
+    expect(
+      scrollController.position.pixels,
+      closeTo(scrollController.position.maxScrollExtent, 0.5),
+    );
+
+    tester.testTextInput.enterText('${savedEditor.controller.text} continued');
+    await tester.pumpAndSettle();
+    expect(documentController.text, endsWith('$pastedText continued'));
   });
 
   testWidgets('image paste keeps the caret at a middle insertion point', (

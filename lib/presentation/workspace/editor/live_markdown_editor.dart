@@ -107,7 +107,9 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
   Offset? _tableBlockDragPosition;
   Timer? _tableBlockAutoScrollTimer;
   var _persistentBlankInsertion = false;
-  var _pinLatestEditThroughContentResize = false;
+  _PasteViewportTransaction? _pasteViewportTransaction;
+
+  bool get _pasteInFlight => _pasteViewportTransaction?.inFlight ?? false;
 
   @override
   void initState() {
@@ -132,6 +134,7 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
   void didUpdateWidget(LiveMarkdownEditor oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.controller != widget.controller) {
+      _cancelPasteViewportTransaction();
       oldWidget.controller.removeListener(_handleFullDocumentChanged);
       widget.controller.addListener(_handleFullDocumentChanged);
       _editorController.replaceDocument(widget.controller);
@@ -140,6 +143,9 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
       _stopTableBlockAutoScroll();
       _draggingTableBlockStart = null;
       _tableBlockDragPosition = null;
+    }
+    if (!widget.focused) {
+      _cancelPasteViewportTransaction();
     }
     if (!widget.focused && _editorController.activeOffset != null) {
       _blockFocusNode.unfocus();
@@ -164,7 +170,7 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
     super.dispose();
   }
 
-  void _focusBlockEditor() {
+  void _focusBlockEditor({bool keepLatestEditVisible = true}) {
     final scheduledOffset = _editorController.activeOffset;
     final scheduledTrailingInsertion =
         _editorController.activeTrailingInsertion;
@@ -184,33 +190,157 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
         return;
       }
       _blockFocusNode.requestFocus();
-      _scheduleKeepLatestEditVisible();
+      if (keepLatestEditVisible) {
+        _scheduleKeepLatestEditVisible();
+      }
     });
   }
 
   double? _activeEditScrollCorrection(
-    ScrollMetrics oldPosition,
+    ScrollMetrics _,
     ScrollMetrics newPosition,
   ) {
-    if (!_pinLatestEditThroughContentResize) {
+    final transaction = _pasteViewportTransaction;
+    if (transaction == null ||
+        transaction.cancelled ||
+        !_pasteTransactionIsCurrent(transaction)) {
       return null;
     }
-    final correction =
-        newPosition.maxScrollExtent - oldPosition.maxScrollExtent;
+    final targetPixels = switch (transaction.mode) {
+      _PasteViewportMode.preserveOffset => transaction.originalOffset,
+      _PasteViewportMode.followDocumentEnd => newPosition.maxScrollExtent,
+    };
+    if (targetPixels == null) {
+      return null;
+    }
+    final anchoredPixels = targetPixels
+        .clamp(newPosition.minScrollExtent, newPosition.maxScrollExtent)
+        .toDouble();
+    final correction = anchoredPixels - newPosition.pixels;
     return correction.abs() < 0.5 ? null : correction;
   }
 
-  void _pinLatestEditForContentResize() {
-    _pinLatestEditThroughContentResize = true;
+  _PasteViewportTransaction _beginPasteViewportTransaction(
+    TextEditingValue target,
+  ) {
+    final existing = _pasteViewportTransaction;
+    if (existing != null &&
+        existing.inFlight &&
+        _pasteTransactionIsCurrent(existing)) {
+      return existing;
+    }
+    final position = _scrollController.hasClients
+        ? _scrollController.position
+        : null;
+    final transaction = _PasteViewportTransaction(
+      paneId: widget.paneId,
+      noteId: widget.noteId,
+      documentController: widget.controller,
+      documentLength: target.text.length,
+      targetSelection: target.selection,
+      originalOffset: position?.pixels,
+      originalMaxScrollExtent: position?.maxScrollExtent,
+    );
+    _pasteViewportTransaction = transaction;
+    return transaction;
   }
 
-  void _clearLatestEditContentResizePin() {
-    _pinLatestEditThroughContentResize = false;
+  bool _pasteTransactionIsCurrent(_PasteViewportTransaction transaction) {
+    return identical(_pasteViewportTransaction, transaction) &&
+        identical(transaction.documentController, widget.controller) &&
+        transaction.paneId == widget.paneId &&
+        transaction.noteId == widget.noteId;
+  }
+
+  void _markCurrentPasteAsImage() {
+    final transaction = _pasteViewportTransaction;
+    if (transaction == null ||
+        transaction.cancelled ||
+        !_pasteTransactionIsCurrent(transaction)) {
+      return;
+    }
+    transaction.imageCommitted = true;
+    if (transaction.targetEndsAtDocumentEnd &&
+        transaction.viewportStartedAtDocumentEnd) {
+      transaction.mode = _PasteViewportMode.followDocumentEnd;
+    }
+  }
+
+  void _cancelPasteViewportTransaction([_PasteViewportTransaction? expected]) {
+    final transaction = _pasteViewportTransaction;
+    if (transaction == null ||
+        (expected != null && !identical(transaction, expected))) {
+      return;
+    }
+    if (transaction.inFlight) {
+      transaction.cancelled = true;
+      return;
+    }
+    _pasteViewportTransaction = null;
+  }
+
+  void _scheduleResolveTextPasteViewport(
+    _PasteViewportTransaction transaction,
+  ) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted ||
+          !_scrollController.hasClients ||
+          !_pasteTransactionIsCurrent(transaction) ||
+          transaction.cancelled ||
+          transaction.imageCommitted) {
+        return;
+      }
+      final position = _scrollController.position;
+      final anchorOffset = transaction.originalOffset;
+      if (anchorOffset == null) {
+        _cancelPasteViewportTransaction(transaction);
+        return;
+      }
+      final originalOffset = anchorOffset
+          .clamp(position.minScrollExtent, position.maxScrollExtent)
+          .toDouble();
+      final renderEditable = _findRenderEditable(_activeBlockRenderObject());
+      final viewportRenderObject = _scrollViewportKey.currentContext
+          ?.findRenderObject();
+      var targetOffset = originalOffset;
+      if (renderEditable != null &&
+          renderEditable.attached &&
+          viewportRenderObject is RenderBox &&
+          viewportRenderObject.attached) {
+        final selection = _editorController.normalizedBlockSelection();
+        final caret = renderEditable.getLocalRectForCaret(
+          TextPosition(offset: selection.extentOffset),
+        );
+        final caretTop = renderEditable.localToGlobal(caret.topLeft).dy;
+        final caretBottom = renderEditable.localToGlobal(caret.bottomLeft).dy;
+        final viewport =
+            viewportRenderObject.localToGlobal(Offset.zero) &
+            viewportRenderObject.size;
+        final offsetDelta = position.pixels - originalOffset;
+        final caretTopAtOriginalOffset = caretTop + offsetDelta;
+        final caretBottomAtOriginalOffset = caretBottom + offsetDelta;
+        final caretIsBelowViewport =
+            caretTopAtOriginalOffset >= viewport.bottom ||
+            caretBottomAtOriginalOffset > viewport.bottom;
+        if (caretIsBelowViewport) {
+          targetOffset = position.maxScrollExtent;
+        }
+      }
+      _cancelPasteViewportTransaction(transaction);
+      if ((position.pixels - targetOffset).abs() >= 0.5) {
+        position.jumpTo(targetOffset);
+      }
+    });
   }
 
   void _scheduleKeepLatestEditVisible() {
+    if (_pasteViewportTransaction != null) {
+      return;
+    }
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || !_scrollController.hasClients) {
+      if (!mounted ||
+          !_scrollController.hasClients ||
+          _pasteViewportTransaction != null) {
         return;
       }
       final targetContext = _activeTextEditorKey.currentContext;
@@ -224,6 +354,22 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
         ),
       );
     });
+  }
+
+  bool _handleScrollNotification(ScrollNotification notification) {
+    if (notification.depth != 0) {
+      return false;
+    }
+    final userStartedDragging =
+        notification is ScrollStartNotification &&
+        notification.dragDetails != null;
+    final userChangedDirection =
+        notification is UserScrollNotification &&
+        notification.direction != ScrollDirection.idle;
+    if (userStartedDragging || userChangedDirection) {
+      _cancelPasteViewportTransaction();
+    }
+    return false;
   }
 
   void _focusEditorSession() {
@@ -244,6 +390,9 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
 
   void _handleEditorFocusChanged(bool hasFocus) {
     if (!hasFocus) {
+      if (!_pasteInFlight && _openContextMenuCount == 0) {
+        _cancelPasteViewportTransaction();
+      }
       _scheduleEditingSessionReconciliation();
     }
   }
@@ -252,6 +401,7 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted ||
           _editorController.activeOffset == null ||
+          _pasteInFlight ||
           _openContextMenuCount > 0 ||
           _editorFocusNode.hasFocus ||
           _blockFocusNode.hasFocus) {
@@ -290,13 +440,18 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
     if (!mounted || !_editorController.handleFullDocumentChanged()) {
       return;
     }
-    if (_editorController.activeTrailingInsertion) {
-      _pinLatestEditForContentResize();
+    final trailingImageInsertion = _editorController.activeTrailingInsertion;
+    if (_pasteInFlight && trailingImageInsertion) {
+      _markCurrentPasteAsImage();
     }
     setState(() {});
-    _scheduleKeepLatestEditVisible();
-    if (widget.focused && _editorController.activeTrailingInsertion) {
-      _focusBlockEditor();
+    if (_pasteViewportTransaction == null) {
+      _scheduleKeepLatestEditVisible();
+    }
+    if (widget.focused && trailingImageInsertion) {
+      _focusBlockEditor(
+        keepLatestEditVisible: _pasteViewportTransaction == null,
+      );
     }
   }
 
@@ -305,7 +460,7 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
     SelectionChangedCause? cause,
   ) {
     if (cause != null) {
-      _clearLatestEditContentResizePin();
+      _cancelPasteViewportTransaction();
     }
     if (_editorController.syncingBlock) {
       return;
@@ -351,7 +506,7 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
     int selectionOffset = 0,
   }) {
     _editorController.endUndoGroup();
-    _clearLatestEditContentResizePin();
+    _cancelPasteViewportTransaction();
     if (block.isBlank) {
       _clearActiveBlock();
       return;
@@ -425,6 +580,7 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
   }
 
   void _replaceActiveBlock(String text) {
+    _cancelPasteViewportTransaction();
     if (!_editorController.replaceActiveBlock(text)) {
       return;
     }
@@ -955,7 +1111,7 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
 
   void _activateTextInsertionAt(int insertionOffset) {
     _editorController.endUndoGroup();
-    _clearLatestEditContentResizePin();
+    _cancelPasteViewportTransaction();
     _clearSelectedImageTarget();
     _clearSelectedTableTarget();
     _persistentBlankInsertion = false;
@@ -1121,9 +1277,31 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
     );
     _restoreRememberedTextCaret(resolvedOffset, lineInsertion: lineInsertion);
     final target = widget.controller.value;
-    final outcome = await widget.onPaste(target, lineInsertion: lineInsertion);
+    final transaction = _beginPasteViewportTransaction(target);
+    late final PaneEditorCommandOutcome outcome;
+    try {
+      outcome = await widget.onPaste(target, lineInsertion: lineInsertion);
+    } catch (_) {
+      _cancelPasteViewportTransaction(transaction);
+      rethrow;
+    } finally {
+      transaction.inFlight = false;
+    }
+    if (transaction.cancelled) {
+      _cancelPasteViewportTransaction(transaction);
+    }
     if (!mounted) {
+      _cancelPasteViewportTransaction(transaction);
       return;
+    }
+    if (outcome != PaneEditorCommandOutcome.committed) {
+      _cancelPasteViewportTransaction(transaction);
+    }
+    final imagePaste =
+        outcome == PaneEditorCommandOutcome.committed &&
+        _editorController.activeTrailingInsertion;
+    if (imagePaste) {
+      _markCurrentPasteAsImage();
     }
     if (outcome == PaneEditorCommandOutcome.committed &&
         widget.controller.selection.isValid) {
@@ -1133,7 +1311,14 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
       );
     }
     _syncBlockController();
-    _scheduleKeepLatestEditVisible();
+    if (outcome == PaneEditorCommandOutcome.committed && !imagePaste) {
+      _scheduleResolveTextPasteViewport(transaction);
+    }
+    if (outcome != PaneEditorCommandOutcome.staleTarget &&
+        widget.focused &&
+        _editorController.activeOffset != null) {
+      _focusBlockEditor(keepLatestEditVisible: false);
+    }
   }
 
   bool _selectedTableSnapshotIsCurrent({
@@ -1677,6 +1862,7 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
     if (!widget.enabled || widget.busy) {
       return;
     }
+    _cancelPasteViewportTransaction();
     _editorController.applyInlineFormat(format, busy: widget.busy);
   }
 
@@ -1685,6 +1871,7 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
       return;
     }
     dismissAllMacContextMenus();
+    _cancelPasteViewportTransaction();
     _clearSelectedImageTarget();
     _clearSelectedTableTarget();
     if (_editorController.undo()) {
@@ -1697,6 +1884,7 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
       return;
     }
     dismissAllMacContextMenus();
+    _cancelPasteViewportTransaction();
     _clearSelectedImageTarget();
     _clearSelectedTableTarget();
     if (_editorController.redo()) {
@@ -1771,17 +1959,55 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
     }
     dismissAllMacContextMenus();
     _editorController.endUndoGroup();
-    _pinLatestEditForContentResize();
+    final pasteStartPrimaryFocus = FocusManager.instance.primaryFocus;
     final lineInsertion = _editorController.activeTrailingInsertion;
     _editorController.syncDocumentSelectionFromBlock(menuTarget: menuTarget);
     final target = widget.controller.value;
-    final outcome = await widget.onPaste(target, lineInsertion: lineInsertion);
-    if (outcome != PaneEditorCommandOutcome.committed) {
-      _clearLatestEditContentResizePin();
+    final transaction = _beginPasteViewportTransaction(target);
+    late final PaneEditorCommandOutcome outcome;
+    try {
+      outcome = await widget.onPaste(target, lineInsertion: lineInsertion);
+    } catch (_) {
+      _cancelPasteViewportTransaction(transaction);
+      rethrow;
+    } finally {
+      transaction.inFlight = false;
     }
-    if (mounted) {
-      _syncBlockController();
-      _scheduleKeepLatestEditVisible();
+    if (transaction.cancelled) {
+      _cancelPasteViewportTransaction(transaction);
+    }
+    if (outcome != PaneEditorCommandOutcome.committed) {
+      _cancelPasteViewportTransaction(transaction);
+    }
+    if (!mounted) {
+      _cancelPasteViewportTransaction(transaction);
+      return;
+    }
+    _syncBlockController();
+    final trailingImageInsertion =
+        outcome == PaneEditorCommandOutcome.committed &&
+        _editorController.activeTrailingInsertion;
+    if (trailingImageInsertion) {
+      _markCurrentPasteAsImage();
+    }
+    final currentPrimaryFocus = FocusManager.instance.primaryFocus;
+    final pasteStillOwnsFocus =
+        currentPrimaryFocus == null ||
+        currentPrimaryFocus == pasteStartPrimaryFocus ||
+        currentPrimaryFocus == _blockFocusNode ||
+        currentPrimaryFocus == _editorFocusNode;
+    if (outcome != PaneEditorCommandOutcome.staleTarget &&
+        widget.focused &&
+        _editorController.activeOffset != null &&
+        pasteStillOwnsFocus) {
+      if (outcome == PaneEditorCommandOutcome.committed &&
+          !trailingImageInsertion) {
+        _scheduleResolveTextPasteViewport(transaction);
+      }
+      _focusBlockEditor(keepLatestEditVisible: false);
+    } else {
+      _cancelPasteViewportTransaction(transaction);
+      _scheduleEditingSessionReconciliation();
     }
   }
 
@@ -1814,7 +2040,7 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
 
   void _activateTrailingTextBlock() {
     _editorController.endUndoGroup();
-    _clearLatestEditContentResizePin();
+    _cancelPasteViewportTransaction();
     _clearSelectedImageTarget();
     _clearSelectedTableTarget();
     _persistentBlankInsertion = false;
@@ -1832,7 +2058,7 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
 
   void _activateBlankBlock(MarkdownLiveBlock block) {
     _editorController.endUndoGroup();
-    _clearLatestEditContentResizePin();
+    _cancelPasteViewportTransaction();
     _clearSelectedImageTarget();
     _clearSelectedTableTarget();
     _persistentBlankInsertion = false;
@@ -1863,7 +2089,7 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
     _clearSelectedImageTarget();
     _clearSelectedTableTarget();
     _persistentBlankInsertion = false;
-    _clearLatestEditContentResizePin();
+    _cancelPasteViewportTransaction();
     if (_editorController.activeOffset == null) {
       if (hadBlockSelection && mounted) {
         setState(() {});
@@ -1879,7 +2105,7 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
 
   void _handleImagePreviewTap(MarkdownLiveBlock block, String src) {
     _editorController.endUndoGroup();
-    _clearLatestEditContentResizePin();
+    _cancelPasteViewportTransaction();
     _clearSelectedTableTarget();
     widget.onFocusPane();
     final normalizedSrc = normalizeImageSrc(src);
@@ -1901,7 +2127,7 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
 
   void _handleTableFrameTap(MarkdownLiveBlock block) {
     _editorController.endUndoGroup();
-    _clearLatestEditContentResizePin();
+    _cancelPasteViewportTransaction();
     _clearSelectedImageTarget();
     _persistentBlankInsertion = false;
     widget.onFocusPane();
@@ -2191,62 +2417,71 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
             child: CupertinoScrollbar(
               key: _scrollViewportKey,
               controller: _scrollController,
-              child: SingleChildScrollView(
-                key: PageStorageKey<String>(
-                  'live-markdown-scroll-${widget.paneId}-${widget.noteId}',
-                ),
-                controller: _scrollController,
-                physics: _tableReordering || _draggingTableBlockStart != null
-                    ? const NeverScrollableScrollPhysics()
-                    : null,
-                padding: const EdgeInsets.fromLTRB(16, 54, 16, 16),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    for (var index = 0; index < blocks.length; index += 1) ...[
-                      _buildOutlineAwareBlock(
-                        blocks[index],
-                        index,
-                        activeIndex,
-                        outlineByBlock[index],
-                        blocks,
-                      ),
-                      if (activeInsertionOffset == blocks[index].end)
-                        _buildVirtualTrailingTextBlockEditor(index + 1),
-                    ],
-                    if (activeInsertionOffset != null &&
-                        !blocks.any(
-                          (block) => block.end == activeInsertionOffset,
-                        ))
-                      _buildVirtualTrailingTextBlockEditor(blocks.length),
-                    _MarkdownTableBlockDropTarget(
-                      key: const Key('markdown-table-document-end-drop-target'),
-                      enabled: _draggingTableBlockStart != null,
-                      noteId: widget.noteId,
-                      targetBlockStart: -1,
-                      fixedSide: _MarkdownBlockDropSide.after,
-                      onDragMove: (position) =>
-                          _tableBlockDragPosition = position,
-                      onAccept: (data, _) =>
-                          _handleTableBlockDropAtDocumentEnd(data),
-                      child: GestureDetector(
-                        key: const Key('live-markdown-end-edit-target'),
-                        behavior: HitTestBehavior.opaque,
-                        onTap: _activateTrailingTextBlock,
-                        onSecondaryTapDown: (details) {
-                          _openContextMenuAtDocumentEnd(
-                            blocks,
-                            details.globalPosition,
-                          );
-                        },
-                        child: SizedBox(
-                          height: _editorController.activeTrailingInsertion
-                              ? 24
-                              : 96,
+              child: NotificationListener<ScrollNotification>(
+                onNotification: _handleScrollNotification,
+                child: SingleChildScrollView(
+                  key: PageStorageKey<String>(
+                    'live-markdown-scroll-${widget.paneId}-${widget.noteId}',
+                  ),
+                  controller: _scrollController,
+                  physics: _tableReordering || _draggingTableBlockStart != null
+                      ? const NeverScrollableScrollPhysics()
+                      : null,
+                  padding: const EdgeInsets.fromLTRB(16, 54, 16, 16),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      for (
+                        var index = 0;
+                        index < blocks.length;
+                        index += 1
+                      ) ...[
+                        _buildOutlineAwareBlock(
+                          blocks[index],
+                          index,
+                          activeIndex,
+                          outlineByBlock[index],
+                          blocks,
+                        ),
+                        if (activeInsertionOffset == blocks[index].end)
+                          _buildVirtualTrailingTextBlockEditor(index + 1),
+                      ],
+                      if (activeInsertionOffset != null &&
+                          !blocks.any(
+                            (block) => block.end == activeInsertionOffset,
+                          ))
+                        _buildVirtualTrailingTextBlockEditor(blocks.length),
+                      _MarkdownTableBlockDropTarget(
+                        key: const Key(
+                          'markdown-table-document-end-drop-target',
+                        ),
+                        enabled: _draggingTableBlockStart != null,
+                        noteId: widget.noteId,
+                        targetBlockStart: -1,
+                        fixedSide: _MarkdownBlockDropSide.after,
+                        onDragMove: (position) =>
+                            _tableBlockDragPosition = position,
+                        onAccept: (data, _) =>
+                            _handleTableBlockDropAtDocumentEnd(data),
+                        child: GestureDetector(
+                          key: const Key('live-markdown-end-edit-target'),
+                          behavior: HitTestBehavior.opaque,
+                          onTap: _activateTrailingTextBlock,
+                          onSecondaryTapDown: (details) {
+                            _openContextMenuAtDocumentEnd(
+                              blocks,
+                              details.globalPosition,
+                            );
+                          },
+                          child: SizedBox(
+                            height: _editorController.activeTrailingInsertion
+                                ? 24
+                                : 96,
+                          ),
                         ),
                       ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
               ),
             ),
@@ -2813,6 +3048,40 @@ class _MarkdownTableDragFeedback extends StatelessWidget {
       ),
     );
   }
+}
+
+enum _PasteViewportMode { preserveOffset, followDocumentEnd }
+
+final class _PasteViewportTransaction {
+  _PasteViewportTransaction({
+    required this.paneId,
+    required this.noteId,
+    required this.documentController,
+    required this.documentLength,
+    required this.targetSelection,
+    required this.originalOffset,
+    required this.originalMaxScrollExtent,
+  });
+
+  final String paneId;
+  final String noteId;
+  final TextEditingController documentController;
+  final int documentLength;
+  final TextSelection targetSelection;
+  final double? originalOffset;
+  final double? originalMaxScrollExtent;
+  var mode = _PasteViewportMode.preserveOffset;
+  var inFlight = true;
+  var cancelled = false;
+  var imageCommitted = false;
+
+  bool get targetEndsAtDocumentEnd =>
+      targetSelection.isValid && targetSelection.end == documentLength;
+
+  bool get viewportStartedAtDocumentEnd =>
+      originalOffset != null &&
+      originalMaxScrollExtent != null &&
+      (originalMaxScrollExtent! - originalOffset!).abs() < 0.5;
 }
 
 final class _ActiveEditScrollController extends ScrollController {
