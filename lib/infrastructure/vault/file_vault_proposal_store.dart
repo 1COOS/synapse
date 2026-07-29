@@ -119,7 +119,7 @@ final class FileVaultProposalStore {
   Future<void> rewriteCopied(
     String sourceNoteId,
     String copiedNoteId,
-    Map<String, String> sourceIdMap,
+    Map<String, String> materialIdMap,
     DateTime now,
   ) async {
     final proposals = await readProposalsFile(sourceNoteId);
@@ -129,9 +129,16 @@ final class FileVaultProposalStore {
           AiProposal(
             id: const Uuid().v4(),
             noteId: copiedNoteId,
-            sourceIds: [
-              for (final sourceId in proposal.sourceIds)
-                sourceIdMap[sourceId] ?? sourceId,
+            materialSnapshots: [
+              for (final snapshot in proposal.materialSnapshots)
+                ProposalMaterialSnapshot(
+                  materialId:
+                      materialIdMap[snapshot.materialId] ?? snapshot.materialId,
+                  title: snapshot.title,
+                  mediaKind: snapshot.mediaKind,
+                  mimeType: snapshot.mimeType,
+                  processingState: snapshot.processingState,
+                ),
             ],
             title: proposal.title,
             proposedMarkdown: proposal.proposedMarkdown,

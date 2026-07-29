@@ -70,8 +70,19 @@ final class FileVaultPaths {
     return p.join(parent, '$basename.assets');
   }
 
-  File sourcesFile(String noteId) {
+  File legacySourcesFile(String noteId) {
     return File(p.join(assetsDirectoryFor(noteId).path, 'sources.json'));
+  }
+
+  @Deprecated('Use legacySourcesFile only during resource migration.')
+  File sourcesFile(String noteId) => legacySourcesFile(noteId);
+
+  File materialsFile(String noteId) {
+    return File(p.join(assetsDirectoryFor(noteId).path, 'materials.json'));
+  }
+
+  File attachmentsFile(String noteId) {
+    return File(p.join(assetsDirectoryFor(noteId).path, 'attachments.json'));
   }
 
   File proposalsFile(String noteId) {
@@ -85,16 +96,27 @@ final class FileVaultPaths {
     return File(p.join(assetsDirectoryFor(noteId).path, 'proposals.json'));
   }
 
-  File attachmentFileFor(SourceItem source) {
-    final attachmentPath = source.attachmentPath;
-    if (attachmentPath == null || attachmentPath.trim().isEmpty) {
-      throw StateError('Source has no attachment: ${source.id}');
+  File materialFileFor(AiMaterial material) {
+    final contentPath = material.contentPath;
+    if (contentPath == null || contentPath.trim().isEmpty) {
+      throw StateError('Material has no file content: ${material.id}');
     }
-    final assets = assetsDirectoryFor(source.noteId);
+    return _fileWithinAssets(material.noteId, contentPath);
+  }
+
+  File attachmentFileFor(NoteAttachment attachment) {
+    return _fileWithinAssets(attachment.noteId, attachment.relativePath);
+  }
+
+  @Deprecated('Use materialFileFor.')
+  File sourceAttachmentFileFor(AiMaterial source) => materialFileFor(source);
+
+  File _fileWithinAssets(String noteId, String relativePath) {
+    final assets = assetsDirectoryFor(noteId);
     final assetsPath = p.normalize(assets.path);
-    final filePath = p.normalize(p.join(assets.path, attachmentPath));
+    final filePath = p.normalize(p.join(assets.path, relativePath));
     if (!p.equals(filePath, assetsPath) && !p.isWithin(assetsPath, filePath)) {
-      throw StateError('Attachment path escapes note assets: $attachmentPath');
+      throw StateError('Resource path escapes note assets: $relativePath');
     }
     return File(filePath);
   }
@@ -161,6 +183,24 @@ final class FileVaultPaths {
           ? '$base$extension'
           : '$base-$index$extension';
       final relative = p.join('attachments', filename).replaceAll('\\', '/');
+      if (!await _entityExists(File(p.join(assetsPath, relative)))) {
+        return relative;
+      }
+      index += 1;
+    }
+  }
+
+  Future<String> uniqueMaterialPath({
+    required String assetsPath,
+    required String base,
+    required String extension,
+  }) async {
+    var index = 1;
+    while (true) {
+      final filename = index == 1
+          ? '$base$extension'
+          : '$base-$index$extension';
+      final relative = p.join('materials', filename).replaceAll('\\', '/');
       if (!await _entityExists(File(p.join(assetsPath, relative)))) {
         return relative;
       }

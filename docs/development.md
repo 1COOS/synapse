@@ -79,8 +79,10 @@ macOS 首次启动必须在左栏底部选择本机目录作为 Vault。应用�
   <folder>/
     note.md
     note.assets/
+      materials/
+      materials.json
       attachments/
-      sources.json
+      attachments.json
   .synapse/
     migrations/<timestamp>/
     transactions/<uuid>/
@@ -90,15 +92,19 @@ macOS 首次启动必须在左栏底部选择本机目录作为 Vault。应用�
     search.sqlite
 ```
 
-用户内容以 `.md`、附件和 `sources.json` 为准。笔记 frontmatter 中的 `synapseId` 必须是规范化小写 UUID v4；rename/move 保持 ID，copy 生成新 note/source/proposal ID。`.synapse-cache/`、SQLite、向量和 proposal 是可删除缓存。个人 Vault、应用支持目录内容、bookmark、Keychain 数据和任何真实 key 都不得提交到 Git。
+用户内容以 `.md`、`materials/` + `materials.json`、`attachments/` + `attachments.json` 为准。AI 素材和笔记附件是独立生命周期，同一输入若两边都需要必须保存两份。笔记 frontmatter 中的 `synapseId` 必须是规范化小写 UUID v4；rename/move 保持 note/material/attachment ID，copy 生成新 ID并重映射 proposal 来源快照。`.synapse-cache/`、SQLite、向量和 proposal 是可删除缓存。个人 Vault、应用支持目录内容、bookmark、Keychain 数据和任何真实 key 都不得提交到 Git。
 
-Vault 中的 Markdown、sidecar JSON 与附件写入必须走原子文件 writer，不允许重新引入直接覆盖写入。重命名、复制或冲突移动改变笔记 basename 时，必须同步更新正文中属于该笔记的 `.assets` 图片引用，并用 backend 回归测试覆盖 HTML 与标准 Markdown 两种形式。
+Vault 中的 Markdown、sidecar JSON 与资源文件写入必须走原子文件 writer，不允许重新引入直接覆盖写入。重命名、复制或冲突移动改变笔记 basename 时，必须同步更新正文中属于该笔记的 `.assets` 图片引用，并用 backend 回归测试覆盖 HTML 与标准 Markdown 两种形式。移动保持资源 ID；复制为两类资源生成新 ID，proposal 只重映射素材来源快照，附件引用只在路径实际变化时改写。
 
 资源名称必须通过共享的 portable validator：拒绝空名称、控制字符、`< > : " / \ | ? *`、结尾空格/点、`.`/`..` 和 Windows 保留名。File/Memory backend 的同级冲突比较统一使用 Unicode NFC + lowercase canonical key。`createFolder`、`renameFolder`、`renameNote` 是严格显式命名，不得自动编号；`createNote`、`copyNote`、`moveNote` 保留自动编号冲突处理。
 
 跨文件/目录 mutation 必须进入 File Vault journal：`.synapse/transactions/` 记录删除新路径、恢复备份和反向 move 等逆操作；同进程 mutex 与 blocking file lock 串行化事务。active journal 会在下次打开 Vault 时回滚，committed journal 只清理。不要绕过 `VaultBackend.runMutationTransaction` 直接拼接多步持久写入。
 
 legacy Vault 身份迁移必须先 scan，再由用户显式确认；确认前 workspace 保持只读。迁移需校验 snapshot digest、备份受影响 Markdown/sidecar、写 manifest，并保证失败回滚。不要为了兼容旧测试重新引入路径型 note ID。
+
+旧 `sources.json` 的资源分区迁移是独立的自动 journal 事务：按 Markdown/HTML 图片引用把旧图片归为附件，其余图片和文本归为 AI 素材，发现裸 `attachments/` 文件时补建附件记录。新 sidecar 写入并校验成功前不得删除旧文件；迁移测试必须覆盖 proposal 快照补齐、未引用附件保留、备份和失败回滚。
+
+迁移、附件影响分析和引用清理必须共用 `localVaultImageSourcePath`，禁止把无 scheme 的本地路径再读取为 `Uri.path`，否则中文、空格和百分号编码会与真实文件路径失配。新增路径用例至少覆盖原始 Unicode、`%XX`、`file:` URI、外部 URL 和 Vault 越界。对已生成 `materials.json`/`attachments.json` 的错误 v1 结果，`resource-split-v2` 仍必须检查 v1 备份；只修复 ID、引用原路径与文件同时匹配的记录，对目标冲突不覆盖，并用 sidecar 备份、SHA-256 manifest、幂等标记和 journal 回滚测试约束。
 
 ## 5. 状态层开发约定
 
@@ -162,10 +168,15 @@ flutter test --no-pub test/presentation/workspace/controller/workspace_controlle
 
 ## 6. AI、OCR 与数据边界
 
+- `AiMaterial` 与 `NoteAttachment` 不得重新合并为通用 source 模型；编辑器粘贴只调用附件 API，右栏导入/粘贴只调用 AI 素材 API并默认选中；
+- `MediaKind` 保持 `text/image/audio` 可序列化，但本期禁止添加音频导入、播放、模型配置或转写 UI；
 - 图片素材 proposal 使用 `visionModel`，纯文本 proposal 使用 `chatModel`；
+- `AiProvider.createOutlineProposal` 只接收 `AiMaterial`；附件若要参与 AI，必须重新导入为一份独立素材；
 - 纯图片 proposal 直接显示忠实 OCR 转写，不做第二次总结或大纲生成；
 - OCR 不添加解释、标题、前缀、图片描述或摘要，并尽量保留原布局和换行；
-- proposal 先供用户查看、选择和复制，再由用户决定是否写入 Markdown；
+- proposal 先供用户查看、选择和复制，再由用户决定是否写入 Markdown，并持久化生成时的 `ProposalMaterialSnapshot`；
+- AI 素材删除只删除其记录/文件/选择，历史 proposal 必须继续显示并标记“来源已删除”；
+- 正文 Delete/剪切只移除 Markdown 引用，不删除附件。永久删除附件必须先调用 impact analysis，展示跨笔记引用次数，flush `noteFingerprints` 覆盖的所有打开会话，再携带原 impact 提交；fingerprint 变化时必须中止并重新确认；
 - Web/H5 不保存 key，也不直连真实模型。
 
 新增缓存或中间数据前必须确认：真源是什么、删除后是否损失用户内容、是否有可验证的重建路径。
@@ -212,19 +223,19 @@ macOS 目录选择和 bookmark 恢复返回 `VaultAccessLease(location, token)`�
 | `test/architecture/` | application/domain 分层与禁止反向依赖 |
 | `test/application/` | ports、settings 值对象、proposal 与 search 契约 |
 | `test/domain/` | Markdown/frontmatter、模型与基础规则 |
-| `test/infrastructure/` | File/Memory backend、parity/dispatch、settings、Keychain、AI、搜索 |
+| `test/infrastructure/` | File/Memory backend、资源分区/迁移、安全删除、parity/dispatch、settings、Keychain、AI、搜索 |
 | `test/presentation/workspace/state/` | session、save、split、materials、mutation/commit |
 | `test/presentation/workspace/controller/` | AsyncNotifier lifecycle、runtime、resource 和 workspace reduction |
 | `test/presentation/workspace/` | Vault、资源、分屏、编辑器、图片、proposal、设置和布局 |
 | `test/macos_entitlements_test.dart` | Debug/Profile/Release Keychain entitlement、本机 Team 配置模板与签名策略 |
 | `test/macos_vault_access_lease_test.dart` | Dart/Swift lease 与 terminate releaseAll 契约 |
 
-当前记录基线为 760/760 tests、analyze no issues，共 72 个测试文件；当前最大测试文件 1773 行。该记录不是 Release signing production gate 结果。
+当前记录基线为 844/844 tests，共 75 个测试文件；`flutter analyze --no-pub` 无 issue，macOS Debug build 与 `git diff --check` 通过。该记录不是 Release signing production gate 结果。
 
 ## 10. 当前工程债
 
-- `WorkspaceController` 当前 1118 行，高于约 1000 行 review threshold；新增职责必须优先进入现有 collaborators，并在下一次增长前复审拆分；
-- 搜索已能从 Markdown 重建 SQLite，但尚未索引附件/source sidecar；素材清单也不能从裸 attachments 完整重建；
+- `WorkspaceController` 当前 1234 行，高于约 1000 行 review threshold；新增职责必须优先进入现有 collaborators，并在下一次增长前复审拆分；
+- 搜索已能从 Markdown 重建 SQLite，但尚未索引 AI 素材、附件内容或两类 sidecar；裸附件可补建记录，但 `materials.json` 丢失后仍不能完整重建处理元数据；
 - 大 Vault 首次语义索引或 embedding profile 变化尚无进度、暂停/取消、节流和成本提示；
 - proposal 仍是 Markdown 片段，diff、局部采纳和结构化 patch 尚未实现；
 - 最终 macOS 本地 production gate 尚未执行；

@@ -162,10 +162,10 @@ final class FileVaultIdentityMigrator {
           ),
         );
         migratedPaths.add(entry.path);
-        final (sourcesPath, sourceIdMap) = await _rewriteSources(entry);
-        if (sourcesPath != null) {
-          migratedPaths.add(sourcesPath);
-        }
+        final (resourcePaths, sourceIdMap) = await _rewriteResourceSidecars(
+          entry,
+        );
+        migratedPaths.addAll(resourcePaths);
         sourceIdMaps[entry.path] = sourceIdMap;
       }
       await _writeManifest(manifest, report, status: 'committed');
@@ -264,9 +264,7 @@ final class FileVaultIdentityMigrator {
           path: relativePath,
           rawId: readMarkdownFrontmatterScalar(markdown, 'synapseId'),
           contentDigest: sha256.convert(utf8.encode(markdown)).toString(),
-          sourcesDigest: await _fileDigest(
-            File(_absolutePath(_sidecarPath(relativePath, 'sources.json'))),
-          ),
+          sourcesDigest: await _resourceSidecarsDigest(relativePath),
         ),
       );
     }
@@ -340,7 +338,12 @@ final class FileVaultIdentityMigrator {
 
     final noteDirectory = p.dirname(notePath);
     final assetsName = '${p.basenameWithoutExtension(notePath)}.assets';
-    for (final filename in ['sources.json', 'proposals.json']) {
+    for (final filename in [
+      'sources.json',
+      'materials.json',
+      'attachments.json',
+      'proposals.json',
+    ]) {
       final relative = p.join(noteDirectory, assetsName, filename);
       final sidecar = File(_absolutePath(relative));
       if (!await sidecar.exists()) {
@@ -354,43 +357,56 @@ final class FileVaultIdentityMigrator {
     }
   }
 
-  Future<(String?, Map<String, String>)> _rewriteSources(
+  Future<(List<String>, Map<String, String>)> _rewriteResourceSidecars(
     VaultIdentityMigrationEntry entry,
   ) async {
-    final relativePath = _sidecarPath(entry.path, 'sources.json');
-    final file = File(_absolutePath(relativePath));
-    if (!await file.exists()) {
-      return (null, const <String, String>{});
-    }
-    final decoded = jsonDecode(await file.readAsString()) as List<Object?>;
-    final sourceIdMap = <String, String>{};
-    final usedIds = <String>{};
-    final rewritten = <Map<String, Object?>>[];
-    for (final item in decoded) {
-      final source = Map<String, Object?>.from(
-        (item as Map).cast<String, Object?>(),
-      );
-      final sourceId = source['id'];
-      if (entry.issue == VaultNoteIdentityIssue.duplicate &&
-          sourceId is String) {
-        var nextId = _createSourceId();
-        while (nextId.isEmpty || usedIds.contains(nextId)) {
-          nextId = _createSourceId();
-        }
-        sourceIdMap[sourceId] = nextId;
-        source['id'] = nextId;
-        usedIds.add(nextId);
-      } else if (sourceId is String) {
-        usedIds.add(sourceId);
+    final migratedPaths = <String>[];
+    final materialIdMap = <String, String>{};
+    for (final filename in [
+      'sources.json',
+      'materials.json',
+      'attachments.json',
+    ]) {
+      final relativePath = _sidecarPath(entry.path, filename);
+      final file = File(_absolutePath(relativePath));
+      if (!await file.exists()) {
+        continue;
       }
-      source['noteId'] = entry.proposedId.value;
-      rewritten.add(source);
+      final decoded = jsonDecode(await file.readAsString()) as List<Object?>;
+      final usedIds = <String>{};
+      final rewritten = <Map<String, Object?>>[];
+      for (final item in decoded) {
+        final resource = Map<String, Object?>.from(
+          (item as Map).cast<String, Object?>(),
+        );
+        final resourceId = resource['id'];
+        if (entry.issue == VaultNoteIdentityIssue.duplicate &&
+            resourceId is String) {
+          var nextId = _createSourceId();
+          while (nextId.isEmpty || usedIds.contains(nextId)) {
+            nextId = _createSourceId();
+          }
+          if (filename != 'attachments.json') {
+            materialIdMap[resourceId] = nextId;
+          }
+          resource['id'] = nextId;
+          usedIds.add(nextId);
+        } else if (resourceId is String) {
+          usedIds.add(resourceId);
+        }
+        resource['noteId'] = entry.proposedId.value;
+        rewritten.add(resource);
+      }
+      await _writeString(
+        file,
+        const JsonEncoder.withIndent('  ').convert(rewritten),
+      );
+      migratedPaths.add(relativePath);
     }
-    await _writeString(
-      file,
-      const JsonEncoder.withIndent('  ').convert(rewritten),
+    return (
+      List<String>.unmodifiable(migratedPaths),
+      Map<String, String>.unmodifiable(materialIdMap),
     );
-    return (relativePath, Map<String, String>.unmodifiable(sourceIdMap));
   }
 
   Future<void> _migrateProposalCache(
@@ -416,6 +432,20 @@ final class FileVaultIdentityMigrator {
           proposal['sourceIds'] = [
             for (final sourceId in sourceIds)
               sourceId is String ? sourceIdMap[sourceId] ?? sourceId : sourceId,
+          ];
+        }
+        final snapshots = proposal['materialSnapshots'];
+        if (snapshots is List<Object?>) {
+          proposal['materialSnapshots'] = [
+            for (final item in snapshots)
+              if (item is Map)
+                {
+                  ...item.cast<String, Object?>(),
+                  if (item['materialId'] case final String materialId)
+                    'materialId': sourceIdMap[materialId] ?? materialId,
+                }
+              else
+                item,
           ];
         }
         rewritten.add(proposal);
@@ -444,6 +474,26 @@ final class FileVaultIdentityMigrator {
       return null;
     }
     return sha256.convert(await file.readAsBytes()).toString();
+  }
+
+  Future<String?> _resourceSidecarsDigest(String notePath) async {
+    final digests = <String>[];
+    for (final filename in [
+      'sources.json',
+      'materials.json',
+      'attachments.json',
+    ]) {
+      final digest = await _fileDigest(
+        File(_absolutePath(_sidecarPath(notePath, filename))),
+      );
+      if (digest != null) {
+        digests.add('$filename:$digest');
+      }
+    }
+    if (digests.isEmpty) {
+      return null;
+    }
+    return sha256.convert(utf8.encode(digests.join('|'))).toString();
   }
 
   String _sidecarPath(String notePath, String filename) {

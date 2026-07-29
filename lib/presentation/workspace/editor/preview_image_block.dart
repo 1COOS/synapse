@@ -14,6 +14,30 @@ enum _ImageResizeSide { left, right }
 
 typedef PreviewImageSecondaryTapCallback =
     void Function(String sourceId, String src, TapUpDetails details);
+typedef PreviewImageAvailabilityChanged = void Function(bool available);
+
+class BrokenImageReferenceLabel extends StatelessWidget {
+  const BrokenImageReferenceLabel({super.key, required this.label});
+
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: Text(
+        label,
+        softWrap: true,
+        style: const TextStyle(
+          color: workspaceMutedColor,
+          fontSize: 13,
+          decoration: TextDecoration.lineThrough,
+          decorationColor: workspaceMutedColor,
+        ),
+      ),
+    );
+  }
+}
 
 final class PreviewImageDragData {
   const PreviewImageDragData({required this.sourceId, required this.src});
@@ -25,24 +49,31 @@ final class PreviewImageDragData {
 class PreviewImageBlock extends StatefulWidget {
   const PreviewImageBlock({
     super.key,
-    required this.source,
+    required this.attachment,
     required this.src,
     required this.width,
     required this.editableControls,
     required this.selectedImageSrc,
     required this.imageBytes,
+    required this.failureLabel,
+    this.onAvailabilityChanged,
     required this.onTap,
     this.onSecondaryTapUp,
     required this.onWidthChanged,
     required this.onImageDropped,
   });
 
-  final SourceItem source;
+  final NoteAttachment attachment;
+
+  @Deprecated('Use attachment.')
+  NoteAttachment get source => attachment;
   final String src;
   final double width;
   final bool editableControls;
   final String? selectedImageSrc;
   final Future<List<int>> imageBytes;
+  final String failureLabel;
+  final PreviewImageAvailabilityChanged? onAvailabilityChanged;
   final VoidCallback onTap;
   final GestureTapUpCallback? onSecondaryTapUp;
   final ValueChanged<double> onWidthChanged;
@@ -59,6 +90,10 @@ class PreviewImageBlock extends StatefulWidget {
 
 class _PreviewImageBlockState extends State<PreviewImageBlock> {
   late Future<List<int>> _imageBytes;
+  var _loadGeneration = 0;
+  var _readFailed = false;
+  var _decodeFailed = false;
+  bool? _reportedAvailability;
   double? _previewWidth;
   double? _resizeStartGlobalX;
   double? _resizeStartWidth;
@@ -76,21 +111,29 @@ class _PreviewImageBlockState extends State<PreviewImageBlock> {
   @override
   void initState() {
     super.initState();
-    _imageBytes = widget.imageBytes;
+    _refreshImageBytes();
   }
 
   @override
   void didUpdateWidget(covariant PreviewImageBlock oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.source.id != widget.source.id ||
-        oldWidget.source.noteId != widget.source.noteId ||
-        oldWidget.source.attachmentPath != widget.source.attachmentPath ||
-        oldWidget.source.updatedAt != widget.source.updatedAt) {
-      _imageBytes = widget.imageBytes;
+    if (oldWidget.attachment.id != widget.attachment.id ||
+        oldWidget.attachment.noteId != widget.attachment.noteId ||
+        oldWidget.attachment.relativePath != widget.attachment.relativePath ||
+        oldWidget.attachment.updatedAt != widget.attachment.updatedAt) {
+      _refreshImageBytes();
     }
     if (!_dragging && oldWidget.width != widget.width) {
       _previewWidth = null;
     }
+  }
+
+  void _refreshImageBytes() {
+    _loadGeneration += 1;
+    _readFailed = false;
+    _decodeFailed = false;
+    _reportedAvailability = null;
+    _imageBytes = widget.imageBytes;
   }
 
   void _startResize(PointerDownEvent event, _ImageResizeSide side) {
@@ -188,7 +231,7 @@ class _PreviewImageBlockState extends State<PreviewImageBlock> {
     setState(() => _dropSide = null);
     widget.onImageDropped(
       details.data,
-      PreviewImageDragData(sourceId: widget.source.id, src: widget.src),
+      PreviewImageDragData(sourceId: widget.attachment.id, src: widget.src),
       side,
     );
   }
@@ -214,6 +257,13 @@ class _PreviewImageBlockState extends State<PreviewImageBlock> {
               constraints.maxWidth.isFinite && constraints.maxWidth < width
               ? constraints.maxWidth
               : width;
+          if (_readFailed || _decodeFailed) {
+            return SizedBox(
+              width: displayWidth,
+              child: BrokenImageReferenceLabel(label: widget.failureLabel),
+            );
+          }
+          final generation = _loadGeneration;
           return SizedBox(
             width: displayWidth,
             child: Stack(
@@ -222,15 +272,15 @@ class _PreviewImageBlockState extends State<PreviewImageBlock> {
                 if (widget.editableControls)
                   DragTarget<PreviewImageDragData>(
                     onWillAcceptWithDetails: (details) =>
-                        details.data.sourceId != widget.source.id,
+                        details.data.sourceId != widget.attachment.id,
                     onMove: _handleDragMove,
                     onLeave: _handleDragLeave,
                     onAcceptWithDetails: _handleImageDrop,
                     builder: (context, candidateData, rejectedData) {
-                      final image = _buildImageBody();
+                      final image = _buildImageBody(generation);
                       return Draggable<PreviewImageDragData>(
                         data: PreviewImageDragData(
-                          sourceId: widget.source.id,
+                          sourceId: widget.attachment.id,
                           src: widget.src,
                         ),
                         dragAnchorStrategy: pointerDragAnchorStrategy,
@@ -243,7 +293,7 @@ class _PreviewImageBlockState extends State<PreviewImageBlock> {
                     },
                   )
                 else
-                  _buildImageBody(),
+                  _buildImageBody(generation),
                 if (widget.editableControls && (_selected || _dragging)) ...[
                   _buildResizeHandle(_ImageResizeSide.left),
                   _buildResizeHandle(_ImageResizeSide.right),
@@ -280,8 +330,8 @@ class _PreviewImageBlockState extends State<PreviewImageBlock> {
         child: Listener(
           key: Key(
             isLeft
-                ? 'image-resize-handle-left-${widget.source.id}'
-                : 'image-resize-handle-${widget.source.id}',
+                ? 'image-resize-handle-left-${widget.attachment.id}'
+                : 'image-resize-handle-${widget.attachment.id}',
           ),
           behavior: HitTestBehavior.opaque,
           onPointerDown: (event) {
@@ -307,8 +357,8 @@ class _PreviewImageBlockState extends State<PreviewImageBlock> {
                   ? DecoratedBox(
                       key: Key(
                         isLeft
-                            ? 'image-resize-handle-left-indicator-${widget.source.id}'
-                            : 'image-resize-handle-icon-${widget.source.id}',
+                            ? 'image-resize-handle-left-indicator-${widget.attachment.id}'
+                            : 'image-resize-handle-icon-${widget.attachment.id}',
                       ),
                       decoration: BoxDecoration(
                         color: workspaceSurfaceColor.withValues(alpha: 0.72),
@@ -337,13 +387,13 @@ class _PreviewImageBlockState extends State<PreviewImageBlock> {
     );
   }
 
-  Widget _buildImageBody() {
+  Widget _buildImageBody(int generation) {
     final highlighted = _selected || _dragging || _dropSide != null;
     final accentColor = WorkspaceAppearanceScope.of(context).accentColor;
     Widget body = SizedBox(
       width: double.infinity,
       child: GestureDetector(
-        key: Key('preview-image-tap-${widget.source.id}'),
+        key: Key('preview-image-tap-${widget.attachment.id}'),
         behavior: HitTestBehavior.opaque,
         onTap: widget.onTap,
         onSecondaryTapUp: widget.onSecondaryTapUp,
@@ -368,30 +418,24 @@ class _PreviewImageBlockState extends State<PreviewImageBlock> {
                     );
                   }
                   if (snapshot.hasError || !snapshot.hasData) {
-                    return const SizedBox(
-                      height: 96,
-                      child: Center(
-                        child: Icon(
-                          CupertinoIcons.exclamationmark_triangle,
-                          color: workspaceDangerColor,
-                        ),
-                      ),
+                    _markReadFailed(generation);
+                    _reportAvailability(false, generation);
+                    return BrokenImageReferenceLabel(
+                      label: widget.failureLabel,
                     );
                   }
+                  _reportAvailability(true, generation);
                   return Image.memory(
                     Uint8List.fromList(snapshot.data!),
                     fit: BoxFit.contain,
                     gaplessPlayback: true,
-                    errorBuilder: (context, error, stackTrace) =>
-                        const SizedBox(
-                          height: 96,
-                          child: Center(
-                            child: Icon(
-                              CupertinoIcons.exclamationmark_triangle,
-                              color: workspaceDangerColor,
-                            ),
-                          ),
-                        ),
+                    errorBuilder: (context, error, stackTrace) {
+                      _markDecodeFailed(generation);
+                      _reportAvailability(false, generation);
+                      return BrokenImageReferenceLabel(
+                        label: widget.failureLabel,
+                      );
+                    },
                   );
                 },
               ),
@@ -422,6 +466,45 @@ class _PreviewImageBlockState extends State<PreviewImageBlock> {
         ),
       ],
     );
+  }
+
+  void _markReadFailed(int generation) {
+    if (_readFailed || generation != _loadGeneration) {
+      return;
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _readFailed || generation != _loadGeneration) {
+        return;
+      }
+      setState(() => _readFailed = true);
+    });
+  }
+
+  void _markDecodeFailed(int generation) {
+    if (_decodeFailed || generation != _loadGeneration) {
+      return;
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _decodeFailed || generation != _loadGeneration) {
+        return;
+      }
+      setState(() => _decodeFailed = true);
+    });
+  }
+
+  void _reportAvailability(bool available, int generation) {
+    if (_reportedAvailability == available || generation != _loadGeneration) {
+      return;
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted ||
+          _reportedAvailability == available ||
+          generation != _loadGeneration) {
+        return;
+      }
+      _reportedAvailability = available;
+      widget.onAvailabilityChanged?.call(available);
+    });
   }
 }
 

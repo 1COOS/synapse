@@ -185,10 +185,10 @@ class _RecordingAiProvider implements AiProvider {
   Future<String> createOutlineProposal({
     required String noteTitle,
     required String currentMarkdown,
-    required List<SourceItem> sources,
+    required List<AiMaterial> materials,
   }) async {
     outlineProposalCalls += 1;
-    return sources.map((source) => source.searchableText).join('\n');
+    return materials.map((material) => material.searchableText).join('\n');
   }
 
   @override

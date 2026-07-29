@@ -9,7 +9,7 @@ import 'file_vault_note_store.dart';
 import 'file_vault_operations.dart';
 import 'file_vault_paths.dart';
 import 'file_vault_proposal_store.dart';
-import 'file_vault_source_store.dart';
+import 'file_vault_resource_store.dart';
 import 'file_vault_transaction_journal.dart';
 import 'vault_backend.dart';
 
@@ -31,33 +31,35 @@ class FileVaultBackend implements VaultBackend, VaultMigrationBackend {
           renameDirectory(directory, newPath),
       copyFile: (file, newPath) => copyFile(file, newPath),
     );
-    _sources = FileVaultSourceStore(
-      paths: paths,
-      operations: operations,
-      readNote: (noteId) => readNote(noteId),
-      listSourcesCallback: (noteId) => listSources(noteId),
-    );
     _proposals = FileVaultProposalStore(
       paths: paths,
       operations: operations,
       listNoteIds: () => _notes.listNoteIds(),
       listProposalsCallback: (noteId) => listProposals(noteId),
     );
+    _resources = FileVaultResourceStore(
+      paths: paths,
+      operations: operations,
+      listNoteIds: () => _notes.listNoteIds(),
+      listProposals: (noteId) => _proposals.listProposals(noteId),
+      writeProposals: _proposals.writeProposals,
+    );
     _notes = FileVaultNoteStore(
       paths: paths,
       operations: operations,
-      sources: _sources,
+      resources: _resources,
       proposals: _proposals,
       readNoteCallback: (noteId) => readNote(noteId),
       listResourcesCallback: () => listResources(),
-      listSources: (noteId) => listSources(noteId),
+      listAiMaterials: (noteId) => listAiMaterials(noteId),
+      listNoteAttachments: (noteId) => listNoteAttachments(noteId),
     );
   }
 
   final Directory root;
   final AtomicVaultFileWriter _atomicWriter = AtomicVaultFileWriter();
   late final FileVaultNoteStore _notes;
-  late final FileVaultSourceStore _sources;
+  late final FileVaultResourceStore _resources;
   late final FileVaultProposalStore _proposals;
   late final FileVaultIdentityMigrator _identityMigrator;
   late final FileVaultOperations _operations;
@@ -125,7 +127,23 @@ class FileVaultBackend implements VaultBackend, VaultMigrationBackend {
   }
 
   @override
-  Future<List<VaultResourceNode>> listResources() => _notes.listResources();
+  Future<List<VaultResourceNode>> listResources() async {
+    final resources = await _notes.listResources();
+    final noteIds = <String>[];
+    void collect(List<VaultResourceNode> nodes) {
+      for (final node in nodes) {
+        if (node.isNote) {
+          noteIds.add(node.id);
+        } else {
+          collect(node.children);
+        }
+      }
+    }
+
+    collect(resources);
+    await _resources.repairMisclassifiedLegacyAttachments(noteIds);
+    return resources;
+  }
 
   @override
   Future<VaultResourceNode> createFolder({
@@ -200,22 +218,22 @@ class FileVaultBackend implements VaultBackend, VaultMigrationBackend {
   }
 
   @override
-  Future<SourceItem> addTextSource({
+  Future<AiMaterial> addTextMaterial({
     required String noteId,
     required String title,
     required String text,
   }) {
-    return _sources.addTextSource(noteId: noteId, title: title, text: text);
+    return _resources.addTextMaterial(noteId: noteId, title: title, text: text);
   }
 
   @override
-  Future<SourceItem> addImageSource({
+  Future<AiMaterial> addImageMaterial({
     required String noteId,
     required String filename,
     required String mimeType,
     required List<int> bytes,
   }) {
-    return _sources.addImageSource(
+    return _resources.addImageMaterial(
       noteId: noteId,
       filename: filename,
       mimeType: mimeType,
@@ -224,28 +242,113 @@ class FileVaultBackend implements VaultBackend, VaultMigrationBackend {
   }
 
   @override
-  Future<List<SourceItem>> listSources(String noteId) {
-    return _sources.listSources(noteId);
+  Future<List<AiMaterial>> listAiMaterials(String noteId) {
+    return _resources.listAiMaterials(noteId);
   }
 
   @override
-  Future<List<SourceItem>> getSources(String noteId, List<String> sourceIds) {
-    return _sources.getSources(noteId, sourceIds);
+  Future<List<AiMaterial>> getAiMaterials(
+    String noteId,
+    List<String> materialIds,
+  ) {
+    return _resources.getAiMaterials(noteId, materialIds);
   }
 
   @override
-  Future<List<int>> readSourceAttachment(SourceItem source) {
-    return _sources.readSourceAttachment(source);
+  Future<List<int>> readAiMaterialContent(AiMaterial material) {
+    return _resources.readAiMaterialContent(material);
   }
 
   @override
-  Future<SourceItem> updateSource(SourceItem source) {
-    return _sources.updateSource(source);
+  Future<AiMaterial> updateAiMaterial(AiMaterial material) {
+    return _resources.updateAiMaterial(material);
   }
 
   @override
-  Future<void> deleteSource(SourceItem source) {
-    return _sources.deleteSource(source);
+  Future<void> deleteAiMaterial(AiMaterial material) {
+    return _resources.deleteAiMaterial(material);
+  }
+
+  @override
+  Future<AiMaterial> addTextSource({
+    required String noteId,
+    required String title,
+    required String text,
+  }) => addTextMaterial(noteId: noteId, title: title, text: text);
+
+  @override
+  Future<AiMaterial> addImageSource({
+    required String noteId,
+    required String filename,
+    required String mimeType,
+    required List<int> bytes,
+  }) => addImageMaterial(
+    noteId: noteId,
+    filename: filename,
+    mimeType: mimeType,
+    bytes: bytes,
+  );
+
+  @override
+  Future<List<AiMaterial>> listSources(String noteId) =>
+      listAiMaterials(noteId);
+
+  @override
+  Future<List<AiMaterial>> getSources(String noteId, List<String> sourceIds) =>
+      getAiMaterials(noteId, sourceIds);
+
+  @override
+  Future<List<int>> readSourceAttachment(AiMaterial source) =>
+      readAiMaterialContent(source);
+
+  @override
+  Future<AiMaterial> updateSource(AiMaterial source) =>
+      updateAiMaterial(source);
+
+  @override
+  Future<void> deleteSource(AiMaterial source) => deleteAiMaterial(source);
+
+  @override
+  Future<NoteAttachment> addImageAttachment({
+    required String noteId,
+    required String filename,
+    required String mimeType,
+    required List<int> bytes,
+  }) {
+    return _resources.addImageAttachment(
+      noteId: noteId,
+      filename: filename,
+      mimeType: mimeType,
+      bytes: bytes,
+    );
+  }
+
+  @override
+  Future<List<NoteAttachment>> listNoteAttachments(String noteId) {
+    return _resources.listNoteAttachments(noteId);
+  }
+
+  @override
+  Future<List<int>> readNoteAttachment(NoteAttachment attachment) {
+    return _resources.readNoteAttachment(attachment);
+  }
+
+  @override
+  Future<AttachmentDeletionImpact> analyzeAttachmentDeletion(
+    List<NoteAttachment> attachments,
+  ) {
+    return _resources.analyzeAttachmentDeletion(attachments);
+  }
+
+  @override
+  Future<void> deleteNoteAttachments({
+    required List<NoteAttachment> attachments,
+    required AttachmentDeletionImpact expectedImpact,
+  }) {
+    return _resources.deleteNoteAttachments(
+      attachments: attachments,
+      expectedImpact: expectedImpact,
+    );
   }
 
   @override

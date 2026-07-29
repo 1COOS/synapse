@@ -4,7 +4,9 @@ final class MemoryVaultState {
   final folders = <String>{};
   final notes = <String, VaultNote>{};
   final markdown = <String, String>{};
-  final sources = <String, List<SourceItem>>{};
+  final aiMaterials = <String, List<AiMaterial>>{};
+  final attachments = <String, List<NoteAttachment>>{};
+  final materialBytes = <String, List<int>>{};
   final attachmentBytes = <String, List<int>>{};
   final proposals = <String, AiProposal>{};
 
@@ -13,9 +15,17 @@ final class MemoryVaultState {
       folders: Set<String>.of(folders),
       notes: Map<String, VaultNote>.of(notes),
       markdown: Map<String, String>.of(markdown),
-      sources: <String, List<SourceItem>>{
-        for (final entry in sources.entries)
-          entry.key: List<SourceItem>.of(entry.value),
+      aiMaterials: <String, List<AiMaterial>>{
+        for (final entry in aiMaterials.entries)
+          entry.key: List<AiMaterial>.of(entry.value),
+      },
+      attachments: <String, List<NoteAttachment>>{
+        for (final entry in attachments.entries)
+          entry.key: List<NoteAttachment>.of(entry.value),
+      },
+      materialBytes: <String, List<int>>{
+        for (final entry in materialBytes.entries)
+          entry.key: List<int>.of(entry.value),
       },
       attachmentBytes: <String, List<int>>{
         for (final entry in attachmentBytes.entries)
@@ -35,11 +45,23 @@ final class MemoryVaultState {
     markdown
       ..clear()
       ..addAll(snapshot.markdown);
-    sources
+    aiMaterials
       ..clear()
-      ..addAll(<String, List<SourceItem>>{
-        for (final entry in snapshot.sources.entries)
-          entry.key: List<SourceItem>.of(entry.value),
+      ..addAll(<String, List<AiMaterial>>{
+        for (final entry in snapshot.aiMaterials.entries)
+          entry.key: List<AiMaterial>.of(entry.value),
+      });
+    attachments
+      ..clear()
+      ..addAll(<String, List<NoteAttachment>>{
+        for (final entry in snapshot.attachments.entries)
+          entry.key: List<NoteAttachment>.of(entry.value),
+      });
+    materialBytes
+      ..clear()
+      ..addAll(<String, List<int>>{
+        for (final entry in snapshot.materialBytes.entries)
+          entry.key: List<int>.of(entry.value),
       });
     attachmentBytes
       ..clear()
@@ -79,7 +101,9 @@ final class MemoryVaultStateSnapshot {
     required this.folders,
     required this.notes,
     required this.markdown,
-    required this.sources,
+    required this.aiMaterials,
+    required this.attachments,
+    required this.materialBytes,
     required this.attachmentBytes,
     required this.proposals,
   });
@@ -87,7 +111,9 @@ final class MemoryVaultStateSnapshot {
   final Set<String> folders;
   final Map<String, VaultNote> notes;
   final Map<String, String> markdown;
-  final Map<String, List<SourceItem>> sources;
+  final Map<String, List<AiMaterial>> aiMaterials;
+  final Map<String, List<NoteAttachment>> attachments;
+  final Map<String, List<int>> materialBytes;
   final Map<String, List<int>> attachmentBytes;
   final Map<String, AiProposal> proposals;
 }

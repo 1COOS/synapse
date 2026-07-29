@@ -184,29 +184,26 @@ updatedAt: 2026-07-03 12:00
     expect((await backend.listResources()).single.id, note.id);
   });
 
-  test(
-    'rolls back attachment deletion when source metadata write fails',
-    () async {
-      final backend = _FaultInjectingFileVaultBackend(root.path);
-      final note = await backend.createNote(parentPath: '', title: 'Alpha');
-      final source = await backend.addImageSource(
-        noteId: note.id,
-        filename: 'alpha.png',
-        mimeType: 'image/png',
-        bytes: const [1, 2, 3],
-      );
-      backend.failStringWriteSuffix = 'sources.json';
-      backend.failStringWriteAfterCommit = true;
+  test('rolls back AI material deletion when metadata write fails', () async {
+    final backend = _FaultInjectingFileVaultBackend(root.path);
+    final note = await backend.createNote(parentPath: '', title: 'Alpha');
+    final source = await backend.addImageSource(
+      noteId: note.id,
+      filename: 'alpha.png',
+      mimeType: 'image/png',
+      bytes: const [1, 2, 3],
+    );
+    backend.failStringWriteSuffix = 'materials.json';
+    backend.failStringWriteAfterCommit = true;
 
-      await expectLater(
-        backend.deleteSource(source),
-        throwsA(isA<VaultPostCommitError>()),
-      );
+    await expectLater(
+      backend.deleteSource(source),
+      throwsA(isA<VaultPostCommitError>()),
+    );
 
-      expect(await backend.readSourceAttachment(source), const [1, 2, 3]);
-      expect((await backend.listSources(note.id)).single.id, source.id);
-    },
-  );
+    expect(await backend.readSourceAttachment(source), const [1, 2, 3]);
+    expect((await backend.listSources(note.id)).single.id, source.id);
+  });
 
   test('rolls back a partial note copy', () async {
     final backend = _FaultInjectingFileVaultBackend(root.path);
@@ -288,7 +285,7 @@ updatedAt: 2026-07-03 12:00
       bytes: [137, 80, 78, 71],
     );
 
-    expect(source.attachmentPath, startsWith('attachments/'));
+    expect(source.contentPath, startsWith('materials/'));
     expect(
       File(
         p.join(root.path, '图像学习.assets', source.attachmentPath),
@@ -317,8 +314,8 @@ updatedAt: 2026-07-03 12:00
         bytes: [2],
       );
 
-      expect(first.attachmentPath, 'attachments/1783082971508.png');
-      expect(second.attachmentPath, 'attachments/1783082971508-2.png');
+      expect(first.contentPath, 'materials/1783082971508.png');
+      expect(second.contentPath, 'materials/1783082971508-2.png');
       expect(
         File(
           p.join(root.path, '图像学习.assets', first.attachmentPath),
@@ -354,7 +351,7 @@ updatedAt: 2026-07-03 12:00
     expect(await attachment.exists(), isFalse);
   });
 
-  test('does not delete image attachments outside the vault root', () async {
+  test('ignores caller-supplied paths when deleting AI materials', () async {
     final backend = FileVaultBackend(root.path);
     final note = await backend.createNote(parentPath: '', title: '图像学习');
     final source = await backend.addImageSource(
@@ -365,15 +362,17 @@ updatedAt: 2026-07-03 12:00
     );
     final outside = File(p.join(root.path, 'outside.png'));
     await outside.writeAsBytes([1, 2, 3]);
-
-    expect(
-      () => backend.deleteSource(
-        source.copyWith(attachmentPath: '../outside.png'),
-      ),
-      throwsA(isA<StateError>()),
+    final materialFile = File(
+      p.join(root.path, '图像学习.assets', source.attachmentPath),
     );
+
+    await backend.deleteSource(
+      source.copyWith(attachmentPath: '../outside.png'),
+    );
+
     expect(await outside.exists(), isTrue);
-    expect(await backend.listSources(note.id), isNotEmpty);
+    expect(await materialFile.exists(), isFalse);
+    expect(await backend.listSources(note.id), isEmpty);
   });
 
   test('deletes a note and its sibling assets directory', () async {
@@ -859,11 +858,11 @@ final class _FailingReadbackFileVaultBackend extends FileVaultBackend {
   bool failReadback = false;
 
   @override
-  Future<List<SourceItem>> listSources(String noteId) {
+  Future<List<AiMaterial>> listAiMaterials(String noteId) {
     if (failReadback) {
       Error.throwWithStackTrace(readbackError, readbackStackTrace);
     }
-    return super.listSources(noteId);
+    return super.listAiMaterials(noteId);
   }
 }
 

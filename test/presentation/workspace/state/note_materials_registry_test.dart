@@ -95,7 +95,7 @@ void main() {
       },
     );
 
-    test('copies nested proposal source IDs from replace input', () {
+    test('copies nested proposal material snapshots from replace input', () {
       final registry = NoteMaterialsRegistry();
       addTearDown(registry.dispose);
       final proposal = _proposal(
@@ -104,11 +104,11 @@ void main() {
       );
 
       registry.replaceProposals('A.md', [proposal]);
-      proposal.sourceIds.add('source-2');
+      final stored = registry.snapshotFor('A.md').proposals.single;
 
-      expect(registry.snapshotFor('A.md').proposals.single.sourceIds, [
-        'source-1',
-      ]);
+      expect(stored, isNot(same(proposal)));
+      expect(stored.materialSnapshots, isNot(same(proposal.materialSnapshots)));
+      expect(stored.sourceIds, ['source-1']);
     });
 
     test('freezes nested proposal source IDs exposed by snapshots', () {

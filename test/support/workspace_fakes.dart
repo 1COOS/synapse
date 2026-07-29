@@ -703,7 +703,7 @@ class GatedAiProvider implements AiProvider {
   Future<String> createOutlineProposal({
     required String noteTitle,
     required String currentMarkdown,
-    required List<SourceItem> sources,
+    required List<AiMaterial> materials,
   }) async {
     outlineCalls += 1;
     if (!outlineStarted.isCompleted) {

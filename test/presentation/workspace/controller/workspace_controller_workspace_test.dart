@@ -502,7 +502,7 @@ void main() {
       () async {
         final vault = _GatedAttachmentReadVaultBackend();
         final alpha = await vault.createNote(parentPath: '', title: 'Alpha');
-        final source = await vault.addImageSource(
+        final attachment = await vault.addImageAttachment(
           noteId: alpha.id,
           filename: 'alpha.png',
           mimeType: 'image/png',
@@ -530,7 +530,7 @@ void main() {
           initial.focusedPaneId,
         )!;
 
-        final copying = controller.copyImage(context, source.id);
+        final copying = controller.copyImage(context, attachment.id);
         await vault.readStarted.future;
         final betaResource = _findResource(
           container.read(workspaceControllerProvider).requireValue.resources,
@@ -670,11 +670,11 @@ final class _GatedAttachmentReadVaultBackend extends MemoryVaultBackend {
   }
 
   @override
-  Future<List<int>> readSourceAttachment(SourceItem source) async {
+  Future<List<int>> readNoteAttachment(NoteAttachment attachment) async {
     if (!readStarted.isCompleted) {
       readStarted.complete();
     }
     await _readRelease.future;
-    return super.readSourceAttachment(source);
+    return super.readNoteAttachment(attachment);
   }
 }

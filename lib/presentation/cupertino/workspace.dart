@@ -404,33 +404,63 @@ class _SynapseWorkspaceState extends ConsumerState<SynapseWorkspace> {
 
   Future<PaneEditorCommandOutcome> _deleteSource(
     PaneEditorContext editorContext,
-    SourceItem source,
+    AiMaterial source,
   ) async {
     final confirmed = await _confirmDelete(
-      title: '删除图片素材',
-      message: '将删除这条图片素材和对应附件文件。此操作不可撤销。',
+      title: '删除 AI 素材',
+      message: '将删除这条 AI 素材及其独立文件。历史 AI 建议仍会保留，笔记附件不受影响。',
     );
     return confirmed
-        ? _controller.deleteSource(editorContext, source)
+        ? _controller.deleteAiMaterial(editorContext, source)
         : PaneEditorCommandOutcome.unchanged;
   }
 
   Future<PaneEditorCommandOutcome> _deleteSources(
     PaneEditorContext editorContext,
-    List<SourceItem> sources,
+    List<AiMaterial> sources,
   ) async {
     if (sources.isEmpty) {
       return PaneEditorCommandOutcome.unchanged;
     }
     final confirmed = await _confirmDelete(
-      title: '删除 ${sources.length} 张图片素材',
-      message: '将删除所选图片素材和对应附件文件。此操作不可撤销。',
+      title: '删除 ${sources.length} 个 AI 素材',
+      message: '将删除所选 AI 素材及其独立文件。历史 AI 建议仍会保留，笔记附件不受影响。',
     );
     if (!_controller.isPaneEditorContextCurrent(editorContext)) {
       return PaneEditorCommandOutcome.staleTarget;
     }
     return confirmed
-        ? _controller.deleteSources(editorContext, sources)
+        ? _controller.deleteAiMaterials(editorContext, sources)
+        : PaneEditorCommandOutcome.unchanged;
+  }
+
+  Future<PaneEditorCommandOutcome> _deleteAttachments(
+    PaneEditorContext editorContext,
+    List<NoteAttachment> attachments,
+  ) async {
+    final impact = await _controller.analyzeAttachmentDeletion(
+      editorContext,
+      attachments,
+    );
+    if (impact == null) {
+      return PaneEditorCommandOutcome.staleTarget;
+    }
+    final referenceSummary = impact.isUnreferenced
+        ? '所选附件当前没有 Markdown 引用。'
+        : '将从 ${impact.references.length} 篇笔记中移除 '
+              '${impact.referenceCount} 处图片引用。\n\n'
+              '${impact.references.map((item) => '${item.noteTitle}：${item.occurrences} 处').join('\n')}';
+    final confirmed = await _confirmDelete(
+      title: attachments.length == 1
+          ? '永久删除笔记附件'
+          : '永久删除 ${attachments.length} 个笔记附件',
+      message: '$referenceSummary\n\n附件文件与引用会在同一事务中删除，此操作不可撤销。',
+    );
+    if (!_controller.isPaneEditorContextCurrent(editorContext)) {
+      return PaneEditorCommandOutcome.staleTarget;
+    }
+    return confirmed
+        ? _controller.deleteNoteAttachments(editorContext, impact)
         : PaneEditorCommandOutcome.unchanged;
   }
 
@@ -921,6 +951,7 @@ class _SynapseWorkspaceState extends ConsumerState<SynapseWorkspace> {
       controller: _controller,
       onDeleteSource: _deleteSource,
       onDeleteSources: _deleteSources,
+      onDeleteAttachments: _deleteAttachments,
       onDeleteProposal: _deleteProposal,
       onDeleteProposals: _deleteProposals,
     );

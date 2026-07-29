@@ -9,10 +9,10 @@ class MockAiProvider implements AiProvider {
   Future<String> createOutlineProposal({
     required String noteTitle,
     required String currentMarkdown,
-    required List<SourceItem> sources,
+    required List<AiMaterial> materials,
   }) async {
-    final concepts = sources
-        .map((source) => _extractConcept(source.searchableText))
+    final concepts = materials
+        .map((material) => _extractConcept(material.searchableText))
         .toList();
     return '''## AI 整理建议
 
@@ -21,7 +21,7 @@ class MockAiProvider implements AiProvider {
 ${concepts.map((concept) => '- $concept').join('\n')}
 
 ${markdownTable(['类型', '内容', '备注'], [
-      for (var index = 0; index < concepts.length; index += 1) ['知识点', concepts[index], sources[index].title],
+      for (var index = 0; index < concepts.length; index += 1) ['知识点', concepts[index], materials[index].title],
     ])}
 ''';
   }

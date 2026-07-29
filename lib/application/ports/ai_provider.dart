@@ -4,7 +4,7 @@ abstract class AiProvider {
   Future<String> createOutlineProposal({
     required String noteTitle,
     required String currentMarkdown,
-    required List<SourceItem> sources,
+    required List<AiMaterial> materials,
   });
 
   Future<ImageExtraction> extractImageText({

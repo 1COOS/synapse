@@ -341,7 +341,12 @@ VaultNoteContent _freezeNote(VaultNoteContent note) {
     updatedAt: note.updatedAt,
     markdown: note.markdown,
     outline: List<OutlineNode>.unmodifiable(note.outline.map(_freezeOutline)),
-    sources: List<SourceItem>.unmodifiable(note.sources.map(_freezeSource)),
+    aiMaterials: List<AiMaterial>.unmodifiable(
+      note.aiMaterials.map(_freezeMaterial),
+    ),
+    attachments: List<NoteAttachment>.unmodifiable(
+      note.attachments.map(_freezeAttachment),
+    ),
   );
 }
 
@@ -355,19 +360,32 @@ OutlineNode _freezeOutline(OutlineNode node) {
   );
 }
 
-SourceItem _freezeSource(SourceItem source) {
-  return SourceItem(
-    id: source.id,
-    noteId: source.noteId,
-    type: source.type,
-    title: source.title,
-    state: source.state,
-    createdAt: source.createdAt,
-    updatedAt: source.updatedAt,
-    text: source.text,
-    extractedText: source.extractedText,
-    attachmentPath: source.attachmentPath,
-    mimeType: source.mimeType,
+AiMaterial _freezeMaterial(AiMaterial material) {
+  return AiMaterial(
+    id: material.id,
+    noteId: material.noteId,
+    mediaKind: material.mediaKind,
+    title: material.title,
+    processingState: material.processingState,
+    createdAt: material.createdAt,
+    updatedAt: material.updatedAt,
+    text: material.text,
+    extractedText: material.extractedText,
+    contentPath: material.contentPath,
+    mimeType: material.mimeType,
+  );
+}
+
+NoteAttachment _freezeAttachment(NoteAttachment attachment) {
+  return NoteAttachment(
+    id: attachment.id,
+    noteId: attachment.noteId,
+    mediaKind: attachment.mediaKind,
+    title: attachment.title,
+    relativePath: attachment.relativePath,
+    mimeType: attachment.mimeType,
+    createdAt: attachment.createdAt,
+    updatedAt: attachment.updatedAt,
   );
 }
 
@@ -375,7 +393,9 @@ AiProposal _freezeProposal(AiProposal proposal) {
   return AiProposal(
     id: proposal.id,
     noteId: proposal.noteId,
-    sourceIds: List<String>.unmodifiable(proposal.sourceIds),
+    materialSnapshots: List<ProposalMaterialSnapshot>.unmodifiable(
+      proposal.materialSnapshots,
+    ),
     title: proposal.title,
     proposedMarkdown: proposal.proposedMarkdown,
     status: proposal.status,

@@ -5,16 +5,24 @@ import '../../../domain/vault/vault_resource.dart';
 @immutable
 final class NoteMaterialsSnapshot {
   NoteMaterialsSnapshot({
-    Set<String> selectedSourceIds = const <String>{},
+    Set<String> selectedAiMaterialIds = const <String>{},
+    @Deprecated('Use selectedAiMaterialIds.') Set<String>? selectedSourceIds,
     List<AiProposal> proposals = const <AiProposal>[],
-  }) : selectedSourceIds = Set<String>.unmodifiable(selectedSourceIds),
+  }) : selectedAiMaterialIds = Set<String>.unmodifiable(
+         selectedAiMaterialIds.isNotEmpty
+             ? selectedAiMaterialIds
+             : selectedSourceIds ?? const <String>{},
+       ),
        proposals = List<AiProposal>.unmodifiable(
          proposals.map(_freezeProposal),
        );
 
   static final NoteMaterialsSnapshot empty = NoteMaterialsSnapshot();
 
-  final Set<String> selectedSourceIds;
+  final Set<String> selectedAiMaterialIds;
+
+  @Deprecated('Use selectedAiMaterialIds.')
+  Set<String> get selectedSourceIds => selectedAiMaterialIds;
   final List<AiProposal> proposals;
 }
 
@@ -22,7 +30,9 @@ AiProposal _freezeProposal(AiProposal proposal) {
   return AiProposal(
     id: proposal.id,
     noteId: proposal.noteId,
-    sourceIds: List<String>.unmodifiable(proposal.sourceIds),
+    materialSnapshots: List<ProposalMaterialSnapshot>.unmodifiable(
+      proposal.materialSnapshots,
+    ),
     title: proposal.title,
     proposedMarkdown: proposal.proposedMarkdown,
     status: proposal.status,
@@ -52,12 +62,12 @@ final class NoteMaterialsRegistry extends ChangeNotifier {
     if (current == null) {
       return;
     }
-    final sourceIds = note.sources.map((source) => source.id).toSet();
-    final selected = current.selectedSourceIds.intersection(sourceIds);
+    final materialIds = note.aiMaterials.map((material) => material.id).toSet();
+    final selected = current.selectedAiMaterialIds.intersection(materialIds);
     _commitSnapshot(
       note.id,
       NoteMaterialsSnapshot(
-        selectedSourceIds: selected,
+        selectedAiMaterialIds: selected,
         proposals: current.proposals,
       ),
     );
@@ -76,42 +86,52 @@ final class NoteMaterialsRegistry extends ChangeNotifier {
     _commitSnapshot(
       noteId,
       NoteMaterialsSnapshot(
-        selectedSourceIds: current.selectedSourceIds,
+        selectedAiMaterialIds: current.selectedAiMaterialIds,
         proposals: normalized,
       ),
     );
   }
 
-  void setSourceSelected(String noteId, String sourceId, bool selected) {
+  void setAiMaterialSelected(String noteId, String materialId, bool selected) {
     _ensureActive();
     _validateNoteId(noteId);
-    _validateSourceId(sourceId);
+    _validateMaterialId(materialId);
     final current = snapshotFor(noteId);
-    final next = Set<String>.of(current.selectedSourceIds);
+    final next = Set<String>.of(current.selectedAiMaterialIds);
     if (selected) {
-      next.add(sourceId);
+      next.add(materialId);
     } else {
-      next.remove(sourceId);
+      next.remove(materialId);
     }
     _commitSnapshot(
       noteId,
       NoteMaterialsSnapshot(
-        selectedSourceIds: next,
+        selectedAiMaterialIds: next,
         proposals: current.proposals,
       ),
     );
   }
 
-  void toggleSource(String noteId, String sourceId) {
-    final selected = snapshotFor(noteId).selectedSourceIds.contains(sourceId);
-    setSourceSelected(noteId, sourceId, !selected);
+  void toggleAiMaterial(String noteId, String materialId) {
+    final selected = snapshotFor(
+      noteId,
+    ).selectedAiMaterialIds.contains(materialId);
+    setAiMaterialSelected(noteId, materialId, !selected);
   }
+
+  @Deprecated('Use setAiMaterialSelected.')
+  void setSourceSelected(String noteId, String sourceId, bool selected) =>
+      setAiMaterialSelected(noteId, sourceId, selected);
+
+  @Deprecated('Use toggleAiMaterial.')
+  void toggleSource(String noteId, String sourceId) =>
+      toggleAiMaterial(noteId, sourceId);
 
   void clearSelection(String noteId) {
     _ensureActive();
     _validateNoteId(noteId);
     final current = _snapshots[noteId];
-    if (current == null || current.selectedSourceIds.isEmpty) {
+    if (current == null || current.selectedAiMaterialIds.isEmpty) {
       return;
     }
     _commitSnapshot(
@@ -126,6 +146,8 @@ final class NoteMaterialsRegistry extends ChangeNotifier {
     Map<String, VaultNoteContent> refreshedNotesByNewId =
         const <String, VaultNoteContent>{},
     Map<String, List<AiProposal>> replacementProposalsByNoteId = const {},
+    Map<String, Set<String>> selectedAiMaterialIdsByNoteId = const {},
+    @Deprecated('Use selectedAiMaterialIdsByNoteId.')
     Map<String, Set<String>> selectedSourceIdsByNoteId = const {},
   }) {
     _ensureActive();
@@ -198,7 +220,7 @@ final class NoteMaterialsRegistry extends ChangeNotifier {
       _validateNoteId(entry.key);
       final current = next[entry.key] ?? NoteMaterialsSnapshot.empty;
       final replacement = NoteMaterialsSnapshot(
-        selectedSourceIds: current.selectedSourceIds,
+        selectedAiMaterialIds: current.selectedAiMaterialIds,
         proposals: [
           for (final proposal in entry.value)
             proposal.noteId == entry.key
@@ -212,7 +234,10 @@ final class NoteMaterialsRegistry extends ChangeNotifier {
         next[entry.key] = replacement;
       }
     }
-    for (final entry in selectedSourceIdsByNoteId.entries) {
+    final selectionReplacements = selectedAiMaterialIdsByNoteId.isNotEmpty
+        ? selectedAiMaterialIdsByNoteId
+        : selectedSourceIdsByNoteId;
+    for (final entry in selectionReplacements.entries) {
       _validateNoteId(entry.key);
       final refreshedNote = refreshedNotesByNewId[entry.key];
       if (refreshedNote == null || refreshedNote.id != entry.key) {
@@ -221,17 +246,17 @@ final class NoteMaterialsRegistry extends ChangeNotifier {
           '"${entry.key}".',
         );
       }
-      final availableSourceIds = {
-        for (final source in refreshedNote.sources) source.id,
+      final availableMaterialIds = {
+        for (final material in refreshedNote.aiMaterials) material.id,
       };
-      if (!availableSourceIds.containsAll(entry.value)) {
+      if (!availableMaterialIds.containsAll(entry.value)) {
         throw ArgumentError(
           'Selected sources for "${entry.key}" include an unknown source.',
         );
       }
       final current = next[entry.key] ?? NoteMaterialsSnapshot.empty;
       final replacement = NoteMaterialsSnapshot(
-        selectedSourceIds: entry.value,
+        selectedAiMaterialIds: entry.value,
         proposals: current.proposals,
       );
       if (_isEmpty(replacement)) {
@@ -416,9 +441,13 @@ NoteMaterialsSnapshot _remapSnapshot(
   String newId,
   VaultNoteContent refreshedNote,
 ) {
-  final sourceIds = refreshedNote.sources.map((source) => source.id).toSet();
+  final materialIds = refreshedNote.aiMaterials
+      .map((material) => material.id)
+      .toSet();
   return NoteMaterialsSnapshot(
-    selectedSourceIds: snapshot.selectedSourceIds.intersection(sourceIds),
+    selectedAiMaterialIds: snapshot.selectedAiMaterialIds.intersection(
+      materialIds,
+    ),
     proposals: <AiProposal>[
       for (final proposal in snapshot.proposals)
         proposal.noteId == newId ? proposal : proposal.copyWith(noteId: newId),
@@ -427,7 +456,7 @@ NoteMaterialsSnapshot _remapSnapshot(
 }
 
 bool _isEmpty(NoteMaterialsSnapshot snapshot) {
-  return snapshot.selectedSourceIds.isEmpty && snapshot.proposals.isEmpty;
+  return snapshot.selectedAiMaterialIds.isEmpty && snapshot.proposals.isEmpty;
 }
 
 bool _sameMaps(
@@ -448,7 +477,7 @@ bool _sameMaps(
 bool _sameSnapshot(NoteMaterialsSnapshot? left, NoteMaterialsSnapshot? right) {
   return left != null &&
       right != null &&
-      setEquals(left.selectedSourceIds, right.selectedSourceIds) &&
+      setEquals(left.selectedAiMaterialIds, right.selectedAiMaterialIds) &&
       listEquals(left.proposals, right.proposals);
 }
 
@@ -458,8 +487,12 @@ void _validateNoteId(String noteId) {
   }
 }
 
-void _validateSourceId(String sourceId) {
-  if (sourceId.trim().isEmpty) {
-    throw ArgumentError.value(sourceId, 'sourceId', 'Source id is empty.');
+void _validateMaterialId(String materialId) {
+  if (materialId.trim().isEmpty) {
+    throw ArgumentError.value(
+      materialId,
+      'materialId',
+      'Material id is empty.',
+    );
   }
 }

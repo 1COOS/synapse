@@ -97,10 +97,11 @@ final class WorkspaceMarkdownRenderer {
     required PaneEditorContext editorContext,
     ValueChanged<String>? onImageTap,
     PreviewImageSecondaryTapCallback? onImageSecondaryTapUp,
+    void Function(String src, bool available)? onImageAvailabilityChanged,
   }) {
     final styleSheet = _noteMarkdownStyleSheet(markdown);
     return MarkdownBody(
-      data: _markdownPreviewData(markdown, editorContext),
+      data: _markdownPreviewData(markdown),
       selectable: false,
       softLineBreak: true,
       inlineSyntaxes: [_highlightSyntax],
@@ -111,6 +112,7 @@ final class WorkspaceMarkdownRenderer {
         editorContext: editorContext,
         onImageTap: onImageTap,
         onImageSecondaryTapUp: onImageSecondaryTapUp,
+        onImageAvailabilityChanged: onImageAvailabilityChanged,
       ),
       styleSheetTheme: MarkdownStyleSheetBaseTheme.cupertino,
       styleSheet: styleSheet,
@@ -173,6 +175,7 @@ final class WorkspaceMarkdownRenderer {
     required PaneEditorContext editorContext,
     ValueChanged<String>? onImageTap,
     PreviewImageSecondaryTapCallback? onImageSecondaryTapUp,
+    void Function(String src, bool available)? onImageAvailabilityChanged,
     bool tableSelected = false,
     Key? tableSelectionTargetKey,
     VoidCallback? onTableFrameTap,
@@ -200,6 +203,7 @@ final class WorkspaceMarkdownRenderer {
       editorContext: editorContext,
       onImageTap: onImageTap,
       onImageSecondaryTapUp: onImageSecondaryTapUp,
+      onImageAvailabilityChanged: onImageAvailabilityChanged,
     );
   }
 
@@ -224,22 +228,41 @@ final class WorkspaceMarkdownRenderer {
     );
   }
 
-  String _markdownPreviewData(
-    String markdown,
-    PaneEditorContext editorContext,
-  ) {
-    return markdown.replaceAllMapped(htmlImageTagPattern, (match) {
+  String _markdownPreviewData(String markdown) {
+    final withMarkdownImages = markdown.replaceAllMapped(
+      markdownImageTagPattern,
+      (match) {
+        final tag = match.group(0)!;
+        final src = markdownImageSrcFromTag(tag);
+        if (src == null || !isLocalMarkdownImageSrc(src)) {
+          return tag;
+        }
+        return _previewMarkdownImage(
+          originalTag: tag,
+          src: src,
+          width: defaultMarkdownImageWidth,
+        );
+      },
+    );
+    return withMarkdownImages.replaceAllMapped(htmlImageTagPattern, (match) {
       final tag = match.group(0)!;
       final src = htmlAttribute(tag, 'src');
-      if (src == null ||
-          _imageSourceForMarkdownSrc(editorContext, src) == null) {
+      if (src == null || !isLocalMarkdownImageSrc(src)) {
         return tag;
       }
       final width = imageWidthFromTag(tag);
-      final alt = escapeMarkdownImageAlt(htmlAttribute(tag, 'alt') ?? 'image');
-      final encodedSrc = encodeMarkdownImageSrc(src);
-      return '![$alt]($encodedSrc#${width}x)';
+      return _previewMarkdownImage(originalTag: tag, src: src, width: width);
     });
+  }
+
+  String _previewMarkdownImage({
+    required String originalTag,
+    required String src,
+    required int width,
+  }) {
+    final alt = escapeMarkdownImageAlt(originalTag);
+    final encodedSrc = encodeMarkdownImageSrc(src);
+    return '![$alt]($encodedSrc#${width}x)';
   }
 
   Widget _buildPreviewImage(
@@ -248,10 +271,15 @@ final class WorkspaceMarkdownRenderer {
     required PaneEditorContext editorContext,
     ValueChanged<String>? onImageTap,
     PreviewImageSecondaryTapCallback? onImageSecondaryTapUp,
+    void Function(String src, bool available)? onImageAvailabilityChanged,
   }) {
     final src = safeUriDecode(config.uri.toString());
-    final source = _imageSourceForMarkdownSrc(editorContext, src);
-    if (source == null) {
+    final failureLabel = config.alt ?? src;
+    final attachment = _imageAttachmentForMarkdownSrc(editorContext, src);
+    if (attachment == null) {
+      if (isLocalMarkdownImageSrc(src)) {
+        return BrokenImageReferenceLabel(label: failureLabel);
+      }
       return Text(
         config.alt ?? src,
         style: const TextStyle(color: workspaceMutedColor, fontSize: 13),
@@ -271,8 +299,8 @@ final class WorkspaceMarkdownRenderer {
             noteId != null &&
             currentWorkspace.lockedSessionNoteIds.contains(noteId);
         return PreviewImageBlock(
-          key: Key('preview-image-${source.id}'),
-          source: source,
+          key: Key('preview-image-${attachment.id}'),
+          attachment: attachment,
           src: src,
           width: width,
           editableControls:
@@ -280,7 +308,14 @@ final class WorkspaceMarkdownRenderer {
               !currentWorkspace.isBusy &&
               !locked,
           selectedImageSrc: currentWorkspace.selectedPreviewImageSrc,
-          imageBytes: controller.readSourceAttachment(source),
+          imageBytes: controller.readNoteAttachment(attachment),
+          failureLabel: failureLabel,
+          onAvailabilityChanged: onImageAvailabilityChanged == null
+              ? null
+              : (available) => onImageAvailabilityChanged(
+                  normalizeImageSrc(src),
+                  available,
+                ),
           onTap: () {
             if (controller.isBusy ||
                 mode != ImagePreviewMode.editing ||
@@ -294,7 +329,7 @@ final class WorkspaceMarkdownRenderer {
                   onImageSecondaryTapUp != null &&
                   controller.resolvePaneEditorContext(editorContext) != null
               ? (details) => onImageSecondaryTapUp(
-                  source.id,
+                  attachment.id,
                   normalizeImageSrc(src),
                   details,
                 )
@@ -307,7 +342,7 @@ final class WorkspaceMarkdownRenderer {
             unawaited(
               _applyImageWidth(
                 editorContext,
-                sourceId: source.id,
+                sourceId: attachment.id,
                 src: src,
                 width: clampImageWidth(value.round()),
               ),
@@ -353,8 +388,8 @@ final class WorkspaceMarkdownRenderer {
     if (controller.isPaneEditorContextLocked(context)) {
       return PaneEditorCommandOutcome.unchanged;
     }
-    if (_sourceForId(resolved.session, draggedSourceId) == null ||
-        _sourceForId(resolved.session, targetSourceId) == null) {
+    if (_attachmentForId(resolved.session, draggedSourceId) == null ||
+        _attachmentForId(resolved.session, targetSourceId) == null) {
       return PaneEditorCommandOutcome.unchanged;
     }
     final documentController = resolved.session.controller;
@@ -374,8 +409,8 @@ final class WorkspaceMarkdownRenderer {
     if (controller.isPaneEditorContextLocked(context)) {
       return PaneEditorCommandOutcome.unchanged;
     }
-    if (_sourceForId(resolved.session, draggedSourceId) == null ||
-        _sourceForId(resolved.session, targetSourceId) == null) {
+    if (_attachmentForId(resolved.session, draggedSourceId) == null ||
+        _attachmentForId(resolved.session, targetSourceId) == null) {
       return PaneEditorCommandOutcome.unchanged;
     }
     _setSelectedPreviewImageSrc(draggedSrc);
@@ -403,7 +438,7 @@ final class WorkspaceMarkdownRenderer {
     if (controller.isPaneEditorContextLocked(context)) {
       return PaneEditorCommandOutcome.unchanged;
     }
-    if (_sourceForId(resolved.session, sourceId) == null) {
+    if (_attachmentForId(resolved.session, sourceId) == null) {
       return PaneEditorCommandOutcome.unchanged;
     }
     final documentController = resolved.session.controller;
@@ -422,7 +457,7 @@ final class WorkspaceMarkdownRenderer {
     if (controller.isPaneEditorContextLocked(context)) {
       return PaneEditorCommandOutcome.unchanged;
     }
-    if (_sourceForId(resolved.session, sourceId) == null) {
+    if (_attachmentForId(resolved.session, sourceId) == null) {
       return PaneEditorCommandOutcome.unchanged;
     }
     _setSelectedPreviewImageSrc(src);
@@ -437,16 +472,19 @@ final class WorkspaceMarkdownRenderer {
     return saveFailure ?? PaneEditorCommandOutcome.committed;
   }
 
-  SourceItem? _sourceForId(NoteDocumentSession session, String sourceId) {
-    for (final source in session.note.sources) {
-      if (source.id == sourceId) {
-        return source;
+  NoteAttachment? _attachmentForId(
+    NoteDocumentSession session,
+    String attachmentId,
+  ) {
+    for (final attachment in session.note.attachments) {
+      if (attachment.id == attachmentId) {
+        return attachment;
       }
     }
     return null;
   }
 
-  SourceItem? _imageSourceForMarkdownSrc(
+  NoteAttachment? _imageAttachmentForMarkdownSrc(
     PaneEditorContext context,
     String? src,
   ) {
@@ -456,13 +494,13 @@ final class WorkspaceMarkdownRenderer {
     }
     final active = resolved.session.note;
     final normalizedSrc = normalizeImageSrc(src);
-    for (final source in active.sources) {
-      if (source.type != SourceType.image || source.attachmentPath == null) {
+    for (final attachment in active.attachments) {
+      if (attachment.mediaKind != MediaKind.image) {
         continue;
       }
-      if (normalizeImageSrc(_markdownAttachmentSrc(active, source)) ==
+      if (normalizeImageSrc(_markdownAttachmentSrc(active, attachment)) ==
           normalizedSrc) {
-        return source;
+        return attachment;
       }
     }
 
@@ -470,40 +508,48 @@ final class WorkspaceMarkdownRenderer {
     if (markdownBasename.isEmpty) {
       return null;
     }
-    SourceItem? attachmentFallback;
-    for (final source in active.sources) {
-      final attachmentPath = source.attachmentPath;
-      if (source.type != SourceType.image || attachmentPath == null) {
+    NoteAttachment? attachmentFallback;
+    for (final attachment in active.attachments) {
+      if (attachment.mediaKind != MediaKind.image) {
         continue;
       }
-      final attachmentBasename = p.basename(normalizeImageSrc(attachmentPath));
+      final attachmentBasename = p.basename(
+        normalizeImageSrc(attachment.relativePath),
+      );
       if (attachmentBasename != markdownBasename) {
         continue;
       }
-      if (attachmentFallback != null && attachmentFallback.id != source.id) {
+      if (attachmentFallback != null &&
+          attachmentFallback.id != attachment.id) {
         return null;
       }
-      attachmentFallback = source;
+      attachmentFallback = attachment;
     }
     if (attachmentFallback != null) {
       return attachmentFallback;
     }
 
-    SourceItem? titleFallback;
-    for (final source in active.sources) {
-      if (source.type != SourceType.image || source.attachmentPath == null) {
+    NoteAttachment? titleFallback;
+    for (final attachment in active.attachments) {
+      if (attachment.mediaKind != MediaKind.image) {
         continue;
       }
-      final sourceTitleBasename = p.basename(normalizeImageSrc(source.title));
-      if (sourceTitleBasename != markdownBasename) {
+      final attachmentTitleBasename = p.basename(
+        normalizeImageSrc(attachment.title),
+      );
+      if (attachmentTitleBasename != markdownBasename) {
         continue;
       }
-      if (titleFallback != null && titleFallback.id != source.id) {
+      if (titleFallback != null && titleFallback.id != attachment.id) {
         return null;
       }
-      titleFallback = source;
+      titleFallback = attachment;
     }
     return titleFallback;
+  }
+
+  bool hasImageAttachment(PaneEditorContext context, String src) {
+    return _imageAttachmentForMarkdownSrc(context, src) != null;
   }
 
   void _setSelectedPreviewImageSrc(String? src) {
@@ -535,13 +581,9 @@ final class WorkspaceMarkdownRenderer {
     return outcome == PaneEditorCommandOutcome.committed ? null : outcome;
   }
 
-  String _markdownAttachmentSrc(VaultNote note, SourceItem source) {
-    final attachmentPath = source.attachmentPath;
-    if (attachmentPath == null || attachmentPath.trim().isEmpty) {
-      throw StateError('Source has no attachment: ${source.id}');
-    }
+  String _markdownAttachmentSrc(VaultNote note, NoteAttachment attachment) {
     final assetsDirectory = '${p.basenameWithoutExtension(note.path)}.assets';
-    return '$assetsDirectory/$attachmentPath'.replaceAll('\\', '/');
+    return '$assetsDirectory/${attachment.relativePath}'.replaceAll('\\', '/');
   }
 }
 

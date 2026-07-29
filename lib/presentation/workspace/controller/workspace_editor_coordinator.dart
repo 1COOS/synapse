@@ -86,14 +86,14 @@ final class WorkspaceEditorCoordinator {
     }
     final targetSession = resolved.session;
     final vault = _runtimes.requireCurrent().vault;
-    final result = await _mutations.run<_SourceHydration>(
-      WorkspaceMutationPlan<_SourceHydration>(
+    final result = await _mutations.run<_MaterialHydration>(
+      WorkspaceMutationPlan<_MaterialHydration>(
         affectedNoteIds: {targetSession.noteId},
         dirtyDisposition: DirtyDisposition.flush,
         commitBackend: () async {
           _requireCurrentMutationTarget(context, targetSession);
           final noteId = targetSession.noteId;
-          final source = await vault.addImageSource(
+          final material = await vault.addImageMaterial(
             noteId: noteId,
             filename: image.filename,
             mimeType: image.mimeType,
@@ -103,7 +103,7 @@ final class WorkspaceEditorCoordinator {
             postCommitHydrate: () async {
               final note = await vault.readNote(noteId);
               return VaultMutationDelta(
-                value: _SourceHydration(note: note, source: source),
+                value: _MaterialHydration(note: note, material: material),
                 refreshedNotesByNewId: {note.id: note},
                 resources: await vault.listResources(),
               );
@@ -113,13 +113,13 @@ final class WorkspaceEditorCoordinator {
         prepareCommit: (delta) {
           final note = delta.value.note;
           final selected = Set<String>.of(
-            _materials.snapshotFor(note.id).selectedSourceIds,
-          )..add(delta.value.source.id);
+            _materials.snapshotFor(note.id).selectedAiMaterialIds,
+          )..add(delta.value.material.id);
           final focused = _splits.focusedPaneId == context.paneId;
           return _commits.prepare(
             delta,
             upsertedNotesById: {note.id: note},
-            selectedSourceIdsByNoteId: {note.id: selected},
+            selectedAiMaterialIdsByNoteId: {note.id: selected},
             patch: WorkspaceStatePatch(
               resources: delta.resources,
               selectedResourceId: focused
@@ -188,23 +188,27 @@ final class WorkspaceEditorCoordinator {
 
   Future<PaneEditorCommandOutcome> copyImage(
     PaneEditorContext context,
-    String sourceId,
+    String attachmentId,
   ) async {
     var resolved = _resolve(context);
     if (resolved == null) {
       return PaneEditorCommandOutcome.staleTarget;
     }
-    final source = _imageSourceForId(resolved.session, sourceId);
-    if (source == null) {
+    final attachment = _imageAttachmentForId(resolved.session, attachmentId);
+    if (attachment == null) {
       return PaneEditorCommandOutcome.unchanged;
     }
-    final bytes = await readSourceAttachment(source);
+    final bytes = await readNoteAttachment(attachment);
     resolved = _resolve(context);
     if (resolved == null) {
       return PaneEditorCommandOutcome.staleTarget;
     }
-    final currentSource = _imageSourceForId(resolved.session, sourceId);
-    if (currentSource == null || !_sameImageSource(source, currentSource)) {
+    final currentAttachment = _imageAttachmentForId(
+      resolved.session,
+      attachmentId,
+    );
+    if (currentAttachment == null ||
+        !_sameImageAttachment(attachment, currentAttachment)) {
       return PaneEditorCommandOutcome.staleTarget;
     }
     await _imageInput.writeClipboardImage(bytes);
@@ -225,20 +229,20 @@ final class WorkspaceEditorCoordinator {
     final filename = _noteEditorPastedImageFilename(image.filename);
     final targetSession = resolved.session;
     final vault = _runtimes.requireCurrent().vault;
-    final result = await _mutations.run<_SourceHydration>(
-      WorkspaceMutationPlan<_SourceHydration>(
+    final result = await _mutations.run<_AttachmentHydration>(
+      WorkspaceMutationPlan<_AttachmentHydration>(
         affectedNoteIds: {targetSession.noteId},
         dirtyDisposition: DirtyDisposition.discard,
         commitBackend: () async {
           _requireCurrentPasteMutationTarget(context, targetSession, target);
           final oldNoteId = targetSession.noteId;
-          late SourceItem source;
+          late NoteAttachment attachment;
           var committedNoteId = oldNoteId;
           try {
             await vault.runMutationTransaction<void>(
               label: 'paste-image-into-note',
               action: () async {
-                source = await vault.addImageSource(
+                attachment = await vault.addImageAttachment(
                   noteId: oldNoteId,
                   filename: filename,
                   mimeType: image.mimeType,
@@ -250,7 +254,10 @@ final class WorkspaceEditorCoordinator {
                   noteIds: {oldNoteId},
                 );
                 final selection = _normalizedSelection(target);
-                final imageTag = _imageMarkdownTag(targetSession.note, source);
+                final imageTag = _imageMarkdownTag(
+                  targetSession.note,
+                  attachment,
+                );
                 final replacement = blockImageInsertion(
                   text: target.text,
                   start: selection.start,
@@ -295,7 +302,7 @@ final class WorkspaceEditorCoordinator {
             postCommitHydrate: () async {
               final note = await vault.readNote(committedNoteId);
               return VaultMutationDelta(
-                value: _SourceHydration(note: note, source: source),
+                value: _AttachmentHydration(note: note, attachment: attachment),
                 remappedNoteIds: {oldNoteId: note.id},
                 refreshedNotesByNewId: {note.id: note},
                 resources: await vault.listResources(),
@@ -328,9 +335,6 @@ final class WorkspaceEditorCoordinator {
             );
           }
           final note = delta.value.note;
-          final selected = Set<String>.of(
-            _materials.snapshotFor(note.id).selectedSourceIds,
-          )..add(delta.value.source.id);
           final focused = _splits.focusedPaneId == context.paneId;
           return _commits.prepare(
             delta,
@@ -340,7 +344,6 @@ final class WorkspaceEditorCoordinator {
               savedNote: note,
               preserveCurrentBody: false,
             ),
-            selectedSourceIdsByNoteId: {note.id: selected},
             patch: WorkspaceStatePatch(
               resources: resources,
               selectedResourceId: focused
@@ -349,7 +352,7 @@ final class WorkspaceEditorCoordinator {
               searchResults: const [],
               message: '图片已粘贴到笔记：$filename',
               selectedPreviewImageSrc: focused
-                  ? _markdownAttachmentSrc(note, delta.value.source)
+                  ? _markdownAttachmentSrc(note, delta.value.attachment)
                   : _readState().selectedPreviewImageSrc,
             ),
           );
@@ -359,13 +362,13 @@ final class WorkspaceEditorCoordinator {
     final outcome = _editorResult(result, context);
     final current = _resolve(context);
     if (outcome == PaneEditorCommandOutcome.committed &&
-        result is Committed<_SourceHydration> &&
+        result is Committed<_AttachmentHydration> &&
         current != null &&
         identical(current.session, targetSession)) {
       final body = current.session.controller.text;
       final reference = findMarkdownImageReference(
         markdown: body,
-        src: _markdownAttachmentSrc(result.value.note, result.value.source),
+        src: _markdownAttachmentSrc(result.value.note, result.value.attachment),
       );
       if (reference != null) {
         current.session.setSelectionProgrammatically(
@@ -385,11 +388,11 @@ final class WorkspaceEditorCoordinator {
     if (resolved == null) {
       return PaneEditorCommandOutcome.staleTarget;
     }
-    final sourceIds = _materials
+    final materialIds = _materials
         .snapshotFor(resolved.noteId)
-        .selectedSourceIds
+        .selectedAiMaterialIds
         .toList(growable: false);
-    if (sourceIds.isEmpty) {
+    if (materialIds.isEmpty) {
       return PaneEditorCommandOutcome.unchanged;
     }
     final flush = await _saves.flush([resolved.session]);
@@ -404,7 +407,7 @@ final class WorkspaceEditorCoordinator {
     final preparedSession = resolved.session;
     final prepared = await runtime.proposalService.prepareOutlineProposal(
       noteId: resolved.noteId,
-      sourceIds: sourceIds,
+      materialIds: materialIds,
     );
     resolved = _resolve(context);
     if (resolved == null) {
@@ -629,21 +632,21 @@ final class WorkspaceEditorCoordinator {
         : PaneEditorCommandOutcome.unchanged;
   }
 
-  Future<PaneEditorCommandOutcome> deleteSource(
+  Future<PaneEditorCommandOutcome> deleteAiMaterial(
     PaneEditorContext context,
-    SourceItem source,
+    AiMaterial material,
   ) {
-    return deleteSources(context, [source]);
+    return deleteAiMaterials(context, [material]);
   }
 
-  Future<PaneEditorCommandOutcome> deleteSources(
+  Future<PaneEditorCommandOutcome> deleteAiMaterials(
     PaneEditorContext context,
-    Iterable<SourceItem> sources,
+    Iterable<AiMaterial> materials,
   ) async {
-    final requestedSources = <String, SourceItem>{
-      for (final source in sources) source.id: source,
+    final requestedMaterials = <String, AiMaterial>{
+      for (final material in materials) material.id: material,
     }.values.toList(growable: false);
-    if (requestedSources.isEmpty) {
+    if (requestedMaterials.isEmpty) {
       return PaneEditorCommandOutcome.unchanged;
     }
     final resolved = _resolve(context);
@@ -659,21 +662,22 @@ final class WorkspaceEditorCoordinator {
         commitBackend: () async {
           _requireCurrentMutationTarget(context, targetSession);
           final currentById = {
-            for (final source in targetSession.note.sources) source.id: source,
+            for (final material in targetSession.note.aiMaterials)
+              material.id: material,
           };
-          final currentSources = <SourceItem>[];
-          for (final source in requestedSources) {
-            final current = currentById[source.id];
+          final currentMaterials = <AiMaterial>[];
+          for (final material in requestedMaterials) {
+            final current = currentById[material.id];
             if (current == null) {
-              throw StateError('Source not found: ${source.id}');
+              throw StateError('AI material not found: ${material.id}');
             }
-            currentSources.add(current);
+            currentMaterials.add(current);
           }
           await vault.runMutationTransaction(
-            label: 'delete-sources',
+            label: 'delete-ai-materials',
             action: () async {
-              for (final source in currentSources) {
-                await vault.deleteSource(source);
+              for (final material in currentMaterials) {
+                await vault.deleteAiMaterial(material);
               }
             },
           );
@@ -692,22 +696,111 @@ final class WorkspaceEditorCoordinator {
         prepareCommit: (delta) {
           final note = delta.value.note;
           final selected = Set<String>.of(
-            _materials.snapshotFor(note.id).selectedSourceIds,
-          )..removeAll(requestedSources.map((source) => source.id));
+            _materials.snapshotFor(note.id).selectedAiMaterialIds,
+          )..removeAll(requestedMaterials.map((material) => material.id));
           return _commits.prepare(
             delta,
             upsertedNotesById: {note.id: note},
             replacementProposalsByNoteId: {note.id: delta.value.proposals},
-            selectedSourceIdsByNoteId: {note.id: selected},
+            selectedAiMaterialIdsByNoteId: {note.id: selected},
             patch: WorkspaceStatePatch(
               resources: delta.resources,
-              message: requestedSources.length == 1
-                  ? '素材已删除'
-                  : '已删除 ${requestedSources.length} 个素材',
+              message: requestedMaterials.length == 1
+                  ? 'AI 素材已删除'
+                  : '已删除 ${requestedMaterials.length} 个 AI 素材',
               selectedPreviewImageSrc: null,
             ),
           );
         },
+      ),
+    );
+    return _editorResult(result, context);
+  }
+
+  @Deprecated('Use deleteAiMaterial.')
+  Future<PaneEditorCommandOutcome> deleteSource(
+    PaneEditorContext context,
+    AiMaterial source,
+  ) => deleteAiMaterial(context, source);
+
+  @Deprecated('Use deleteAiMaterials.')
+  Future<PaneEditorCommandOutcome> deleteSources(
+    PaneEditorContext context,
+    Iterable<AiMaterial> sources,
+  ) => deleteAiMaterials(context, sources);
+
+  Future<AttachmentDeletionImpact?> analyzeAttachmentDeletion(
+    PaneEditorContext context,
+    Iterable<NoteAttachment> attachments,
+  ) async {
+    if (_resolve(context) == null) {
+      return null;
+    }
+    final unique = <String, NoteAttachment>{
+      for (final attachment in attachments) attachment.id: attachment,
+    }.values.toList(growable: false);
+    if (unique.isEmpty) {
+      return const AttachmentDeletionImpact(attachments: [], references: []);
+    }
+    final impact = await _runtimes
+        .requireCurrent()
+        .vault
+        .analyzeAttachmentDeletion(unique);
+    return _resolve(context) == null ? null : impact;
+  }
+
+  Future<PaneEditorCommandOutcome> deleteNoteAttachments(
+    PaneEditorContext context,
+    AttachmentDeletionImpact impact,
+  ) async {
+    final resolved = _resolve(context);
+    if (resolved == null || impact.attachments.isEmpty) {
+      return resolved == null
+          ? PaneEditorCommandOutcome.staleTarget
+          : PaneEditorCommandOutcome.unchanged;
+    }
+    final affectedNoteIds = <String>{
+      ...impact.attachments.map((attachment) => attachment.noteId),
+      ...impact.references.map((reference) => reference.noteId),
+      ...impact.noteFingerprints.keys,
+    };
+    final targetSession = resolved.session;
+    final vault = _runtimes.requireCurrent().vault;
+    final result = await _mutations.run<Map<String, VaultNoteContent>>(
+      WorkspaceMutationPlan<Map<String, VaultNoteContent>>(
+        affectedNoteIds: affectedNoteIds,
+        dirtyDisposition: DirtyDisposition.flush,
+        commitBackend: () async {
+          _requireCurrentMutationTarget(context, targetSession);
+          await vault.deleteNoteAttachments(
+            attachments: impact.attachments,
+            expectedImpact: impact,
+          );
+          return WorkspaceBackendCommit(
+            postCommitHydrate: () async {
+              final notes = <String, VaultNoteContent>{};
+              for (final noteId in affectedNoteIds) {
+                notes[noteId] = await vault.readNote(noteId);
+              }
+              return VaultMutationDelta(
+                value: notes,
+                refreshedNotesByNewId: notes,
+                resources: await vault.listResources(),
+              );
+            },
+          );
+        },
+        prepareCommit: (delta) => _commits.prepare(
+          delta,
+          upsertedNotesById: delta.value,
+          patch: WorkspaceStatePatch(
+            resources: delta.resources,
+            message: impact.attachments.length == 1
+                ? '笔记附件已永久删除'
+                : '已永久删除 ${impact.attachments.length} 个笔记附件',
+            selectedPreviewImageSrc: null,
+          ),
+        ),
       ),
     );
     return _editorResult(result, context);
@@ -732,30 +825,41 @@ final class WorkspaceEditorCoordinator {
         : PaneEditorCommandOutcome.committed;
   }
 
-  Future<List<int>> readSourceAttachment(SourceItem source) {
-    return _runtimes.requireCurrent().vault.readSourceAttachment(source);
+  Future<List<int>> readAiMaterialContent(AiMaterial material) {
+    return _runtimes.requireCurrent().vault.readAiMaterialContent(material);
   }
 
-  SourceItem? _imageSourceForId(NoteDocumentSession session, String sourceId) {
-    for (final source in session.note.sources) {
-      if (source.id == sourceId &&
-          source.type == SourceType.image &&
-          source.attachmentPath != null) {
-        return source;
+  Future<List<int>> readNoteAttachment(NoteAttachment attachment) {
+    return _runtimes.requireCurrent().vault.readNoteAttachment(attachment);
+  }
+
+  @Deprecated('Use readAiMaterialContent.')
+  Future<List<int>> readSourceAttachment(AiMaterial source) {
+    return readAiMaterialContent(source);
+  }
+
+  NoteAttachment? _imageAttachmentForId(
+    NoteDocumentSession session,
+    String attachmentId,
+  ) {
+    for (final attachment in session.note.attachments) {
+      if (attachment.id == attachmentId &&
+          attachment.mediaKind == MediaKind.image) {
+        return attachment;
       }
     }
     return null;
   }
 
-  bool _sameImageSource(SourceItem expected, SourceItem actual) {
+  bool _sameImageAttachment(NoteAttachment expected, NoteAttachment actual) {
     return expected.id == actual.id &&
         expected.noteId == actual.noteId &&
-        expected.attachmentPath == actual.attachmentPath &&
+        expected.relativePath == actual.relativePath &&
         expected.updatedAt == actual.updatedAt;
   }
 
-  String _imageMarkdownTag(VaultNoteContent note, SourceItem source) {
-    final src = _markdownAttachmentSrc(note, source);
+  String _imageMarkdownTag(VaultNoteContent note, NoteAttachment attachment) {
+    final src = _markdownAttachmentSrc(note, attachment);
     return '<img src="${escapeHtmlAttribute(src)}" '
         'width="${_readState().preferences.pastedImageWidth}">';
   }
@@ -783,13 +887,9 @@ final class WorkspaceEditorCoordinator {
     return match == null ? filename : '${match.group(1)}$extension';
   }
 
-  String _markdownAttachmentSrc(VaultNote note, SourceItem source) {
-    final attachmentPath = source.attachmentPath;
-    if (attachmentPath == null || attachmentPath.trim().isEmpty) {
-      throw StateError('Source has no attachment: ${source.id}');
-    }
+  String _markdownAttachmentSrc(VaultNote note, NoteAttachment attachment) {
     final assetsDirectory = '${p.basenameWithoutExtension(note.path)}.assets';
-    return '$assetsDirectory/$attachmentPath'.replaceAll('\\', '/');
+    return '$assetsDirectory/${attachment.relativePath}'.replaceAll('\\', '/');
   }
 
   void _replaceEditorSelection(
@@ -933,11 +1033,18 @@ final class _PasteTargetChangedAfterBackend implements Exception {
   const _PasteTargetChangedAfterBackend();
 }
 
-final class _SourceHydration {
-  const _SourceHydration({required this.note, required this.source});
+final class _MaterialHydration {
+  const _MaterialHydration({required this.note, required this.material});
 
   final VaultNoteContent note;
-  final SourceItem source;
+  final AiMaterial material;
+}
+
+final class _AttachmentHydration {
+  const _AttachmentHydration({required this.note, required this.attachment});
+
+  final VaultNoteContent note;
+  final NoteAttachment attachment;
 }
 
 final class _NoteHydration {

@@ -61,6 +61,7 @@ class LiveMarkdownEditor extends StatefulWidget {
     required this.onPaste,
     required this.onCopyImage,
     required this.onImageSelectionChanged,
+    required this.hasImageAttachment,
     required this.previewBuilder,
   });
 
@@ -77,10 +78,12 @@ class LiveMarkdownEditor extends StatefulWidget {
   final NoteEditorPasteCallback onPaste;
   final NoteEditorCopyImageCallback onCopyImage;
   final ValueChanged<String?> onImageSelectionChanged;
+  final bool Function(String src) hasImageAttachment;
   final Widget Function(
     String markdown, {
     ValueChanged<String>? onImageTap,
     PreviewImageSecondaryTapCallback? onImageSecondaryTapUp,
+    void Function(String src, bool available)? onImageAvailabilityChanged,
     bool? tableSelected,
     Key? tableSelectionTargetKey,
     VoidCallback? onTableFrameTap,
@@ -116,6 +119,7 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
   Timer? _tableBlockAutoScrollTimer;
   var _persistentBlankInsertion = false;
   _PasteViewportTransaction? _pasteViewportTransaction;
+  final Set<String> _failedImageSources = <String>{};
 
   bool get _pasteInFlight => _pasteViewportTransaction?.inFlight ?? false;
 
@@ -151,6 +155,7 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
       _stopTableBlockAutoScroll();
       _draggingTableBlockStart = null;
       _tableBlockDragPosition = null;
+      _failedImageSources.clear();
     }
     if (!widget.focused) {
       _cancelPasteViewportTransaction();
@@ -2769,6 +2774,7 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
                 key: Key('live-markdown-image-preview-$index'),
                 child: widget.previewBuilder(
                   block.text,
+                  onImageAvailabilityChanged: _handleImageAvailabilityChanged,
                   onImageTap: (src) => _handleImagePreviewTap(block, src),
                   onImageSecondaryTapUp: (sourceId, src, details) =>
                       _handleImagePreviewSecondaryTap(
@@ -2872,6 +2878,7 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
               key: Key('live-markdown-image-preview-$index'),
               child: widget.previewBuilder(
                 block.text,
+                onImageAvailabilityChanged: _handleImageAvailabilityChanged,
                 onImageTap: (src) => _handleImagePreviewTap(block, src),
                 onImageSecondaryTapUp: (sourceId, src, details) =>
                     _handleImagePreviewSecondaryTap(
@@ -2936,10 +2943,14 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
   }) {
     final appearance = WorkspaceAppearanceScope.of(context);
     final baseTextStyle = _textStyleForBlock(block, appearance);
+    _editorController.blockController.brokenImageMatcher = block == null
+        ? null
+        : _imageTagIsBroken;
     _editorController.blockController.inlineImageBuilder =
         block != null && markdownHasTextAlongsideImage(block.text)
         ? (source) => widget.previewBuilder(
             source,
+            onImageAvailabilityChanged: _handleImageAvailabilityChanged,
             onImageTap: (src) => _handleImagePreviewTap(block, src),
             onImageSecondaryTapUp: (sourceId, src, details) =>
                 _handleImagePreviewSecondaryTap(block, sourceId, src, details),
@@ -2966,6 +2977,28 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
         onKeyEvent: _handleBlockKeyEvent,
       ),
     );
+  }
+
+  bool _imageTagIsBroken(String imageTag) {
+    final src =
+        htmlAttribute(imageTag, 'src') ?? markdownImageSrcFromTag(imageTag);
+    if (src == null || !isLocalMarkdownImageSrc(src)) {
+      return false;
+    }
+    final normalized = normalizeImageSrc(src);
+    return !widget.hasImageAttachment(src) ||
+        _failedImageSources.contains(normalized);
+  }
+
+  void _handleImageAvailabilityChanged(String src, bool available) {
+    final normalized = normalizeImageSrc(src);
+    final changed = available
+        ? _failedImageSources.remove(normalized)
+        : _failedImageSources.add(normalized);
+    if (!changed || !mounted) {
+      return;
+    }
+    setState(() {});
   }
 
   TextStyle _textStyleForBlock(

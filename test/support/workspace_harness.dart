@@ -429,12 +429,14 @@ enum PreviewImageDropSide { left, right }
 
 Future<void> dragPreviewImageToSide(
   WidgetTester tester, {
-  required SourceItem from,
-  required SourceItem to,
+  required Object from,
+  required Object to,
   required PreviewImageDropSide side,
 }) async {
-  final fromFinder = find.byKey(Key('preview-image-tap-${from.id}'));
-  final toFinder = find.byKey(Key('preview-image-tap-${to.id}'));
+  final fromId = _imageRecordId(from);
+  final toId = _imageRecordId(to);
+  final fromFinder = find.byKey(Key('preview-image-tap-$fromId'));
+  final toFinder = find.byKey(Key('preview-image-tap-$toId'));
   final start = tester.getCenter(fromFinder);
   final targetRect = tester.getRect(toFinder);
   final drop = Offset(
@@ -447,15 +449,22 @@ Future<void> dragPreviewImageToSide(
   await tester.pumpAndSettle();
 }
 
-Color previewImageFrameBorderColor(WidgetTester tester, SourceItem source) {
+Color previewImageFrameBorderColor(WidgetTester tester, Object imageRecord) {
+  final id = _imageRecordId(imageRecord);
   final tapTarget = tester.widget<GestureDetector>(
-    find.byKey(Key('preview-image-tap-${source.id}')),
+    find.byKey(Key('preview-image-tap-$id')),
   );
   final decoration =
       (tapTarget.child! as DecoratedBox).decoration as BoxDecoration;
   final border = decoration.border! as Border;
   return border.top.color;
 }
+
+String _imageRecordId(Object imageRecord) => switch (imageRecord) {
+  final AiMaterial material => material.id,
+  final NoteAttachment attachment => attachment.id,
+  _ => throw ArgumentError.value(imageRecord, 'imageRecord'),
+};
 
 Color workspaceAccentColor(WidgetTester tester) {
   final scope = find.ancestor(

@@ -3,7 +3,7 @@ import '../../domain/vault/note_id.dart';
 import '../../domain/vault/vault_resource.dart';
 import 'memory_vault_paths.dart';
 import 'memory_vault_proposal_store.dart';
-import 'memory_vault_source_store.dart';
+import 'memory_vault_resource_store.dart';
 import 'memory_vault_state.dart';
 import 'vault_store_helpers.dart';
 
@@ -11,7 +11,7 @@ final class MemoryVaultNoteStore {
   const MemoryVaultNoteStore({
     required this.state,
     required this.paths,
-    required this.sources,
+    required this.resources,
     required this.proposals,
     required this.readNoteCallback,
     required this.deleteNoteCallback,
@@ -19,7 +19,7 @@ final class MemoryVaultNoteStore {
 
   final MemoryVaultState state;
   final MemoryVaultPaths paths;
-  final MemoryVaultSourceStore sources;
+  final MemoryVaultResourceStore resources;
   final MemoryVaultProposalStore proposals;
   final Future<VaultNoteContent> Function(String noteId) readNoteCallback;
   final Future<void> Function(String noteId) deleteNoteCallback;
@@ -58,7 +58,8 @@ final class MemoryVaultNoteStore {
     );
     state.notes[note.id] = note;
     state.markdown[note.id] = initialVaultMarkdown(note);
-    state.sources[note.id] = <SourceItem>[];
+    state.aiMaterials[note.id] = <AiMaterial>[];
+    state.attachments[note.id] = <NoteAttachment>[];
     return note;
   }
 
@@ -124,7 +125,8 @@ final class MemoryVaultNoteStore {
       updatedAt: note.updatedAt,
       markdown: markdown,
       outline: document.outline,
-      sources: List.unmodifiable(state.sources[note.id] ?? const []),
+      aiMaterials: List.unmodifiable(state.aiMaterials[note.id] ?? const []),
+      attachments: List.unmodifiable(state.attachments[note.id] ?? const []),
     );
   }
 
@@ -155,7 +157,7 @@ final class MemoryVaultNoteStore {
 
   Future<void> deleteNote(String noteId) async {
     final note = state.note(noteId);
-    sources.deleteForNote(note.id);
+    resources.deleteForNote(note.id);
     proposals.deleteForNote(note.id);
     state.markdown.remove(note.id);
     state.notes.remove(note.id);
@@ -202,8 +204,8 @@ final class MemoryVaultNoteStore {
       key: 'synapseId',
       value: copied.id,
     );
-    final sourceIdMap = sources.copyForNote(note.id, copied.id, now);
-    proposals.copyForNote(note.id, copied.id, sourceIdMap, now);
+    final resourceIds = resources.copyForNote(note.id, copied.id, now);
+    proposals.copyForNote(note.id, copied.id, resourceIds.materialIds, now);
     return copied;
   }
 
@@ -312,29 +314,30 @@ final class MemoryVaultNoteStore {
     );
     state.notes[id] = note;
     state.markdown[id] = initialVaultMarkdown(note);
-    state.sources[id] = [
-      SourceItem(
+    state.aiMaterials[id] = [
+      AiMaterial(
         id: 'preview-source',
         noteId: id,
-        type: SourceType.text,
+        mediaKind: MediaKind.text,
         title: '示例摘录',
         text: '核心概念：观照。照见五蕴皆空。',
-        state: SourceState.ready,
+        processingState: MaterialProcessingState.ready,
         createdAt: now,
         updatedAt: now,
       ),
-      SourceItem(
+      AiMaterial(
         id: 'preview-image-source',
         noteId: id,
-        type: SourceType.image,
+        mediaKind: MediaKind.image,
         title: '经文截图.png',
-        attachmentPath: 'attachments/经文截图.png',
+        contentPath: 'materials/经文截图.png',
         mimeType: 'image/png',
-        state: SourceState.processed,
+        processingState: MaterialProcessingState.processed,
         createdAt: now,
         updatedAt: now,
       ),
     ];
+    state.attachments[id] = const [];
     state.proposals['preview-proposal'] = AiProposal(
       id: 'preview-proposal',
       noteId: id,
@@ -349,7 +352,7 @@ final class MemoryVaultNoteStore {
       createdAt: now,
       updatedAt: now,
     );
-    state.attachmentBytes['preview-image-source'] = _tinyPreviewPng;
+    state.materialBytes['preview-image-source'] = _tinyPreviewPng;
   }
 
   String _titleFor(VaultNote note) {

@@ -213,4 +213,20 @@ void main() {
       'note.assets/100% image.png',
     );
   });
+
+  test('classifies only filesystem-backed image sources as local', () {
+    expect(
+      isLocalMarkdownImageSrc('中文 笔记.assets/attachments/a%20b.png'),
+      isTrue,
+    );
+    expect(
+      isLocalMarkdownImageSrc('file:///tmp/%E4%B8%AD%E6%96%87.png'),
+      isTrue,
+    );
+    expect(isLocalMarkdownImageSrc(r'C:\notes\image.png'), isTrue);
+    expect(isLocalMarkdownImageSrc(r'\\server\share\image.png'), isTrue);
+    expect(isLocalMarkdownImageSrc('https://example.com/image.png'), isFalse);
+    expect(isLocalMarkdownImageSrc('data:image/png;base64,AA=='), isFalse);
+    expect(isLocalMarkdownImageSrc('custom:image.png'), isFalse);
+  });
 }

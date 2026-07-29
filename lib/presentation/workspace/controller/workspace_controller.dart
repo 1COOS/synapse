@@ -562,10 +562,14 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
     }
   }
 
-  void toggleSourceSelection(String noteId, String sourceId) {
-    _materials.toggleSource(noteId, sourceId);
+  void toggleAiMaterialSelection(String noteId, String materialId) {
+    _materials.toggleAiMaterial(noteId, materialId);
     _publishCollaboratorSnapshot();
   }
+
+  @Deprecated('Use toggleAiMaterialSelection.')
+  void toggleSourceSelection(String noteId, String sourceId) =>
+      toggleAiMaterialSelection(noteId, sourceId);
 
   editor_context.PaneEditorContext? capturePaneEditorContext(String paneId) {
     final pane = _splits.pane(paneId);
@@ -774,28 +778,69 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
     );
   }
 
-  Future<editor_context.PaneEditorCommandOutcome> deleteSource(
+  Future<editor_context.PaneEditorCommandOutcome> deleteAiMaterial(
     editor_context.PaneEditorContext context,
-    SourceItem source,
+    AiMaterial material,
   ) {
-    return deleteSources(context, [source]);
+    return deleteAiMaterials(context, [material]);
   }
 
-  Future<editor_context.PaneEditorCommandOutcome> deleteSources(
+  Future<editor_context.PaneEditorCommandOutcome> deleteAiMaterials(
     editor_context.PaneEditorContext context,
-    List<SourceItem> sources,
+    List<AiMaterial> materials,
   ) {
     return _editorOperations.withSaveScope(
       context,
       () => _editorOperations.runOperation(
-        () => _editor.deleteSources(context, sources),
+        () => _editor.deleteAiMaterials(context, materials),
         context: context,
       ),
     );
   }
 
-  Future<List<int>> readSourceAttachment(SourceItem source) {
-    return _editor.readSourceAttachment(source);
+  @Deprecated('Use deleteAiMaterial.')
+  Future<editor_context.PaneEditorCommandOutcome> deleteSource(
+    editor_context.PaneEditorContext context,
+    AiMaterial source,
+  ) => deleteAiMaterial(context, source);
+
+  @Deprecated('Use deleteAiMaterials.')
+  Future<editor_context.PaneEditorCommandOutcome> deleteSources(
+    editor_context.PaneEditorContext context,
+    List<AiMaterial> sources,
+  ) => deleteAiMaterials(context, sources);
+
+  Future<AttachmentDeletionImpact?> analyzeAttachmentDeletion(
+    editor_context.PaneEditorContext context,
+    List<NoteAttachment> attachments,
+  ) {
+    return _editor.analyzeAttachmentDeletion(context, attachments);
+  }
+
+  Future<editor_context.PaneEditorCommandOutcome> deleteNoteAttachments(
+    editor_context.PaneEditorContext context,
+    AttachmentDeletionImpact impact,
+  ) {
+    return _editorOperations.withSaveScope(
+      context,
+      () => _editorOperations.runOperation(
+        () => _editor.deleteNoteAttachments(context, impact),
+        context: context,
+      ),
+    );
+  }
+
+  Future<List<int>> readAiMaterialContent(AiMaterial material) {
+    return _editor.readAiMaterialContent(material);
+  }
+
+  Future<List<int>> readNoteAttachment(NoteAttachment attachment) {
+    return _editor.readNoteAttachment(attachment);
+  }
+
+  @Deprecated('Use readAiMaterialContent.')
+  Future<List<int>> readSourceAttachment(AiMaterial source) {
+    return readAiMaterialContent(source);
   }
 
   Future<WorkspaceActionResult> _runDocumentOperation(

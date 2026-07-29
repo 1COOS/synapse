@@ -73,13 +73,13 @@ lib/
       file_vault_backend.dart
       file_vault_paths.dart
       file_vault_note_store.dart
-      file_vault_source_store.dart
+      file_vault_resource_store.dart
       file_vault_proposal_store.dart
       file_vault_operations.dart
       memory_vault_backend.dart
       memory_vault_paths.dart
       memory_vault_note_store.dart
-      memory_vault_source_store.dart
+      memory_vault_resource_store.dart
       memory_vault_proposal_store.dart
       memory_vault_state.dart
   presentation/
@@ -110,10 +110,10 @@ test/
 
 | 文件 | 行数 | 说明 |
 | --- | ---: | --- |
-| `lib/presentation/cupertino/workspace.dart` | 834 | Provider/Consumer 入口与 screen glue |
-| `WorkspaceController` | 1118 | 已拆出 runtime/search/resource 等 collaborators，但仍高于约 1000 行 review threshold |
-| `FileVaultBackend` facade | 275 | 公开 API facade，内部委托专用 stores/operations/journal |
-| `MemoryVaultBackend` facade | 199 | 与 file backend 保持公开行为 parity |
+| `lib/presentation/cupertino/workspace.dart` | 1022 | Provider/Consumer 入口与 screen glue |
+| `WorkspaceController` | 1234 | 已拆出 runtime/search/resource 等 collaborators，但仍高于约 1000 行 review threshold |
+| `FileVaultBackend` facade | 362 | 公开 API facade，内部委托专用 stores/operations/journal |
+| `MemoryVaultBackend` facade | 284 | 与 file backend 保持公开行为 parity |
 
 ## 5. Workspace 状态架构
 
@@ -138,7 +138,7 @@ test/
 | note ID 到 session、remap/remove/dispose | `NoteSessionRegistry` | remap 保持 controller identity |
 | debounce、串行 save、flush/quiesce | `NoteSaveCoordinator` | 每个 session 至多一个 in-flight save |
 | split tree、focus、pane note、mode、ratio | `SplitWorkspaceController` | 不依赖 Vault 或 editor controller |
-| source selection 与 proposals | `NoteMaterialsRegistry` | 按 note ID 唯一持有 |
+| AI material selection 与 proposals | `NoteMaterialsRegistry` | 按 note ID 唯一持有，附件不进入选择状态 |
 | mutation 顺序 | `WorkspaceMutationBarrier` | flush/quiesce → `commitBackend` → post-commit hydrate → commit batch |
 | registry/split/materials/workspace 原子替换 | `WorkspaceCommitBatch` | prepare/validate、apply、publish 分离 |
 | await 前捕获的 pane/session/runtime 目标 | `PaneEditorContext` | focus 改变不改写目标；stale/dispose 后拒绝写入 |
@@ -199,14 +199,14 @@ File Vault mutation 由 `.synapse/transactions/` 下的 WAL journal 保护，并
 - transaction 开始前自动恢复遗留 active journal；
 - 新建路径记录删除逆操作，被替换/删除实体先备份并记录恢复逆操作，rename/move 记录反向移动；
 - backend action 成功后写 committed 状态再清理 journal；未 committed 的 transaction 在异常或下次打开 Vault 时回滚；
-- Markdown、文件夹、附件、`sources.json` 与 proposal 状态的跨调用 mutation 都进入同一事务边界；
+- Markdown、文件夹、AI 素材、笔记附件、两类 sidecar 与 proposal 状态的跨调用 mutation 都进入同一事务边界；
 - committed journal 只清理，不撤销已经成功提交的用户变更。
 
 ## 7. Vault Backend 与数据契约
 
 ### 7.1 公开 API 与内部拆分
 
-`FileVaultBackend` 和 `MemoryVaultBackend` 实现同一 `VaultBackend` port。两个 facade 分别委托 path、note、source、proposal 与 operations/state collaborators；parity tests 和 dispatch tests 约束两种实现的公共行为。File backend 的 Markdown、sidecar JSON 与新附件写入使用同目录临时文件、flush、原子 rename 和 mutation journal，失败时保留或恢复原目标。
+`FileVaultBackend` 和 `MemoryVaultBackend` 实现同一 `VaultBackend` port。两个 facade 分别委托 path、note、resource、proposal 与 operations/state collaborators；parity tests 和 dispatch tests 约束两种实现的公共行为。资源 API 分为 AI 素材与笔记附件两组：前者负责添加、列表、读取内容、更新处理结果和删除；后者负责添加、列表、读取、删除影响分析与批量永久删除。File backend 的 Markdown、sidecar JSON 与资源文件写入使用原子 writer 和 mutation journal，失败时保留或恢复原目标。
 
 ### 7.2 Vault 目录结构
 
@@ -215,8 +215,10 @@ File Vault mutation 由 `.synapse/transactions/` 下的 WAL journal 保护，并
   <folder>/
     note.md
     note.assets/
+      materials/
+      materials.json
       attachments/
-      sources.json
+      attachments.json
   .synapse/
     migrations/<timestamp>/
       manifest.json
@@ -228,20 +230,28 @@ File Vault mutation 由 `.synapse/transactions/` 下的 WAL journal 保护，并
     search.sqlite
 ```
 
-- `note.md`、普通目录、附件与 `sources.json` 是 Vault 持久真源；
-- `note.assets/attachments/` 保存相对引用的附件；
-- `note.md` frontmatter 中的 `synapseId` 是规范化小写 UUID v4；rename/move 保持 ID，copy 生成新 note/source/proposal ID；
-- `sources.json` 是素材元数据真源；proposal 迁至 `.synapse-cache/proposals/<UUID>.json`，属于可丢弃缓存；
+- `note.md`、普通目录、两类资源文件及其 sidecar 是 Vault 持久真源；
+- `note.assets/materials/` + `materials.json` 保存当前笔记隔离的 AI 素材；`AiMaterial.mediaKind` 支持 `text/image/audio`，音频目前仅可序列化，不提供导入、播放或转写；
+- `note.assets/attachments/` + `attachments.json` 保存只供 Markdown/HTML 引用的笔记附件；引用次数实时扫描 Vault 计算，不写回 sidecar；
+- 同一物理输入若同时用于 AI 与正文，必须生成两份独立记录和文件，任一侧删除不影响另一侧；
+- `note.md` frontmatter 中的 `synapseId` 是规范化小写 UUID v4；rename/move 保持 note/material/attachment ID，copy 为其生成新 ID并重映射 proposal 来源快照；
+- proposal 位于 `.synapse-cache/proposals/<UUID>.json`，包含生成时的 `ProposalMaterialSnapshot`；AI 素材删除后历史 proposal 仍可显示来源信息与“来源已删除”；
 - `.synapse-cache/`、SQLite、向量和 proposal 缓存可删除，不得成为 Markdown 或素材元数据的唯一副本；
 - File Vault 运行期 catalog 建立 UUID → 当前相对路径映射，业务层不再把文件路径当 note ID。
 
-旧 Vault 若缺少 ID、ID 非法或重复，会进入 `migrationRequired`，工作区在用户明确确认前保持只读。迁移会重新扫描快照、防止确认期间 Vault 漂移，备份受影响的 Markdown/sidecar，写 manifest，patch `synapseId` 而不重排用户 frontmatter，并同步重写 `sources.json` 与 legacy proposal cache；失败时回滚持久真源。
+旧 Vault 若缺少 ID、ID 非法或重复，会进入 `migrationRequired`，工作区在用户明确确认前保持只读。身份迁移会重新扫描快照、防止确认期间 Vault 漂移，备份受影响的 Markdown/sidecar，写 manifest，patch `synapseId` 而不重排用户 frontmatter，并同步重写资源 sidecar 与 legacy proposal cache；失败时回滚持久真源。
+
+资源分区迁移与身份确认分开：有效笔记首次读取资源时，`sources.json` 在 journal 事务中自动分类。被标准 Markdown 或 HTML 图片语法引用的旧图片转为附件，未引用图片和文本转为 AI 素材；未引用图片移动到 `materials/`；历史 proposal 补齐来源快照，被分到附件的旧来源保留为历史已删除素材。`attachments/` 中没有记录的裸文件会补建附件记录且绝不自动删除。只有新 sidecar 写入并校验成功后才删除旧 `sources.json`，迁移备份保留供回滚。
+
+本地图片引用由同一路径解析器供迁移、附件影响分析和引用清理共用：无 scheme 路径按已解码的文件系统路径处理，不经过会重新编码中文的 `Uri.path`；`file:` URI 单独解析，`http`/`https`/`data` 等外部资源排除，解析后越出 Vault 的路径也排除。对已错误完成 v1 分区的 Vault，`resource-split-v2` 会基于 v1 备份、当前素材 ID、Markdown 原附件路径引用和实际素材文件做严格交集修复。修复事务先备份当前两类 sidecar，在 manifest 中记录 SHA-256，只移回无冲突的确定文件；缺失、模糊或目标已存在的记录跳过且绝不覆盖。成功后的 v2 manifest 是幂等完成标记，Markdown 与 proposal 快照不改动。
 
 ### 7.3 文件系统边界
 
 所有桌面文件操作必须限制在用户选择的 Vault root 内。路径解析需要拒绝 `../`、绝对路径注入和通过符号链接逃逸根目录；资源名使用跨平台 validator，并以 Unicode NFC + lowercase 比较同级冲突。移动、重命名、复制和删除必须同步处理 `.md` 与同名 `.assets/`。当目标文件名因重命名、复制或移动冲突而改变时，必须同步改写正文中指向本笔记 assets 的 HTML/Markdown 图片路径，同时保持外链、其他笔记引用和 fenced code 不变。显式 folder/note rename 与 create-folder 冲突直接失败，自动创建笔记、复制和移动才允许编号去重。
 
 笔记右键重命名和 H1 驱动的自动重命名都使用 save + rename 单事务。事务同时覆盖首个 H1、frontmatter、Markdown 文件、assets 目录及引用；冲突回滚后 session 继续保留用户当前正文与 dirty 状态，workspace 不进入 `reloadRequired`。
+
+附件永久删除采用 analyze/confirm/commit 协议：backend 先规范化附件真实路径，扫描整个 Vault 的标准 Markdown 与 HTML 图片引用，并返回受影响笔记、次数和每篇笔记的 SHA-256 fingerprint。确认后 workspace flush 所有扫描过的打开会话，backend 再次分析并比较 fingerprint；任何 Markdown 漂移都会抛出 `AttachmentDeletionImpactChangedException`，要求重新确认。匹配时在同一 journal 事务内删除所有引用、附件 sidecar 记录和文件，失败统一回滚。AI 素材删除只触及素材 sidecar、独立文件和选择状态。
 
 ## 8. 平台与 Vault Access Lease
 
@@ -315,10 +325,12 @@ Keychain、签名或 entitlement 异常必须明确报错并 fail-closed。任�
 `AiProvider` 隔离真实 OpenAI-compatible Provider 与 Mock Provider。配置支持 `baseURL`、`apiKey`、`chatModel`、`visionModel` 和可选 `embeddingModel`。
 
 - 图片素材 proposal 使用 `visionModel`；纯文本 proposal 使用 `chatModel`；
+- `AiProvider.createOutlineProposal` 只接收 `AiMaterial`，笔记附件不能直接参与生成；
 - 纯图片 proposal 直接展示 OCR 转写，不做二次总结或 outline pass；
 - OCR 只忠实转写可见文字，不添加解释、标题、前缀、图片描述或摘要；
 - 树状菜单、表格、缩进和换行尽量保留为等价 Markdown；
-- proposal 先展示、选择和审核，再由用户决定是否写入 Markdown。
+- proposal 先展示、选择和审核，再由用户决定是否写入 Markdown；
+- proposal 持久化生成时素材快照，至少包含 ID、标题、媒体类型、MIME 和处理状态，不依赖当前素材记录才能展示来源。
 
 当前 proposal 数据仍是 Markdown 片段，结构化 patch、diff、局部采纳和冲突处理属于后续演进。
 
@@ -328,11 +340,11 @@ Keychain、签名或 entitlement 异常必须明确报错并 fail-closed。任�
 
 `WorkspaceSearchCoordinator` 负责 SHA-256 内容 fingerprint、串行索引、查询、runtime 切换和后台预热。工作区 ready 后持久索引会异步扫描 Markdown；搜索仍会先刷新 Vault inventory，因此外部新增、删除和修改能被增量纳入。SQLite 保存 fingerprint，重启后 unchanged note 不重复生成 embedding；全文/语义配置或 embedding endpoint/model 变化会切换 index profile 并清空可重建 rows。
 
-删除 `.synapse-cache` 不得损失 Markdown、附件或 `sources.json`。当前搜索索引可以从 Markdown 自动重建，但尚未把附件内容与 source sidecar 纳入检索；从裸 attachments 反推完整素材清单仍是后续工作。
+删除 `.synapse-cache` 不得损失 Markdown、AI 素材、附件或两类 sidecar。当前搜索索引可以从 Markdown 自动重建，但尚未把 AI 素材、附件内容或 sidecar 纳入检索；裸 `attachments/` 文件可在资源迁移/读取时补建附件记录，但缺失 `materials.json` 时不能完整恢复素材处理状态和提取结果。
 
 ## 13. 测试与质量边界
 
-当前基线为 `flutter test --no-pub` 760/760、`flutter analyze --no-pub` 无 issue。现有 72 个测试文件覆盖架构边界、状态竞态、Vault 事务、迁移、搜索、Keychain、设置契约与 UI 行为。
+当前基线为 `flutter test --no-pub` 848/848、`flutter analyze --no-pub` 无 issue、`flutter build macos --debug --no-pub` 成功。现有 75 个测试文件覆盖架构边界、状态竞态、Vault 事务、迁移、搜索、Keychain、设置契约与 UI 行为；这不等同于 Release signing production gate 已完成。
 
 重点测试面包括：
 
@@ -353,8 +365,8 @@ Keychain、签名或 entitlement 异常必须明确报错并 fail-closed。任�
 | 风险/未完成项 | 影响 | 后续方向 |
 | --- | --- | --- |
 | 最终 macOS 本地 production gate 尚未执行 | 尚无本轮 release build、xcodebuild 与 codesign 的最终证据 | 按开发文档顺序执行并保留结果 |
-| `WorkspaceController` 1118 行，高于约 1000 review threshold | 后续 intent 增长可能重新集中职责 | 新增职责必须优先进入现有 collaborator，下一次功能增长前复审拆分 |
-| 素材清单仍不能从裸 attachments 完整重建，搜索也尚未索引 source/附件内容 | sidecar 损坏会丢失素材元数据，搜索范围只覆盖 Markdown | 为 attachments/source sidecar 建立显式 rebuild 与索引用例 |
+| `WorkspaceController` 1234 行，高于约 1000 review threshold | 后续 intent 增长可能重新集中职责 | 新增职责必须优先进入现有 collaborator，下一次功能增长前复审拆分 |
+| `materials.json` 尚无完整重建工具，搜索也未索引素材/附件内容 | 素材 sidecar 损坏会丢失处理元数据，搜索范围只覆盖 Markdown | 为 AI 素材 sidecar 建立修复工具，并为两类资源增加显式索引用例 |
 | 首次语义索引或 embedding profile 变化会顺序调用每条变更笔记的 embedding | 大 Vault 可能产生可见耗时与模型调用成本 | 增加进度、暂停/取消、节流和成本提示 |
 | proposal 仍是 Markdown 片段 | 难以支持 diff、局部采纳和冲突检测 | 演进为结构化 changes，同时保持现有数据兼容策略 |
 | Web 与 macOS 能力不同 | 用户可能误把预览当生产端 | 产品和 UI 持续标明 Web 为内存预览 |

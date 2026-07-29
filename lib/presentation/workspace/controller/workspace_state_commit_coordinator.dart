@@ -68,6 +68,8 @@ final class WorkspaceStateCommitCoordinator {
     Map<String, VaultNoteContent> upsertedNotesById = const {},
     SavedNoteSessionCommit? savedNoteCommit,
     Map<String, List<AiProposal>> replacementProposalsByNoteId = const {},
+    Map<String, Set<String>> selectedAiMaterialIdsByNoteId = const {},
+    @Deprecated('Use selectedAiMaterialIdsByNoteId.')
     Map<String, Set<String>> selectedSourceIdsByNoteId = const {},
     String? fallbackNoteId,
     Map<String, String?> paneNoteAssignments = const {},
@@ -101,7 +103,9 @@ final class WorkspaceStateCommitCoordinator {
       removedNoteIds: committedRemovals,
       refreshedNotesByNewId: delta.refreshedNotesByNewId,
       replacementProposalsByNoteId: replacementProposalsByNoteId,
-      selectedSourceIdsByNoteId: selectedSourceIdsByNoteId,
+      selectedAiMaterialIdsByNoteId: selectedAiMaterialIdsByNoteId.isNotEmpty
+          ? selectedAiMaterialIdsByNoteId
+          : selectedSourceIdsByNoteId,
     );
     final current = _readState();
     final selectedResourceId = identical(patch.selectedResourceId, _unset)

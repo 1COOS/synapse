@@ -201,70 +201,77 @@ void main() {
     );
   });
 
-  group('attachment symlink escape', () {
-    late SourceItem source;
+  group('AI material symlink escape', () {
+    late AiMaterial material;
     late File outsideFile;
-    late File attachment;
+    late File materialFile;
 
     setUp(() async {
       final note = await backend.createNote(parentPath: '', title: 'Note');
-      source = await backend.addImageSource(
+      material = await backend.addImageMaterial(
         noteId: note.id,
         filename: 'image.png',
         mimeType: 'image/png',
         bytes: const [1, 2, 3],
       );
-      attachment = File(
-        p.join(root.path, 'Note.assets', source.attachmentPath),
+      materialFile = File(
+        p.join(root.path, 'Note.assets', material.contentPath),
       );
-      await attachment.delete();
+      await materialFile.delete();
       outsideFile = File(p.join(outside.path, 'secret.png'));
       await outsideFile.writeAsBytes(const [9, 8, 7]);
-      await Link(attachment.path).create(outsideFile.path);
+      await Link(materialFile.path).create(outsideFile.path);
     });
 
-    test('rejects attachment reads', () async {
+    test('rejects material reads', () async {
       await _expectPathRejected(
-        () => backend.readSourceAttachment(source),
+        () => backend.readAiMaterialContent(material),
         outside,
       );
       expect(await outsideFile.readAsBytes(), const [9, 8, 7]);
     });
 
-    test('rejects source updates that retain a linked attachment', () async {
+    test('rejects material updates that retain linked content', () async {
       await _expectPathRejected(
-        () => backend.updateSource(source.copyWith(title: 'Changed')),
+        () => backend.updateAiMaterial(material.copyWith(title: 'Changed')),
         outside,
       );
       expect(
-        (await backend.listSources(source.noteId)).single.title,
+        (await backend.listAiMaterials(material.noteId)).single.title,
         'image.png',
       );
       expect(await outsideFile.readAsBytes(), const [9, 8, 7]);
     });
 
     test(
-      'rejects attachment deletion without deleting the outside file',
+      'rejects material deletion without deleting the outside file',
       () async {
-        await _expectPathRejected(() => backend.deleteSource(source), outside);
+        await _expectPathRejected(
+          () => backend.deleteAiMaterial(material),
+          outside,
+        );
         expect(await outsideFile.exists(), isTrue);
         expect(await outsideFile.readAsBytes(), const [9, 8, 7]);
-        expect(await backend.listSources(source.noteId), hasLength(1));
+        expect(await backend.listAiMaterials(material.noteId), hasLength(1));
       },
     );
   });
 
   test(
-    'rejects text source creation through a linked sources directory',
+    'rejects text material creation through linked material metadata',
     () async {
       final note = await backend.createNote(parentPath: '', title: 'Note');
-      final sourcesDirectory = Directory(
-        p.join(root.path, 'Note.assets', 'sources'),
+      await backend.listAiMaterials(note.id);
+      final materialsFile = File(
+        p.join(root.path, 'Note.assets', 'materials.json'),
       );
-      await Link(sourcesDirectory.path).create(outside.path);
+      await materialsFile.delete();
+      final outsideFile = File(p.join(outside.path, 'materials.json'));
+      await outsideFile.writeAsString('[]');
+      await Link(materialsFile.path).create(outsideFile.path);
 
       await _expectPathRejected(
-        () => backend.addTextSource(
+        () => backend.addTextMaterial(
           noteId: note.id,
           title: 'escaped',
           text: 'secret',
@@ -272,21 +279,22 @@ void main() {
         outside,
       );
 
-      expect(await outside.list().toList(), isEmpty);
+      expect(await outsideFile.readAsString(), '[]');
     },
   );
 
   test(
-    'rejects image creation through a linked attachments directory',
+    'rejects image material creation through a linked materials directory',
     () async {
       final note = await backend.createNote(parentPath: '', title: 'Note');
-      final attachments = Directory(
-        p.join(root.path, 'Note.assets', 'attachments'),
+      await backend.listAiMaterials(note.id);
+      final materials = Directory(
+        p.join(root.path, 'Note.assets', 'materials'),
       );
-      await Link(attachments.path).create(outside.path);
+      await Link(materials.path).create(outside.path);
 
       await _expectPathRejected(
-        () => backend.addImageSource(
+        () => backend.addImageMaterial(
           noteId: note.id,
           filename: 'escaped.png',
           mimeType: 'image/png',
@@ -296,6 +304,57 @@ void main() {
       );
 
       expect(await outside.list().toList(), isEmpty);
+    },
+  );
+
+  test(
+    'rejects image attachment creation through a linked attachments directory',
+    () async {
+      final note = await backend.createNote(parentPath: '', title: 'Note');
+      await backend.listNoteAttachments(note.id);
+      final attachments = Directory(
+        p.join(root.path, 'Note.assets', 'attachments'),
+      );
+      await Link(attachments.path).create(outside.path);
+
+      await _expectPathRejected(
+        () => backend.addImageAttachment(
+          noteId: note.id,
+          filename: 'escaped.png',
+          mimeType: 'image/png',
+          bytes: const [1, 2, 3],
+        ),
+        outside,
+      );
+
+      expect(await outside.list().toList(), isEmpty);
+    },
+  );
+
+  test(
+    'rejects linked attachment deletion without deleting the outside file',
+    () async {
+      final note = await backend.createNote(parentPath: '', title: 'Note');
+      final attachment = await backend.addImageAttachment(
+        noteId: note.id,
+        filename: 'image.png',
+        mimeType: 'image/png',
+        bytes: const [1, 2, 3],
+      );
+      final attachmentFile = File(
+        p.join(root.path, 'Note.assets', attachment.relativePath),
+      );
+      await attachmentFile.delete();
+      final outsideFile = File(p.join(outside.path, 'attachment.png'));
+      await outsideFile.writeAsBytes(const [9, 8, 7]);
+      await Link(attachmentFile.path).create(outsideFile.path);
+
+      await _expectPathRejected(() async {
+        await backend.analyzeAttachmentDeletion([attachment]);
+      }, outside);
+
+      expect(await outsideFile.readAsBytes(), const [9, 8, 7]);
+      expect(await backend.listNoteAttachments(note.id), hasLength(1));
     },
   );
 

@@ -16,7 +16,7 @@ void main() {
   ) async {
     final vault = GatedFailingUpdateVaultBackend(seedExampleData: false);
     final note = await vault.createNote(parentPath: '', title: 'Alpha');
-    final source = await vault.addImageSource(
+    final source = await vault.addImageAttachment(
       noteId: note.id,
       filename: 'save.png',
       mimeType: 'image/png',
@@ -82,9 +82,15 @@ void main() {
     (tester) async {
       final vault = GatedFailingUpdateVaultBackend(seedExampleData: false);
       final note = await vault.createNote(parentPath: '', title: 'Alpha');
-      final source = await vault.addImageSource(
+      final source = await vault.addImageAttachment(
         noteId: note.id,
         filename: 'shared-flight.png',
+        mimeType: 'image/png',
+        bytes: tinyPng,
+      );
+      await vault.addImageMaterial(
+        noteId: note.id,
+        filename: 'shared-flight-ai.png',
         mimeType: 'image/png',
         bytes: tinyPng,
       );
@@ -103,7 +109,9 @@ void main() {
         settingsStore: FakeSettingsStore(),
       );
       await tester.pumpAndSettle();
-      await tester.tap(find.bySemanticsLabel('shared-flight.png'));
+      await tester.tap(find.bySemanticsLabel('shared-flight-ai.png'));
+      await tester.pump();
+      await tester.tap(find.byKey(Key('preview-image-tap-${source.id}')));
       await tester.pump();
       final image = tester.widget<PreviewImageBlock>(
         find.byKey(Key('preview-image-${source.id}')),
@@ -269,7 +277,7 @@ void main() {
   testWidgets('reading mode hides image resize controls', (tester) async {
     final vault = CountingUpdateVaultBackend(seedExampleData: false);
     final note = await vault.createNote(parentPath: '', title: 'Image Study');
-    final source = await vault.addImageSource(
+    final source = await vault.addImageAttachment(
       noteId: note.id,
       filename: 'pasted.png',
       mimeType: 'image/png',
@@ -308,7 +316,7 @@ void main() {
   ) async {
     final vault = CountingUpdateVaultBackend(seedExampleData: false);
     final note = await vault.createNote(parentPath: '', title: 'Image Study');
-    final source = await vault.addImageSource(
+    final source = await vault.addImageAttachment(
       noteId: note.id,
       filename: 'pasted.png',
       mimeType: 'image/png',
@@ -345,13 +353,13 @@ void main() {
   ) async {
     final vault = CountingUpdateVaultBackend(seedExampleData: false);
     final note = await vault.createNote(parentPath: '', title: 'Image Study');
-    final first = await vault.addImageSource(
+    final first = await vault.addImageAttachment(
       noteId: note.id,
       filename: 'first.png',
       mimeType: 'image/png',
       bytes: tinyPng,
     );
-    final second = await vault.addImageSource(
+    final second = await vault.addImageAttachment(
       noteId: note.id,
       filename: 'second.png',
       mimeType: 'image/png',
@@ -392,13 +400,13 @@ void main() {
   ) async {
     final vault = CountingUpdateVaultBackend(seedExampleData: false);
     final note = await vault.createNote(parentPath: '', title: 'Image Study');
-    final first = await vault.addImageSource(
+    final first = await vault.addImageAttachment(
       noteId: note.id,
       filename: 'first.png',
       mimeType: 'image/png',
       bytes: tinyPng,
     );
-    final second = await vault.addImageSource(
+    final second = await vault.addImageAttachment(
       noteId: note.id,
       filename: 'second.png',
       mimeType: 'image/png',
@@ -439,19 +447,19 @@ void main() {
     final vault = CountingUpdateVaultBackend(seedExampleData: false);
     final alpha = await vault.createNote(parentPath: '', title: 'Alpha');
     final beta = await vault.createNote(parentPath: '', title: 'Beta');
-    final first = await vault.addImageSource(
+    final first = await vault.addImageAttachment(
       noteId: alpha.id,
       filename: 'first.png',
       mimeType: 'image/png',
       bytes: tinyPng,
     );
-    final second = await vault.addImageSource(
+    final second = await vault.addImageAttachment(
       noteId: alpha.id,
       filename: 'second.png',
       mimeType: 'image/png',
       bytes: tinyPng,
     );
-    await vault.addImageSource(
+    await vault.addImageAttachment(
       noteId: beta.id,
       filename: 'beta.png',
       mimeType: 'image/png',
@@ -514,13 +522,13 @@ void main() {
   ) async {
     final vault = CountingUpdateVaultBackend(seedExampleData: false);
     final note = await vault.createNote(parentPath: '', title: 'Image Study');
-    final first = await vault.addImageSource(
+    final first = await vault.addImageAttachment(
       noteId: note.id,
       filename: 'first.png',
       mimeType: 'image/png',
       bytes: tinyPng,
     );
-    final second = await vault.addImageSource(
+    final second = await vault.addImageAttachment(
       noteId: note.id,
       filename: 'second.png',
       mimeType: 'image/png',
@@ -559,7 +567,7 @@ void main() {
   ) async {
     final vault = CountingUpdateVaultBackend(seedExampleData: false);
     final note = await vault.createNote(parentPath: '', title: 'Image Study');
-    final source = await vault.addImageSource(
+    final source = await vault.addImageAttachment(
       noteId: note.id,
       filename: 'local.png',
       mimeType: 'image/png',

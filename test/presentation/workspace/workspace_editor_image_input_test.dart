@@ -40,7 +40,7 @@ void main() {
     (tester) async {
       final vault = CountingUpdateVaultBackend(seedExampleData: false);
       final note = await vault.createNote(parentPath: '', title: 'Image Study');
-      final source = await vault.addImageSource(
+      final source = await vault.addImageAttachment(
         noteId: note.id,
         filename: 'pasted.png',
         mimeType: 'image/png',
@@ -140,13 +140,13 @@ void main() {
   ) async {
     final vault = CountingUpdateVaultBackend(seedExampleData: false);
     final note = await vault.createNote(parentPath: '', title: 'Image Study');
-    final first = await vault.addImageSource(
+    final first = await vault.addImageAttachment(
       noteId: note.id,
       filename: 'first.png',
       mimeType: 'image/png',
       bytes: tinyPng,
     );
-    final second = await vault.addImageSource(
+    final second = await vault.addImageAttachment(
       noteId: note.id,
       filename: 'second.png',
       mimeType: 'image/png',
@@ -199,13 +199,13 @@ void main() {
       final largePng = File('web/icons/Icon-512.png').readAsBytesSync();
       final vault = CountingUpdateVaultBackend(seedExampleData: false);
       final note = await vault.createNote(parentPath: '', title: 'Image Menu');
-      final first = await vault.addImageSource(
+      final first = await vault.addImageAttachment(
         noteId: note.id,
         filename: 'first.png',
         mimeType: 'image/png',
         bytes: tinyPng,
       );
-      final second = await vault.addImageSource(
+      final second = await vault.addImageAttachment(
         noteId: note.id,
         filename: 'second.png',
         mimeType: 'image/png',
@@ -252,10 +252,10 @@ void main() {
             .text,
         original,
       );
-      expect((await vault.listSources(note.id)).map((source) => source.id), [
-        first.id,
-        second.id,
-      ]);
+      expect(
+        (await vault.listNoteAttachments(note.id)).map((source) => source.id),
+        [first.id, second.id],
+      );
     },
   );
 
@@ -264,7 +264,7 @@ void main() {
   ) async {
     final vault = CountingUpdateVaultBackend(seedExampleData: false);
     final note = await vault.createNote(parentPath: '', title: 'Image Cut');
-    final source = await vault.addImageSource(
+    final source = await vault.addImageAttachment(
       noteId: note.id,
       filename: 'cut.png',
       mimeType: 'image/png',
@@ -297,7 +297,7 @@ void main() {
     expect(imageInput.copiedImages, [tinyPng]);
     expect(editor.controller.text, isNot(contains(imageTag)));
     expect(find.byKey(Key('preview-image-${source.id}')), findsNothing);
-    expect((await vault.listSources(note.id)).map((item) => item.id), [
+    expect((await vault.listNoteAttachments(note.id)).map((item) => item.id), [
       source.id,
     ]);
   });
@@ -307,7 +307,7 @@ void main() {
   ) async {
     final vault = CountingUpdateVaultBackend(seedExampleData: false);
     final note = await vault.createNote(parentPath: '', title: 'Text Paste');
-    final source = await vault.addImageSource(
+    final source = await vault.addImageAttachment(
       noteId: note.id,
       filename: 'original.png',
       mimeType: 'image/png',
@@ -350,7 +350,7 @@ void main() {
   ) async {
     final vault = CountingUpdateVaultBackend(seedExampleData: false);
     final note = await vault.createNote(parentPath: '', title: 'Image Paste');
-    final source = await vault.addImageSource(
+    final source = await vault.addImageAttachment(
       noteId: note.id,
       filename: 'original.png',
       mimeType: 'image/png',
@@ -399,7 +399,7 @@ void main() {
     );
     expect(pastedImageOffset, lessThan(editor.controller.text.indexOf('pha')));
     expect(editor.controller.text, contains(originalTag));
-    expect(await vault.listSources(note.id), hasLength(2));
+    expect(await vault.listNoteAttachments(note.id), hasLength(2));
     expect(imageInput.pasteCalls, 1);
     expect(activeLiveMarkdownTextField(tester).focusNode.hasFocus, isTrue);
   });
@@ -409,7 +409,7 @@ void main() {
   ) async {
     final vault = CountingUpdateVaultBackend(seedExampleData: false);
     final note = await vault.createNote(parentPath: '', title: 'Image Study');
-    final source = await vault.addImageSource(
+    final source = await vault.addImageAttachment(
       noteId: note.id,
       filename: 'captioned.png',
       mimeType: 'image/png',
@@ -477,13 +477,13 @@ void main() {
   ) async {
     final vault = CountingUpdateVaultBackend(seedExampleData: false);
     final note = await vault.createNote(parentPath: '', title: 'Image Study');
-    final first = await vault.addImageSource(
+    final first = await vault.addImageAttachment(
       noteId: note.id,
       filename: 'first.png',
       mimeType: 'image/png',
       bytes: tinyPng,
     );
-    final second = await vault.addImageSource(
+    final second = await vault.addImageAttachment(
       noteId: note.id,
       filename: 'second.png',
       mimeType: 'image/png',
@@ -561,13 +561,13 @@ void main() {
     (tester) async {
       final vault = CountingUpdateVaultBackend(seedExampleData: false);
       final note = await vault.createNote(parentPath: '', title: 'Image Study');
-      final first = await vault.addImageSource(
+      final first = await vault.addImageAttachment(
         noteId: note.id,
         filename: 'first.png',
         mimeType: 'image/png',
         bytes: tinyPng,
       );
-      await vault.addImageSource(
+      await vault.addImageAttachment(
         noteId: note.id,
         filename: 'second.png',
         mimeType: 'image/png',
@@ -623,13 +623,13 @@ void main() {
   ) async {
     final vault = MemoryVaultBackend(seedExampleData: false);
     final note = await vault.createNote(parentPath: '', title: 'Image Study');
-    final first = await vault.addImageSource(
+    final first = await vault.addImageAttachment(
       noteId: note.id,
       filename: 'first.png',
       mimeType: 'image/png',
       bytes: tinyPng,
     );
-    await vault.addImageSource(
+    await vault.addImageAttachment(
       noteId: note.id,
       filename: 'second.png',
       mimeType: 'image/png',
@@ -670,13 +670,13 @@ void main() {
   ) async {
     final vault = CountingUpdateVaultBackend(seedExampleData: false);
     final note = await vault.createNote(parentPath: '', title: 'Image Study');
-    final first = await vault.addImageSource(
+    final first = await vault.addImageAttachment(
       noteId: note.id,
       filename: 'first.png',
       mimeType: 'image/png',
       bytes: tinyPng,
     );
-    await vault.addImageSource(
+    await vault.addImageAttachment(
       noteId: note.id,
       filename: 'second.png',
       mimeType: 'image/png',
@@ -718,13 +718,13 @@ void main() {
     ) async {
       final vault = CountingUpdateVaultBackend(seedExampleData: false);
       final note = await vault.createNote(parentPath: '', title: 'Image Study');
-      final first = await vault.addImageSource(
+      final first = await vault.addImageAttachment(
         noteId: note.id,
         filename: 'first.png',
         mimeType: 'image/png',
         bytes: tinyPng,
       );
-      final second = await vault.addImageSource(
+      final second = await vault.addImageAttachment(
         noteId: note.id,
         filename: 'second.png',
         mimeType: 'image/png',
@@ -754,7 +754,9 @@ void main() {
       expect(find.byKey(Key('preview-image-${second.id}')), findsOneWidget);
       expect(find.textContaining('<img'), findsNothing);
       expect(
-        (await vault.listSources(note.id)).map((source) => source.id).toSet(),
+        (await vault.listNoteAttachments(
+          note.id,
+        )).map((source) => source.id).toSet(),
         {first.id, second.id},
       );
 
@@ -769,7 +771,7 @@ void main() {
   testWidgets('can continue writing below a trailing image', (tester) async {
     final vault = CountingUpdateVaultBackend(seedExampleData: false);
     final note = await vault.createNote(parentPath: '', title: 'Image Study');
-    await vault.addImageSource(
+    await vault.addImageAttachment(
       noteId: note.id,
       filename: 'pasted.png',
       mimeType: 'image/png',
@@ -1568,7 +1570,7 @@ void main() {
   ) async {
     final vault = CountingUpdateVaultBackend(seedExampleData: false);
     final note = await vault.createNote(parentPath: '', title: 'Focus Study');
-    await vault.addImageSource(
+    await vault.addImageAttachment(
       noteId: note.id,
       filename: 'existing.png',
       mimeType: 'image/png',
@@ -1815,7 +1817,7 @@ void main() {
     expect(await paste, PaneEditorCommandOutcome.staleTarget);
     await tester.pump();
     expect(editor.controller.text, 'Changed');
-    expect(await vault.listSources(note.id), isEmpty);
+    expect(await vault.listNoteAttachments(note.id), isEmpty);
   });
 
   testWidgets('transactional paste target change rolls back without reload', (
@@ -1859,7 +1861,7 @@ void main() {
     FlutterError.onError = previousOnError;
     expect(reportedErrors, isEmpty);
     expect(find.textContaining('后端操作可能已完成，请重新加载工作区'), findsNothing);
-    expect(await vault.listSources(note.id), isEmpty);
+    expect(await vault.listNoteAttachments(note.id), isEmpty);
     expect((await vault.readNote(note.id)).markdown, isNot(contains('<img')));
   });
 
@@ -1904,7 +1906,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(vault.updatedNoteIds, isEmpty);
-    expect(await vault.listSources(alpha.id), isEmpty);
+    expect(await vault.listNoteAttachments(alpha.id), isEmpty);
   });
 
   testWidgets(
@@ -2018,7 +2020,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(vault.updatedNoteIds, isEmpty);
-    expect(await vault.listSources(alpha.id), isEmpty);
+    expect(await vault.listNoteAttachments(alpha.id), isEmpty);
   });
 
   testWidgets('delayed paste availability ignores focus changes', (
@@ -2291,13 +2293,13 @@ class _GatedCommittedImageSourceVaultBackend
   }
 
   @override
-  Future<SourceItem> addImageSource({
+  Future<NoteAttachment> addImageAttachment({
     required String noteId,
     required String filename,
     required String mimeType,
     required List<int> bytes,
   }) async {
-    final source = await super.addImageSource(
+    final source = await super.addImageAttachment(
       noteId: noteId,
       filename: filename,
       mimeType: mimeType,

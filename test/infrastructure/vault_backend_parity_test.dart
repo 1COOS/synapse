@@ -405,7 +405,7 @@ updatedAt: 2026-07-13 10:01
       expect(moved.id, note.id);
       expect(moved.path, '${renamed.path}/笔记.md');
       expect(movedSource.noteId, note.id);
-      expect(movedSource.attachmentPath, 'attachments/page.png');
+      expect(movedSource.contentPath, 'materials/page.png');
       expect((await backend.listProposals(note.id)).single.noteId, note.id);
       expect(await backend.readSourceAttachment(movedSource), [7, 8, 9]);
     });

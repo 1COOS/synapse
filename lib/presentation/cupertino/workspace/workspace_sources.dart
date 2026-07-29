@@ -24,10 +24,10 @@ class ImageSourceTile extends StatefulWidget {
     required this.onDelete,
   });
 
-  final SourceItem source;
+  final AiMaterial source;
   final bool selected;
   final bool busy;
-  final Future<List<int>> imageBytes;
+  final Future<List<int>>? imageBytes;
   final VoidCallback onToggle;
   final VoidCallback onDelete;
 
@@ -36,7 +36,7 @@ class ImageSourceTile extends StatefulWidget {
 }
 
 class _ImageSourceTileState extends State<ImageSourceTile> {
-  late Future<List<int>> _imageBytes;
+  Future<List<int>>? _imageBytes;
 
   @override
   void initState() {
@@ -47,7 +47,8 @@ class _ImageSourceTileState extends State<ImageSourceTile> {
   @override
   void didUpdateWidget(covariant ImageSourceTile oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.source.id != widget.source.id) {
+    if (oldWidget.source.id != widget.source.id ||
+        oldWidget.source.updatedAt != widget.source.updatedAt) {
       _imageBytes = widget.imageBytes;
     }
   }
@@ -57,7 +58,8 @@ class _ImageSourceTileState extends State<ImageSourceTile> {
     final accentColor = WorkspaceAppearanceScope.of(context).accentColor;
     return Semantics(
       label: widget.source.title,
-      image: true,
+      excludeSemantics: true,
+      image: widget.source.mediaKind == MediaKind.image,
       selected: widget.selected,
       button: true,
       child: GestureDetector(
@@ -77,34 +79,40 @@ class _ImageSourceTileState extends State<ImageSourceTile> {
             child: Stack(
               fit: StackFit.expand,
               children: [
-                FutureBuilder<List<int>>(
-                  future: _imageBytes,
-                  builder: (context, snapshot) {
-                    if (snapshot.connectionState != ConnectionState.done) {
-                      return const Center(child: CupertinoActivityIndicator());
-                    }
-                    if (snapshot.hasError || !snapshot.hasData) {
-                      return const Center(
-                        child: Icon(
-                          CupertinoIcons.exclamationmark_triangle,
-                          color: workspaceDangerColor,
-                        ),
-                      );
-                    }
-                    return Image.memory(
-                      Uint8List.fromList(snapshot.data!),
-                      fit: BoxFit.contain,
-                      gaplessPlayback: true,
-                      errorBuilder: (context, error, stackTrace) =>
-                          const Center(
-                            child: Icon(
-                              CupertinoIcons.exclamationmark_triangle,
-                              color: workspaceDangerColor,
-                            ),
+                if (widget.source.mediaKind == MediaKind.image &&
+                    _imageBytes != null)
+                  FutureBuilder<List<int>>(
+                    future: _imageBytes,
+                    builder: (context, snapshot) {
+                      if (snapshot.connectionState != ConnectionState.done) {
+                        return const Center(
+                          child: CupertinoActivityIndicator(),
+                        );
+                      }
+                      if (snapshot.hasError || !snapshot.hasData) {
+                        return const Center(
+                          child: Icon(
+                            CupertinoIcons.exclamationmark_triangle,
+                            color: workspaceDangerColor,
                           ),
-                    );
-                  },
-                ),
+                        );
+                      }
+                      return Image.memory(
+                        Uint8List.fromList(snapshot.data!),
+                        fit: BoxFit.contain,
+                        gaplessPlayback: true,
+                        errorBuilder: (context, error, stackTrace) =>
+                            const Center(
+                              child: Icon(
+                                CupertinoIcons.exclamationmark_triangle,
+                                color: workspaceDangerColor,
+                              ),
+                            ),
+                      );
+                    },
+                  )
+                else
+                  _MaterialPlaceholder(material: widget.source),
                 if (widget.selected)
                   DecoratedBox(
                     decoration: BoxDecoration(
@@ -121,25 +129,31 @@ class _ImageSourceTileState extends State<ImageSourceTile> {
                       ),
                     ),
                   ),
-                Positioned(
-                  top: 4,
-                  left: 4,
-                  child: TileAction(
-                    key: const Key('show-full-image-button'),
-                    label: '查看全图',
-                    icon: CupertinoIcons.arrow_up_left_arrow_down_right,
-                    onPressed: widget.busy ? null : _showFullImagePreview,
+                if (widget.source.mediaKind == MediaKind.image)
+                  Positioned(
+                    top: 4,
+                    left: 4,
+                    child: TileAction(
+                      key: const Key('show-full-image-button'),
+                      label: '查看全图',
+                      icon: CupertinoIcons.arrow_up_left_arrow_down_right,
+                      onPressed: widget.busy ? null : _showFullImagePreview,
+                    ),
                   ),
-                ),
                 Positioned(
                   top: 4,
                   right: 4,
                   child: TileAction(
                     key: const Key('delete-image-button'),
-                    label: '删除图片素材',
+                    label: '删除 AI 素材',
                     icon: CupertinoIcons.trash,
                     onPressed: widget.busy ? null : widget.onDelete,
                   ),
+                ),
+                Positioned(
+                  right: 6,
+                  bottom: 6,
+                  child: _MediaKindBadge(kind: widget.source.mediaKind),
                 ),
               ],
             ),
@@ -248,10 +262,308 @@ class _ImageSourceTileState extends State<ImageSourceTile> {
   }
 }
 
+class _MaterialPlaceholder extends StatelessWidget {
+  const _MaterialPlaceholder({required this.material});
+
+  final AiMaterial material;
+
+  @override
+  Widget build(BuildContext context) {
+    final icon = switch (material.mediaKind) {
+      MediaKind.text => CupertinoIcons.doc_text,
+      MediaKind.image => CupertinoIcons.photo,
+      MediaKind.audio => CupertinoIcons.waveform,
+    };
+    return Padding(
+      padding: const EdgeInsets.all(12),
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(icon, color: workspaceMutedColor, size: 30),
+          const SizedBox(height: 8),
+          Text(
+            material.title,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            textAlign: TextAlign.center,
+            style: const TextStyle(fontSize: 12, color: workspaceTextColor),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _MediaKindBadge extends StatelessWidget {
+  const _MediaKindBadge({required this.kind});
+
+  final MediaKind kind;
+
+  @override
+  Widget build(BuildContext context) {
+    final label = switch (kind) {
+      MediaKind.text => '文本',
+      MediaKind.image => '图片',
+      MediaKind.audio => '音频',
+    };
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: workspaceSurfaceColor.withValues(alpha: 0.88),
+        borderRadius: BorderRadius.circular(5),
+        border: Border.all(color: workspaceSoftLineColor),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+        child: Text(
+          label,
+          style: const TextStyle(fontSize: 10, color: workspaceMutedColor),
+        ),
+      ),
+    );
+  }
+}
+
+class AttachmentTile extends StatefulWidget {
+  const AttachmentTile({
+    super.key,
+    required this.attachment,
+    required this.referenceCount,
+    required this.busy,
+    required this.imageBytes,
+    required this.onDelete,
+  });
+
+  final NoteAttachment attachment;
+  final int referenceCount;
+  final bool busy;
+  final Future<List<int>> imageBytes;
+  final VoidCallback onDelete;
+
+  @override
+  State<AttachmentTile> createState() => _AttachmentTileState();
+}
+
+class _AttachmentTileState extends State<AttachmentTile> {
+  late Future<List<int>> _imageBytes;
+
+  @override
+  void initState() {
+    super.initState();
+    _imageBytes = widget.imageBytes;
+  }
+
+  @override
+  void didUpdateWidget(covariant AttachmentTile oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.attachment.id != widget.attachment.id ||
+        oldWidget.attachment.updatedAt != widget.attachment.updatedAt) {
+      _imageBytes = widget.imageBytes;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      label: widget.attachment.title,
+      excludeSemantics: true,
+      image: true,
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: workspaceSurfaceColor,
+          borderRadius: workspaceBorderRadius,
+          border: Border.all(color: workspaceLineColor),
+        ),
+        child: ClipRRect(
+          borderRadius: workspaceBorderRadius,
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              FutureBuilder<List<int>>(
+                future: _imageBytes,
+                builder: (context, snapshot) {
+                  if (snapshot.connectionState != ConnectionState.done) {
+                    return const Center(child: CupertinoActivityIndicator());
+                  }
+                  if (snapshot.hasError || !snapshot.hasData) {
+                    return const Center(
+                      child: Icon(
+                        CupertinoIcons.exclamationmark_triangle,
+                        color: workspaceDangerColor,
+                      ),
+                    );
+                  }
+                  return Image.memory(
+                    Uint8List.fromList(snapshot.data!),
+                    fit: BoxFit.contain,
+                    gaplessPlayback: true,
+                  );
+                },
+              ),
+              Positioned(
+                top: 4,
+                left: 4,
+                child: TileAction(
+                  key: Key('show-full-attachment-${widget.attachment.id}'),
+                  label: '查看附件全图',
+                  icon: CupertinoIcons.arrow_up_left_arrow_down_right,
+                  onPressed: widget.busy ? null : _showFullImagePreview,
+                ),
+              ),
+              Positioned(
+                top: 4,
+                right: 4,
+                child: TileAction(
+                  key: Key('delete-attachment-${widget.attachment.id}'),
+                  label: '永久删除附件',
+                  icon: CupertinoIcons.trash,
+                  onPressed: widget.busy ? null : widget.onDelete,
+                ),
+              ),
+              Positioned(
+                left: 6,
+                bottom: 6,
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    color: workspaceSurfaceColor.withValues(alpha: 0.9),
+                    borderRadius: BorderRadius.circular(5),
+                    border: Border.all(color: workspaceSoftLineColor),
+                  ),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 5,
+                      vertical: 2,
+                    ),
+                    child: Text(
+                      widget.referenceCount == 0
+                          ? '未引用'
+                          : '引用 ${widget.referenceCount} 次',
+                      style: const TextStyle(
+                        fontSize: 10,
+                        color: workspaceMutedColor,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _showFullImagePreview() {
+    return showCupertinoDialog<void>(
+      context: context,
+      builder: (context) => Center(
+        child: CupertinoPopupSurface(
+          child: ConstrainedBox(
+            constraints: BoxConstraints(
+              maxWidth: MediaQuery.sizeOf(context).width * 0.88,
+              maxHeight: MediaQuery.sizeOf(context).height * 0.86,
+            ),
+            child: SizedBox(
+              width: 760,
+              height: 600,
+              child: Column(
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 10, 8, 8),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            widget.attachment.title,
+                            overflow: TextOverflow.ellipsis,
+                            style: workspaceRightPaneTitleStyle,
+                          ),
+                        ),
+                        IconAction(
+                          label: '关闭',
+                          icon: CupertinoIcons.xmark,
+                          onPressed: () => Navigator.of(context).pop(),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const Hairline(),
+                  Expanded(
+                    child: FutureBuilder<List<int>>(
+                      future: _imageBytes,
+                      builder: (context, snapshot) {
+                        if (!snapshot.hasData) {
+                          return const Center(
+                            child: CupertinoActivityIndicator(),
+                          );
+                        }
+                        return InteractiveViewer(
+                          minScale: 0.5,
+                          maxScale: 5,
+                          child: Center(
+                            child: Image.memory(
+                              Uint8List.fromList(snapshot.data!),
+                              fit: BoxFit.contain,
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _ProposalMaterialChip extends StatelessWidget {
+  const _ProposalMaterialChip({
+    required this.snapshot,
+    required this.available,
+  });
+
+  final ProposalMaterialSnapshot snapshot;
+  final bool available;
+
+  @override
+  Widget build(BuildContext context) {
+    final kind = switch (snapshot.mediaKind) {
+      MediaKind.text => '文本',
+      MediaKind.image => '图片',
+      MediaKind.audio => '音频',
+    };
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: available
+            ? workspaceSecondarySurfaceColor
+            : workspaceDangerColor.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(
+          color: available ? workspaceSoftLineColor : workspaceDangerColor,
+        ),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 4),
+        child: Text(
+          '$kind · ${snapshot.title}${available ? '' : ' · 来源已删除'}',
+          style: TextStyle(
+            color: available ? workspaceMutedColor : workspaceDangerColor,
+            fontSize: 11,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class ProposalCard extends StatelessWidget {
   const ProposalCard({
     super.key,
     required this.proposal,
+    required this.availableMaterialIds,
     required this.expanded,
     required this.selectionMode,
     required this.selected,
@@ -270,6 +582,7 @@ class ProposalCard extends StatelessWidget {
   });
 
   final AiProposal proposal;
+  final Set<String> availableMaterialIds;
   final bool expanded;
   final bool selectionMode;
   final bool selected;
@@ -361,6 +674,22 @@ class ProposalCard extends StatelessWidget {
           ),
           if (expanded) ...[
             const SizedBox(height: 8),
+            if (proposal.materialSnapshots.isNotEmpty) ...[
+              Wrap(
+                spacing: 6,
+                runSpacing: 6,
+                children: [
+                  for (final snapshot in proposal.materialSnapshots)
+                    _ProposalMaterialChip(
+                      snapshot: snapshot,
+                      available: availableMaterialIds.contains(
+                        snapshot.materialId,
+                      ),
+                    ),
+                ],
+              ),
+              const SizedBox(height: 8),
+            ],
             _SelectableTextBlock(proposal.proposedMarkdown),
             if (!selectionMode) ...[
               const SizedBox(height: 10),

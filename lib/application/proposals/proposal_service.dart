@@ -7,11 +7,11 @@ import '../ports/vault_post_commit_error.dart';
 
 final class PreparedOutlineProposal {
   const PreparedOutlineProposal({
-    required this.sourceUpdates,
+    required this.materialUpdates,
     required this.proposal,
   });
 
-  final List<SourceItem> sourceUpdates;
+  final List<AiMaterial> materialUpdates;
   final AiProposal proposal;
 }
 
@@ -24,59 +24,64 @@ class ProposalService {
 
   Future<AiProposal> createOutlineProposal({
     required String noteId,
-    required List<String> sourceIds,
+    List<String>? materialIds,
+    @Deprecated('Use materialIds.') List<String>? sourceIds,
   }) async {
     final prepared = await prepareOutlineProposal(
       noteId: noteId,
-      sourceIds: sourceIds,
+      materialIds: materialIds ?? sourceIds,
     );
     return commitPreparedOutlineProposal(prepared);
   }
 
   Future<PreparedOutlineProposal> prepareOutlineProposal({
     required String noteId,
-    required List<String> sourceIds,
+    List<String>? materialIds,
+    @Deprecated('Use materialIds.') List<String>? sourceIds,
   }) async {
+    final requestedIds = materialIds ?? sourceIds ?? const <String>[];
     final note = await vault.readNote(noteId);
-    final sources = await vault.getSources(noteId, sourceIds);
-    if (sources.isEmpty) {
-      throw ArgumentError('At least one source is required.');
+    final materials = await vault.getAiMaterials(noteId, requestedIds);
+    if (materials.isEmpty) {
+      throw ArgumentError('At least one AI material is required.');
     }
-    final sourceUpdates = <SourceItem>[];
-    final preparedSources = <SourceItem>[];
-    for (final source in sources) {
-      if (source.type == SourceType.image &&
-          source.state == SourceState.pending) {
-        final updated = await _prepareImageSource(source);
-        sourceUpdates.add(updated);
-        preparedSources.add(updated);
+    final materialUpdates = <AiMaterial>[];
+    final preparedMaterials = <AiMaterial>[];
+    for (final material in materials) {
+      if (material.mediaKind == MediaKind.image &&
+          material.processingState == MaterialProcessingState.pending) {
+        final updated = await _prepareImageMaterial(material);
+        materialUpdates.add(updated);
+        preparedMaterials.add(updated);
       } else {
-        preparedSources.add(source);
+        preparedMaterials.add(material);
       }
     }
     final now = DateTime.now().toUtc();
-    final imageOnly = preparedSources.every(
-      (source) => source.type == SourceType.image,
+    final imageOnly = preparedMaterials.every(
+      (material) => material.mediaKind == MediaKind.image,
     );
     final markdown = imageOnly
-        ? _imageOcrMarkdown(preparedSources)
+        ? _imageOcrMarkdown(preparedMaterials)
         : await aiProvider.createOutlineProposal(
             noteTitle: note.title,
             currentMarkdown: note.markdown,
-            sources: preparedSources,
+            materials: preparedMaterials,
           );
     final proposal = AiProposal(
       id: _uuid.v4(),
       noteId: noteId,
-      sourceIds: sourceIds,
-      title: '整理 ${preparedSources.length} 条素材',
+      materialSnapshots: preparedMaterials
+          .map(ProposalMaterialSnapshot.fromMaterial)
+          .toList(),
+      title: '整理 ${preparedMaterials.length} 条素材',
       proposedMarkdown: markdown,
       status: ProposalStatus.pending,
       createdAt: now,
       updatedAt: now,
     );
     return PreparedOutlineProposal(
-      sourceUpdates: List<SourceItem>.unmodifiable(sourceUpdates),
+      materialUpdates: List<AiMaterial>.unmodifiable(materialUpdates),
       proposal: proposal,
     );
   }
@@ -87,31 +92,31 @@ class ProposalService {
     return vault.runMutationTransaction(
       label: 'commit-outline-proposal',
       action: () async {
-        for (final source in prepared.sourceUpdates) {
-          await runVaultPostCommit(() => vault.updateSource(source));
+        for (final material in prepared.materialUpdates) {
+          await runVaultPostCommit(() => vault.updateAiMaterial(material));
         }
         return runVaultPostCommit(() => vault.saveProposal(prepared.proposal));
       },
     );
   }
 
-  String _imageOcrMarkdown(List<SourceItem> sources) {
-    return sources
-        .map((source) => (source.extractedText ?? '').trim())
+  String _imageOcrMarkdown(List<AiMaterial> materials) {
+    return materials
+        .map((material) => (material.extractedText ?? '').trim())
         .where((text) => text.isNotEmpty)
         .join('\n\n')
         .trim();
   }
 
-  Future<SourceItem> _prepareImageSource(SourceItem source) async {
-    final bytes = await vault.readSourceAttachment(source);
+  Future<AiMaterial> _prepareImageMaterial(AiMaterial material) async {
+    final bytes = await vault.readAiMaterialContent(material);
     final extraction = await aiProvider.extractImageText(
-      filename: source.title,
-      mimeType: source.mimeType ?? 'application/octet-stream',
+      filename: material.title,
+      mimeType: material.mimeType ?? 'application/octet-stream',
       bytes: bytes,
     );
-    return source.copyWith(
-      state: SourceState.processed,
+    return material.copyWith(
+      processingState: MaterialProcessingState.processed,
       extractedText: extraction.text,
       updatedAt: DateTime.now().toUtc(),
     );

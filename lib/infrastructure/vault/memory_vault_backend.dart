@@ -2,7 +2,7 @@ import '../../domain/vault/vault_resource.dart';
 import 'memory_vault_note_store.dart';
 import 'memory_vault_paths.dart';
 import 'memory_vault_proposal_store.dart';
-import 'memory_vault_source_store.dart';
+import 'memory_vault_resource_store.dart';
 import 'memory_vault_state.dart';
 import 'vault_backend.dart';
 
@@ -10,12 +10,12 @@ class MemoryVaultBackend implements VaultBackend {
   MemoryVaultBackend({bool seedExampleData = true}) {
     _state = MemoryVaultState();
     final paths = MemoryVaultPaths(_state);
-    _sources = MemoryVaultSourceStore(state: _state, paths: paths);
+    _resources = MemoryVaultResourceStore(state: _state, paths: paths);
     _proposals = MemoryVaultProposalStore(_state);
     _notes = MemoryVaultNoteStore(
       state: _state,
       paths: paths,
-      sources: _sources,
+      resources: _resources,
       proposals: _proposals,
       readNoteCallback: (noteId) => readNote(noteId),
       deleteNoteCallback: (noteId) => deleteNote(noteId),
@@ -26,7 +26,7 @@ class MemoryVaultBackend implements VaultBackend {
   }
 
   late final MemoryVaultNoteStore _notes;
-  late final MemoryVaultSourceStore _sources;
+  late final MemoryVaultResourceStore _resources;
   late final MemoryVaultProposalStore _proposals;
   late final MemoryVaultState _state;
 
@@ -120,22 +120,22 @@ class MemoryVaultBackend implements VaultBackend {
   }
 
   @override
-  Future<SourceItem> addTextSource({
+  Future<AiMaterial> addTextMaterial({
     required String noteId,
     required String title,
     required String text,
   }) {
-    return _sources.addTextSource(noteId: noteId, title: title, text: text);
+    return _resources.addTextMaterial(noteId: noteId, title: title, text: text);
   }
 
   @override
-  Future<SourceItem> addImageSource({
+  Future<AiMaterial> addImageMaterial({
     required String noteId,
     required String filename,
     required String mimeType,
     required List<int> bytes,
   }) {
-    return _sources.addImageSource(
+    return _resources.addImageMaterial(
       noteId: noteId,
       filename: filename,
       mimeType: mimeType,
@@ -144,28 +144,113 @@ class MemoryVaultBackend implements VaultBackend {
   }
 
   @override
-  Future<List<SourceItem>> listSources(String noteId) {
-    return _sources.listSources(noteId);
+  Future<List<AiMaterial>> listAiMaterials(String noteId) {
+    return _resources.listAiMaterials(noteId);
   }
 
   @override
-  Future<List<SourceItem>> getSources(String noteId, List<String> sourceIds) {
-    return _sources.getSources(noteId, sourceIds);
+  Future<List<AiMaterial>> getAiMaterials(
+    String noteId,
+    List<String> materialIds,
+  ) {
+    return _resources.getAiMaterials(noteId, materialIds);
   }
 
   @override
-  Future<List<int>> readSourceAttachment(SourceItem source) {
-    return _sources.readSourceAttachment(source);
+  Future<List<int>> readAiMaterialContent(AiMaterial material) {
+    return _resources.readAiMaterialContent(material);
   }
 
   @override
-  Future<SourceItem> updateSource(SourceItem source) {
-    return _sources.updateSource(source);
+  Future<AiMaterial> updateAiMaterial(AiMaterial material) {
+    return _resources.updateAiMaterial(material);
   }
 
   @override
-  Future<void> deleteSource(SourceItem source) {
-    return _sources.deleteSource(source);
+  Future<void> deleteAiMaterial(AiMaterial material) {
+    return _resources.deleteAiMaterial(material);
+  }
+
+  @override
+  Future<AiMaterial> addTextSource({
+    required String noteId,
+    required String title,
+    required String text,
+  }) => addTextMaterial(noteId: noteId, title: title, text: text);
+
+  @override
+  Future<AiMaterial> addImageSource({
+    required String noteId,
+    required String filename,
+    required String mimeType,
+    required List<int> bytes,
+  }) => addImageMaterial(
+    noteId: noteId,
+    filename: filename,
+    mimeType: mimeType,
+    bytes: bytes,
+  );
+
+  @override
+  Future<List<AiMaterial>> listSources(String noteId) =>
+      listAiMaterials(noteId);
+
+  @override
+  Future<List<AiMaterial>> getSources(String noteId, List<String> sourceIds) =>
+      getAiMaterials(noteId, sourceIds);
+
+  @override
+  Future<List<int>> readSourceAttachment(AiMaterial source) =>
+      readAiMaterialContent(source);
+
+  @override
+  Future<AiMaterial> updateSource(AiMaterial source) =>
+      updateAiMaterial(source);
+
+  @override
+  Future<void> deleteSource(AiMaterial source) => deleteAiMaterial(source);
+
+  @override
+  Future<NoteAttachment> addImageAttachment({
+    required String noteId,
+    required String filename,
+    required String mimeType,
+    required List<int> bytes,
+  }) {
+    return _resources.addImageAttachment(
+      noteId: noteId,
+      filename: filename,
+      mimeType: mimeType,
+      bytes: bytes,
+    );
+  }
+
+  @override
+  Future<List<NoteAttachment>> listNoteAttachments(String noteId) {
+    return _resources.listNoteAttachments(noteId);
+  }
+
+  @override
+  Future<List<int>> readNoteAttachment(NoteAttachment attachment) {
+    return _resources.readNoteAttachment(attachment);
+  }
+
+  @override
+  Future<AttachmentDeletionImpact> analyzeAttachmentDeletion(
+    List<NoteAttachment> attachments,
+  ) {
+    return _resources.analyzeAttachmentDeletion(attachments);
+  }
+
+  @override
+  Future<void> deleteNoteAttachments({
+    required List<NoteAttachment> attachments,
+    required AttachmentDeletionImpact expectedImpact,
+  }) {
+    return _resources.deleteNoteAttachments(
+      attachments: attachments,
+      expectedImpact: expectedImpact,
+    );
   }
 
   @override

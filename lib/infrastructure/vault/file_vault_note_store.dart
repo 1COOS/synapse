@@ -9,7 +9,7 @@ import '../../domain/vault/vault_resource.dart';
 import 'file_vault_operations.dart';
 import 'file_vault_paths.dart';
 import 'file_vault_proposal_store.dart';
-import 'file_vault_source_store.dart';
+import 'file_vault_resource_store.dart';
 import 'vault_post_commit_error.dart';
 import 'vault_store_helpers.dart';
 
@@ -17,20 +17,23 @@ final class FileVaultNoteStore {
   const FileVaultNoteStore({
     required this.paths,
     required this.operations,
-    required this.sources,
+    required this.resources,
     required this.proposals,
     required this.readNoteCallback,
     required this.listResourcesCallback,
-    required this.listSources,
+    required this.listAiMaterials,
+    required this.listNoteAttachments,
   });
 
   final FileVaultPaths paths;
   final FileVaultOperations operations;
-  final FileVaultSourceStore sources;
+  final FileVaultResourceStore resources;
   final FileVaultProposalStore proposals;
   final Future<VaultNoteContent> Function(String noteId) readNoteCallback;
   final Future<List<VaultResourceNode>> Function() listResourcesCallback;
-  final Future<List<SourceItem>> Function(String noteId) listSources;
+  final Future<List<AiMaterial>> Function(String noteId) listAiMaterials;
+  final Future<List<NoteAttachment>> Function(String noteId)
+  listNoteAttachments;
 
   Future<VaultResourceNode> createFolder({
     required String parentPath,
@@ -68,7 +71,8 @@ final class FileVaultNoteStore {
     final noteId = NoteId.generate().value;
     await paths.ensureSafePath(file.path);
     await paths.ensureSafePath(assets.path);
-    await paths.ensureSafePath(p.join(assets.path, 'sources.json'));
+    await paths.ensureSafePath(p.join(assets.path, 'materials.json'));
+    await paths.ensureSafePath(p.join(assets.path, 'attachments.json'));
     await paths.ensureSafePath(p.join(assets.path, 'proposals.json'));
     return operations.transaction(
       'create-note',
@@ -88,7 +92,8 @@ final class FileVaultNoteStore {
             Directory(note.assetsPath),
             recursive: true,
           );
-          await sources.writeSources(note.id, const []);
+          await resources.writeMaterials(note.id, const []);
+          await resources.writeAttachments(note.id, const []);
           await proposals.writeProposals(note.id, const []);
           return note;
         } catch (_) {
@@ -115,6 +120,8 @@ final class FileVaultNoteStore {
     final markdown = await operations.readFileString(file);
     final doc = MarkdownDocument.parse(markdown);
     final note = await _noteFromExistingFile(file, doc);
+    final aiMaterials = await listAiMaterials(note.id);
+    final attachments = await listNoteAttachments(note.id);
     return VaultNoteContent(
       id: note.id,
       title: note.title,
@@ -125,7 +132,8 @@ final class FileVaultNoteStore {
       updatedAt: note.updatedAt,
       markdown: markdown,
       outline: doc.outline,
-      sources: await listSources(note.id),
+      aiMaterials: aiMaterials,
+      attachments: attachments,
     );
   }
 
@@ -255,8 +263,13 @@ final class FileVaultNoteStore {
           } else {
             await operations.createDirectory(copiedAssets, recursive: true);
           }
-          final sourceIdMap = await sources.rewriteCopied(copiedId, now);
-          await proposals.rewriteCopied(note.id, copiedId, sourceIdMap, now);
+          final resourceIds = await resources.rewriteCopied(copiedId, now);
+          await proposals.rewriteCopied(
+            note.id,
+            copiedId,
+            resourceIds.materialIds,
+            now,
+          );
           return (await readNoteCallback(copiedId)).note;
         } catch (_) {
           paths.catalog.markDeleted(copiedId);
@@ -349,7 +362,7 @@ final class FileVaultNoteStore {
         final moved = await _renameDirectoryPortable(directory, target.path);
         await listResources();
         for (final noteId in movedLegacyIds.values) {
-          await sources.rewriteMoved(noteId);
+          await resources.rewriteMoved(noteId);
           await proposals.rewriteMoved(noteId);
         }
         return VaultResourceNode(
@@ -548,7 +561,7 @@ final class FileVaultNoteStore {
           }
         }
         paths.catalog.move(note.id, movedPath);
-        await sources.rewriteMoved(note.id);
+        await resources.rewriteMoved(note.id);
         await proposals.rewriteMoved(note.id);
         return (await readNoteCallback(note.id)).note;
       }),

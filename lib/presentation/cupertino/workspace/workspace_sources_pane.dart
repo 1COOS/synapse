@@ -3,10 +3,12 @@ import 'dart:math' as math;
 
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/services.dart';
+import 'package:path/path.dart' as p;
 
 import '../../../domain/vault/vault_resource.dart';
 import '../../workspace/controller/workspace_controller.dart';
 import '../../workspace/editor/pane_editor_context.dart';
+import '../../workspace/editor/markdown_image_transform.dart';
 import '../../workspace/state/note_materials_registry.dart';
 import '../../workspace/state/split_workspace_controller.dart';
 import 'workspace_controls.dart';
@@ -17,13 +19,19 @@ import 'workspace_theme.dart';
 typedef SourceDeleteConfirmation =
     Future<PaneEditorCommandOutcome> Function(
       PaneEditorContext context,
-      SourceItem source,
+      AiMaterial source,
     );
 
 typedef SourcesDeleteConfirmation =
     Future<PaneEditorCommandOutcome> Function(
       PaneEditorContext context,
-      List<SourceItem> sources,
+      List<AiMaterial> sources,
+    );
+
+typedef AttachmentDeleteConfirmation =
+    Future<PaneEditorCommandOutcome> Function(
+      PaneEditorContext context,
+      List<NoteAttachment> attachments,
     );
 
 typedef ProposalDeleteConfirmation =
@@ -45,6 +53,7 @@ final class WorkspaceSourcesPane extends StatefulWidget {
     required this.controller,
     required this.onDeleteSource,
     required this.onDeleteSources,
+    required this.onDeleteAttachments,
     required this.onDeleteProposal,
     required this.onDeleteProposals,
   });
@@ -53,6 +62,7 @@ final class WorkspaceSourcesPane extends StatefulWidget {
   final WorkspaceController controller;
   final SourceDeleteConfirmation onDeleteSource;
   final SourcesDeleteConfirmation onDeleteSources;
+  final AttachmentDeleteConfirmation onDeleteAttachments;
   final ProposalDeleteConfirmation onDeleteProposal;
   final ProposalsDeleteConfirmation onDeleteProposals;
 
@@ -69,6 +79,7 @@ final class _WorkspaceSourcesPaneState extends State<WorkspaceSourcesPane> {
   final _focusNode = FocusNode();
   final _proposalScrollController = ScrollController();
   final Map<String, bool> _sourcesExpandedByNote = <String, bool>{};
+  final Map<String, bool> _attachmentsExpandedByNote = <String, bool>{};
   final Map<String, String> _expandedProposalByNote = <String, String>{};
   final Set<String> _selectedProposalIds = <String>{};
   double _sourcesAreaFraction = _defaultSourcesAreaFraction;
@@ -117,12 +128,14 @@ final class _WorkspaceSourcesPaneState extends State<WorkspaceSourcesPane> {
     final resolved = editorContext == null
         ? null
         : widget.controller.resolvePaneEditorContext(editorContext);
-    final sources =
+    final aiMaterials =
         (widget.workspace.reloadRequired
-                ? const <SourceItem>[]
-                : resolved?.session.note.sources ?? const <SourceItem>[])
-            .where((source) => source.type == SourceType.image)
+                ? const <AiMaterial>[]
+                : resolved?.session.note.aiMaterials ?? const <AiMaterial>[])
             .toList();
+    final attachments = widget.workspace.reloadRequired
+        ? const <NoteAttachment>[]
+        : resolved?.session.note.attachments ?? const <NoteAttachment>[];
     final materials = resolved == null
         ? NoteMaterialsSnapshot.empty
         : widget.workspace.materialsFor(resolved.noteId);
@@ -131,6 +144,9 @@ final class _WorkspaceSourcesPaneState extends State<WorkspaceSourcesPane> {
     final sourcesExpanded = noteId == null
         ? true
         : _sourcesExpandedByNote[noteId] ?? true;
+    final attachmentsExpanded = noteId == null
+        ? true
+        : _attachmentsExpandedByNote[noteId] ?? true;
     final expandedProposalId = noteId == null
         ? null
         : _expandedProposalByNote[noteId] ??
@@ -162,7 +178,7 @@ final class _WorkspaceSourcesPaneState extends State<WorkspaceSourcesPane> {
                 children: [
                   Expanded(
                     child: Text(
-                      '图片素材 · 已选 ${materials.selectedSourceIds.length} 张',
+                      'AI 素材 · 已选 ${materials.selectedAiMaterialIds.length} 项',
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: workspaceRightPaneTitleStyle,
@@ -170,7 +186,7 @@ final class _WorkspaceSourcesPaneState extends State<WorkspaceSourcesPane> {
                   ),
                   IconAction(
                     key: const Key('add-image-button'),
-                    label: '导入图片',
+                    label: '导入图片素材',
                     icon: CupertinoIcons.photo,
                     onPressed: actionsDisabled
                         ? null
@@ -178,7 +194,7 @@ final class _WorkspaceSourcesPaneState extends State<WorkspaceSourcesPane> {
                   ),
                   IconAction(
                     key: const Key('paste-image-button'),
-                    label: '粘贴图片',
+                    label: '粘贴图片素材',
                     icon: CupertinoIcons.doc_on_clipboard,
                     onPressed: actionsDisabled
                         ? null
@@ -186,20 +202,21 @@ final class _WorkspaceSourcesPaneState extends State<WorkspaceSourcesPane> {
                   ),
                   IconAction(
                     key: const Key('delete-selected-images-button'),
-                    label: '删除已选图片',
+                    label: '删除已选 AI 素材',
                     icon: CupertinoIcons.trash,
                     onPressed:
-                        actionsDisabled || materials.selectedSourceIds.isEmpty
+                        actionsDisabled ||
+                            materials.selectedAiMaterialIds.isEmpty
                         ? null
                         : () => _deleteSelectedSources(
                             editorContext,
-                            sources,
-                            materials.selectedSourceIds,
+                            aiMaterials,
+                            materials.selectedAiMaterialIds,
                           ),
                   ),
                   IconAction(
                     key: const Key('toggle-sources-section-button'),
-                    label: sourcesExpanded ? '收起图片素材' : '展开图片素材',
+                    label: sourcesExpanded ? '收起 AI 素材' : '展开 AI 素材',
                     icon: sourcesExpanded
                         ? CupertinoIcons.chevron_up
                         : CupertinoIcons.chevron_down,
@@ -214,8 +231,10 @@ final class _WorkspaceSourcesPaneState extends State<WorkspaceSourcesPane> {
                 child: LayoutBuilder(
                   builder: (context, constraints) => _buildMaterialsBody(
                     availableHeight: constraints.maxHeight,
-                    sources: sources,
+                    sources: aiMaterials,
+                    attachments: attachments,
                     sourcesExpanded: sourcesExpanded,
+                    attachmentsExpanded: attachmentsExpanded,
                     materials: materials,
                     editorContext: editorContext,
                     noteId: noteId,
@@ -224,6 +243,7 @@ final class _WorkspaceSourcesPaneState extends State<WorkspaceSourcesPane> {
                     selectedProposalIds: selectedProposalIds,
                     actionsDisabled: actionsDisabled,
                     busy: busy,
+                    currentMarkdown: resolved?.session.controller.text ?? '',
                   ),
                 ),
               ),
@@ -236,8 +256,10 @@ final class _WorkspaceSourcesPaneState extends State<WorkspaceSourcesPane> {
 
   Widget _buildMaterialsBody({
     required double availableHeight,
-    required List<SourceItem> sources,
+    required List<AiMaterial> sources,
+    required List<NoteAttachment> attachments,
     required bool sourcesExpanded,
+    required bool attachmentsExpanded,
     required NoteMaterialsSnapshot materials,
     required PaneEditorContext? editorContext,
     required String? noteId,
@@ -246,6 +268,7 @@ final class _WorkspaceSourcesPaneState extends State<WorkspaceSourcesPane> {
     required Set<String> selectedProposalIds,
     required bool actionsDisabled,
     required bool busy,
+    required String currentMarkdown,
   }) {
     final resizableSources = sourcesExpanded && sources.isNotEmpty;
     final sourcesHeight = resizableSources
@@ -267,7 +290,7 @@ final class _WorkspaceSourcesPaneState extends State<WorkspaceSourcesPane> {
             )
           : _buildSelectedSourcesSummary(
               sources: sources,
-              selectedSourceIds: materials.selectedSourceIds,
+              selectedSourceIds: materials.selectedAiMaterialIds,
             ),
     );
     return Column(
@@ -304,7 +327,7 @@ final class _WorkspaceSourcesPaneState extends State<WorkspaceSourcesPane> {
         Row(
           children: [
             Text(
-              '已选择 ${materials.selectedSourceIds.length} 张',
+              '已选择 ${materials.selectedAiMaterialIds.length} 项',
               style: const TextStyle(color: workspaceMutedColor),
             ),
             const SizedBox(width: 10),
@@ -315,7 +338,7 @@ final class _WorkspaceSourcesPaneState extends State<WorkspaceSourcesPane> {
                 icon: CupertinoIcons.sparkles,
                 busy: _generatingProposal,
                 onPressed:
-                    materials.selectedSourceIds.isEmpty ||
+                    materials.selectedAiMaterialIds.isEmpty ||
                         busy ||
                         widget.workspace.reloadRequired
                     ? null
@@ -338,70 +361,105 @@ final class _WorkspaceSourcesPaneState extends State<WorkspaceSourcesPane> {
         ),
         const SizedBox(height: 8),
         Expanded(
-          child: materials.proposals.isEmpty
-              ? const EmptyState(text: '选择图片后生成 AI 建议')
-              : ListView.builder(
-                  key: const Key('proposal-history-list'),
-                  controller: _proposalScrollController,
-                  padding: EdgeInsets.zero,
-                  itemCount: materials.proposals.length,
-                  itemBuilder: (context, index) {
-                    final proposal = materials.proposals[index];
-                    return ProposalCard(
-                      key: Key('proposal-${proposal.noteId}-${proposal.id}'),
-                      proposal: proposal,
-                      expanded: proposal.id == expandedProposalId,
-                      selectionMode: proposalBatchMode,
-                      selected: selectedProposalIds.contains(proposal.id),
-                      selectionKey: Key('proposal-select-${proposal.id}'),
-                      toggleKey: Key('proposal-toggle-${proposal.id}'),
-                      expandKey: Key('proposal-expand-${proposal.id}'),
-                      copyKey: Key(
-                        index == 0
-                            ? 'copy-proposal-button'
-                            : 'copy-proposal-button-${proposal.id}',
+          child: ListView.builder(
+            key: const Key('proposal-history-list'),
+            controller: _proposalScrollController,
+            padding: EdgeInsets.zero,
+            itemCount:
+                (materials.proposals.isEmpty ? 1 : materials.proposals.length) +
+                2,
+            itemBuilder: (context, index) {
+              final proposalItemCount = materials.proposals.isEmpty
+                  ? 1
+                  : materials.proposals.length;
+              if (index < proposalItemCount) {
+                if (materials.proposals.isEmpty) {
+                  return const SizedBox(
+                    height: 80,
+                    child: EmptyState(text: '选择 AI 素材后生成建议'),
+                  );
+                }
+                final proposal = materials.proposals[index];
+                return ProposalCard(
+                  key: Key('proposal-${proposal.noteId}-${proposal.id}'),
+                  proposal: proposal,
+                  availableMaterialIds: sources
+                      .map((material) => material.id)
+                      .toSet(),
+                  expanded: proposal.id == expandedProposalId,
+                  selectionMode: proposalBatchMode,
+                  selected: selectedProposalIds.contains(proposal.id),
+                  selectionKey: Key('proposal-select-${proposal.id}'),
+                  toggleKey: Key('proposal-toggle-${proposal.id}'),
+                  expandKey: Key('proposal-expand-${proposal.id}'),
+                  copyKey: Key(
+                    index == 0
+                        ? 'copy-proposal-button'
+                        : 'copy-proposal-button-${proposal.id}',
+                  ),
+                  deleteKey: Key(
+                    index == 0
+                        ? 'delete-proposal-button'
+                        : 'delete-proposal-button-${proposal.id}',
+                  ),
+                  applyKey: Key(
+                    index == 0
+                        ? 'apply-proposal-button'
+                        : 'apply-proposal-button-${proposal.id}',
+                  ),
+                  busy: busy || widget.workspace.reloadRequired,
+                  onToggleSelected: () => _toggleProposalSelected(proposal.id),
+                  onToggleExpanded: noteId == null
+                      ? () {}
+                      : () => _setExpandedProposal(noteId, proposal.id),
+                  onCopy: editorContext == null
+                      ? () {}
+                      : () async {
+                          await widget.controller.copyProposal(
+                            editorContext,
+                            proposal,
+                          );
+                        },
+                  onDelete: editorContext == null
+                      ? () {}
+                      : () async {
+                          await widget.onDeleteProposal(
+                            editorContext,
+                            proposal,
+                          );
+                        },
+                  onApply: editorContext == null
+                      ? () {}
+                      : () => _confirmAndApplyProposal(editorContext, proposal),
+                );
+              }
+              if (index == proposalItemCount) {
+                return Padding(
+                  padding: const EdgeInsets.only(top: 8),
+                  child: Column(
+                    children: [
+                      const Padding(
+                        padding: EdgeInsets.only(bottom: 8),
+                        child: Hairline(),
                       ),
-                      deleteKey: Key(
-                        index == 0
-                            ? 'delete-proposal-button'
-                            : 'delete-proposal-button-${proposal.id}',
+                      _buildAttachmentHeader(
+                        noteId: noteId,
+                        attachmentCount: attachments.length,
+                        expanded: attachmentsExpanded,
                       ),
-                      applyKey: Key(
-                        index == 0
-                            ? 'apply-proposal-button'
-                            : 'apply-proposal-button-${proposal.id}',
-                      ),
-                      busy: busy || widget.workspace.reloadRequired,
-                      onToggleSelected: () =>
-                          _toggleProposalSelected(proposal.id),
-                      onToggleExpanded: noteId == null
-                          ? () {}
-                          : () => _setExpandedProposal(noteId, proposal.id),
-                      onCopy: editorContext == null
-                          ? () {}
-                          : () async {
-                              await widget.controller.copyProposal(
-                                editorContext,
-                                proposal,
-                              );
-                            },
-                      onDelete: editorContext == null
-                          ? () {}
-                          : () async {
-                              await widget.onDeleteProposal(
-                                editorContext,
-                                proposal,
-                              );
-                            },
-                      onApply: editorContext == null
-                          ? () {}
-                          : () => _confirmAndApplyProposal(
-                              editorContext,
-                              proposal,
-                            ),
-                    );
-                  },
-                ),
+                    ],
+                  ),
+                );
+              }
+              return _buildAttachments(
+                attachments: attachments,
+                expanded: attachmentsExpanded,
+                editorContext: editorContext,
+                currentMarkdown: currentMarkdown,
+                busy: busy,
+              );
+            },
+          ),
         ),
       ],
     );
@@ -511,7 +569,7 @@ final class _WorkspaceSourcesPaneState extends State<WorkspaceSourcesPane> {
 
   Widget _buildExpandedSources({
     required double height,
-    required List<SourceItem> sources,
+    required List<AiMaterial> sources,
     required NoteMaterialsSnapshot materials,
     required PaneEditorContext? editorContext,
     required bool busy,
@@ -520,7 +578,7 @@ final class _WorkspaceSourcesPaneState extends State<WorkspaceSourcesPane> {
       return SizedBox(
         key: Key('sources-expanded-content'),
         height: height,
-        child: const EmptyState(text: '暂无图片素材'),
+        child: const EmptyState(text: '暂无 AI 素材'),
       );
     }
     return SizedBox(
@@ -539,15 +597,17 @@ final class _WorkspaceSourcesPaneState extends State<WorkspaceSourcesPane> {
           final source = sources[index];
           return ImageSourceTile(
             source: source,
-            selected: materials.selectedSourceIds.contains(source.id),
+            selected: materials.selectedAiMaterialIds.contains(source.id),
             busy: busy,
-            imageBytes: widget.controller.readSourceAttachment(source),
+            imageBytes: source.mediaKind == MediaKind.image
+                ? widget.controller.readAiMaterialContent(source)
+                : null,
             onToggle: () {
               final target = editorContext == null
                   ? null
                   : widget.controller.resolvePaneEditorContext(editorContext);
               if (target != null) {
-                widget.controller.toggleSourceSelection(
+                widget.controller.toggleAiMaterialSelection(
                   target.noteId,
                   source.id,
                 );
@@ -565,7 +625,7 @@ final class _WorkspaceSourcesPaneState extends State<WorkspaceSourcesPane> {
   }
 
   Widget _buildSelectedSourcesSummary({
-    required List<SourceItem> sources,
+    required List<AiMaterial> sources,
     required Set<String> selectedSourceIds,
   }) {
     final selected = sources
@@ -585,7 +645,7 @@ final class _WorkspaceSourcesPaneState extends State<WorkspaceSourcesPane> {
           if (selected.isEmpty)
             const Expanded(
               child: Text(
-                '未选择图片',
+                '未选择 AI 素材',
                 style: TextStyle(color: workspaceMutedColor),
               ),
             )
@@ -593,15 +653,17 @@ final class _WorkspaceSourcesPaneState extends State<WorkspaceSourcesPane> {
             for (final source in selected.take(4)) ...[
               _SourceSummaryThumbnail(
                 source: source,
-                imageBytes: widget.controller.readSourceAttachment(source),
+                imageBytes: source.mediaKind == MediaKind.image
+                    ? widget.controller.readAiMaterialContent(source)
+                    : null,
               ),
               const SizedBox(width: 6),
             ],
             Expanded(
               child: Text(
                 selected.length > 4
-                    ? '另有 ${selected.length - 4} 张'
-                    : '已选 ${selected.length} 张',
+                    ? '另有 ${selected.length - 4} 项'
+                    : '已选 ${selected.length} 项',
                 textAlign: TextAlign.end,
                 style: const TextStyle(color: workspaceMutedColor),
               ),
@@ -610,6 +672,118 @@ final class _WorkspaceSourcesPaneState extends State<WorkspaceSourcesPane> {
         ],
       ),
     );
+  }
+
+  Widget _buildAttachmentHeader({
+    required String? noteId,
+    required int attachmentCount,
+    required bool expanded,
+  }) {
+    return Row(
+      children: [
+        const Text('笔记附件', style: workspaceRightPaneTitleStyle),
+        const SizedBox(width: 4),
+        Text(
+          '· $attachmentCount',
+          style: const TextStyle(color: workspaceMutedColor, fontSize: 12),
+        ),
+        const Spacer(),
+        IconAction(
+          key: const Key('toggle-attachments-section-button'),
+          label: expanded ? '收起笔记附件' : '展开笔记附件',
+          icon: expanded
+              ? CupertinoIcons.chevron_up
+              : CupertinoIcons.chevron_down,
+          onPressed: noteId == null
+              ? null
+              : () => _setAttachmentsExpanded(noteId, !expanded),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildAttachments({
+    required List<NoteAttachment> attachments,
+    required bool expanded,
+    required PaneEditorContext? editorContext,
+    required String currentMarkdown,
+    required bool busy,
+  }) {
+    if (!expanded) {
+      return const SizedBox(height: 8);
+    }
+    if (attachments.isEmpty) {
+      return const SizedBox(height: 72, child: EmptyState(text: '暂无笔记附件'));
+    }
+    final resolved = editorContext == null
+        ? null
+        : widget.controller.resolvePaneEditorContext(editorContext);
+    final note = resolved?.session.note;
+    return Padding(
+      padding: const EdgeInsets.only(top: 8, bottom: 4),
+      child: GridView.builder(
+        key: const Key('note-attachments-grid'),
+        shrinkWrap: true,
+        physics: const NeverScrollableScrollPhysics(),
+        itemCount: attachments.length,
+        gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+          crossAxisCount: 2,
+          mainAxisSpacing: 8,
+          crossAxisSpacing: 8,
+          childAspectRatio: 1.15,
+        ),
+        itemBuilder: (context, index) {
+          final attachment = attachments[index];
+          final referenceCount = note == null
+              ? 0
+              : _attachmentReferenceCount(
+                  markdown: currentMarkdown,
+                  note: note,
+                  attachment: attachment,
+                );
+          return AttachmentTile(
+            attachment: attachment,
+            referenceCount: referenceCount,
+            busy: busy,
+            imageBytes: widget.controller.readNoteAttachment(attachment),
+            onDelete: editorContext == null
+                ? () {}
+                : () async {
+                    await widget.onDeleteAttachments(editorContext, [
+                      attachment,
+                    ]);
+                  },
+          );
+        },
+      ),
+    );
+  }
+
+  int _attachmentReferenceCount({
+    required String markdown,
+    required VaultNote note,
+    required NoteAttachment attachment,
+  }) {
+    final assetsDirectory = '${p.basenameWithoutExtension(note.path)}.assets';
+    final src = '$assetsDirectory/${attachment.relativePath}'.replaceAll(
+      '\\',
+      '/',
+    );
+    var count = 0;
+    var start = 0;
+    while (start < markdown.length) {
+      final reference = findMarkdownImageReference(
+        markdown: markdown,
+        src: src,
+        start: start,
+      );
+      if (reference == null) {
+        break;
+      }
+      count += 1;
+      start = reference.end;
+    }
+    return count;
   }
 
   PaneEditorContext? _captureFocusedEditorContext() {
@@ -624,7 +798,7 @@ final class _WorkspaceSourcesPaneState extends State<WorkspaceSourcesPane> {
 
   Future<void> _deleteSelectedSources(
     PaneEditorContext? editorContext,
-    List<SourceItem> sources,
+    List<AiMaterial> sources,
     Set<String> selectedSourceIds,
   ) async {
     if (editorContext == null) {
@@ -716,6 +890,13 @@ final class _WorkspaceSourcesPaneState extends State<WorkspaceSourcesPane> {
       return;
     }
     setState(() => _sourcesExpandedByNote[noteId] = expanded);
+  }
+
+  void _setAttachmentsExpanded(String noteId, bool expanded) {
+    if (_attachmentsExpandedByNote[noteId] == expanded) {
+      return;
+    }
+    setState(() => _attachmentsExpandedByNote[noteId] = expanded);
   }
 
   void _setExpandedProposal(String noteId, String proposalId) {
@@ -810,7 +991,7 @@ final class _WorkspaceSourcesPaneState extends State<WorkspaceSourcesPane> {
     KeyEvent event,
     PaneEditorContext? editorContext,
   ) {
-    if (!_isPasteImageShortcutKeyUp(event)) {
+    if (!node.hasPrimaryFocus || !_isPasteImageShortcutKeyUp(event)) {
       return KeyEventResult.ignored;
     }
     if (!widget.workspace.isBusy &&
@@ -899,8 +1080,8 @@ final class _SourceSummaryThumbnail extends StatefulWidget {
     required this.imageBytes,
   });
 
-  final SourceItem source;
-  final Future<List<int>> imageBytes;
+  final AiMaterial source;
+  final Future<List<int>>? imageBytes;
 
   @override
   State<_SourceSummaryThumbnail> createState() =>
@@ -909,7 +1090,7 @@ final class _SourceSummaryThumbnail extends StatefulWidget {
 
 final class _SourceSummaryThumbnailState
     extends State<_SourceSummaryThumbnail> {
-  late Future<List<int>> _imageBytes;
+  Future<List<int>>? _imageBytes;
 
   @override
   void initState() {
@@ -933,28 +1114,37 @@ final class _SourceSummaryThumbnailState
         dimension: 40,
         child: ColoredBox(
           color: workspaceSecondarySurfaceColor,
-          child: FutureBuilder<List<int>>(
-            future: _imageBytes,
-            builder: (context, snapshot) {
-              if (snapshot.connectionState != ConnectionState.done) {
-                return const Center(
-                  child: CupertinoActivityIndicator(radius: 7),
-                );
-              }
-              if (snapshot.hasError || !snapshot.hasData) {
-                return const Icon(
-                  CupertinoIcons.exclamationmark_triangle,
-                  size: 16,
-                  color: workspaceDangerColor,
-                );
-              }
-              return Image.memory(
-                Uint8List.fromList(snapshot.data!),
-                fit: BoxFit.contain,
-                gaplessPlayback: true,
-              );
-            },
-          ),
+          child:
+              widget.source.mediaKind == MediaKind.image && _imageBytes != null
+              ? FutureBuilder<List<int>>(
+                  future: _imageBytes,
+                  builder: (context, snapshot) {
+                    if (snapshot.connectionState != ConnectionState.done) {
+                      return const Center(
+                        child: CupertinoActivityIndicator(radius: 7),
+                      );
+                    }
+                    if (snapshot.hasError || !snapshot.hasData) {
+                      return const Icon(
+                        CupertinoIcons.exclamationmark_triangle,
+                        size: 16,
+                        color: workspaceDangerColor,
+                      );
+                    }
+                    return Image.memory(
+                      Uint8List.fromList(snapshot.data!),
+                      fit: BoxFit.contain,
+                      gaplessPlayback: true,
+                    );
+                  },
+                )
+              : Icon(
+                  widget.source.mediaKind == MediaKind.audio
+                      ? CupertinoIcons.waveform
+                      : CupertinoIcons.doc_text,
+                  size: 18,
+                  color: workspaceMutedColor,
+                ),
         ),
       ),
     );

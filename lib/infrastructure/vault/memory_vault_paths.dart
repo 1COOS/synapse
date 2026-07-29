@@ -95,8 +95,8 @@ final class MemoryVaultPaths {
 
   String uniqueAttachmentPath(String noteId, String filename) {
     final existing = {
-      for (final source in state.sources[noteId] ?? const [])
-        if (source.attachmentPath != null) source.attachmentPath!,
+      for (final attachment in state.attachments[noteId] ?? const [])
+        attachment.relativePath,
     };
     final dot = filename.lastIndexOf('.');
     final base = dot <= 0 ? filename : filename.substring(0, dot);
@@ -105,6 +105,25 @@ final class MemoryVaultPaths {
     while (true) {
       final name = index == 1 ? filename : '$base-$index$extension';
       final path = 'attachments/$name';
+      if (!existing.contains(path)) {
+        return path;
+      }
+      index += 1;
+    }
+  }
+
+  String uniqueMaterialPath(String noteId, String filename) {
+    final existing = {
+      for (final material in state.aiMaterials[noteId] ?? const [])
+        if (material.contentPath != null) material.contentPath!,
+    };
+    final dot = filename.lastIndexOf('.');
+    final base = dot <= 0 ? filename : filename.substring(0, dot);
+    final extension = dot <= 0 ? '' : filename.substring(dot);
+    var index = 1;
+    while (true) {
+      final name = index == 1 ? filename : '$base-$index$extension';
+      final path = 'materials/$name';
       if (!existing.contains(path)) {
         return path;
       }

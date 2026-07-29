@@ -2,6 +2,48 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:synapse/infrastructure/vault/vault_store_helpers.dart';
 
 void main() {
+  test('decodes local image paths without re-encoding Unicode', () {
+    expect(
+      localVaultImageSourcePath(
+        '中文笔记.assets/attachments/图片.png',
+        windows: false,
+      ),
+      '中文笔记.assets/attachments/图片.png',
+    );
+    expect(
+      localVaultImageSourcePath(
+        '%E4%B8%AD%E6%96%87%20%E7%AC%94%E8%AE%B0.assets/attachments/a%20b.png',
+        windows: false,
+      ),
+      '中文 笔记.assets/attachments/a b.png',
+    );
+    expect(
+      localVaultImageSourcePath(
+        '中文%25笔记.assets/attachments/100%25.png',
+        windows: false,
+      ),
+      '中文%笔记.assets/attachments/100%.png',
+    );
+    expect(
+      localVaultImageSourcePath(
+        'file:///tmp/%E4%B8%AD%E6%96%87.png',
+        windows: false,
+      ),
+      '/tmp/中文.png',
+    );
+    expect(
+      localVaultImageSourcePath(
+        'https://example.com/image.png',
+        windows: false,
+      ),
+      isNull,
+    );
+    expect(
+      localVaultImageSourcePath('data:image/png;base64,AA==', windows: false),
+      isNull,
+    );
+  });
+
   test('rewrites only local note asset image references', () {
     const markdown = '''# Note
 

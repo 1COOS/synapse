@@ -16,13 +16,13 @@ void main() {
       final vault = MemoryVaultBackend(seedExampleData: false);
       final alpha = await vault.createNote(parentPath: '', title: 'Alpha');
       final beta = await vault.createNote(parentPath: '', title: 'Beta');
-      final alphaSource = await vault.addImageSource(
+      final alphaSource = await vault.addImageAttachment(
         noteId: alpha.id,
         filename: 'alpha.png',
         mimeType: 'image/png',
         bytes: tinyPng,
       );
-      await vault.addImageSource(
+      await vault.addImageAttachment(
         noteId: beta.id,
         filename: 'beta.png',
         mimeType: 'image/png',

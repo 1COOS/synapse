@@ -68,12 +68,13 @@ class OpenAICompatibleProvider implements DisposableAiProvider {
   Future<String> createOutlineProposal({
     required String noteTitle,
     required String currentMarkdown,
-    required List<SourceItem> sources,
+    required List<AiMaterial> materials,
   }) async {
-    final sourceText = sources
-        .map((source) => '### ${source.title}\n${source.searchableText}')
+    final sourceText = materials
+        .map((material) => '### ${material.title}\n${material.searchableText}')
         .join('\n\n');
-    final model = sources.any((source) => source.type == SourceType.image)
+    final model =
+        materials.any((material) => material.mediaKind == MediaKind.image)
         ? config.visionModel.trim()
         : config.chatModel.trim();
     final json = await _postJson('/chat/completions', {

@@ -859,14 +859,14 @@ final class _RecordingPostCommitVault extends MemoryVaultBackend {
   }
 
   @override
-  Future<SourceItem> addImageSource({
+  Future<AiMaterial> addImageMaterial({
     required String noteId,
     required String filename,
     required String mimeType,
     required List<int> bytes,
   }) {
     addImageCalls += 1;
-    return super.addImageSource(
+    return super.addImageMaterial(
       noteId: noteId,
       filename: filename,
       mimeType: mimeType,
@@ -975,7 +975,7 @@ final class _NoopAiProvider implements AiProvider {
   Future<String> createOutlineProposal({
     required String noteTitle,
     required String currentMarkdown,
-    required List<SourceItem> sources,
+    required List<AiMaterial> materials,
   }) async => '';
 
   @override

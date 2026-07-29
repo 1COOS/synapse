@@ -107,7 +107,7 @@ void main() {
     await provider.createOutlineProposal(
       noteTitle: '心经学习',
       currentMarkdown: '# 心经学习',
-      sources: [
+      materials: [
         SourceItem(
           id: 'source-1',
           noteId: 'note-1.md',
@@ -148,7 +148,7 @@ void main() {
     final proposal = await provider.createOutlineProposal(
       noteTitle: '心经学习',
       currentMarkdown: '# 心经学习',
-      sources: [
+      materials: [
         SourceItem(
           id: 'source-1',
           noteId: 'note-1.md',

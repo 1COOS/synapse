@@ -67,7 +67,7 @@ final class MemoryVaultProposalStore {
   void copyForNote(
     String oldNoteId,
     String newNoteId,
-    Map<String, String> sourceIdMap,
+    Map<String, String> materialIdMap,
     DateTime now,
   ) {
     final proposals = state.proposals.values
@@ -77,9 +77,16 @@ final class MemoryVaultProposalStore {
       final copied = AiProposal(
         id: const Uuid().v4(),
         noteId: newNoteId,
-        sourceIds: [
-          for (final sourceId in proposal.sourceIds)
-            sourceIdMap[sourceId] ?? sourceId,
+        materialSnapshots: [
+          for (final snapshot in proposal.materialSnapshots)
+            ProposalMaterialSnapshot(
+              materialId:
+                  materialIdMap[snapshot.materialId] ?? snapshot.materialId,
+              title: snapshot.title,
+              mediaKind: snapshot.mediaKind,
+              mimeType: snapshot.mimeType,
+              processingState: snapshot.processingState,
+            ),
         ],
         title: proposal.title,
         proposedMarkdown: proposal.proposedMarkdown,

@@ -101,6 +101,20 @@ String normalizeImageSrc(String? src) {
   return safeUriDecode(src ?? '').replaceAll('\\', '/');
 }
 
+bool isLocalMarkdownImageSrc(String? src) {
+  final value = (src ?? '').trim();
+  if (value.isEmpty) {
+    return false;
+  }
+  if (RegExp(r'^[A-Za-z]:[\\/]').hasMatch(value) || value.startsWith(r'\\')) {
+    return true;
+  }
+  final uri = Uri.tryParse(value);
+  return uri == null || !uri.hasScheme || uri.scheme.toLowerCase() == 'file';
+}
+
+String? markdownImageSrcFromTag(String tag) => _markdownImageSrc(tag);
+
 int clampImageWidth(int value) {
   return value.clamp(minMarkdownImageWidth, maxMarkdownImageWidth);
 }

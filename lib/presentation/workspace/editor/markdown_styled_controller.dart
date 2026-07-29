@@ -8,6 +8,7 @@ typedef MarkdownInlineImageBuilder = Widget Function(String source);
 
 class MarkdownStyledTextEditingController extends TextEditingController {
   MarkdownInlineImageBuilder? inlineImageBuilder;
+  bool Function(String source)? brokenImageMatcher;
 
   @override
   TextSpan buildTextSpan({
@@ -21,6 +22,7 @@ class MarkdownStyledTextEditingController extends TextEditingController {
         color: workspaceTextColor,
       ),
       inlineImageBuilder: inlineImageBuilder,
+      brokenImageMatcher: brokenImageMatcher,
     );
   }
 }
@@ -44,6 +46,7 @@ class _MarkdownSourceTextSpanBuilder {
     String source,
     TextStyle baseStyle, {
     MarkdownInlineImageBuilder? inlineImageBuilder,
+    bool Function(String source)? brokenImageMatcher,
   }) {
     return TextSpan(
       style: baseStyle,
@@ -51,6 +54,7 @@ class _MarkdownSourceTextSpanBuilder {
         source,
         baseStyle,
         inlineImageBuilder: inlineImageBuilder,
+        brokenImageMatcher: brokenImageMatcher,
       ),
     );
   }
@@ -59,6 +63,7 @@ class _MarkdownSourceTextSpanBuilder {
     String source,
     TextStyle baseStyle, {
     MarkdownInlineImageBuilder? inlineImageBuilder,
+    bool Function(String source)? brokenImageMatcher,
   }) {
     final spans = <InlineSpan>[];
     final lines = source.split('\n');
@@ -68,6 +73,7 @@ class _MarkdownSourceTextSpanBuilder {
           lines[index],
           baseStyle,
           inlineImageBuilder: inlineImageBuilder,
+          brokenImageMatcher: brokenImageMatcher,
         ),
       );
       if (index < lines.length - 1) {
@@ -81,6 +87,7 @@ class _MarkdownSourceTextSpanBuilder {
     String line,
     TextStyle baseStyle, {
     MarkdownInlineImageBuilder? inlineImageBuilder,
+    bool Function(String source)? brokenImageMatcher,
   }) {
     final headingMatch = RegExp(r'^(#{1,6})(\s+)(.*)$').firstMatch(line);
     if (headingMatch != null) {
@@ -95,6 +102,7 @@ class _MarkdownSourceTextSpanBuilder {
           headingMatch.group(3)!,
           baseStyle,
           inlineImageBuilder: inlineImageBuilder,
+          brokenImageMatcher: brokenImageMatcher,
         ),
       ];
     }
@@ -112,6 +120,7 @@ class _MarkdownSourceTextSpanBuilder {
           blockMarkerMatch.group(2)!,
           baseStyle,
           inlineImageBuilder: inlineImageBuilder,
+          brokenImageMatcher: brokenImageMatcher,
         ),
       ];
     }
@@ -120,6 +129,7 @@ class _MarkdownSourceTextSpanBuilder {
       line,
       baseStyle,
       inlineImageBuilder: inlineImageBuilder,
+      brokenImageMatcher: brokenImageMatcher,
     );
   }
 
@@ -128,6 +138,7 @@ class _MarkdownSourceTextSpanBuilder {
     TextStyle baseStyle, {
     bool showMarkers = true,
     MarkdownInlineImageBuilder? inlineImageBuilder,
+    bool Function(String source)? brokenImageMatcher,
   }) {
     final analysis = MarkdownInlineAnalysis.parse(source);
     final imageMatches = inlineImageBuilder == null
@@ -146,6 +157,11 @@ class _MarkdownSourceTextSpanBuilder {
         showMarkers: showMarkers,
       );
       final imageSource = imageMatch.group(0)!;
+      if (brokenImageMatcher?.call(imageSource) == true) {
+        spans.add(TextSpan(text: imageSource, style: baseStyle));
+        cursor = imageMatch.end;
+        continue;
+      }
       // Render the first source code unit as the image placeholder and keep
       // the remaining source at zero size. The editable span therefore keeps
       // exactly the same UTF-16 offsets and plain text as the Markdown source.

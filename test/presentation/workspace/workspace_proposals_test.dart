@@ -682,27 +682,33 @@ void main() {
       addTearDown(vault.releaseUpdate);
       final alpha = await vault.createNote(parentPath: '', title: 'Alpha');
       final beta = await vault.createNote(parentPath: '', title: 'Beta');
-      final lockedSource = await vault.addImageSource(
+      final lockedSource = await vault.addImageAttachment(
         noteId: alpha.id,
         filename: 'locked-ocr.png',
         mimeType: 'image/png',
         bytes: tinyPng,
       );
-      final secondAlphaSource = await vault.addImageSource(
+      final secondAlphaSource = await vault.addImageAttachment(
         noteId: alpha.id,
         filename: 'locked-second.png',
         mimeType: 'image/png',
         bytes: tinyPng,
       );
-      final betaSource = await vault.addImageSource(
+      final betaSource = await vault.addImageAttachment(
         noteId: beta.id,
         filename: 'beta-control.png',
         mimeType: 'image/png',
         bytes: tinyPng,
       );
-      final secondBetaSource = await vault.addImageSource(
+      final secondBetaSource = await vault.addImageAttachment(
         noteId: beta.id,
         filename: 'beta-second.png',
+        mimeType: 'image/png',
+        bytes: tinyPng,
+      );
+      final lockedMaterial = await vault.addImageMaterial(
+        noteId: alpha.id,
+        filename: 'locked-ocr-ai.png',
         mimeType: 'image/png',
         bytes: tinyPng,
       );
@@ -750,7 +756,7 @@ void main() {
           .widget<GestureDetector>(find.byKey(const Key('split-pane-pane-1')))
           .onTap!();
       await tester.pump();
-      await tester.tap(find.bySemanticsLabel('locked-ocr.png'));
+      await tester.tap(find.bySemanticsLabel('locked-ocr-ai.png'));
       await tester.pump();
       await tester.tap(find.byKey(const Key('note-mode-source-pane-1')));
       await tester.pump(const Duration(milliseconds: 250));
@@ -906,9 +912,9 @@ void main() {
         'Locked OCR',
       );
       expect(
-        (await vault.listSources(
+        (await vault.listAiMaterials(
           alpha.id,
-        )).firstWhere((source) => source.id == lockedSource.id).state,
+        )).firstWhere((source) => source.id == lockedMaterial.id).state,
         SourceState.processed,
       );
       expect(await vault.listProposals(beta.id), isEmpty);
@@ -1211,9 +1217,9 @@ final class _StaleProposalPostCommitFailureVault extends MemoryVaultBackend {
   int saveProposalCalls = 0;
 
   @override
-  Future<SourceItem> updateSource(SourceItem source) async {
+  Future<AiMaterial> updateAiMaterial(AiMaterial source) async {
     updateSourceCalls += 1;
-    return super.updateSource(source);
+    return super.updateAiMaterial(source);
   }
 
   @override
@@ -1288,9 +1294,9 @@ final class _PostDeleteHydrationFailureVault extends MemoryVaultBackend {
   int deleteProposalCalls = 0;
 
   @override
-  Future<void> deleteSource(SourceItem source) async {
+  Future<void> deleteAiMaterial(AiMaterial source) async {
     deleteSourceCalls += 1;
-    await super.deleteSource(source);
+    await super.deleteAiMaterial(source);
   }
 
   @override

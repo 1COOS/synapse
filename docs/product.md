@@ -53,7 +53,7 @@ AI 只能生成 proposal，不能绕过用户审核直接改写核心笔记。�
 
 ### 5.2 Markdown 是真源
 
-笔记内容以 Markdown、稳定 `synapseId`、相对附件路径、普通目录结构和 `sources.json` 保存。SQLite、向量索引和 AI proposal 都只是可删除缓存。
+笔记内容以 Markdown、稳定 `synapseId`、相对附件路径和普通目录结构保存。每篇笔记的 AI 素材与笔记附件分别由 `materials.json`、`attachments.json` 管理，二者拥有独立记录和文件生命周期；SQLite、向量索引和 AI proposal 都只是可删除缓存。
 
 ### 5.3 可迁移优先于封闭能力
 
@@ -98,13 +98,13 @@ AI 只能生成 proposal，不能绕过用户审核直接改写核心笔记。�
 - 新建文件夹、重命名文件夹和重命名笔记使用同一名称校验：名称不能为空，不能是 `.`/`..`，不能包含控制字符或 `< > : " / \ | ? *`，不能以空格或点结尾，也不能使用 Windows 保留名。重名比较先做 Unicode NFC 规范化，再按不区分大小写处理。
 - 显式命名遇到同级重名时保持弹窗并显示错误，不自动编号；新建未命名笔记、创建副本和移动冲突仍使用自动编号。
 - 笔记移动只在当前已打开 Vault 内选择根级或文件夹目标，不调用系统目录选择器，也不改变 Vault 位置。
-- rename/move 保持笔记的 UUID v4 `synapseId`，copy 为新笔记生成新的 note/source/proposal ID。复制会复制 Markdown、同名 `.assets/`、素材清单、附件和可用 proposal cache，并保持 proposal 指向复制后的 source。文件名变化时同步调整正文中指向本笔记 assets 的图片路径。
+- rename/move 保持笔记的 UUID v4 `synapseId` 以及素材/附件 ID；copy 为新笔记生成新的 note/material/attachment/proposal ID，并把 proposal 来源快照重映射到复制后的素材。文件名变化时只重写确实受路径变化影响的本笔记 assets 图片引用。
 - 重命名笔记会在同一 Vault transaction 内同步首个 H1、frontmatter `title`、文件名、assets 引用、资源树、打开会话和搜索失效状态。若编辑器有未保存正文，以当前正文生成候选 Markdown；冲突时回滚持久层，保留编辑器文字和 dirty 状态。
 - 删除笔记会删除 `.md` 和同名 `.assets/`；删除文件夹会递归删除其中所有子文件夹、笔记和素材。
 
 系统写入 `title`、`createdAt`、`updatedAt` frontmatter 和初始 `# 标题` 正文。Synapse 不再要求用户选择学科、书籍等模板。
 
-中栏 Markdown 编辑器会在用户停止输入约 1 秒后自动保存到当前笔记文件。保存按钮位于中栏内容区第一行，用于立即保存、失败后重试，或在用户希望明确落盘时手动触发。切换笔记、切换 Vault、导入或删除素材、生成 AI proposal 等会刷新当前笔记内容的操作，会先保存当前未落盘编辑；如果保存失败，系统留在当前笔记并保留编辑器里的文字。
+中栏 Markdown 编辑器会在用户停止输入约 1 秒后自动保存到当前笔记文件。保存按钮位于中栏内容区第一行，用于立即保存、失败后重试，或在用户希望明确落盘时手动触发。切换笔记、切换 Vault、导入或删除 AI 素材、永久删除附件、生成 AI proposal 等会刷新当前笔记内容的操作，会先保存相关未落盘编辑；如果保存失败，系统保留编辑器里的文字并中止操作。
 
 编辑器右键菜单统一为「插入 / 格式 / 段落 / 列表」。格式支持加粗、斜体、删除线和 Obsidian 兼容的 `==高亮==`；引用块属于「段落」，表格和分隔线属于「插入」。命令采用切换语义，跨行逐个非空行处理，并保持相同可见文字处于选中状态。无选区或选区涉及行内/围栏代码时禁用格式与结构命令，仅保留可用的剪贴板操作。
 
@@ -112,12 +112,12 @@ macOS 默认快捷键为 `⌘B`、`⌘I`、`⇧⌘V`，Windows/Web 对应 `Ctrl+
 
 ### 7.3 导入素材
 
-首版支持：
+当前资源分为两个独立入口和生命周期：
 
-- 粘贴文本素材。
-- 选择图片文件导入。
-- 在 Markdown 编辑器中粘贴剪贴板图片。
-- 图片 OCR/视觉理解 proposal。
+- **AI 素材：** 在右栏导入图片或粘贴文本/图片，用于生成 AI 建议；新素材默认选中。当前支持文本和图片，`MediaKind.audio` 仅保证模型与持久化可序列化，本期没有音频导入、播放或转写。
+- **笔记附件：** 在 Markdown 编辑器中粘贴图片时创建，只服务正文引用，不参与 AI，也不会自动选中。
+- 同一文件若两边都需要，必须重新导入并形成两份独立记录和文件；删除任一侧不会影响另一侧，也不提供“附件加入 AI”的快捷转换。
+- 从正文删除、剪切或按 Delete 移除图片时，只删除 Markdown 引用，附件文件保留并显示为“未引用”。
 
 产品目标支持：
 
@@ -125,7 +125,7 @@ macOS 默认快捷键为 `⌘B`、`⌘I`、`⇧⌘V`，Windows/Web 对应 `Ctrl+
 - PDF 导入。
 - 网页剪藏。
 
-后 3 类属于后续扩展点，不作为当前首版完整交付。
+以上 3 类属于后续扩展点，不作为当前首版完整交付。
 
 ### 7.4 生成 AI proposal
 
@@ -133,9 +133,13 @@ macOS 默认快捷键为 `⌘B`、`⌘I`、`⇧⌘V`，Windows/Web 对应 `Ctrl+
 
 图片素材使用 `visionModel`，纯文本素材使用 `chatModel`。纯图片建议直接显示忠实 OCR 转写，不做第二次总结或大纲生成，并尽量保留原图中的换行、层级和表格。
 
+proposal 保存生成时的素材快照，包括素材 ID、名称、媒体类型、MIME 和处理状态。AI 素材删除后，历史建议内容仍可查看，来源位置显示“来源已删除”。
+
 ### 7.5 审核并写入笔记
 
 proposal 会显示在右侧 AI 建议栏。用户确认后，系统把建议内容追加写入当前笔记 Markdown，并把 proposal 状态改为 `applied`。后续需要补充拒绝、diff 预览、插入位置选择和局部合并。
+
+AI 素材删除只删除素材记录、独立文件和选择状态，不修改 Markdown、附件或历史 proposal。附件使用“永久删除附件”：确认前扫描整个 Vault，列出受影响笔记与引用次数；确认后先 flush 相关打开会话，再在同一事务中删除所有 Markdown/HTML 图片引用、附件记录和文件。提交前若 Vault Markdown 已变化，删除会中止并要求重新确认；任何持久化失败由 journal 回滚，禁止留下断链或半提交状态。
 
 ### 7.6 搜索与回看
 
@@ -164,7 +168,7 @@ Chat、Vision、Embedding 分项测试使用当前草稿发起真实请求且互
 
 - **左栏：** 资源/搜索模式切换、根级新建文件夹、根级新建笔记、Apple Notes 式资源树、文件夹和笔记右键菜单、大纲树、全仓搜索结果、底部仓库与设置入口。
 - **中栏：** Markdown 阅读、块级 Live Preview 编辑、手动保存入口。
-- **右栏：** 素材录入、素材选择、AI proposal 审核。
+- **右栏：** 保持单页纵向工作流，依次显示可折叠的「AI 素材 → AI 建议 → 笔记附件」，不使用标签页。AI 素材区保留批选、折叠和高度拖动；附件区显示引用次数或“未引用”。
 
 桌面端左右栏都可折叠为窄图标栏；左栏折叠后仍保留仓库选择和设置图标。
 
@@ -175,15 +179,21 @@ Chat、Vision、Embedding 分项测试使用当前草稿发起真实请求且互
 资源树直接映射 Vault 下的普通文件夹和 `.md` 文件。笔记是一个普通 Markdown 文件，笔记相关素材放在同级同名 assets 目录中：
 
 - `foo.md`：用户可直接编辑和用 Obsidian 打开的主笔记。
-- `foo.assets/attachments/`：图片等附件。
-- `foo.assets/sources.json`：素材清单持久真源。
+- `foo.assets/materials/`：AI 图片素材等独立文件。
+- `foo.assets/materials.json`：AI 素材清单、媒体类型、处理状态与提取结果。
+- `foo.assets/attachments/`：仅供 Markdown/HTML 引用的笔记附件。
+- `foo.assets/attachments.json`：附件身份与相对路径；引用次数从整个 Vault 的 Markdown 实时计算，不持久化。
 - `.synapse-cache/proposals/<note-uuid>.json`：可删除的 AI 建议缓存。
 - `.synapse-cache/search.sqlite`：可从 Markdown 重建的搜索缓存。
 - `.synapse/transactions/`：File Vault mutation WAL；异常退出后的 active transaction 会在下次打开 Vault 时自动回滚。
 
-资源树不显示 `.assets/`、`.synapse/` 和 `.synapse-cache/`。每篇笔记 frontmatter 中保存规范化小写 UUID v4 `synapseId`，业务身份不再等于路径。重命名文件夹、重命名/移动笔记会同步移动文件与 assets，但保持 note ID；复制笔记生成新 ID，并让复制后的 source/proposal 和图片引用指向新笔记。删除笔记时同步删除同名 `.assets/`；删除文件夹时递归删除其中资源。
+资源树不显示 `.assets/`、`.synapse/` 和 `.synapse-cache/`。每篇笔记 frontmatter 中保存规范化小写 UUID v4 `synapseId`，业务身份不再等于路径。重命名文件夹、重命名/移动笔记会同步移动文件与 assets，但保持 note/material/attachment ID；复制笔记为两类资源生成新 ID，并重映射 proposal 来源快照。删除笔记时同步删除同名 `.assets/`；删除文件夹时递归删除其中资源。
 
-旧 Vault 若缺少 `synapseId`、ID 非法或重复，会先进入只读迁移确认页。用户确认后，系统备份受影响文件、写 migration manifest，并同步迁移 `sources.json` 与 legacy proposal cache；失败时回滚持久真源。
+旧 Vault 若缺少 `synapseId`、ID 非法或重复，会先进入只读身份迁移确认页。用户确认后，系统备份受影响文件、写 migration manifest，并同步重写资源 sidecar 与 legacy proposal cache；失败时回滚持久真源。
+
+身份有效但仍使用 `sources.json` 的笔记会在首次读取资源时自动进入资源分区迁移事务：被 Markdown 或 HTML 图片语法引用的旧图片归为附件，其余旧图片和文本归为 AI 素材；历史 proposal 补齐来源快照，被归为附件的旧来源显示为历史已删除素材。`attachments/` 中没有 sidecar 的裸文件也会补建附件记录并标记为“未引用”。只有新 sidecar 校验成功后才删除旧 `sources.json`，迁移备份与 journal 回滚信息会保留。
+
+中文、空格或百分号编码的本地图片路径按文件系统路径解析，不应被 URI 处理重新编码。如果旧版本已因路径失配把被引用图片错分到 AI 素材，应用会执行幂等的 `resource-split-v2` 修复：仅把 v1 备份、当前素材记录、正文原附件引用和实际文件同时确认的图片移回附件区。修复前备份当前 sidecar 并记录文件 SHA-256；缺失或冲突项保持原样，不覆盖文件、不删除 Markdown 引用，也不改动历史 proposal。
 
 ### 8.3 大纲
 
@@ -219,10 +229,11 @@ Chat、Vision、Embedding 分项测试使用当前草稿发起真实请求且互
 - OpenAI 兼容 Provider 与 Chat/Vision/Embedding 能力测试。
 - Markdown frontmatter 解析。
 - 标题大纲解析。
-- 文本素材导入。
-- 图片素材导入和附件保存。
+- AI 文本/图片素材导入、默认选中和独立删除。
+- 编辑器图片粘贴创建笔记附件，附件引用计数、预览和安全永久删除。
+- `MediaKind` 的 text/image/audio 可序列化结构；音频能力仅预留。
 - 真实/Mock AI proposal 生成。
-- proposal 审核写入。
+- proposal 审核写入、生成时素材快照和“来源已删除”状态。
 - 稳定 UUID v4 note identity、显式 legacy Vault 迁移和备份/回滚。
 - File Vault mutation WAL、跨调用 proposal 事务和启动恢复。
 - macOS SQLite 后台增量搜索、持久 fingerprint 和 memory fallback。
@@ -231,8 +242,8 @@ Chat、Vision、Embedding 分项测试使用当前草稿发起真实请求且互
 
 ### 9.2 部分实现
 
-- 搜索已能从 Markdown 自动重建，但尚未索引附件内容和 source sidecar。
-- `sources.json` 是持久真源；从裸 attachments 反推完整素材清单的恢复任务尚未实现。
+- 搜索已能从 Markdown 自动重建，但尚未索引 AI 素材、附件内容或两类 sidecar。
+- 裸 `attachments/` 文件已能自动补建附件记录；AI 素材文件在 `materials.json` 丢失后仍不能完整重建标题、处理状态和提取结果。
 - 后台语义索引尚无进度、暂停、节流和模型成本提示。
 - proposal 当前仍以 Markdown 片段为单位，尚无 diff 和局部采纳。
 
@@ -241,8 +252,8 @@ Chat、Vision、Embedding 分项测试使用当前草稿发起真实请求且互
 - proposal diff 视图。
 - proposal 拒绝和重新生成。
 - 选择写入位置。
-- 从 attachments/source sidecar 重建和扩展搜索索引的完整任务。
-- 音频、PDF、网页剪藏。
+- AI 素材 sidecar 修复工具，以及材料/附件搜索索引。
+- 音频导入、播放、转写，以及 PDF、网页剪藏。
 - 移动端发布。
 - 云同步和协作。
 
@@ -252,9 +263,9 @@ Chat、Vision、Embedding 分项测试使用当前草稿发起真实请求且互
 
 - 用户可以选择本机 Vault。
 - 用户可以创建文件夹和普通 `.md` 笔记并看到文件落盘。
-- 用户可以粘贴文本素材。
-- 用户可以导入图片，图片保存到相对附件目录。
-- 用户可以选择素材生成 proposal。
+- 用户可以在右栏导入 AI 文本/图片素材，在编辑器中粘贴图片附件，两类记录和文件互不影响。
+- 用户可以选择 AI 素材生成 proposal，删除素材后仍能查看 proposal 来源快照。
+- 用户可以查看附件引用次数，并通过影响预览和二次校验安全永久删除附件。
 - 用户可以确认 proposal 并写入 Markdown。
 - 用户可以自动保存 Markdown，也可以手动立即保存或失败后重试，并用 Obsidian 打开该 Vault。
 
@@ -270,6 +281,8 @@ Chat、Vision、Embedding 分项测试使用当前草稿发起真实请求且互
 
 - 桌面端只在用户选择的 Vault 根目录内读写。
 - 附件路径使用相对路径。
+- AI 素材与笔记附件使用独立目录和 sidecar；任何一侧删除都不得影响另一侧。
+- 附件永久删除必须清理整个 Vault 中的 Markdown/HTML 引用，并由 fingerprint 二次校验和 journal 回滚防止断链。
 - 缓存目录可删除，删除后不影响用户核心 Markdown 笔记。
 - 旧 Vault 身份迁移必须显式确认，并在迁移前保持工作区只读。
 - File Vault mutation 中断后必须由 WAL 回滚或确认 committed 状态，不能留下半完成跨文件变更。
@@ -300,11 +313,11 @@ Chat、Vision、Embedding 分项测试使用当前草稿发起真实请求且互
 
 ### 11.4 v0.4：索引重建与搜索增强
 
-在已落地的 Markdown → SQLite 后台增量索引基础上，继续加入附件/source sidecar 索引、标签筛选、索引进度、暂停/取消、节流和语义调用成本提示。
+在已落地的 Markdown → SQLite 后台增量索引基础上，继续加入 AI 素材/附件 sidecar 与内容索引、标签筛选、索引进度、暂停/取消、节流和语义调用成本提示。
 
 ### 11.5 v0.5：导入 Provider 扩展
 
-增加音频转写、PDF 文本提取和网页剪藏。所有导入能力通过统一 Provider 接口注册，避免 UI 与平台能力耦合。
+在现有 `MediaKind.audio` 持久化边界上增加音频导入、播放和转写，再扩展 PDF 文本提取和网页剪藏。所有导入能力通过统一 Provider 接口注册，避免 UI 与平台能力耦合。
 
 ## 12. 非目标
 

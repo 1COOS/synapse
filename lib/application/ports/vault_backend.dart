@@ -55,28 +55,90 @@ abstract class VaultBackend {
     required String title,
   });
 
-  Future<SourceItem> addTextSource({
+  Future<AiMaterial> addTextMaterial({
     required String noteId,
     required String title,
     required String text,
   });
 
-  Future<SourceItem> addImageSource({
+  Future<AiMaterial> addImageMaterial({
     required String noteId,
     required String filename,
     required String mimeType,
     required List<int> bytes,
   });
 
-  Future<List<SourceItem>> listSources(String noteId);
+  Future<List<AiMaterial>> listAiMaterials(String noteId);
 
-  Future<List<SourceItem>> getSources(String noteId, List<String> sourceIds);
+  Future<List<AiMaterial>> getAiMaterials(
+    String noteId,
+    List<String> materialIds,
+  );
 
-  Future<List<int>> readSourceAttachment(SourceItem source);
+  Future<List<int>> readAiMaterialContent(AiMaterial material);
 
-  Future<SourceItem> updateSource(SourceItem source);
+  Future<AiMaterial> updateAiMaterial(AiMaterial material);
 
-  Future<void> deleteSource(SourceItem source);
+  Future<void> deleteAiMaterial(AiMaterial material);
+
+  Future<NoteAttachment> addImageAttachment({
+    required String noteId,
+    required String filename,
+    required String mimeType,
+    required List<int> bytes,
+  });
+
+  Future<List<NoteAttachment>> listNoteAttachments(String noteId);
+
+  Future<List<int>> readNoteAttachment(NoteAttachment attachment);
+
+  Future<AttachmentDeletionImpact> analyzeAttachmentDeletion(
+    List<NoteAttachment> attachments,
+  );
+
+  Future<void> deleteNoteAttachments({
+    required List<NoteAttachment> attachments,
+    required AttachmentDeletionImpact expectedImpact,
+  });
+
+  @Deprecated('Use addTextMaterial.')
+  Future<AiMaterial> addTextSource({
+    required String noteId,
+    required String title,
+    required String text,
+  }) => addTextMaterial(noteId: noteId, title: title, text: text);
+
+  @Deprecated('Use addImageMaterial.')
+  Future<AiMaterial> addImageSource({
+    required String noteId,
+    required String filename,
+    required String mimeType,
+    required List<int> bytes,
+  }) => addImageMaterial(
+    noteId: noteId,
+    filename: filename,
+    mimeType: mimeType,
+    bytes: bytes,
+  );
+
+  @Deprecated('Use listAiMaterials.')
+  Future<List<AiMaterial>> listSources(String noteId) =>
+      listAiMaterials(noteId);
+
+  @Deprecated('Use getAiMaterials.')
+  Future<List<AiMaterial>> getSources(String noteId, List<String> sourceIds) =>
+      getAiMaterials(noteId, sourceIds);
+
+  @Deprecated('Use readAiMaterialContent.')
+  Future<List<int>> readSourceAttachment(AiMaterial source) =>
+      readAiMaterialContent(source);
+
+  @Deprecated('Use updateAiMaterial.')
+  Future<AiMaterial> updateSource(AiMaterial source) =>
+      updateAiMaterial(source);
+
+  @Deprecated('Use deleteAiMaterial.')
+  Future<void> deleteSource(AiMaterial source) => deleteAiMaterial(source);
 
   Future<AiProposal> saveProposal(AiProposal proposal);
 

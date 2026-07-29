@@ -21,7 +21,7 @@ void main() {
     );
 
     expect(tester.takeException(), isNull);
-    final materialsTitle = tester.widget<Text>(find.text('图片素材 · 已选 0 张'));
+    final materialsTitle = tester.widget<Text>(find.text('AI 素材 · 已选 0 项'));
     final proposalsTitle = tester.widget<Text>(find.text('AI 建议'));
     expect(materialsTitle.style?.fontSize, 13);
     expect(materialsTitle.style?.fontWeight, FontWeight.w600);
@@ -115,7 +115,7 @@ void main() {
       await tester.tap(find.bySemanticsLabel('first.png'));
       await tester.tap(find.bySemanticsLabel('second.png'));
       await tester.pump();
-      expect(find.text('图片素材 · 已选 2 张'), findsOneWidget);
+      expect(find.text('AI 素材 · 已选 2 项'), findsOneWidget);
 
       await tester.tap(find.byKey(const Key('generate-proposal-button')));
       await aiProvider.extractionStarted.future;
@@ -158,7 +158,7 @@ void main() {
     );
 
     expect(find.text('导入'), findsNothing);
-    expect(find.byTooltip('导入图片'), findsOneWidget);
+    expect(find.byTooltip('导入图片素材'), findsOneWidget);
     await tester.tap(find.byKey(const Key('add-image-button')));
     await tester.pump(const Duration(milliseconds: 250));
 
@@ -500,7 +500,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.byType(Image), findsNothing);
-    expect(find.text('暂无图片素材'), findsOneWidget);
+    expect(find.text('暂无 AI 素材'), findsOneWidget);
     expect(await vault.listSources(note.id), isEmpty);
   });
 
@@ -529,12 +529,12 @@ void main() {
 
     await tester.tap(find.byKey(const Key('delete-selected-images-button')));
     await tester.pumpAndSettle();
-    expect(find.textContaining('删除 2 张图片素材'), findsOneWidget);
+    expect(find.textContaining('删除 2 个 AI 素材'), findsOneWidget);
 
     await tester.tap(find.text('取消'));
     await tester.pumpAndSettle();
     expect(await vault.listSources(note.id), hasLength(2));
-    expect(find.text('图片素材 · 已选 2 张'), findsOneWidget);
+    expect(find.text('AI 素材 · 已选 2 项'), findsOneWidget);
 
     await tester.tap(find.byKey(const Key('delete-selected-images-button')));
     await tester.pumpAndSettle();
@@ -542,7 +542,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(await vault.listSources(note.id), isEmpty);
-    expect(find.text('图片素材 · 已选 0 张'), findsOneWidget);
+    expect(find.text('AI 素材 · 已选 0 项'), findsOneWidget);
     await expectLater(
       vault.readSourceAttachment(first),
       throwsA(isA<StateError>()),
@@ -581,7 +581,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(await vault.listSources(note.id), hasLength(2));
-    expect(find.text('图片素材 · 已选 2 张'), findsOneWidget);
+    expect(find.text('AI 素材 · 已选 2 项'), findsOneWidget);
   });
 
   testWidgets(
@@ -666,14 +666,14 @@ final class _ImageImportHydrationFailureVault extends MemoryVaultBackend {
   bool _imageCommitted = false;
 
   @override
-  Future<SourceItem> addImageSource({
+  Future<AiMaterial> addImageMaterial({
     required String noteId,
     required String filename,
     required String mimeType,
     required List<int> bytes,
   }) async {
     addImageSourceCalls += 1;
-    final source = await super.addImageSource(
+    final source = await super.addImageMaterial(
       noteId: noteId,
       filename: filename,
       mimeType: mimeType,
@@ -705,9 +705,9 @@ final class _ProposalHydrationFailureVault extends MemoryVaultBackend {
   bool _proposalCommitted = false;
 
   @override
-  Future<SourceItem> updateSource(SourceItem source) async {
+  Future<AiMaterial> updateAiMaterial(AiMaterial source) async {
     updateSourceCalls += 1;
-    return super.updateSource(source);
+    return super.updateAiMaterial(source);
   }
 
   @override
@@ -733,9 +733,9 @@ final class _FailingBatchDeleteVault extends MemoryVaultBackend {
   int deleteSourceCalls = 0;
 
   @override
-  Future<void> deleteSource(SourceItem source) async {
+  Future<void> deleteAiMaterial(AiMaterial source) async {
     deleteSourceCalls += 1;
-    await super.deleteSource(source);
+    await super.deleteAiMaterial(source);
     if (deleteSourceCalls == 2) {
       throw StateError('second source delete failed');
     }
@@ -754,9 +754,9 @@ final class _PostDeleteHydrationFailureVault extends MemoryVaultBackend {
   int deleteProposalCalls = 0;
 
   @override
-  Future<void> deleteSource(SourceItem source) async {
+  Future<void> deleteAiMaterial(AiMaterial source) async {
     deleteSourceCalls += 1;
-    await super.deleteSource(source);
+    await super.deleteAiMaterial(source);
   }
 
   @override

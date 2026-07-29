@@ -403,7 +403,7 @@ final class _TrackingAiProvider implements DisposableAiProvider {
   Future<String> createOutlineProposal({
     required String noteTitle,
     required String currentMarkdown,
-    required List<SourceItem> sources,
+    required List<AiMaterial> materials,
   }) async => id;
 
   @override

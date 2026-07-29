@@ -43,40 +43,36 @@ void main() {
         title: '笔记',
       );
 
-      var readCalls = backend.readNoteCalls;
-      var sourceCalls = backend.listSourcesCalls;
+      var materialCalls = backend.addTextMaterialCalls;
       final textSource = await backend.addTextSource(
         noteId: note.id,
         title: '摘录',
         text: '正文',
       );
-      expect(backend.readNoteCalls, greaterThan(readCalls));
-      expect(backend.listSourcesCalls, greaterThan(sourceCalls));
+      expect(backend.addTextMaterialCalls, greaterThan(materialCalls));
 
-      readCalls = backend.readNoteCalls;
-      sourceCalls = backend.listSourcesCalls;
+      materialCalls = backend.addImageMaterialCalls;
       final imageSource = await backend.addImageSource(
         noteId: note.id,
         filename: 'screen.png',
         mimeType: 'image/png',
         bytes: [1, 2, 3],
       );
-      expect(backend.readNoteCalls, greaterThan(readCalls));
-      expect(backend.listSourcesCalls, greaterThan(sourceCalls));
+      expect(backend.addImageMaterialCalls, greaterThan(materialCalls));
 
-      sourceCalls = backend.listSourcesCalls;
+      materialCalls = backend.getAiMaterialsCalls;
       await backend.getSources(note.id, [textSource.id]);
-      expect(backend.listSourcesCalls, greaterThan(sourceCalls));
+      expect(backend.getAiMaterialsCalls, greaterThan(materialCalls));
 
-      sourceCalls = backend.listSourcesCalls;
+      materialCalls = backend.updateAiMaterialCalls;
       await backend.updateSource(
         textSource.copyWith(text: '更新', updatedAt: DateTime.utc(2026, 7, 13)),
       );
-      expect(backend.listSourcesCalls, greaterThan(sourceCalls));
+      expect(backend.updateAiMaterialCalls, greaterThan(materialCalls));
 
-      sourceCalls = backend.listSourcesCalls;
+      materialCalls = backend.deleteAiMaterialCalls;
       await backend.deleteSource(imageSource);
-      expect(backend.listSourcesCalls, greaterThan(sourceCalls));
+      expect(backend.deleteAiMaterialCalls, greaterThan(materialCalls));
 
       final proposal = AiProposal(
         id: 'proposal-1',
@@ -104,8 +100,8 @@ void main() {
       expect(backend.listProposalsCalls, greaterThan(proposalCalls));
       expect(backend.listResourcesCalls, greaterThan(resourceCalls));
 
-      readCalls = backend.readNoteCalls;
-      sourceCalls = backend.listSourcesCalls;
+      var readCalls = backend.readNoteCalls;
+      var sourceCalls = backend.listSourcesCalls;
       final copied = await backend.copyNote(noteId: note.id);
       expect(backend.readNoteCalls, greaterThan(readCalls));
       expect(backend.listSourcesCalls, greaterThan(sourceCalls));
@@ -187,6 +183,11 @@ final class _DispatchTrackingFileVaultBackend extends FileVaultBackend {
 
   int readNoteCalls = 0;
   int listSourcesCalls = 0;
+  int addTextMaterialCalls = 0;
+  int addImageMaterialCalls = 0;
+  int getAiMaterialsCalls = 0;
+  int updateAiMaterialCalls = 0;
+  int deleteAiMaterialCalls = 0;
   int listProposalsCalls = 0;
   int listResourcesCalls = 0;
 
@@ -197,9 +198,56 @@ final class _DispatchTrackingFileVaultBackend extends FileVaultBackend {
   }
 
   @override
-  Future<List<SourceItem>> listSources(String noteId) {
+  Future<List<AiMaterial>> listAiMaterials(String noteId) {
     listSourcesCalls += 1;
-    return super.listSources(noteId);
+    return super.listAiMaterials(noteId);
+  }
+
+  @override
+  Future<AiMaterial> addTextMaterial({
+    required String noteId,
+    required String title,
+    required String text,
+  }) {
+    addTextMaterialCalls += 1;
+    return super.addTextMaterial(noteId: noteId, title: title, text: text);
+  }
+
+  @override
+  Future<AiMaterial> addImageMaterial({
+    required String noteId,
+    required String filename,
+    required String mimeType,
+    required List<int> bytes,
+  }) {
+    addImageMaterialCalls += 1;
+    return super.addImageMaterial(
+      noteId: noteId,
+      filename: filename,
+      mimeType: mimeType,
+      bytes: bytes,
+    );
+  }
+
+  @override
+  Future<List<AiMaterial>> getAiMaterials(
+    String noteId,
+    List<String> materialIds,
+  ) {
+    getAiMaterialsCalls += 1;
+    return super.getAiMaterials(noteId, materialIds);
+  }
+
+  @override
+  Future<AiMaterial> updateAiMaterial(AiMaterial material) {
+    updateAiMaterialCalls += 1;
+    return super.updateAiMaterial(material);
+  }
+
+  @override
+  Future<void> deleteAiMaterial(AiMaterial material) {
+    deleteAiMaterialCalls += 1;
+    return super.deleteAiMaterial(material);
   }
 
   @override

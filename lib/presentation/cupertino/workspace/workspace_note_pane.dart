@@ -466,11 +466,14 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
                         ),
                     onImageSelectionChanged:
                         _controller.setSelectedPreviewImageSrc,
+                    hasImageAttachment: (src) => _markdownRenderer
+                        .hasImageAttachment(editorContext!, src),
                     previewBuilder:
                         (
                           markdown, {
                           onImageTap,
                           onImageSecondaryTapUp,
+                          onImageAvailabilityChanged,
                           tableSelected,
                           tableSelectionTargetKey,
                           onTableFrameTap,
@@ -481,6 +484,8 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
                           editorContext: editorContext!,
                           onImageTap: onImageTap,
                           onImageSecondaryTapUp: onImageSecondaryTapUp,
+                          onImageAvailabilityChanged:
+                              onImageAvailabilityChanged,
                           tableSelected: tableSelected ?? false,
                           tableSelectionTargetKey: tableSelectionTargetKey,
                           onTableFrameTap: onTableFrameTap,
