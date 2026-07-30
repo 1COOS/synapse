@@ -287,6 +287,10 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
     _publish(_requireState().copyWith(rightPaneCollapsed: collapsed));
   }
 
+  void setRightTab(WorkspaceRightTab tab) {
+    _publish(_requireState().copyWith(rightTab: tab));
+  }
+
   void toggleFolderCollapsed(String folderId) {
     final current = _requireState();
     final collapsed = Set<String>.of(current.collapsedFolderIds);
@@ -1033,6 +1037,7 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
         narrowSection: current.narrowSection,
         leftPaneCollapsed: current.leftPaneCollapsed,
         rightPaneCollapsed: current.rightPaneCollapsed,
+        rightTab: current.rightTab,
         usesNativeMacTitlebar: current.usesNativeMacTitlebar,
         settings: _startup.settings,
         vaultLabel: current.vaultLabel,
@@ -1086,6 +1091,7 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
       narrowSection: snapshot.note == null
           ? WorkspaceSection.resources
           : WorkspaceSection.notes,
+      rightTab: current.rightTab,
       settings: _startup.settings,
       vaultLabel: runtime.label,
       vaultRoot: runtime.rootPath,

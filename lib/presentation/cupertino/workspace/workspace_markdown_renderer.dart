@@ -308,7 +308,7 @@ final class WorkspaceMarkdownRenderer {
               !currentWorkspace.isBusy &&
               !locked,
           selectedImageSrc: currentWorkspace.selectedPreviewImageSrc,
-          imageBytes: controller.readNoteAttachment(attachment),
+          loadImageBytes: () => controller.readNoteAttachment(attachment),
           failureLabel: failureLabel,
           onAvailabilityChanged: onImageAvailabilityChanged == null
               ? null

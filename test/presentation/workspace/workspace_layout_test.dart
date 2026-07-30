@@ -6,6 +6,7 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:synapse/domain/vault/vault_resource.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
+import 'package:synapse/presentation/cupertino/workspace/workspace_titlebar.dart';
 
 import '../../support/workspace_harness.dart';
 
@@ -24,7 +25,27 @@ void main() {
     expect(find.byKey(const Key('left-pane-mode-resources')), findsOneWidget);
     expect(find.byKey(const Key('left-pane-mode-search')), findsOneWidget);
     expect(find.byKey(const Key('center-pane-title-icon')), findsNothing);
-    expect(find.byKey(const Key('right-pane-title-icon')), findsOneWidget);
+    expect(find.byKey(const Key('right-pane-tab-ai')), findsOneWidget);
+    expect(find.byKey(const Key('right-pane-tab-attachments')), findsOneWidget);
+    expect(
+      tester
+          .widget<ModeIconAction>(find.byKey(const Key('right-pane-tab-ai')))
+          .selected,
+      isTrue,
+    );
+    expect(
+      tester
+          .widget<ModeIconAction>(
+            find.byKey(const Key('right-pane-tab-attachments')),
+          )
+          .selected,
+      isFalse,
+    );
+    expect(find.byKey(const Key('right-pane-ai-content')), findsOneWidget);
+    expect(
+      find.byKey(const Key('right-pane-attachments-content')),
+      findsNothing,
+    );
     expect(find.text('素材与 AI'), findsNothing);
     expect(find.text('Synapse'), findsNothing);
     expect(find.text('AI 建议'), findsOneWidget);
@@ -69,6 +90,8 @@ void main() {
         const Key('left-pane-mode-search'),
         const Key('collapse-left-pane-button'),
         const Key('split-pane-left-button'),
+        const Key('right-pane-tab-ai'),
+        const Key('right-pane-tab-attachments'),
         const Key('collapse-right-pane-button'),
       ];
 
@@ -146,7 +169,11 @@ void main() {
     expect(find.byKey(const Key('right-pane-collapsed-rail')), findsOneWidget);
     expect(find.byKey(const Key('expand-right-pane-button')), findsOneWidget);
     expect(find.byKey(const Key('right-workflow-rail-button')), findsOneWidget);
-    expect(find.bySemanticsLabel('展开素材与 AI，1 条待处理'), findsOneWidget);
+    expect(
+      find.byKey(const Key('right-attachments-rail-button')),
+      findsOneWidget,
+    );
+    expect(find.bySemanticsLabel('展开 AI 工作流，1 条待处理'), findsOneWidget);
     expect(find.byKey(const Key('note-pane')), findsOneWidget);
     expect(find.text('素材与 AI'), findsNothing);
     expect(
@@ -154,15 +181,40 @@ void main() {
       findsOneWidget,
     );
 
+    await tester.tap(find.byKey(const Key('right-attachments-rail-button')));
+    await tester.pump(const Duration(milliseconds: 250));
+
+    expect(find.byKey(const Key('source-pane')), findsOneWidget);
+    expect(find.byKey(const Key('right-pane-tab-ai')), findsOneWidget);
+    expect(find.byKey(const Key('right-pane-tab-attachments')), findsOneWidget);
+    expect(
+      find.byKey(const Key('right-pane-attachments-content')),
+      findsOneWidget,
+    );
+    expect(find.byKey(const Key('right-pane-ai-content')), findsNothing);
+    expect(find.byKey(const Key('collapse-right-pane-button')), findsOneWidget);
+    expect(find.text('素材与 AI'), findsNothing);
+
+    await tester.tap(find.byKey(const Key('collapse-right-pane-button')));
+    await tester.pump(const Duration(milliseconds: 250));
     await tester.tap(
       find.byKey(const Key('titlebar-expand-right-pane-button')),
     );
     await tester.pump(const Duration(milliseconds: 250));
+    expect(
+      find.byKey(const Key('right-pane-attachments-content')),
+      findsOneWidget,
+    );
 
-    expect(find.byKey(const Key('source-pane')), findsOneWidget);
-    expect(find.byKey(const Key('right-pane-title-icon')), findsOneWidget);
-    expect(find.byKey(const Key('collapse-right-pane-button')), findsOneWidget);
-    expect(find.text('素材与 AI'), findsNothing);
+    await tester.tap(find.byKey(const Key('collapse-right-pane-button')));
+    await tester.pump(const Duration(milliseconds: 250));
+    await tester.tap(find.byKey(const Key('right-workflow-rail-button')));
+    await tester.pump(const Duration(milliseconds: 250));
+    expect(find.byKey(const Key('right-pane-ai-content')), findsOneWidget);
+    expect(
+      find.byKey(const Key('right-pane-attachments-content')),
+      findsNothing,
+    );
   });
 
   testWidgets('searches the whole vault from the left pane and opens results', (
@@ -312,7 +364,18 @@ void main() {
     await tester.pump(const Duration(milliseconds: 250));
 
     expect(find.byKey(const Key('source-pane')), findsOneWidget);
+    expect(find.byKey(const Key('right-pane-tab-ai')), findsOneWidget);
+    expect(find.byKey(const Key('right-pane-tab-attachments')), findsOneWidget);
     expect(find.text('AI 建议'), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('right-pane-tab-attachments')));
+    await tester.pump(const Duration(milliseconds: 250));
+
+    expect(
+      find.byKey(const Key('right-pane-attachments-content')),
+      findsOneWidget,
+    );
+    expect(find.text('AI 建议'), findsNothing);
   });
 }
 

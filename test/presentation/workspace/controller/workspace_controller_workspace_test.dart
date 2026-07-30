@@ -34,6 +34,8 @@ void main() {
       final controller = container.read(workspaceControllerProvider.notifier);
       final initialSession = controller.sessionFor(initial.selectedResourceId!);
       final beta = _findResource(initial.resources, betaNote.id);
+      expect(initial.rightTab, WorkspaceRightTab.ai);
+      controller.setRightTab(WorkspaceRightTab.attachments);
 
       final result = await controller.selectResource(beta!);
       final selected = container.read(workspaceControllerProvider).requireValue;
@@ -42,6 +44,7 @@ void main() {
       expect(selected.selectedResourceId, betaNote.id);
       expect((selected.splitRoot as SplitLeaf).noteId, betaNote.id);
       expect(selected.narrowSection, WorkspaceSection.notes);
+      expect(selected.rightTab, WorkspaceRightTab.attachments);
       expect(
         controller.sessionFor(initialSession!.noteId),
         same(initialSession),
@@ -70,6 +73,7 @@ void main() {
       controller.setNarrowSection(WorkspaceSection.sources);
       controller.setLeftPaneCollapsed(true);
       controller.setRightPaneCollapsed(true);
+      controller.setRightTab(WorkspaceRightTab.attachments);
       controller.toggleFolderCollapsed('Folder');
       final newPaneId = controller.splitFocused(SplitDirection.right);
       final updated = container.read(workspaceControllerProvider).requireValue;
@@ -78,6 +82,7 @@ void main() {
       expect(updated.narrowSection, WorkspaceSection.sources);
       expect(updated.leftPaneCollapsed, isTrue);
       expect(updated.rightPaneCollapsed, isTrue);
+      expect(updated.rightTab, WorkspaceRightTab.attachments);
       expect(updated.collapsedFolderIds, {'Folder'});
       expect(updated.focusedPaneId, newPaneId);
       expect(updated.splitRoot, isA<SplitBranch>());

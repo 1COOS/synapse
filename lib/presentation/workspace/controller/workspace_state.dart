@@ -19,6 +19,8 @@ enum WorkspaceSection { resources, notes, sources }
 
 enum WorkspaceLeftMode { resources, search }
 
+enum WorkspaceRightTab { ai, attachments }
+
 enum WorkspaceOperation {
   startup,
   vaultSwitch,
@@ -47,6 +49,7 @@ final class WorkspaceState {
     this.narrowSection = WorkspaceSection.resources,
     this.leftPaneCollapsed = false,
     this.rightPaneCollapsed = false,
+    this.rightTab = WorkspaceRightTab.ai,
     this.usesNativeMacTitlebar = false,
     SynapseSettings settings = SynapseSettings.defaults,
     this.vaultLabel = '',
@@ -85,6 +88,7 @@ final class WorkspaceState {
   final WorkspaceSection narrowSection;
   final bool leftPaneCollapsed;
   final bool rightPaneCollapsed;
+  final WorkspaceRightTab rightTab;
   final bool usesNativeMacTitlebar;
   final SynapseSettings settings;
   WorkspacePreferences get preferences => settings.preferences;
@@ -129,6 +133,7 @@ final class WorkspaceState {
     WorkspaceSection? narrowSection,
     bool? leftPaneCollapsed,
     bool? rightPaneCollapsed,
+    WorkspaceRightTab? rightTab,
     bool? usesNativeMacTitlebar,
     SynapseSettings? settings,
     String? vaultLabel,
@@ -158,6 +163,7 @@ final class WorkspaceState {
       narrowSection: narrowSection ?? this.narrowSection,
       leftPaneCollapsed: leftPaneCollapsed ?? this.leftPaneCollapsed,
       rightPaneCollapsed: rightPaneCollapsed ?? this.rightPaneCollapsed,
+      rightTab: rightTab ?? this.rightTab,
       usesNativeMacTitlebar:
           usesNativeMacTitlebar ?? this.usesNativeMacTitlebar,
       settings: settings ?? this.settings,

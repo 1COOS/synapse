@@ -78,8 +78,8 @@ final class _WorkspaceSourcesPaneState extends State<WorkspaceSourcesPane> {
 
   final _focusNode = FocusNode();
   final _proposalScrollController = ScrollController();
+  final _attachmentScrollController = ScrollController();
   final Map<String, bool> _sourcesExpandedByNote = <String, bool>{};
-  final Map<String, bool> _attachmentsExpandedByNote = <String, bool>{};
   final Map<String, String> _expandedProposalByNote = <String, String>{};
   final Set<String> _selectedProposalIds = <String>{};
   double _sourcesAreaFraction = _defaultSourcesAreaFraction;
@@ -119,6 +119,7 @@ final class _WorkspaceSourcesPaneState extends State<WorkspaceSourcesPane> {
   void dispose() {
     _focusNode.dispose();
     _proposalScrollController.dispose();
+    _attachmentScrollController.dispose();
     super.dispose();
   }
 
@@ -144,9 +145,6 @@ final class _WorkspaceSourcesPaneState extends State<WorkspaceSourcesPane> {
     final sourcesExpanded = noteId == null
         ? true
         : _sourcesExpandedByNote[noteId] ?? true;
-    final attachmentsExpanded = noteId == null
-        ? true
-        : _attachmentsExpandedByNote[noteId] ?? true;
     final expandedProposalId = noteId == null
         ? null
         : _expandedProposalByNote[noteId] ??
@@ -163,103 +161,35 @@ final class _WorkspaceSourcesPaneState extends State<WorkspaceSourcesPane> {
 
     return WorkspacePane(
       key: const Key('source-pane'),
-      child: Focus(
-        focusNode: _focusNode,
-        onKeyEvent: (node, event) =>
-            _handleKeyEvent(node, event, editorContext),
-        child: Listener(
-          key: const Key('image-input-area'),
-          behavior: HitTestBehavior.opaque,
-          onPointerDown: (_) => _focusNode.requestFocus(),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Row(
-                children: [
-                  Expanded(
-                    child: Text(
-                      'AI 素材 · 已选 ${materials.selectedAiMaterialIds.length} 项',
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: workspaceRightPaneTitleStyle,
-                    ),
-                  ),
-                  IconAction(
-                    key: const Key('add-image-button'),
-                    label: '导入图片素材',
-                    icon: CupertinoIcons.photo,
-                    onPressed: actionsDisabled
-                        ? null
-                        : () => _importImage(editorContext, noteId),
-                  ),
-                  IconAction(
-                    key: const Key('paste-image-button'),
-                    label: '粘贴图片素材',
-                    icon: CupertinoIcons.doc_on_clipboard,
-                    onPressed: actionsDisabled
-                        ? null
-                        : () => _pasteImage(editorContext, noteId),
-                  ),
-                  IconAction(
-                    key: const Key('delete-selected-images-button'),
-                    label: '删除已选 AI 素材',
-                    icon: CupertinoIcons.trash,
-                    onPressed:
-                        actionsDisabled ||
-                            materials.selectedAiMaterialIds.isEmpty
-                        ? null
-                        : () => _deleteSelectedSources(
-                            editorContext,
-                            aiMaterials,
-                            materials.selectedAiMaterialIds,
-                          ),
-                  ),
-                  IconAction(
-                    key: const Key('toggle-sources-section-button'),
-                    label: sourcesExpanded ? '收起 AI 素材' : '展开 AI 素材',
-                    icon: sourcesExpanded
-                        ? CupertinoIcons.chevron_up
-                        : CupertinoIcons.chevron_down,
-                    onPressed: noteId == null
-                        ? null
-                        : () => _setSourcesExpanded(noteId, !sourcesExpanded),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 8),
-              Expanded(
-                child: LayoutBuilder(
-                  builder: (context, constraints) => _buildMaterialsBody(
-                    availableHeight: constraints.maxHeight,
-                    sources: aiMaterials,
-                    attachments: attachments,
-                    sourcesExpanded: sourcesExpanded,
-                    attachmentsExpanded: attachmentsExpanded,
-                    materials: materials,
-                    editorContext: editorContext,
-                    noteId: noteId,
-                    expandedProposalId: expandedProposalId,
-                    proposalBatchMode: proposalBatchMode,
-                    selectedProposalIds: selectedProposalIds,
-                    actionsDisabled: actionsDisabled,
-                    busy: busy,
-                    currentMarkdown: resolved?.session.controller.text ?? '',
-                  ),
-                ),
-              ),
-            ],
+      child: IndexedStack(
+        index: widget.workspace.rightTab == WorkspaceRightTab.ai ? 0 : 1,
+        children: [
+          _buildAiTab(
+            sources: aiMaterials,
+            sourcesExpanded: sourcesExpanded,
+            materials: materials,
+            editorContext: editorContext,
+            noteId: noteId,
+            expandedProposalId: expandedProposalId,
+            proposalBatchMode: proposalBatchMode,
+            selectedProposalIds: selectedProposalIds,
+            actionsDisabled: actionsDisabled,
+            busy: busy,
           ),
-        ),
+          _buildAttachmentsTab(
+            attachments: attachments,
+            editorContext: editorContext,
+            currentMarkdown: resolved?.session.controller.text ?? '',
+            busy: busy,
+          ),
+        ],
       ),
     );
   }
 
-  Widget _buildMaterialsBody({
-    required double availableHeight,
+  Widget _buildAiTab({
     required List<AiMaterial> sources,
-    required List<NoteAttachment> attachments,
     required bool sourcesExpanded,
-    required bool attachmentsExpanded,
     required NoteMaterialsSnapshot materials,
     required PaneEditorContext? editorContext,
     required String? noteId,
@@ -268,7 +198,105 @@ final class _WorkspaceSourcesPaneState extends State<WorkspaceSourcesPane> {
     required Set<String> selectedProposalIds,
     required bool actionsDisabled,
     required bool busy,
-    required String currentMarkdown,
+  }) {
+    return Focus(
+      key: const Key('right-pane-ai-content'),
+      focusNode: _focusNode,
+      onKeyEvent: (node, event) => _handleKeyEvent(node, event, editorContext),
+      child: Listener(
+        key: const Key('image-input-area'),
+        behavior: HitTestBehavior.opaque,
+        onPointerDown: (_) => _focusNode.requestFocus(),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    'AI 素材 · 已选 ${materials.selectedAiMaterialIds.length} 项',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: workspaceRightPaneTitleStyle,
+                  ),
+                ),
+                IconAction(
+                  key: const Key('add-image-button'),
+                  label: '导入图片素材',
+                  icon: CupertinoIcons.photo,
+                  onPressed: actionsDisabled
+                      ? null
+                      : () => _importImage(editorContext, noteId),
+                ),
+                IconAction(
+                  key: const Key('paste-image-button'),
+                  label: '粘贴图片素材',
+                  icon: CupertinoIcons.doc_on_clipboard,
+                  onPressed: actionsDisabled
+                      ? null
+                      : () => _pasteImage(editorContext, noteId),
+                ),
+                IconAction(
+                  key: const Key('delete-selected-images-button'),
+                  label: '删除已选 AI 素材',
+                  icon: CupertinoIcons.trash,
+                  onPressed:
+                      actionsDisabled || materials.selectedAiMaterialIds.isEmpty
+                      ? null
+                      : () => _deleteSelectedSources(
+                          editorContext,
+                          sources,
+                          materials.selectedAiMaterialIds,
+                        ),
+                ),
+                IconAction(
+                  key: const Key('toggle-sources-section-button'),
+                  label: sourcesExpanded ? '收起 AI 素材' : '展开 AI 素材',
+                  icon: sourcesExpanded
+                      ? CupertinoIcons.chevron_up
+                      : CupertinoIcons.chevron_down,
+                  onPressed: noteId == null
+                      ? null
+                      : () => _setSourcesExpanded(noteId, !sourcesExpanded),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Expanded(
+              child: LayoutBuilder(
+                builder: (context, constraints) => _buildMaterialsBody(
+                  availableHeight: constraints.maxHeight,
+                  sources: sources,
+                  sourcesExpanded: sourcesExpanded,
+                  materials: materials,
+                  editorContext: editorContext,
+                  noteId: noteId,
+                  expandedProposalId: expandedProposalId,
+                  proposalBatchMode: proposalBatchMode,
+                  selectedProposalIds: selectedProposalIds,
+                  actionsDisabled: actionsDisabled,
+                  busy: busy,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildMaterialsBody({
+    required double availableHeight,
+    required List<AiMaterial> sources,
+    required bool sourcesExpanded,
+    required NoteMaterialsSnapshot materials,
+    required PaneEditorContext? editorContext,
+    required String? noteId,
+    required String? expandedProposalId,
+    required bool proposalBatchMode,
+    required Set<String> selectedProposalIds,
+    required bool actionsDisabled,
+    required bool busy,
   }) {
     final resizableSources = sourcesExpanded && sources.isNotEmpty;
     final sourcesHeight = resizableSources
@@ -365,98 +393,65 @@ final class _WorkspaceSourcesPaneState extends State<WorkspaceSourcesPane> {
             key: const Key('proposal-history-list'),
             controller: _proposalScrollController,
             padding: EdgeInsets.zero,
-            itemCount:
-                (materials.proposals.isEmpty ? 1 : materials.proposals.length) +
-                2,
+            itemCount: materials.proposals.isEmpty
+                ? 1
+                : materials.proposals.length,
             itemBuilder: (context, index) {
-              final proposalItemCount = materials.proposals.isEmpty
-                  ? 1
-                  : materials.proposals.length;
-              if (index < proposalItemCount) {
-                if (materials.proposals.isEmpty) {
-                  return const SizedBox(
-                    height: 80,
-                    child: EmptyState(text: '选择 AI 素材后生成建议'),
-                  );
-                }
-                final proposal = materials.proposals[index];
-                return ProposalCard(
-                  key: Key('proposal-${proposal.noteId}-${proposal.id}'),
-                  proposal: proposal,
-                  availableMaterialIds: sources
-                      .map((material) => material.id)
-                      .toSet(),
-                  expanded: proposal.id == expandedProposalId,
-                  selectionMode: proposalBatchMode,
-                  selected: selectedProposalIds.contains(proposal.id),
-                  selectionKey: Key('proposal-select-${proposal.id}'),
-                  toggleKey: Key('proposal-toggle-${proposal.id}'),
-                  expandKey: Key('proposal-expand-${proposal.id}'),
-                  copyKey: Key(
-                    index == 0
-                        ? 'copy-proposal-button'
-                        : 'copy-proposal-button-${proposal.id}',
-                  ),
-                  deleteKey: Key(
-                    index == 0
-                        ? 'delete-proposal-button'
-                        : 'delete-proposal-button-${proposal.id}',
-                  ),
-                  applyKey: Key(
-                    index == 0
-                        ? 'apply-proposal-button'
-                        : 'apply-proposal-button-${proposal.id}',
-                  ),
-                  busy: busy || widget.workspace.reloadRequired,
-                  onToggleSelected: () => _toggleProposalSelected(proposal.id),
-                  onToggleExpanded: noteId == null
-                      ? () {}
-                      : () => _setExpandedProposal(noteId, proposal.id),
-                  onCopy: editorContext == null
-                      ? () {}
-                      : () async {
-                          await widget.controller.copyProposal(
-                            editorContext,
-                            proposal,
-                          );
-                        },
-                  onDelete: editorContext == null
-                      ? () {}
-                      : () async {
-                          await widget.onDeleteProposal(
-                            editorContext,
-                            proposal,
-                          );
-                        },
-                  onApply: editorContext == null
-                      ? () {}
-                      : () => _confirmAndApplyProposal(editorContext, proposal),
+              if (materials.proposals.isEmpty) {
+                return const SizedBox(
+                  height: 80,
+                  child: EmptyState(text: '选择 AI 素材后生成建议'),
                 );
               }
-              if (index == proposalItemCount) {
-                return Padding(
-                  padding: const EdgeInsets.only(top: 8),
-                  child: Column(
-                    children: [
-                      const Padding(
-                        padding: EdgeInsets.only(bottom: 8),
-                        child: Hairline(),
-                      ),
-                      _buildAttachmentHeader(
-                        noteId: noteId,
-                        attachmentCount: attachments.length,
-                        expanded: attachmentsExpanded,
-                      ),
-                    ],
-                  ),
-                );
-              }
-              return _buildAttachments(
-                attachments: attachments,
-                expanded: attachmentsExpanded,
-                editorContext: editorContext,
-                currentMarkdown: currentMarkdown,
-                busy: busy,
+              final proposal = materials.proposals[index];
+              return ProposalCard(
+                key: Key('proposal-${proposal.noteId}-${proposal.id}'),
+                proposal: proposal,
+                availableMaterialIds: sources
+                    .map((material) => material.id)
+                    .toSet(),
+                expanded: proposal.id == expandedProposalId,
+                selectionMode: proposalBatchMode,
+                selected: selectedProposalIds.contains(proposal.id),
+                selectionKey: Key('proposal-select-${proposal.id}'),
+                toggleKey: Key('proposal-toggle-${proposal.id}'),
+                expandKey: Key('proposal-expand-${proposal.id}'),
+                copyKey: Key(
+                  index == 0
+                      ? 'copy-proposal-button'
+                      : 'copy-proposal-button-${proposal.id}',
+                ),
+                deleteKey: Key(
+                  index == 0
+                      ? 'delete-proposal-button'
+                      : 'delete-proposal-button-${proposal.id}',
+                ),
+                applyKey: Key(
+                  index == 0
+                      ? 'apply-proposal-button'
+                      : 'apply-proposal-button-${proposal.id}',
+                ),
+                busy: busy || widget.workspace.reloadRequired,
+                onToggleSelected: () => _toggleProposalSelected(proposal.id),
+                onToggleExpanded: noteId == null
+                    ? () {}
+                    : () => _setExpandedProposal(noteId, proposal.id),
+                onCopy: editorContext == null
+                    ? () {}
+                    : () async {
+                        await widget.controller.copyProposal(
+                          editorContext,
+                          proposal,
+                        );
+                      },
+                onDelete: editorContext == null
+                    ? () {}
+                    : () async {
+                        await widget.onDeleteProposal(editorContext, proposal);
+                      },
+                onApply: editorContext == null
+                    ? () {}
+                    : () => _confirmAndApplyProposal(editorContext, proposal),
               );
             },
           ),
@@ -674,88 +669,72 @@ final class _WorkspaceSourcesPaneState extends State<WorkspaceSourcesPane> {
     );
   }
 
-  Widget _buildAttachmentHeader({
-    required String? noteId,
-    required int attachmentCount,
-    required bool expanded,
-  }) {
-    return Row(
-      children: [
-        const Text('笔记附件', style: workspaceRightPaneTitleStyle),
-        const SizedBox(width: 4),
-        Text(
-          '· $attachmentCount',
-          style: const TextStyle(color: workspaceMutedColor, fontSize: 12),
-        ),
-        const Spacer(),
-        IconAction(
-          key: const Key('toggle-attachments-section-button'),
-          label: expanded ? '收起笔记附件' : '展开笔记附件',
-          icon: expanded
-              ? CupertinoIcons.chevron_up
-              : CupertinoIcons.chevron_down,
-          onPressed: noteId == null
-              ? null
-              : () => _setAttachmentsExpanded(noteId, !expanded),
-        ),
-      ],
-    );
-  }
-
-  Widget _buildAttachments({
+  Widget _buildAttachmentsTab({
     required List<NoteAttachment> attachments,
-    required bool expanded,
     required PaneEditorContext? editorContext,
     required String currentMarkdown,
     required bool busy,
   }) {
-    if (!expanded) {
-      return const SizedBox(height: 8);
-    }
-    if (attachments.isEmpty) {
-      return const SizedBox(height: 72, child: EmptyState(text: '暂无笔记附件'));
-    }
     final resolved = editorContext == null
         ? null
         : widget.controller.resolvePaneEditorContext(editorContext);
     final note = resolved?.session.note;
-    return Padding(
-      padding: const EdgeInsets.only(top: 8, bottom: 4),
-      child: GridView.builder(
-        key: const Key('note-attachments-grid'),
-        shrinkWrap: true,
-        physics: const NeverScrollableScrollPhysics(),
-        itemCount: attachments.length,
-        gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-          crossAxisCount: 2,
-          mainAxisSpacing: 8,
-          crossAxisSpacing: 8,
-          childAspectRatio: 1.15,
+    return Column(
+      key: const Key('right-pane-attachments-content'),
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Row(
+          children: [
+            const Text('笔记附件', style: workspaceRightPaneTitleStyle),
+            const SizedBox(width: 4),
+            Text(
+              '· ${attachments.length}',
+              style: const TextStyle(color: workspaceMutedColor, fontSize: 12),
+            ),
+          ],
         ),
-        itemBuilder: (context, index) {
-          final attachment = attachments[index];
-          final referenceCount = note == null
-              ? 0
-              : _attachmentReferenceCount(
-                  markdown: currentMarkdown,
-                  note: note,
-                  attachment: attachment,
-                );
-          return AttachmentTile(
-            attachment: attachment,
-            referenceCount: referenceCount,
-            busy: busy,
-            imageBytes: widget.controller.readNoteAttachment(attachment),
-            onDelete: editorContext == null
-                ? () {}
-                : () async {
-                    await widget.onDeleteAttachments(editorContext, [
-                      attachment,
-                    ]);
+        const SizedBox(height: 8),
+        Expanded(
+          child: attachments.isEmpty
+              ? const EmptyState(text: '暂无笔记附件')
+              : GridView.builder(
+                  key: const Key('note-attachments-grid'),
+                  controller: _attachmentScrollController,
+                  padding: EdgeInsets.zero,
+                  itemCount: attachments.length,
+                  gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                    crossAxisCount: 2,
+                    mainAxisSpacing: 8,
+                    crossAxisSpacing: 8,
+                    childAspectRatio: 1.15,
+                  ),
+                  itemBuilder: (context, index) {
+                    final attachment = attachments[index];
+                    final referenceCount = note == null
+                        ? 0
+                        : _attachmentReferenceCount(
+                            markdown: currentMarkdown,
+                            note: note,
+                            attachment: attachment,
+                          );
+                    return AttachmentTile(
+                      attachment: attachment,
+                      referenceCount: referenceCount,
+                      busy: busy,
+                      loadImageBytes: () =>
+                          widget.controller.readNoteAttachment(attachment),
+                      onDelete: editorContext == null
+                          ? () {}
+                          : () async {
+                              await widget.onDeleteAttachments(editorContext, [
+                                attachment,
+                              ]);
+                            },
+                    );
                   },
-          );
-        },
-      ),
+                ),
+        ),
+      ],
     );
   }
 
@@ -892,13 +871,6 @@ final class _WorkspaceSourcesPaneState extends State<WorkspaceSourcesPane> {
     setState(() => _sourcesExpandedByNote[noteId] = expanded);
   }
 
-  void _setAttachmentsExpanded(String noteId, bool expanded) {
-    if (_attachmentsExpandedByNote[noteId] == expanded) {
-      return;
-    }
-    setState(() => _attachmentsExpandedByNote[noteId] = expanded);
-  }
-
   void _setExpandedProposal(String noteId, String proposalId) {
     if (_expandedProposalByNote[noteId] == proposalId) {
       return;
@@ -991,7 +963,9 @@ final class _WorkspaceSourcesPaneState extends State<WorkspaceSourcesPane> {
     KeyEvent event,
     PaneEditorContext? editorContext,
   ) {
-    if (!node.hasPrimaryFocus || !_isPasteImageShortcutKeyUp(event)) {
+    if (widget.workspace.rightTab != WorkspaceRightTab.ai ||
+        !node.hasPrimaryFocus ||
+        !_isPasteImageShortcutKeyUp(event)) {
       return KeyEventResult.ignored;
     }
     if (!widget.workspace.isBusy &&

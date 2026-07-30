@@ -54,7 +54,7 @@ class PreviewImageBlock extends StatefulWidget {
     required this.width,
     required this.editableControls,
     required this.selectedImageSrc,
-    required this.imageBytes,
+    required this.loadImageBytes,
     required this.failureLabel,
     this.onAvailabilityChanged,
     required this.onTap,
@@ -71,7 +71,7 @@ class PreviewImageBlock extends StatefulWidget {
   final double width;
   final bool editableControls;
   final String? selectedImageSrc;
-  final Future<List<int>> imageBytes;
+  final Future<List<int>> Function() loadImageBytes;
   final String failureLabel;
   final PreviewImageAvailabilityChanged? onAvailabilityChanged;
   final VoidCallback onTap;
@@ -133,7 +133,7 @@ class _PreviewImageBlockState extends State<PreviewImageBlock> {
     _readFailed = false;
     _decodeFailed = false;
     _reportedAvailability = null;
-    _imageBytes = widget.imageBytes;
+    _imageBytes = widget.loadImageBytes();
   }
 
   void _startResize(PointerDownEvent event, _ImageResizeSide side) {
@@ -269,31 +269,28 @@ class _PreviewImageBlockState extends State<PreviewImageBlock> {
             child: Stack(
               clipBehavior: Clip.none,
               children: [
-                if (widget.editableControls)
-                  DragTarget<PreviewImageDragData>(
-                    onWillAcceptWithDetails: (details) =>
-                        details.data.sourceId != widget.attachment.id,
-                    onMove: _handleDragMove,
-                    onLeave: _handleDragLeave,
-                    onAcceptWithDetails: _handleImageDrop,
-                    builder: (context, candidateData, rejectedData) {
-                      final image = _buildImageBody(generation);
-                      return Draggable<PreviewImageDragData>(
-                        data: PreviewImageDragData(
-                          sourceId: widget.attachment.id,
-                          src: widget.src,
-                        ),
-                        dragAnchorStrategy: pointerDragAnchorStrategy,
-                        feedback: _PreviewImageDragFeedback(
-                          width: displayWidth,
-                        ),
-                        childWhenDragging: Opacity(opacity: 0.45, child: image),
-                        child: image,
-                      );
-                    },
-                  )
-                else
-                  _buildImageBody(generation),
+                DragTarget<PreviewImageDragData>(
+                  onWillAcceptWithDetails: (details) =>
+                      widget.editableControls &&
+                      details.data.sourceId != widget.attachment.id,
+                  onMove: _handleDragMove,
+                  onLeave: _handleDragLeave,
+                  onAcceptWithDetails: _handleImageDrop,
+                  builder: (context, candidateData, rejectedData) {
+                    final image = _buildImageBody(generation);
+                    return Draggable<PreviewImageDragData>(
+                      data: PreviewImageDragData(
+                        sourceId: widget.attachment.id,
+                        src: widget.src,
+                      ),
+                      maxSimultaneousDrags: widget.editableControls ? 1 : 0,
+                      dragAnchorStrategy: pointerDragAnchorStrategy,
+                      feedback: _PreviewImageDragFeedback(width: displayWidth),
+                      childWhenDragging: Opacity(opacity: 0.45, child: image),
+                      child: image,
+                    );
+                  },
+                ),
                 if (widget.editableControls && (_selected || _dragging)) ...[
                   _buildResizeHandle(_ImageResizeSide.left),
                   _buildResizeHandle(_ImageResizeSide.right),

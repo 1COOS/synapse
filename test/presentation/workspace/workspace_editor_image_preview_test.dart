@@ -667,7 +667,7 @@ Widget _previewImageApp({
         width: 320,
         editableControls: true,
         selectedImageSrc: src,
-        imageBytes: imageBytes,
+        loadImageBytes: () => imageBytes,
         failureLabel: failureLabel,
         onTap: () {},
         onWidthChanged: (_) {},

@@ -886,7 +886,20 @@ class _SynapseWorkspaceState extends ConsumerState<SynapseWorkspace> {
         const SizedBox(height: 8),
         _RightWorkflowRailAction(
           pendingCount: pendingCount,
-          onPressed: () => setState(() => _rightPaneCollapsed = false),
+          onPressed: () {
+            _controller.setRightTab(WorkspaceRightTab.ai);
+            _controller.setRightPaneCollapsed(false);
+          },
+        ),
+        const SizedBox(height: 8),
+        IconAction(
+          key: const Key('right-attachments-rail-button'),
+          label: '展开笔记附件',
+          icon: CupertinoIcons.paperclip,
+          onPressed: () {
+            _controller.setRightTab(WorkspaceRightTab.attachments);
+            _controller.setRightPaneCollapsed(false);
+          },
         ),
       ],
     );
@@ -975,7 +988,9 @@ final class _RightWorkflowRailAction extends StatelessWidget {
       children: [
         IconAction(
           key: const Key('right-workflow-rail-button'),
-          label: pendingCount == 0 ? '展开素材与 AI' : '展开素材与 AI，$pendingCount 条待处理',
+          label: pendingCount == 0
+              ? '展开 AI 工作流'
+              : '展开 AI 工作流，$pendingCount 条待处理',
           icon: CupertinoIcons.photo_on_rectangle,
           onPressed: onPressed,
         ),

@@ -329,14 +329,14 @@ class AttachmentTile extends StatefulWidget {
     required this.attachment,
     required this.referenceCount,
     required this.busy,
-    required this.imageBytes,
+    required this.loadImageBytes,
     required this.onDelete,
   });
 
   final NoteAttachment attachment;
   final int referenceCount;
   final bool busy;
-  final Future<List<int>> imageBytes;
+  final Future<List<int>> Function() loadImageBytes;
   final VoidCallback onDelete;
 
   @override
@@ -349,7 +349,7 @@ class _AttachmentTileState extends State<AttachmentTile> {
   @override
   void initState() {
     super.initState();
-    _imageBytes = widget.imageBytes;
+    _imageBytes = widget.loadImageBytes();
   }
 
   @override
@@ -357,7 +357,7 @@ class _AttachmentTileState extends State<AttachmentTile> {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.attachment.id != widget.attachment.id ||
         oldWidget.attachment.updatedAt != widget.attachment.updatedAt) {
-      _imageBytes = widget.imageBytes;
+      _imageBytes = widget.loadImageBytes();
     }
   }
 

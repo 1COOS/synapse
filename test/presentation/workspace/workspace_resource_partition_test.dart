@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -34,7 +36,13 @@ void main() {
     expect(await vault.listAiMaterials(note.id), isEmpty);
     expect(await vault.listNoteAttachments(note.id), hasLength(1));
     expect(find.text('AI 素材 · 已选 0 项'), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('right-pane-tab-attachments')));
+    await tester.pumpAndSettle();
+
+    expect(find.text('AI 素材 · 已选 0 项'), findsNothing);
     expect(find.text('笔记附件'), findsOneWidget);
+    expect(find.byKey(const Key('note-attachments-grid')), findsOneWidget);
   });
 
   testWidgets('right-pane import creates only an AI material', (tester) async {
@@ -75,18 +83,10 @@ void main() {
         markdown: '# Delete\n\n$imageTag',
       );
       await pumpWorkspace(tester, vault: vault);
+      await tester.tap(find.byKey(const Key('right-pane-tab-attachments')));
+      await tester.pumpAndSettle();
       final deleteButton = find.byKey(
         Key('delete-attachment-${attachment.id}'),
-      );
-      await tester.scrollUntilVisible(
-        deleteButton,
-        180,
-        scrollable: find
-            .descendant(
-              of: find.byKey(const Key('proposal-history-list')),
-              matching: find.byType(Scrollable),
-            )
-            .first,
       );
 
       await tester.tap(deleteButton);
@@ -136,4 +136,122 @@ void main() {
     expect(find.textContaining('history.png · 来源已删除'), findsOneWidget);
     expect(find.text('历史结果'), findsOneWidget);
   });
+
+  testWidgets('attachment tab ignores source-pane image paste shortcuts', (
+    tester,
+  ) async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Paste Scope');
+    final imageInput = FakeImageInputService(
+      pastedImage: const ImportedImage(
+        filename: 'should-not-import.png',
+        mimeType: 'image/png',
+        bytes: tinyPng,
+      ),
+    );
+    await pumpWorkspace(tester, vault: vault, imageInput: imageInput);
+
+    await tester.tap(find.byKey(const Key('image-input-area')));
+    await tester.pump();
+    await tester.tap(find.byKey(const Key('right-pane-tab-attachments')));
+    await tester.pump();
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.metaLeft);
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.keyV);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.keyV);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.metaLeft);
+    await tester.pumpAndSettle();
+
+    expect(imageInput.pasteCalls, 0);
+    expect(await vault.listAiMaterials(note.id), isEmpty);
+    expect(await vault.listNoteAttachments(note.id), isEmpty);
+  });
+
+  testWidgets('deleting an AI material keeps note image elements mounted', (
+    tester,
+  ) async {
+    final vault = _GatedMaterialDeleteVault();
+    final note = await vault.createNote(parentPath: '', title: 'Stable Images');
+    final attachment = await vault.addImageAttachment(
+      noteId: note.id,
+      filename: 'note-image.png',
+      mimeType: 'image/png',
+      bytes: tinyPng,
+    );
+    await vault.addImageMaterial(
+      noteId: note.id,
+      filename: 'ai-material.png',
+      mimeType: 'image/png',
+      bytes: tinyPng,
+    );
+    await vault.updateMarkdown(
+      noteId: note.id,
+      markdown:
+          '# Stable Images\n\n'
+          '<img src="Stable Images.assets/${attachment.relativePath}" '
+          'width="320">',
+    );
+    await pumpWorkspace(tester, vault: vault);
+    await switchToSourceMode(tester);
+    await tester.pumpAndSettle();
+
+    final preview = find.byKey(Key('preview-image-${attachment.id}'));
+    final previewImage = find.descendant(
+      of: preview,
+      matching: find.byType(Image),
+    );
+    expect(previewImage, findsOneWidget);
+    final imageElement = tester.element(previewImage);
+    final attachmentReads = vault.attachmentReadCalls;
+
+    await tester.tap(find.byKey(const Key('delete-image-button')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(CupertinoDialogAction, '删除').last);
+    await vault.deleteStarted.future;
+    await tester.pump();
+
+    expect(tester.element(previewImage), same(imageElement));
+    expect(
+      find.descendant(
+        of: preview,
+        matching: find.byType(CupertinoActivityIndicator),
+      ),
+      findsNothing,
+    );
+    expect(vault.attachmentReadCalls, attachmentReads);
+
+    vault.releaseDelete();
+    await tester.pumpAndSettle();
+
+    expect(tester.element(previewImage), same(imageElement));
+    expect(vault.attachmentReadCalls, attachmentReads);
+  });
+}
+
+final class _GatedMaterialDeleteVault extends MemoryVaultBackend {
+  _GatedMaterialDeleteVault() : super(seedExampleData: false);
+
+  final deleteStarted = Completer<void>();
+  final _deleteRelease = Completer<void>();
+  int attachmentReadCalls = 0;
+
+  void releaseDelete() {
+    if (!_deleteRelease.isCompleted) {
+      _deleteRelease.complete();
+    }
+  }
+
+  @override
+  Future<void> deleteAiMaterial(AiMaterial material) async {
+    if (!deleteStarted.isCompleted) {
+      deleteStarted.complete();
+    }
+    await _deleteRelease.future;
+    return super.deleteAiMaterial(material);
+  }
+
+  @override
+  Future<List<int>> readNoteAttachment(NoteAttachment attachment) {
+    attachmentReadCalls += 1;
+    return super.readNoteAttachment(attachment);
+  }
 }

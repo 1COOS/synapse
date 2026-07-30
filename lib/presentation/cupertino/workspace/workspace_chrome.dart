@@ -63,27 +63,31 @@ final class WorkspaceChromeTitlebar extends StatelessWidget {
       ),
       child: Row(
         children: [
-          ModeIconAction(
-            key: const Key('left-pane-mode-resources'),
-            label: '资源列表',
-            icon: CupertinoIcons.folder,
-            selected: workspace.leftMode == WorkspaceLeftMode.resources,
-            onPressed: () {
-              controller.setLeftMode(WorkspaceLeftMode.resources);
-              controller.setNarrowSection(WorkspaceSection.resources);
-            },
-          ),
-          const SizedBox(width: 4),
-          ModeIconAction(
-            key: const Key('left-pane-mode-search'),
-            label: '搜索',
-            icon: CupertinoIcons.search,
-            selected: workspace.leftMode == WorkspaceLeftMode.search,
-            onPressed: () {
-              controller.setLeftMode(WorkspaceLeftMode.search);
-              controller.setNarrowSection(WorkspaceSection.resources);
-            },
-          ),
+          if (workspace.narrowSection == WorkspaceSection.sources)
+            ..._buildRightTabControls()
+          else ...[
+            ModeIconAction(
+              key: const Key('left-pane-mode-resources'),
+              label: '资源列表',
+              icon: CupertinoIcons.folder,
+              selected: workspace.leftMode == WorkspaceLeftMode.resources,
+              onPressed: () {
+                controller.setLeftMode(WorkspaceLeftMode.resources);
+                controller.setNarrowSection(WorkspaceSection.resources);
+              },
+            ),
+            const SizedBox(width: 4),
+            ModeIconAction(
+              key: const Key('left-pane-mode-search'),
+              label: '搜索',
+              icon: CupertinoIcons.search,
+              selected: workspace.leftMode == WorkspaceLeftMode.search,
+              onPressed: () {
+                controller.setLeftMode(WorkspaceLeftMode.search);
+                controller.setNarrowSection(WorkspaceSection.resources);
+              },
+            ),
+          ],
           const Spacer(),
           TitlebarIconAction(
             key: const Key('settings-button'),
@@ -223,12 +227,7 @@ final class WorkspaceChromeTitlebar extends StatelessWidget {
     return WorkspaceTitlebarStrip(
       child: Row(
         children: [
-          const Icon(
-            CupertinoIcons.photo_on_rectangle,
-            key: Key('right-pane-title-icon'),
-            size: 16,
-            color: workspaceMutedColor,
-          ),
+          ..._buildRightTabControls(),
           const Spacer(),
           TitlebarIconAction(
             key: const Key('collapse-right-pane-button'),
@@ -239,6 +238,26 @@ final class WorkspaceChromeTitlebar extends StatelessWidget {
         ],
       ),
     );
+  }
+
+  List<Widget> _buildRightTabControls() {
+    return [
+      ModeIconAction(
+        key: const Key('right-pane-tab-ai'),
+        label: 'AI 工作流',
+        icon: CupertinoIcons.photo_on_rectangle,
+        selected: workspace.rightTab == WorkspaceRightTab.ai,
+        onPressed: () => controller.setRightTab(WorkspaceRightTab.ai),
+      ),
+      const SizedBox(width: 4),
+      ModeIconAction(
+        key: const Key('right-pane-tab-attachments'),
+        label: '笔记附件',
+        icon: CupertinoIcons.paperclip,
+        selected: workspace.rightTab == WorkspaceRightTab.attachments,
+        onPressed: () => controller.setRightTab(WorkspaceRightTab.attachments),
+      ),
+    ];
   }
 }
 

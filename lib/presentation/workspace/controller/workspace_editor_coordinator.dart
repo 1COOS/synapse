@@ -655,8 +655,11 @@ final class WorkspaceEditorCoordinator {
     }
     final targetSession = resolved.session;
     final vault = _runtimes.requireCurrent().vault;
-    final result = await _mutations.run<_NoteHydration>(
-      WorkspaceMutationPlan<_NoteHydration>(
+    final deletedMaterialIds = requestedMaterials
+        .map((material) => material.id)
+        .toSet();
+    final result = await _mutations.run<VaultNoteContent>(
+      WorkspaceMutationPlan<VaultNoteContent>(
         affectedNoteIds: {targetSession.noteId},
         dirtyDisposition: DirtyDisposition.flush,
         commitBackend: () async {
@@ -683,28 +686,41 @@ final class WorkspaceEditorCoordinator {
           );
           return WorkspaceBackendCommit(
             postCommitHydrate: () async {
-              final note = await vault.readNote(targetSession.noteId);
-              final proposals = await vault.listProposals(note.id);
+              final current = targetSession.note;
+              final note = VaultNoteContent(
+                id: current.id,
+                title: current.title,
+                path: current.path,
+                markdownPath: current.markdownPath,
+                assetsPath: current.assetsPath,
+                createdAt: current.createdAt,
+                updatedAt: current.updatedAt,
+                markdown: current.markdown,
+                outline: current.outline,
+                aiMaterials: current.aiMaterials
+                    .where(
+                      (material) => !deletedMaterialIds.contains(material.id),
+                    )
+                    .toList(growable: false),
+                attachments: current.attachments,
+              );
               return VaultMutationDelta(
-                value: _NoteHydration(note: note, proposals: proposals),
+                value: note,
                 refreshedNotesByNewId: {note.id: note},
-                resources: await vault.listResources(),
               );
             },
           );
         },
         prepareCommit: (delta) {
-          final note = delta.value.note;
+          final note = delta.value;
           final selected = Set<String>.of(
             _materials.snapshotFor(note.id).selectedAiMaterialIds,
-          )..removeAll(requestedMaterials.map((material) => material.id));
+          )..removeAll(deletedMaterialIds);
           return _commits.prepare(
             delta,
             upsertedNotesById: {note.id: note},
-            replacementProposalsByNoteId: {note.id: delta.value.proposals},
             selectedAiMaterialIdsByNoteId: {note.id: selected},
             patch: WorkspaceStatePatch(
-              resources: delta.resources,
               message: requestedMaterials.length == 1
                   ? 'AI 素材已删除'
                   : '已删除 ${requestedMaterials.length} 个 AI 素材',
