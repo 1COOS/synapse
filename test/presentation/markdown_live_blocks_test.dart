@@ -69,6 +69,31 @@ void main() {}
     expect(blocks.map((block) => block.text).join(), markdown);
   });
 
+  test('recognizes only the canonical standalone Synapse page break', () {
+    const markdown =
+        'Before\n\n'
+        '<!-- synapse:page-break -->\n\n'
+        '---\n\n'
+        'Inline <!-- synapse:page-break --> marker\n';
+
+    final blocks = splitMarkdownLiveBlocks(markdown);
+
+    expect(blocks.where((block) => !block.isBlank).map((block) => block.kind), [
+      MarkdownLiveBlockKind.paragraph,
+      MarkdownLiveBlockKind.pageBreak,
+      MarkdownLiveBlockKind.paragraph,
+      MarkdownLiveBlockKind.paragraph,
+    ]);
+    expect(
+      blocks
+          .firstWhere((block) => block.kind == MarkdownLiveBlockKind.pageBreak)
+          .text
+          .trim(),
+      '<!-- synapse:page-break -->',
+    );
+    expect(blocks.map((block) => block.text).join(), markdown);
+  });
+
   test('finds and replaces the block containing a text offset', () {
     const markdown = '# Title\n\nold paragraph\n\n- first\n- second\n';
     final blocks = splitMarkdownLiveBlocks(markdown);

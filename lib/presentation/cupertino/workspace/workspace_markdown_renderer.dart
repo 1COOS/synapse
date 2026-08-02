@@ -12,6 +12,7 @@ import '../../workspace/controller/workspace_controller.dart';
 import '../markdown_inline_formatting.dart';
 import '../../workspace/editor/markdown_image_transform.dart';
 import '../../workspace/editor/markdown_table_editor.dart';
+import '../../workspace/editor/note_find_controller.dart';
 import '../../workspace/editor/pane_editor_context.dart';
 import '../../workspace/editor/preview_image_block.dart';
 import '../../workspace/outline_navigation.dart';
@@ -42,6 +43,7 @@ final class WorkspaceMarkdownRenderer {
     required bool focused,
     required List<OutlineNode> outlineNodes,
     required WorkspaceOutlineNavigationController outlineNavigationController,
+    required NoteFindController findController,
   }) {
     return _WorkspaceReadingPreview(
       renderer: this,
@@ -51,6 +53,7 @@ final class WorkspaceMarkdownRenderer {
       focused: focused,
       outlineNodes: outlineNodes,
       outlineNavigationController: outlineNavigationController,
+      findController: findController,
     );
   }
 
@@ -63,6 +66,11 @@ final class WorkspaceMarkdownRenderer {
     if (hiddenTableSeparator) {
       return SizedBox.shrink(
         key: Key('live-markdown-reading-table-separator-$index'),
+      );
+    }
+    if (block.kind == MarkdownLiveBlockKind.pageBreak) {
+      return SizedBox.shrink(
+        key: Key('live-markdown-reading-page-break-$index'),
       );
     }
     if (block.isBlank) {
@@ -596,6 +604,7 @@ final class _WorkspaceReadingPreview extends StatefulWidget {
     required this.focused,
     required this.outlineNodes,
     required this.outlineNavigationController,
+    required this.findController,
   });
 
   final WorkspaceMarkdownRenderer renderer;
@@ -605,6 +614,7 @@ final class _WorkspaceReadingPreview extends StatefulWidget {
   final bool focused;
   final List<OutlineNode> outlineNodes;
   final WorkspaceOutlineNavigationController outlineNavigationController;
+  final NoteFindController findController;
 
   @override
   State<_WorkspaceReadingPreview> createState() =>
@@ -615,7 +625,9 @@ final class _WorkspaceReadingPreviewState
     extends State<_WorkspaceReadingPreview> {
   final _scrollController = ScrollController();
   final _scrollViewportKey = GlobalKey();
+  final Map<int, GlobalKey> _findBlockKeys = <int, GlobalKey>{};
   late final WorkspaceOutlineViewportCoordinator _outlineViewport;
+  int _lastFindNavigationRevision = -1;
 
   @override
   void initState() {
@@ -653,6 +665,7 @@ final class _WorkspaceReadingPreviewState
       isFocused: () => widget.focused,
       nodes: widget.outlineNodes,
     );
+    _scheduleRevealFindMatch(blocks);
     final accentColor = widget.renderer._appearance.accentColor;
     return CupertinoScrollbar(
       controller: _scrollController,
@@ -668,35 +681,142 @@ final class _WorkspaceReadingPreviewState
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 for (var index = 0; index < blocks.length; index += 1)
-                  if (outlineByBlock[index] case final node?)
-                    WorkspaceOutlineHeadingAnchor(
-                      coordinator: _outlineViewport,
-                      node: node,
-                      accentColor: accentColor,
-                      child: widget.renderer._buildReadingMarkdownBlock(
-                        blocks[index],
-                        index,
-                        widget.editorContext,
-                        hiddenTableSeparator:
-                            markdownBlockIsHiddenTableSeparator(blocks, index),
-                      ),
-                    )
-                  else
-                    widget.renderer._buildReadingMarkdownBlock(
-                      blocks[index],
-                      index,
-                      widget.editorContext,
-                      hiddenTableSeparator: markdownBlockIsHiddenTableSeparator(
-                        blocks,
-                        index,
-                      ),
-                    ),
+                  _buildReadingBlock(
+                    blocks,
+                    index,
+                    outlineByBlock[index],
+                    accentColor,
+                  ),
               ],
             ),
           ),
         ),
       ),
     );
+  }
+
+  Widget _buildReadingBlock(
+    List<MarkdownLiveBlock> blocks,
+    int index,
+    OutlineNode? outlineNode,
+    Color accentColor,
+  ) {
+    final block = blocks[index];
+    final child = widget.renderer._buildReadingMarkdownBlock(
+      block,
+      index,
+      widget.editorContext,
+      hiddenTableSeparator: markdownBlockIsHiddenTableSeparator(blocks, index),
+    );
+    final decorated = _decorateFindBlock(block, child, accentColor);
+    if (outlineNode == null) {
+      return decorated;
+    }
+    return WorkspaceOutlineHeadingAnchor(
+      coordinator: _outlineViewport,
+      node: outlineNode,
+      accentColor: accentColor,
+      child: decorated,
+    );
+  }
+
+  Widget _decorateFindBlock(
+    MarkdownLiveBlock block,
+    Widget child,
+    Color accentColor,
+  ) {
+    if (!widget.findController.visible) {
+      return child;
+    }
+    final hasMatch = widget.findController.blockHasMatch(
+      block.start,
+      block.end,
+    );
+    final current = widget.findController.blockHasCurrentMatch(
+      block.start,
+      block.end,
+    );
+    return KeyedSubtree(
+      key: Key('reading-find-block-${block.start}'),
+      child: KeyedSubtree(
+        key: _findBlockKeys.putIfAbsent(
+          block.start,
+          () => GlobalKey(debugLabel: 'reading-find-block-${block.start}'),
+        ),
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            color: current
+                ? accentColor.withValues(alpha: 0.12)
+                : hasMatch
+                ? workspaceMarkdownHighlightColor.withValues(alpha: 0.34)
+                : null,
+            border: current
+                ? Border.all(color: accentColor.withValues(alpha: 0.72))
+                : null,
+            borderRadius: workspaceBorderRadius,
+          ),
+          child: child,
+        ),
+      ),
+    );
+  }
+
+  void _scheduleRevealFindMatch(List<MarkdownLiveBlock> blocks) {
+    final findController = widget.findController;
+    final current = findController.visible ? findController.currentMatch : null;
+    if (current == null ||
+        _lastFindNavigationRevision == findController.navigationRevision) {
+      return;
+    }
+    _lastFindNavigationRevision = findController.navigationRevision;
+    final block = _visibleBlockForMatch(blocks, current);
+    if (block == null) {
+      return;
+    }
+    final key = _findBlockKeys.putIfAbsent(
+      block.start,
+      () => GlobalKey(debugLabel: 'reading-find-block-${block.start}'),
+    );
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final targetContext = key.currentContext;
+      if (!mounted || targetContext == null) {
+        return;
+      }
+      unawaited(
+        Scrollable.ensureVisible(
+          targetContext,
+          alignment: 0.24,
+          duration: const Duration(milliseconds: 120),
+          curve: Curves.easeOut,
+        ),
+      );
+    });
+  }
+
+  MarkdownLiveBlock? _visibleBlockForMatch(
+    List<MarkdownLiveBlock> blocks,
+    NoteFindMatch match,
+  ) {
+    for (var index = 0; index < blocks.length; index += 1) {
+      final block = blocks[index];
+      if (!match.overlaps(block.start, block.end) ||
+          markdownBlockIsHiddenTableSeparator(blocks, index)) {
+        continue;
+      }
+      return block;
+    }
+    final startIndex = markdownBlockIndexForOffset(blocks, match.start);
+    for (var index = startIndex + 1; index < blocks.length; index += 1) {
+      if (!markdownBlockIsHiddenTableSeparator(blocks, index)) {
+        return blocks[index];
+      }
+    }
+    for (var index = startIndex - 1; index >= 0; index -= 1) {
+      if (!markdownBlockIsHiddenTableSeparator(blocks, index)) {
+        return blocks[index];
+      }
+    }
+    return null;
   }
 }
 

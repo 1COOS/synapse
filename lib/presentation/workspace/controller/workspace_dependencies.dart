@@ -1,4 +1,5 @@
 import '../../../application/search/search_index.dart';
+import '../../../application/exports/note_pdf_export.dart';
 import '../../../application/settings/provider_config.dart';
 import '../../../application/settings/settings_capabilities.dart';
 import '../../../application/settings/vault_location.dart';
@@ -53,6 +54,9 @@ final class WorkspaceDependencies {
   const WorkspaceDependencies({
     required this.initialVault,
     required this.imageInput,
+    required this.notePdfExporter,
+    required this.notePdfPreviewRasterizer,
+    required this.notePdfFileSaver,
     required this.settingsStore,
     required this.resolvedSettingsStore,
     required this.createVault,
@@ -69,6 +73,7 @@ final class WorkspaceDependencies {
     required this.restoreUsesVaultAccessGateway,
     required this.formatVaultLabel,
     required this.supportsDirectoryVault,
+    required this.supportsPdfExport,
     required this.usesNativeMacTitlebar,
     required this.usesInjectedAiProvider,
     required this.emptyVaultLabel,
@@ -82,6 +87,9 @@ final class WorkspaceDependencies {
 
   final VaultBackend? initialVault;
   final ImageInputService imageInput;
+  final NotePdfExporter notePdfExporter;
+  final NotePdfPreviewRasterizer notePdfPreviewRasterizer;
+  final NotePdfFileSaver notePdfFileSaver;
   final Future<SettingsStore> Function() settingsStore;
   final SettingsStore? Function() resolvedSettingsStore;
   final VaultBackendFactory createVault;
@@ -98,6 +106,7 @@ final class WorkspaceDependencies {
   final bool restoreUsesVaultAccessGateway;
   final String Function(String rootPath) formatVaultLabel;
   final bool supportsDirectoryVault;
+  final bool supportsPdfExport;
   final bool usesNativeMacTitlebar;
   final bool usesInjectedAiProvider;
   final String emptyVaultLabel;

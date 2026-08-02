@@ -16,6 +16,7 @@ import 'live_markdown_editor_controller.dart';
 import 'markdown_context_menu.dart';
 import 'markdown_image_transform.dart';
 import 'markdown_table_editor.dart';
+import 'note_find_controller.dart';
 import 'pane_editor_context.dart';
 import 'preview_image_block.dart';
 
@@ -45,18 +46,28 @@ typedef NoteEditorPasteCallback =
 typedef NoteEditorCopyImageCallback =
     Future<PaneEditorCommandOutcome> Function(String sourceId, {bool cutting});
 
+typedef NoteEditorFindRequestCallback =
+    void Function(String? seed, int? anchorOffset);
+
+typedef LiveMarkdownEditorStateChanged =
+    void Function(LiveMarkdownEditorState state, bool attached);
+
 class LiveMarkdownEditor extends StatefulWidget {
   const LiveMarkdownEditor({
     super.key,
     required this.paneId,
     required this.noteId,
     required this.controller,
+    required this.findController,
     required this.outlineNodes,
     required this.outlineNavigationController,
     required this.enabled,
     required this.busy,
     required this.focused,
     required this.onFocusPane,
+    required this.onStateChanged,
+    required this.onFindRequested,
+    required this.onReplaceRequested,
     required this.pasteAvailability,
     required this.onPaste,
     required this.onCopyImage,
@@ -68,12 +79,16 @@ class LiveMarkdownEditor extends StatefulWidget {
   final String paneId;
   final String noteId;
   final TextEditingController controller;
+  final NoteFindController findController;
   final List<OutlineNode> outlineNodes;
   final WorkspaceOutlineNavigationController outlineNavigationController;
   final bool enabled;
   final bool busy;
   final bool focused;
   final VoidCallback onFocusPane;
+  final LiveMarkdownEditorStateChanged onStateChanged;
+  final NoteEditorFindRequestCallback onFindRequested;
+  final NoteEditorFindRequestCallback onReplaceRequested;
   final Future<NoteEditorPasteAvailability> Function() pasteAvailability;
   final NoteEditorPasteCallback onPaste;
   final NoteEditorCopyImageCallback onCopyImage;
@@ -104,6 +119,8 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
   final _scrollViewportKey = GlobalKey();
   late final WorkspaceOutlineViewportCoordinator _outlineViewport;
   final _activeTextEditorKey = GlobalKey();
+  final Map<int, GlobalKey> _findBlockKeys = <int, GlobalKey>{};
+  final Map<int, GlobalKey> _previewSurfaceKeys = <int, GlobalKey>{};
   final _editingSessionTapGroup = Object();
   var _openContextMenuCount = 0;
   var _autofocusInsertedTable = false;
@@ -118,14 +135,35 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
   Offset? _tableBlockDragPosition;
   Timer? _tableBlockAutoScrollTimer;
   var _persistentBlankInsertion = false;
+  int _lastFindNavigationRevision = -1;
+  int? _activationCoverBlockStart;
+  var _activationCoverGeneration = 0;
   _PasteViewportTransaction? _pasteViewportTransaction;
   final Set<String> _failedImageSources = <String>{};
 
   bool get _pasteInFlight => _pasteViewportTransaction?.inFlight ?? false;
 
+  void prepareFindReplacement() {
+    _cancelPasteViewportTransaction();
+    _editorController.endUndoGroup();
+  }
+
+  void restoreFocusAfterFind() {
+    if (!mounted || !widget.focused) {
+      return;
+    }
+    if (_editorController.activeOffset != null && !_activeBlockIsTable()) {
+      _blockFocusNode.requestFocus();
+      _scheduleKeepLatestEditVisible();
+    } else {
+      _editorFocusNode.requestFocus();
+    }
+  }
+
   @override
   void initState() {
     super.initState();
+    widget.onStateChanged(this, true);
     _scrollController = _ActiveEditScrollController(
       correctionForNewDimensions: _activeEditScrollCorrection,
     );
@@ -146,6 +184,8 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
   void didUpdateWidget(LiveMarkdownEditor oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.controller != widget.controller) {
+      _clearActivationCover();
+      _previewSurfaceKeys.clear();
       _cancelPasteViewportTransaction();
       oldWidget.controller.removeListener(_handleFullDocumentChanged);
       widget.controller.addListener(_handleFullDocumentChanged);
@@ -158,6 +198,7 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
       _failedImageSources.clear();
     }
     if (!widget.focused) {
+      _clearActivationCover();
       _cancelPasteViewportTransaction();
     }
     if (!widget.focused && _editorController.activeOffset != null) {
@@ -173,6 +214,8 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
 
   @override
   void dispose() {
+    _clearActivationCover();
+    widget.onStateChanged(this, false);
     widget.controller.removeListener(_handleFullDocumentChanged);
     _stopTableBlockAutoScroll();
     _editorController.dispose();
@@ -529,6 +572,7 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
     _persistentBlankInsertion = false;
     final table = _tableForBlock(block);
     widget.onFocusPane();
+    _armActivationCover(block);
     setState(() {
       _editorController.activateOffset(block.start);
       _editorController.beginDocumentUpdate();
@@ -1675,7 +1719,8 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
         _autofocusInsertedTable = insertion == MarkdownInsertion.table;
       }
     });
-    if (insertion == MarkdownInsertion.divider) {
+    if (insertion == MarkdownInsertion.divider ||
+        insertion == MarkdownInsertion.pageBreak) {
       _focusBlockEditor();
     }
     if (insertion == MarkdownInsertion.table && _openContextMenuCount == 0) {
@@ -1699,6 +1744,41 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
       context,
       editableTextState.contextMenuAnchors,
       menuTarget: menuTarget,
+    );
+  }
+
+  void _requestFind(MarkdownCommandTarget? target) {
+    final request = _findRequestForTarget(target);
+    dismissAllMacContextMenus();
+    widget.onFindRequested(request.seed, request.anchorOffset);
+  }
+
+  void _requestReplace(MarkdownCommandTarget? target) {
+    final request = _findRequestForTarget(target);
+    dismissAllMacContextMenus();
+    widget.onReplaceRequested(request.seed, request.anchorOffset);
+  }
+
+  ({String? seed, int? anchorOffset}) _findRequestForTarget(
+    MarkdownCommandTarget? target,
+  ) {
+    if (target == null) {
+      final selection = widget.controller.selection;
+      return (
+        seed: null,
+        anchorOffset: selection.isValid ? selection.extentOffset : null,
+      );
+    }
+    final selection = target.selection;
+    final blockStart = target.blockStart ?? 0;
+    final seed = selection.isValid && !selection.isCollapsed
+        ? target.value.text.substring(selection.start, selection.end)
+        : null;
+    return (
+      seed: seed,
+      anchorOffset: selection.isValid
+          ? blockStart + selection.start
+          : blockStart,
     );
   }
 
@@ -1736,6 +1816,8 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
                   busy: widget.busy,
                   onUndo: _undo,
                   onRedo: _redo,
+                  onFind: _requestFind,
+                  onReplace: _requestReplace,
                   onPaste: (target) =>
                       _pasteFromContextMenu(menuTarget: target),
                 ),
@@ -1764,6 +1846,7 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
     widget.onFocusPane();
     final editableText = _editorController.editableTextForBlock(block);
     final offset = _clampOffset(selectionOffset ?? 0, editableText.length);
+    _armActivationCover(block);
     setState(() {
       _editorController.activateOffset(
         _clampOffset(block.start + offset, widget.controller.text.length),
@@ -1884,6 +1967,8 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
                     busy: widget.busy,
                     onUndo: _undo,
                     onRedo: _redo,
+                    onFind: _requestFind,
+                    onReplace: _requestReplace,
                     onPaste: (_) => _pasteSelectedImageAtRememberedCaret(),
                     canCopyOverride: imageTargetIsCurrent,
                     onCopyOverride: _copySelectedImage,
@@ -1924,6 +2009,7 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
               final availability =
                   snapshot.data ?? NoteEditorPasteAvailability.empty;
               final canEdit = widget.enabled && !widget.busy;
+              final findShortcuts = _findShortcutLabels();
               return NoteContextMenuToolbar(
                 anchors: TextSelectionToolbarAnchors(
                   primaryAnchor: globalPosition,
@@ -1965,6 +2051,23 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
                       label: '粘贴',
                       enabled: canEdit && availability.canPaste,
                       onPressed: () => unawaited(_pasteAtRememberedCaret()),
+                    ),
+                    const NoteMenuSeparator(
+                      key: Key('note-menu-separator-find'),
+                    ),
+                    NoteMenuAction(
+                      itemKey: const Key('note-menu-find'),
+                      label: '查找…',
+                      enabled: true,
+                      shortcutLabel: findShortcuts.find,
+                      onPressed: () => _requestFind(null),
+                    ),
+                    NoteMenuAction(
+                      itemKey: const Key('note-menu-replace'),
+                      label: '替换…',
+                      enabled: canEdit,
+                      shortcutLabel: findShortcuts.replace,
+                      onPressed: () => _requestReplace(null),
                     ),
                     const NoteMenuSeparator(),
                     NoteMenuAction(
@@ -2086,11 +2189,42 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
         control: !usesMeta,
       ): () =>
           unawaited(_editorController.pastePlainText(busy: widget.busy)),
+      SingleActivator(
+        LogicalKeyboardKey.keyF,
+        meta: usesMeta,
+        control: !usesMeta,
+      ): () =>
+          _requestFind(null),
+      SingleActivator(
+        usesMeta ? LogicalKeyboardKey.keyF : LogicalKeyboardKey.keyH,
+        alt: usesMeta,
+        meta: usesMeta,
+        control: !usesMeta,
+      ): () =>
+          _requestReplace(null),
+      if (usesMeta) ...{
+        const SingleActivator(LogicalKeyboardKey.keyG, meta: true):
+            widget.findController.next,
+        const SingleActivator(LogicalKeyboardKey.keyG, meta: true, shift: true):
+            widget.findController.previous,
+      } else ...{
+        const SingleActivator(LogicalKeyboardKey.f3):
+            widget.findController.next,
+        const SingleActivator(LogicalKeyboardKey.f3, shift: true):
+            widget.findController.previous,
+      },
       const SingleActivator(LogicalKeyboardKey.f10, shift: true):
           _openContextMenuFromKeyboard,
       const SingleActivator(LogicalKeyboardKey.contextMenu):
           _openContextMenuFromKeyboard,
     };
+  }
+
+  ({String find, String replace}) _findShortcutLabels() {
+    final usesMeta = !kIsWeb && defaultTargetPlatform == TargetPlatform.macOS;
+    return usesMeta
+        ? (find: '⌘F', replace: '⌥⌘F')
+        : (find: 'Ctrl+F', replace: 'Ctrl+H');
   }
 
   bool _globalPositionHitsBlockEditor(Offset globalPosition) {
@@ -2249,8 +2383,10 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
     _clearSelectedTableTarget();
     _persistentBlankInsertion = false;
     _cancelPasteViewportTransaction();
+    final hadActivationCover = _activationCoverBlockStart != null;
+    _clearActivationCover();
     if (_editorController.activeOffset == null) {
-      if (hadBlockSelection && mounted) {
+      if ((hadBlockSelection || hadActivationCover) && mounted) {
         setState(() {});
       }
       return;
@@ -2579,6 +2715,7 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
         ? null
         : _editorController.nonBlankBlockIndexForOffset(blocks, activeOffset);
     final activeInsertionOffset = _editorController.activeInsertionOffset;
+    _scheduleRevealFindMatch(blocks);
 
     return CallbackShortcuts(
       bindings: _editorShortcuts(),
@@ -2689,7 +2826,10 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
     OutlineNode? outlineNode,
     List<MarkdownLiveBlock> blocks,
   ) {
-    final child = _buildBlock(block, index, activeIndex, blocks);
+    final child = _decorateFindBlock(
+      block,
+      _buildBlock(block, index, activeIndex, blocks),
+    );
     final outlined = outlineNode == null
         ? child
         : WorkspaceOutlineHeadingAnchor(
@@ -2710,6 +2850,157 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
       onAccept: (data, side) => _handleTableBlockDrop(data, block, side),
       child: outlined,
     );
+  }
+
+  Widget _decorateFindBlock(MarkdownLiveBlock block, Widget child) {
+    if (!widget.findController.visible) {
+      return child;
+    }
+    final appearance = WorkspaceAppearanceScope.of(context);
+    final hasMatch = widget.findController.blockHasMatch(
+      block.start,
+      block.end,
+    );
+    final current = widget.findController.blockHasCurrentMatch(
+      block.start,
+      block.end,
+    );
+    return KeyedSubtree(
+      key: Key('editor-find-block-${block.start}'),
+      child: KeyedSubtree(
+        key: _findBlockKeys.putIfAbsent(
+          block.start,
+          () => GlobalKey(debugLabel: 'editor-find-block-${block.start}'),
+        ),
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            color: current
+                ? appearance.accentColor.withValues(alpha: 0.1)
+                : hasMatch
+                ? workspaceMarkdownHighlightColor.withValues(alpha: 0.3)
+                : null,
+            border: current
+                ? Border.all(
+                    color: appearance.accentColor.withValues(alpha: 0.7),
+                  )
+                : null,
+            borderRadius: workspaceBorderRadius,
+          ),
+          child: child,
+        ),
+      ),
+    );
+  }
+
+  void _scheduleRevealFindMatch(List<MarkdownLiveBlock> blocks) {
+    final findController = widget.findController;
+    final current = findController.visible ? findController.currentMatch : null;
+    if (current == null ||
+        _lastFindNavigationRevision == findController.navigationRevision) {
+      return;
+    }
+    _lastFindNavigationRevision = findController.navigationRevision;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || widget.findController.currentMatch != current) {
+        return;
+      }
+      _revealFindMatch(current);
+    });
+  }
+
+  void _revealFindMatch(NoteFindMatch match) {
+    final blocks = splitMarkdownLiveBlocks(widget.controller.text);
+    final block = _visibleBlockForFindMatch(blocks, match);
+    if (block == null) {
+      return;
+    }
+    final table = _tableForBlock(block);
+    final pureImage =
+        _blockHasPreviewImage(block) &&
+        !markdownHasTextAlongsideImage(block.text);
+    if (!block.isBlank && table == null && !pureImage) {
+      final editableText = _editorController.editableTextForBlock(block);
+      final localStart = _clampOffset(
+        match.start - block.start,
+        editableText.length,
+      );
+      final localEnd = _clampOffset(
+        match.end - block.start,
+        editableText.length,
+      );
+      if (localStart < localEnd) {
+        final selection = TextSelection(
+          baseOffset: localStart,
+          extentOffset: localEnd,
+        );
+        widget.onFocusPane();
+        _armActivationCover(block);
+        setState(() {
+          _editorController.activateOffset(match.start);
+          _editorController.beginDocumentUpdate();
+          widget.controller.selection = TextSelection(
+            baseOffset: block.start + localStart,
+            extentOffset: block.start + localEnd,
+          );
+          _editorController.endDocumentUpdate();
+          _syncBlockController(selectionOffset: localEnd);
+          _editorController.blockController.selection = selection;
+          _editorController.setSelectionTarget(
+            MarkdownCommandTarget(
+              value: _editorController.blockController.value.copyWith(
+                selection: selection,
+                composing: TextRange.empty,
+              ),
+              blockStart: block.start,
+            ),
+          );
+        });
+      }
+    }
+    final key = _findBlockKeys.putIfAbsent(
+      block.start,
+      () => GlobalKey(debugLabel: 'editor-find-block-${block.start}'),
+    );
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final targetContext = key.currentContext;
+      if (!mounted || targetContext == null) {
+        return;
+      }
+      unawaited(
+        Scrollable.ensureVisible(
+          targetContext,
+          alignment: 0.24,
+          duration: const Duration(milliseconds: 120),
+          curve: Curves.easeOut,
+        ),
+      );
+    });
+  }
+
+  MarkdownLiveBlock? _visibleBlockForFindMatch(
+    List<MarkdownLiveBlock> blocks,
+    NoteFindMatch match,
+  ) {
+    for (var index = 0; index < blocks.length; index += 1) {
+      final block = blocks[index];
+      if (!match.overlaps(block.start, block.end) ||
+          markdownBlockIsHiddenTableSeparator(blocks, index)) {
+        continue;
+      }
+      return block;
+    }
+    final startIndex = markdownBlockIndexForOffset(blocks, match.start);
+    for (var index = startIndex + 1; index < blocks.length; index += 1) {
+      if (!markdownBlockIsHiddenTableSeparator(blocks, index)) {
+        return blocks[index];
+      }
+    }
+    for (var index = startIndex - 1; index >= 0; index -= 1) {
+      if (!markdownBlockIsHiddenTableSeparator(blocks, index)) {
+        return blocks[index];
+      }
+    }
+    return null;
   }
 
   Widget _buildBlock(
@@ -2735,23 +3026,110 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
         child: SizedBox(height: 12.0 * visibleLineCount),
       );
     }
+    if (block.kind == MarkdownLiveBlockKind.pageBreak) {
+      if (index == activeIndex) {
+        return _buildTextBlockEditor(block, index);
+      }
+      return GestureDetector(
+        key: Key('live-markdown-page-break-$index'),
+        behavior: HitTestBehavior.opaque,
+        onTap: () => _activateBlock(block),
+        onSecondaryTapDown: (details) =>
+            _activateBlockAndOpenContextMenu(block, details.globalPosition),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 8),
+          child: Row(
+            children: [
+              const Expanded(
+                child: SizedBox(
+                  height: 1,
+                  child: ColoredBox(color: workspaceSoftLineColor),
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 10),
+                child: Text(
+                  '分页符',
+                  style: workspaceMarkdownBodyTextStyle(
+                    context,
+                    WorkspaceAppearanceScope.of(context),
+                  ).copyWith(fontSize: 12, color: workspaceMutedColor),
+                ),
+              ),
+              const Expanded(
+                child: SizedBox(
+                  height: 1,
+                  child: ColoredBox(color: workspaceSoftLineColor),
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
     final hasPreviewImage = _blockHasPreviewImage(block);
     final hasEditableInlineText = markdownHasTextAlongsideImage(block.text);
     final table = _tableForBlock(block);
     if (table != null) {
       final selected = _selectedTableBlockStart == block.start;
+      final preview = _buildPreviewSurface(
+        block,
+        index,
+        _buildTablePreviewBlock(block, index, selected: selected),
+      );
       if (index == activeIndex && !selected) {
-        return _buildTableBlockEditor(block, index, table);
+        return _buildActivationTransition(
+          block: block,
+          index: index,
+          preview: preview,
+          editor: _buildTableBlockEditor(block, index, table),
+        );
       }
-      return _buildTablePreviewBlock(block, index, selected: selected);
+      return preview;
     }
     if (hasPreviewImage && !hasEditableInlineText) {
       return _buildImageBlock(block, index, editingTag: index == activeIndex);
     }
-    if (index == activeIndex) {
-      return _buildTextBlockEditor(block, index);
+    if (hasPreviewImage) {
+      if (index == activeIndex) {
+        return _buildActivationTransition(
+          block: block,
+          index: index,
+          preview: _buildPreviewSurface(
+            block,
+            index,
+            _buildTextPreviewBlock(block, index, hasPreviewImage: true),
+          ),
+          editor: _buildTextBlockEditor(block, index),
+        );
+      }
+      return _buildPreviewSurface(
+        block,
+        index,
+        _buildTextPreviewBlock(block, index, hasPreviewImage: true),
+      );
     }
+    final preview = _buildPreviewSurface(
+      block,
+      index,
+      _buildTextPreviewBlock(block, index, hasPreviewImage: false),
+    );
+    if (index == activeIndex) {
+      return _buildActivationTransition(
+        block: block,
+        index: index,
+        preview: preview,
+        editor: _buildTextBlockEditor(block, index),
+      );
+    }
+    return preview;
+  }
 
+  Widget _buildTextPreviewBlock(
+    MarkdownLiveBlock block,
+    int index, {
+    required bool hasPreviewImage,
+  }) {
     return GestureDetector(
       key: Key('live-markdown-block-preview-$index'),
       behavior: HitTestBehavior.opaque,
@@ -2791,6 +3169,79 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
               ),
       ),
     );
+  }
+
+  Widget _buildPreviewSurface(
+    MarkdownLiveBlock block,
+    int index,
+    Widget preview,
+  ) {
+    return KeyedSubtree(
+      key: _previewSurfaceKeys.putIfAbsent(
+        block.start,
+        () => GlobalKey(debugLabel: 'markdown-preview-${block.start}'),
+      ),
+      child: KeyedSubtree(
+        key: Key('live-markdown-preview-surface-$index'),
+        child: preview,
+      ),
+    );
+  }
+
+  Widget _buildActivationTransition({
+    required MarkdownLiveBlock block,
+    required int index,
+    required Widget preview,
+    required Widget editor,
+  }) {
+    if (_activationCoverBlockStart != block.start) {
+      return editor;
+    }
+    return Stack(
+      alignment: AlignmentDirectional.topStart,
+      fit: StackFit.passthrough,
+      clipBehavior: Clip.none,
+      children: [
+        editor,
+        Positioned.fill(
+          key: Key('live-markdown-activation-cover-$index'),
+          child: IgnorePointer(child: ColoredBox(color: workspaceSurfaceColor)),
+        ),
+        Positioned(
+          top: 0,
+          left: 0,
+          right: 0,
+          child: IgnorePointer(
+            child: ExcludeSemantics(
+              child: ColoredBox(color: workspaceSurfaceColor, child: preview),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  void _armActivationCover(MarkdownLiveBlock block) {
+    final current = _editorController.currentActiveTextBlock();
+    if (current?.start == block.start) {
+      return;
+    }
+    final generation = ++_activationCoverGeneration;
+    _activationCoverBlockStart = block.start;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted ||
+          generation != _activationCoverGeneration ||
+          _activationCoverBlockStart != block.start ||
+          _editorController.currentActiveTextBlock()?.start != block.start) {
+        return;
+      }
+      setState(() => _activationCoverBlockStart = null);
+    });
+  }
+
+  void _clearActivationCover() {
+    _activationCoverGeneration += 1;
+    _activationCoverBlockStart = null;
   }
 
   Widget _buildTablePreviewBlock(
@@ -2914,6 +3365,9 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
       verticalViewportKey: _scrollViewportKey,
       onReorderStateChanged: _handleTableReorderStateChanged,
       onFocusPane: widget.onFocusPane,
+      onFindRequested: (seed) => widget.onFindRequested(seed, block.start),
+      onReplaceRequested: (seed) =>
+          widget.onReplaceRequested(seed, block.start),
       onDeleteTable: () => _deleteTableBlock(block),
       onChanged: (table) => _replaceTableBlock(block, table),
     );

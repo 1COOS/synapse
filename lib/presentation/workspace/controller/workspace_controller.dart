@@ -3,7 +3,9 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:path/path.dart' as p;
 
+import '../../../application/exports/note_pdf_export.dart';
 import '../../../application/search/search_index.dart';
 import '../../../application/settings/synapse_settings.dart';
 import '../../../domain/markdown/markdown_document.dart';
@@ -257,6 +259,9 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
   }
 
   void focusPane(String paneId) {
+    if (_splits.focusedPaneId == paneId) {
+      return;
+    }
     if (_splits.focus(paneId)) {
       final pane = _splits.pane(paneId)!;
       final current = _requireState();
@@ -841,6 +846,81 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
   Future<List<int>> readNoteAttachment(NoteAttachment attachment) {
     return _editor.readNoteAttachment(attachment);
   }
+
+  Future<NotePdfExportSnapshot?> prepareNotePdfExport(
+    editor_context.PaneEditorContext? context,
+  ) async {
+    final current = _requireState();
+    if (context == null ||
+        current.requiresMigration ||
+        current.reloadRequired ||
+        current.activeOperation != null) {
+      return null;
+    }
+    final resolved = resolvePaneEditorContext(context);
+    if (resolved == null ||
+        current.lockedSessionNoteIds.contains(resolved.session.noteId) ||
+        !_beginOperation(WorkspaceOperation.pdfExport)) {
+      return null;
+    }
+    try {
+      final report = await _saves.flush([resolved.session]);
+      if (!report.succeeded) {
+        final error = report.results.isEmpty
+            ? '未知错误'
+            : report.results.first.error;
+        _setMessage('保存失败：$error');
+        return null;
+      }
+      final refreshed = resolvePaneEditorContext(context);
+      if (refreshed == null ||
+          refreshed.session.noteId != resolved.session.noteId) {
+        return null;
+      }
+      final note = refreshed.session.note;
+      final assetsDirectory = '${p.basenameWithoutExtension(note.path)}.assets';
+      final assets = <NotePdfExportAsset>[];
+      for (final attachment in note.attachments) {
+        if (attachment.mediaKind != MediaKind.image) {
+          continue;
+        }
+        List<int>? bytes;
+        try {
+          bytes = await _editor.readNoteAttachment(attachment);
+        } catch (_) {
+          bytes = null;
+        }
+        assets.add(
+          NotePdfExportAsset(
+            source: '$assetsDirectory/${attachment.relativePath}'.replaceAll(
+              '\\',
+              '/',
+            ),
+            title: attachment.title,
+            mimeType: attachment.mimeType,
+            bytes: bytes == null ? null : Uint8List.fromList(bytes),
+          ),
+        );
+      }
+      return NotePdfExportSnapshot(
+        noteId: note.id,
+        title: note.title,
+        markdown: refreshed.session.controller.text,
+        assets: assets,
+      );
+    } finally {
+      _endOperation(WorkspaceOperation.pdfExport);
+    }
+  }
+
+  bool get supportsPdfExport => _dependencies.supportsPdfExport;
+
+  NotePdfExporter get notePdfExporter => _dependencies.notePdfExporter;
+
+  NotePdfPreviewRasterizer get notePdfPreviewRasterizer =>
+      _dependencies.notePdfPreviewRasterizer;
+
+  NotePdfFileSaver get notePdfFileSaver => _dependencies.notePdfFileSaver;
 
   @Deprecated('Use readAiMaterialContent.')
   Future<List<int>> readSourceAttachment(AiMaterial source) {

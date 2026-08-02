@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 
 import '../../application/ports/vault_revealer.dart';
+import '../../application/exports/note_pdf_export.dart';
 import '../../application/proposals/proposal_service.dart';
 import '../../application/search/search_index.dart';
 import '../../application/settings/synapse_settings.dart';
@@ -23,12 +24,17 @@ import '../config/vault_location_store.dart';
 import '../input/image_input_service.dart';
 import '../platform/default_vault_revealer.dart';
 import '../platform/package_application_metadata.dart';
+import '../pdf/default_note_pdf_exporter.dart';
+import '../pdf/platform_note_pdf_services.dart';
 import '../vault/default_vault_backend.dart' as platform_vault;
 import '../vault/vault_backend.dart';
 
 WorkspaceDependencies createWorkspaceDependencies({
   VaultBackend? initialVault,
   ImageInputService? imageInput,
+  NotePdfExporter? notePdfExporter,
+  NotePdfPreviewRasterizer? notePdfPreviewRasterizer,
+  NotePdfFileSaver? notePdfFileSaver,
   SettingsStore? settingsStore,
   ProviderConfigStore? providerConfigStore,
   VaultLocationStore? vaultLocationStore,
@@ -45,6 +51,7 @@ WorkspaceDependencies createWorkspaceDependencies({
   VaultAccessGateway? vaultAccessGateway,
   VaultBackend Function()? defaultVaultFactory,
   bool? supportsDirectoryVaultOverride,
+  bool? supportsPdfExportOverride,
   bool? usesNativeMacTitlebarOverride,
   String? emptyVaultLabel,
   String? injectedVaultLabel,
@@ -63,6 +70,11 @@ WorkspaceDependencies createWorkspaceDependencies({
       );
   final supportsDirectoryVault =
       supportsDirectoryVaultOverride ?? platform_vault.supportsDirectoryVault;
+  final supportsPdfExport =
+      supportsPdfExportOverride ??
+      (!kIsWeb &&
+          (defaultTargetPlatform == TargetPlatform.macOS ||
+              defaultTargetPlatform == TargetPlatform.windows));
   final customSearchIndexFactory = searchIndexFactory;
   final createPlatformAiProvider = aiProviderFactory ?? _createAiProvider;
   final reportCleanupError = cleanupErrorReporter ?? _reportCleanupError;
@@ -85,6 +97,10 @@ WorkspaceDependencies createWorkspaceDependencies({
   return WorkspaceDependencies(
     initialVault: initialVault,
     imageInput: imageInput ?? const PlatformImageInputService(),
+    notePdfExporter: notePdfExporter ?? DefaultNotePdfExporter(),
+    notePdfPreviewRasterizer:
+        notePdfPreviewRasterizer ?? const PrintingNotePdfPreviewRasterizer(),
+    notePdfFileSaver: notePdfFileSaver ?? const PlatformNotePdfFileSaver(),
     settingsStore: () async {
       return resolvedSettingsStore ??= await createDefaultSettingsStore();
     },
@@ -163,6 +179,7 @@ WorkspaceDependencies createWorkspaceDependencies({
       return basename.isEmpty ? rootPath : basename;
     },
     supportsDirectoryVault: supportsDirectoryVault,
+    supportsPdfExport: supportsPdfExport,
     usesNativeMacTitlebar:
         usesNativeMacTitlebarOverride ??
         (!kIsWeb && defaultTargetPlatform == TargetPlatform.macOS),

@@ -15,6 +15,8 @@ List<Widget> buildLiveMarkdownContextMenuItems({
   required bool busy,
   required VoidCallback onUndo,
   required VoidCallback onRedo,
+  required ValueChanged<MarkdownCommandTarget?> onFind,
+  required ValueChanged<MarkdownCommandTarget?> onReplace,
   required Future<void> Function(MarkdownCommandTarget? target) onPaste,
   bool? canCopyOverride,
   Future<void> Function()? onCopyOverride,
@@ -73,6 +75,21 @@ List<Widget> buildLiveMarkdownContextMenuItems({
       onPressed: () =>
           controller.pastePlainText(menuTarget: menuTarget, busy: busy),
     ),
+    const NoteMenuSeparator(key: Key('note-menu-separator-find')),
+    NoteMenuAction(
+      itemKey: const Key('note-menu-find'),
+      label: hasSelection ? '查找所选内容' : '查找…',
+      enabled: true,
+      shortcutLabel: shortcuts.find,
+      onPressed: () => onFind(menuTarget),
+    ),
+    NoteMenuAction(
+      itemKey: const Key('note-menu-replace'),
+      label: '替换…',
+      enabled: canEdit,
+      shortcutLabel: shortcuts.replace,
+      onPressed: () => onReplace(menuTarget),
+    ),
     const NoteMenuSeparator(key: Key('note-menu-separator-0')),
     NoteMenuSubmenu(
       itemKey: const Key('note-menu-insert'),
@@ -97,6 +114,16 @@ List<Widget> buildLiveMarkdownContextMenuItems({
           enabled: canUseStructure,
           onPressed: () => controller.applyInsertion(
             MarkdownInsertion.divider,
+            menuTarget: menuTarget,
+            busy: busy,
+          ),
+        ),
+        NoteMenuAction(
+          itemKey: const Key('note-menu-insert-page-break'),
+          label: '分页符',
+          enabled: canUseStructure,
+          onPressed: () => controller.applyInsertion(
+            MarkdownInsertion.pageBreak,
             menuTarget: menuTarget,
             busy: busy,
           ),
@@ -291,17 +318,35 @@ List<Widget> buildLiveMarkdownContextMenuItems({
   ];
 }
 
-({String undo, String redo, String bold, String italic, String pastePlain})
+({
+  String undo,
+  String redo,
+  String bold,
+  String italic,
+  String pastePlain,
+  String find,
+  String replace,
+})
 _contextMenuShortcuts() {
   final usesMacSymbols =
       !kIsWeb && defaultTargetPlatform == TargetPlatform.macOS;
   return usesMacSymbols
-      ? (undo: '⌘Z', redo: '⇧⌘Z', bold: '⌘B', italic: '⌘I', pastePlain: '⇧⌘V')
+      ? (
+          undo: '⌘Z',
+          redo: '⇧⌘Z',
+          bold: '⌘B',
+          italic: '⌘I',
+          pastePlain: '⇧⌘V',
+          find: '⌘F',
+          replace: '⌥⌘F',
+        )
       : (
           undo: 'Ctrl+Z',
           redo: 'Ctrl+Shift+Z',
           bold: 'Ctrl+B',
           italic: 'Ctrl+I',
           pastePlain: 'Ctrl+Shift+V',
+          find: 'Ctrl+F',
+          replace: 'Ctrl+H',
         );
 }

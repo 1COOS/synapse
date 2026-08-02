@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -8,6 +9,9 @@ import '../../../domain/markdown/markdown_document.dart';
 import '../../../domain/vault/vault_resource.dart';
 import '../../workspace/controller/workspace_controller.dart';
 import '../../workspace/editor/live_markdown_editor.dart';
+import '../../workspace/editor/markdown_context_menu.dart';
+import '../../workspace/editor/note_find_controller.dart';
+import '../../workspace/editor/note_find_panel.dart';
 import '../../workspace/editor/pane_editor_context.dart';
 import '../../workspace/outline_navigation.dart';
 import '../../workspace/state/note_document_session.dart';
@@ -15,6 +19,7 @@ import '../../workspace/state/split_workspace_controller.dart';
 import 'workspace_controls.dart';
 import 'workspace_layout.dart';
 import 'workspace_markdown_renderer.dart';
+import 'note_pdf_export_dialog.dart';
 import 'workspace_theme.dart';
 import 'workspace_titlebar.dart';
 
@@ -37,6 +42,10 @@ final class WorkspaceNotePane extends ConsumerStatefulWidget {
 final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
   final _emptyMarkdownController = TextEditingController();
   final _editorPasteFocusNode = FocusNode();
+  final Map<String, NoteFindController> _findControllers = {};
+  final Map<String, LiveMarkdownEditorState> _editorStates = {};
+  final Map<String, FocusNode> _paneFocusNodes = {};
+  var _paneStatePruneScheduled = false;
   Future<PaneEditorCommandOutcome>? _pasteIntoNoteOperation;
 
   WorkspaceController get _controller => widget.controller;
@@ -73,6 +82,12 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
   void dispose() {
     _emptyMarkdownController.dispose();
     _editorPasteFocusNode.dispose();
+    for (final controller in _findControllers.values) {
+      controller.dispose();
+    }
+    for (final focusNode in _paneFocusNodes.values) {
+      focusNode.dispose();
+    }
     super.dispose();
   }
 
@@ -80,6 +95,186 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
   Widget build(BuildContext context) => _buildEditorPane();
 
   void _focusPane(String paneId) => _controller.focusPane(paneId);
+
+  NoteFindController _findControllerFor(
+    SplitLeaf pane,
+    NoteDocumentSession? session,
+  ) {
+    final controller = _findControllers.putIfAbsent(
+      pane.paneId,
+      NoteFindController.new,
+    );
+    if (session == null) {
+      controller.unbind(notify: false);
+    } else {
+      controller.bind(noteId: session.noteId, document: session.controller);
+    }
+    return controller;
+  }
+
+  FocusNode _paneFocusNodeFor(String paneId) {
+    return _paneFocusNodes.putIfAbsent(
+      paneId,
+      () => FocusNode(debugLabel: 'note-pane-$paneId'),
+    );
+  }
+
+  int _findAnchor(NoteDocumentSession? session) {
+    final selection = session?.controller.selection;
+    return selection != null && selection.isValid ? selection.extentOffset : 0;
+  }
+
+  void _openFind(
+    SplitLeaf pane,
+    NoteFindController controller, {
+    String? seed,
+    int? anchorOffset,
+  }) {
+    _focusPane(pane.paneId);
+    controller.openFind(
+      seed: seed,
+      anchorOffset:
+          anchorOffset ??
+          _findAnchor(
+            pane.noteId == null ? null : _controller.sessionFor(pane.noteId!),
+          ),
+    );
+  }
+
+  void _openReplace(
+    SplitLeaf pane,
+    NoteFindController controller, {
+    String? seed,
+    int? anchorOffset,
+  }) {
+    setState(() {
+      _focusPane(pane.paneId);
+      if (pane.mode != NoteMode.source) {
+        _splitWorkspaceController.setPaneMode(pane.paneId, NoteMode.source);
+      }
+    });
+    controller.openReplace(
+      seed: seed,
+      anchorOffset:
+          anchorOffset ??
+          _findAnchor(
+            pane.noteId == null ? null : _controller.sessionFor(pane.noteId!),
+          ),
+    );
+  }
+
+  void _closeFind(String paneId, NoteFindController controller) {
+    controller.close();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) {
+        return;
+      }
+      final editor = _editorStates[paneId];
+      if (editor != null) {
+        editor.restoreFocusAfterFind();
+      } else {
+        _paneFocusNodes[paneId]?.requestFocus();
+      }
+    });
+  }
+
+  void _replaceCurrent(String paneId, NoteFindController controller) {
+    final editor = _editorStates[paneId];
+    if (editor == null) {
+      return;
+    }
+    controller.replaceCurrent(beforeChange: editor.prepareFindReplacement);
+  }
+
+  void _replaceAll(String paneId, NoteFindController controller) {
+    final editor = _editorStates[paneId];
+    if (editor == null) {
+      return;
+    }
+    controller.replaceAll(beforeChange: editor.prepareFindReplacement);
+  }
+
+  Map<ShortcutActivator, VoidCallback> _findShortcuts(
+    SplitLeaf pane,
+    NoteFindController controller,
+  ) {
+    final usesMeta = !kIsWeb && defaultTargetPlatform == TargetPlatform.macOS;
+    return <ShortcutActivator, VoidCallback>{
+      SingleActivator(
+        LogicalKeyboardKey.keyF,
+        meta: usesMeta,
+        control: !usesMeta,
+      ): () =>
+          _openFind(pane, controller),
+      SingleActivator(
+        usesMeta ? LogicalKeyboardKey.keyF : LogicalKeyboardKey.keyH,
+        alt: usesMeta,
+        meta: usesMeta,
+        control: !usesMeta,
+      ): () =>
+          _openReplace(pane, controller),
+      if (usesMeta) ...{
+        const SingleActivator(LogicalKeyboardKey.keyG, meta: true):
+            controller.next,
+        const SingleActivator(LogicalKeyboardKey.keyG, meta: true, shift: true):
+            controller.previous,
+      } else ...{
+        const SingleActivator(LogicalKeyboardKey.f3): controller.next,
+        const SingleActivator(LogicalKeyboardKey.f3, shift: true):
+            controller.previous,
+      },
+    };
+  }
+
+  ({String find, String replace}) _findShortcutLabels() {
+    final usesMeta = !kIsWeb && defaultTargetPlatform == TargetPlatform.macOS;
+    return usesMeta
+        ? (find: '⌘F', replace: '⌥⌘F')
+        : (find: 'Ctrl+F', replace: 'Ctrl+H');
+  }
+
+  void _showReadingFindMenu(
+    SplitLeaf pane,
+    NoteFindController findController,
+    Offset globalPosition,
+  ) {
+    final shortcuts = _findShortcutLabels();
+    final appearance = _workspaceAppearance;
+    final noteId = pane.noteId;
+    final canReplace =
+        noteId != null &&
+        !_busy &&
+        !_reloadRequired &&
+        !_paneEditorCommandLocks.contains(noteId);
+    ContextMenuController().show(
+      context: context,
+      contextMenuBuilder: (context) => WorkspaceAppearanceScope(
+        appearance: appearance,
+        child: NoteContextMenuToolbar(
+          anchors: TextSelectionToolbarAnchors(primaryAnchor: globalPosition),
+          child: NoteContextMenu(
+            children: [
+              NoteMenuAction(
+                itemKey: const Key('note-menu-find'),
+                label: '查找…',
+                enabled: pane.noteId != null,
+                shortcutLabel: shortcuts.find,
+                onPressed: () => _openFind(pane, findController),
+              ),
+              NoteMenuAction(
+                itemKey: const Key('note-menu-replace'),
+                label: '替换…',
+                enabled: canReplace,
+                shortcutLabel: shortcuts.replace,
+                onPressed: () => _openReplace(pane, findController),
+              ),
+            ],
+          ),
+        ),
+      ),
+      debugRequiredFor: widget,
+    );
+  }
 
   void _resizeSplitBranch(String branchId, double delta, double extent) {
     _controller.resizeSplit(branchId, delta, extent);
@@ -129,7 +324,49 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
     PaneEditorContext? editorContext,
   ) => _controller.notePasteAvailability(editorContext);
 
+  bool _canExportPdf(SplitLeaf pane, NoteDocumentSession? session) {
+    return _controller.supportsPdfExport &&
+        session != null &&
+        !_busy &&
+        !_reloadRequired &&
+        !_workspace.requiresMigration &&
+        !_paneEditorCommandLocks.contains(session.noteId) &&
+        pane.noteId == session.noteId;
+  }
+
+  Future<void> _showPdfExport(
+    SplitLeaf pane,
+    NoteDocumentSession session,
+  ) async {
+    _focusPane(pane.paneId);
+    final editorContext = _capturePaneEditorContext(
+      pane: pane,
+      session: session,
+    );
+    final snapshot = await _controller.prepareNotePdfExport(editorContext);
+    if (!mounted || snapshot == null) {
+      return;
+    }
+    await showCupertinoDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => WorkspaceAppearanceScope(
+        appearance: _workspaceAppearance,
+        child: Center(
+          child: NotePdfExportDialog(
+            snapshot: snapshot,
+            exporter: _controller.notePdfExporter,
+            rasterizer: _controller.notePdfPreviewRasterizer,
+            fileSaver: _controller.notePdfFileSaver,
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget _buildEditorPane() {
+    final root = _splitWorkspaceController.root;
+    _schedulePaneStatePrune();
     return Container(
       key: const Key('note-pane'),
       decoration: const BoxDecoration(
@@ -139,9 +376,31 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
       child: Padding(
         key: const Key('split-workspace'),
         padding: const EdgeInsets.all(workspaceNoteWorkspaceGutter),
-        child: _buildSplitNode(_splitWorkspaceController.root),
+        child: _buildSplitNode(root),
       ),
     );
+  }
+
+  void _schedulePaneStatePrune() {
+    if (_paneStatePruneScheduled) {
+      return;
+    }
+    _paneStatePruneScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _paneStatePruneScheduled = false;
+      if (!mounted) {
+        return;
+      }
+      final currentPaneIds = _splitPaneIds(_splitWorkspaceController.root);
+      for (final paneId in _findControllers.keys.toList()) {
+        if (currentPaneIds.contains(paneId)) {
+          continue;
+        }
+        _findControllers.remove(paneId)?.dispose();
+        _editorStates.remove(paneId);
+        _paneFocusNodes.remove(paneId)?.dispose();
+      }
+    });
   }
 
   Widget _buildSplitNode(SplitNode node) {
@@ -198,63 +457,124 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
       pane: pane,
       session: session,
     );
+    final findController = _findControllerFor(pane, session);
+    final paneFocusNode = _paneFocusNodeFor(pane.paneId);
     final accentColor = _workspaceAppearance.accentColor;
-    return GestureDetector(
-      key: Key('split-pane-${pane.paneId}'),
-      behavior: HitTestBehavior.opaque,
-      onTap: () => setState(() => _focusPane(pane.paneId)),
-      child: ListenableBuilder(
-        listenable: session ?? _emptyMarkdownController,
-        builder: (context, child) {
-          final outlineNodes = session == null
-              ? const <OutlineNode>[]
-              : extractOutline(session.controller.text);
-          return DecoratedBox(
-            decoration: BoxDecoration(
-              color: workspaceSurfaceColor,
-              border: Border.all(
-                color: focused ? accentColor : workspaceLineColor,
-              ),
-              borderRadius: workspaceBorderRadius,
-            ),
-            child: ClipRRect(
-              borderRadius: workspaceBorderRadius,
-              child: Stack(
-                children: [
-                  Positioned.fill(
-                    child: pane.mode == NoteMode.reading
-                        ? session == null
-                              ? const EmptyState(text: '选择或创建笔记后开始整理 Markdown')
-                              : _markdownRenderer.buildReadingPreview(
-                                  session: session,
-                                  editorContext: editorContext!,
-                                  paneId: pane.paneId,
-                                  focused: focused,
-                                  outlineNodes: outlineNodes,
-                                  outlineNavigationController:
-                                      widget.outlineNavigationController,
-                                )
-                        : _buildNoteEditor(
-                            session: session,
-                            pane: pane,
-                            outlineNodes: outlineNodes,
+    return CallbackShortcuts(
+      bindings: _findShortcuts(pane, findController),
+      child: GestureDetector(
+        key: Key('split-pane-${pane.paneId}'),
+        behavior: HitTestBehavior.opaque,
+        onTap: () => _focusPane(pane.paneId),
+        child: ListenableBuilder(
+          listenable: session ?? _emptyMarkdownController,
+          builder: (context, child) => ListenableBuilder(
+            listenable: findController,
+            builder: (context, child) {
+              final outlineNodes = session == null
+                  ? const <OutlineNode>[]
+                  : extractOutline(session.controller.text);
+              final canReplace =
+                  session != null &&
+                  pane.mode == NoteMode.source &&
+                  !_busy &&
+                  !_reloadRequired &&
+                  !_paneEditorCommandLocks.contains(session.noteId);
+              return DecoratedBox(
+                decoration: BoxDecoration(
+                  color: workspaceSurfaceColor,
+                  border: Border.all(
+                    color: focused ? accentColor : workspaceLineColor,
+                  ),
+                  borderRadius: workspaceBorderRadius,
+                ),
+                child: ClipRRect(
+                  borderRadius: workspaceBorderRadius,
+                  child: Stack(
+                    children: [
+                      Positioned.fill(
+                        child: pane.mode == NoteMode.reading
+                            ? session == null
+                                  ? const EmptyState(
+                                      text: '选择或创建笔记后开始整理 Markdown',
+                                    )
+                                  : Focus(
+                                      focusNode: paneFocusNode,
+                                      child: GestureDetector(
+                                        behavior: HitTestBehavior.translucent,
+                                        onTapDown: (_) {
+                                          if (!paneFocusNode.hasFocus) {
+                                            paneFocusNode.requestFocus();
+                                          }
+                                        },
+                                        onSecondaryTapDown: (details) =>
+                                            _showReadingFindMenu(
+                                              pane,
+                                              findController,
+                                              details.globalPosition,
+                                            ),
+                                        child: _markdownRenderer
+                                            .buildReadingPreview(
+                                              session: session,
+                                              editorContext: editorContext!,
+                                              paneId: pane.paneId,
+                                              focused: focused,
+                                              outlineNodes: outlineNodes,
+                                              outlineNavigationController: widget
+                                                  .outlineNavigationController,
+                                              findController: findController,
+                                            ),
+                                      ),
+                                    )
+                            : _buildNoteEditor(
+                                session: session,
+                                pane: pane,
+                                outlineNodes: outlineNodes,
+                                findController: findController,
+                              ),
+                      ),
+                      Positioned(
+                        top: 10,
+                        left: 12,
+                        right: 10,
+                        child: _buildPaneHeader(
+                          pane,
+                          session: session,
+                          focused: focused,
+                        ),
+                      ),
+                      if (session != null && findController.visible)
+                        Positioned(
+                          top: 42,
+                          left: 12,
+                          right: 12,
+                          child: Align(
+                            alignment: Alignment.topRight,
+                            child: ConstrainedBox(
+                              constraints: const BoxConstraints(maxWidth: 430),
+                              child: NoteFindPanel(
+                                key: Key('note-find-panel-${pane.paneId}'),
+                                controller: findController,
+                                canReplace: canReplace,
+                                onClose: () =>
+                                    _closeFind(pane.paneId, findController),
+                                onReplaceCurrent: () => _replaceCurrent(
+                                  pane.paneId,
+                                  findController,
+                                ),
+                                onReplaceAll: () =>
+                                    _replaceAll(pane.paneId, findController),
+                              ),
+                            ),
                           ),
+                        ),
+                    ],
                   ),
-                  Positioned(
-                    top: 10,
-                    left: 12,
-                    right: 10,
-                    child: _buildPaneHeader(
-                      pane,
-                      session: session,
-                      focused: focused,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          );
-        },
+                ),
+              );
+            },
+          ),
+        ),
       ),
     );
   }
@@ -291,6 +611,18 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
               ),
             ),
           ),
+          if (_controller.supportsPdfExport) ...[
+            const SizedBox(width: 4),
+            PaneModeIconAction(
+              key: Key('note-export-pdf-${pane.paneId}'),
+              label: '导出 PDF',
+              icon: CupertinoIcons.share,
+              selected: false,
+              onPressed: _canExportPdf(pane, session)
+                  ? () => unawaited(_showPdfExport(pane, session!))
+                  : null,
+            ),
+          ],
         ],
       ),
     );
@@ -341,6 +673,9 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
       onPressed: () {
         setState(() {
           _focusPane(pane.paneId);
+          if (mode == NoteMode.reading) {
+            _findControllers[pane.paneId]?.hideReplace();
+          }
           _splitWorkspaceController.setPaneMode(pane.paneId, mode);
         });
       },
@@ -355,6 +690,7 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
     NoteDocumentSession? session,
     SplitLeaf? pane,
     List<OutlineNode> outlineNodes = const [],
+    NoteFindController? findController,
   }) {
     final resolvedSession = pane == null ? session ?? _activeSession : session;
     final resolvedPane = pane ?? _focusedPane;
@@ -395,7 +731,7 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
           behavior: HitTestBehavior.opaque,
           onTap: () {
             if (resolvedPane != null) {
-              setState(() => _focusPane(resolvedPane.paneId));
+              _focusPane(resolvedPane.paneId);
             }
             _editorPasteFocusNode.requestFocus();
           },
@@ -434,6 +770,9 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
                     paneId: resolvedPane?.paneId ?? 'pane-1',
                     noteId: resolvedSession.noteId,
                     controller: resolvedSession.controller,
+                    findController:
+                        findController ??
+                        _findControllerFor(resolvedPane!, resolvedSession),
                     outlineNodes: outlineNodes,
                     outlineNavigationController:
                         widget.outlineNavigationController,
@@ -447,9 +786,32 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
                     focused: focused,
                     onFocusPane: () {
                       if (resolvedPane != null) {
-                        setState(() => _focusPane(resolvedPane.paneId));
+                        _focusPane(resolvedPane.paneId);
                       }
                     },
+                    onStateChanged: (state, attached) {
+                      final paneId = resolvedPane?.paneId ?? 'pane-1';
+                      if (!attached &&
+                          identical(_editorStates[paneId], state)) {
+                        _editorStates.remove(paneId);
+                      } else if (attached) {
+                        _editorStates[paneId] = state;
+                      }
+                    },
+                    onFindRequested: (seed, anchorOffset) => _openFind(
+                      resolvedPane!,
+                      findController ??
+                          _findControllerFor(resolvedPane, resolvedSession),
+                      seed: seed,
+                      anchorOffset: anchorOffset,
+                    ),
+                    onReplaceRequested: (seed, anchorOffset) => _openReplace(
+                      resolvedPane!,
+                      findController ??
+                          _findControllerFor(resolvedPane, resolvedSession),
+                      seed: seed,
+                      anchorOffset: anchorOffset,
+                    ),
                     pasteAvailability: () =>
                         _noteEditorPasteAvailability(editorContext),
                     onPaste: (target, {lineInsertion = false}) =>
@@ -551,5 +913,15 @@ SplitLeaf? _findSplitLeaf(SplitNode node, String paneId) {
     final SplitBranch branch =>
       _findSplitLeaf(branch.first, paneId) ??
           _findSplitLeaf(branch.second, paneId),
+  };
+}
+
+Set<String> _splitPaneIds(SplitNode node) {
+  return switch (node) {
+    final SplitLeaf leaf => <String>{leaf.paneId},
+    final SplitBranch branch => <String>{
+      ..._splitPaneIds(branch.first),
+      ..._splitPaneIds(branch.second),
+    },
   };
 }

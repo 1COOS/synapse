@@ -22,6 +22,7 @@ Synapse 使用 Flutter + Dart 构建本地优先的学习资料整理工作台�
 | UI | Cupertino + Flutter widgets | 已使用 |
 | 状态管理 | Riverpod `AsyncNotifier` | 已实现，`WorkspaceController` 为 workspace snapshot 唯一写入者 |
 | Markdown | `flutter_markdown` + 自定义 Live Markdown editor | 已使用 |
+| PDF 导出 | `pdf` + `printing` + `file_selector` | macOS/Windows 当前笔记 A4 生成、分页预览与保存已实现 |
 | macOS 文件访问 | security-scoped bookmark + tokenized lease + `dart:io` | 已实现 |
 | 密钥存储 | macOS Keychain / `flutter_secure_storage` | strict fail-closed |
 | 搜索 | SQLite / memory `SearchIndex` | macOS Vault 默认 SQLite 并后台增量预热；Web 与降级路径使用 memory |
@@ -56,6 +57,7 @@ infrastructure
 lib/
   main.dart
   application/
+    exports/
     ports/
     proposals/
     search/
@@ -69,6 +71,7 @@ lib/
     cache/
     config/
     input/
+    pdf/
     vault/
       file_vault_backend.dart
       file_vault_paths.dart
@@ -192,7 +195,15 @@ backend commit 成功后，`postCommitHydrate`、prepare/validate、apply 或 pu
 
 Live Markdown 继续遵守：活动 block 显示 Markdown marker，失焦后由预览隐藏；共享 inline parser 负责加粗、斜体、删除线、Obsidian `==高亮==`、转义、嵌套和代码范围；`TextSpan.toPlainText()` 必须与 backing controller text 完全一致；focus、selection 和 context menu 不得修改正文或插入空行。产品命令只开放 H1–H4，但 renderer 与 outline parser 继续兼容已有 H5/H6。
 
-### 6.4 File Vault mutation journal
+### 6.4 PDF 导出管线
+
+`application/exports/note_pdf_export.dart` 定义 `NotePdfExportSnapshot`、`NotePdfExportOptions`、`NotePdfBuildResult`、结构化 warning 以及 exporter/rasterizer/file-saver ports。真实实现位于 `infrastructure/pdf/`：`DefaultNotePdfExporter` 使用 `pdf` 在后台 isolate 构建文档，`PrintingNotePdfPreviewRasterizer` 按需将指定页栅格化，`PlatformNotePdfFileSaver` 继续通过 `file_selector` 保存。Noto Sans SC、JetBrains Mono、Noto Emoji 及其 OFL 许可证随应用 assets 离线打包，不允许运行时下载字体。
+
+窗格在 await 前捕获 `PaneEditorContext`，`prepareNotePdfExport` 先通过 `NoteSaveCoordinator.flush` 保存指定 session，再复制正文和图片附件得到不可变快照。flush 失败、中途 stale、workspace busy、迁移、`reloadRequired` 或 note lock 都不得进入生成。弹窗只持有快照和当前 preview bytes；方向/边距更新使用 generation token，过期 build 结果直接丢弃，缩略图按页懒加载并限制缓存。
+
+导出器将 Markdown 转为独立打印块，不修改 Vault 数据模型。唯一新增正文契约是独占一行的 `<!-- synapse:page-break -->`；开头、结尾和连续标记折叠，fenced code 内保持字面量，`---` 继续解析为水平线。段落和长列表使用可跨页 RichText；代码块用逐行 table row 保证只在线之间分页；标题用 `NewPage(freeSpace: ...)` 防止孤立；普通表格按行分页并重复 header，超高行整表降级为可跨页字段布局；图片使用本地快照、等比 contain 和缺失占位。页眉按字体实际宽度省略标题，页脚统一使用 `pageNumber / pagesCount`。
+
+### 6.5 File Vault mutation journal
 
 File Vault mutation 由 `.synapse/transactions/` 下的 WAL journal 保护，并使用同进程 mutex + blocking file lock 串行化：
 
@@ -261,7 +272,7 @@ File Vault mutation 由 `.synapse/transactions/` 下的 WAL journal 保护，并
 | --- | --- | --- | --- |
 | macOS | `FileVaultBackend` | 本机 Markdown Vault | 唯一生产目标 |
 | Web/H5 | `MemoryVaultBackend` | 内存，刷新重置 | UI/流程预览 |
-| Windows | 工程资产保留 | 不在本轮验证范围 | 不属于当前生产 gate |
+| Windows | `FileVaultBackend` 工程资产 | PDF 导出代码与插件装配已实现，需在 Windows 验证 build | 不属于当前 macOS production gate |
 
 ### 8.2 Tokenized security-scoped lease
 
@@ -344,7 +355,7 @@ Keychain、签名或 entitlement 异常必须明确报错并 fail-closed。任�
 
 ## 13. 测试与质量边界
 
-当前基线为 `flutter test --no-pub` 848/848、`flutter analyze --no-pub` 无 issue、`flutter build macos --debug --no-pub` 成功。现有 75 个测试文件覆盖架构边界、状态竞态、Vault 事务、迁移、搜索、Keychain、设置契约与 UI 行为；这不等同于 Release signing production gate 已完成。
+当前基线为 `flutter test --no-pub --concurrency=1` 901/901、`flutter analyze --no-pub` 无 issue、`flutter build macos --no-pub` 成功。现有 80 个测试文件覆盖架构边界、状态竞态、Vault 事务、迁移、搜索、Keychain、设置契约、PDF 分页与 UI 行为；这不等同于完整 Release signing production gate 已完成。
 
 重点测试面包括：
 
@@ -365,7 +376,7 @@ Keychain、签名或 entitlement 异常必须明确报错并 fail-closed。任�
 | 风险/未完成项 | 影响 | 后续方向 |
 | --- | --- | --- |
 | 最终 macOS 本地 production gate 尚未执行 | 尚无本轮 release build、xcodebuild 与 codesign 的最终证据 | 按开发文档顺序执行并保留结果 |
-| `WorkspaceController` 1234 行，高于约 1000 review threshold | 后续 intent 增长可能重新集中职责 | 新增职责必须优先进入现有 collaborator，下一次功能增长前复审拆分 |
+| `WorkspaceController` 1320 行，高于约 1000 review threshold | 后续 intent 增长可能重新集中职责 | 新增职责必须优先进入现有 collaborator，下一次功能增长前复审拆分 |
 | `materials.json` 尚无完整重建工具，搜索也未索引素材/附件内容 | 素材 sidecar 损坏会丢失处理元数据，搜索范围只覆盖 Markdown | 为 AI 素材 sidecar 建立修复工具，并为两类资源增加显式索引用例 |
 | 首次语义索引或 embedding profile 变化会顺序调用每条变更笔记的 embedding | 大 Vault 可能产生可见耗时与模型调用成本 | 增加进度、暂停/取消、节流和成本提示 |
 | proposal 仍是 Markdown 片段 | 难以支持 diff、局部采纳和冲突检测 | 演进为结构化 changes，同时保持现有数据兼容策略 |

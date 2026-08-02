@@ -30,6 +30,7 @@ enum WorkspaceOperation {
   search,
   materials,
   editorCommand,
+  pdfExport,
 }
 
 enum WorkspaceActionResult { committed, cancelled, busy, aborted, failed }

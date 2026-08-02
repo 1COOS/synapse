@@ -11,17 +11,18 @@ final class NoteDocumentSession extends ChangeNotifier {
     required void Function(NoteDocumentSession session) onEdited,
   }) : _note = note,
        _visibleBody = visibleBody,
-       _onEdited = onEdited,
-       _controller = _SessionTextEditingController(
-         text: visibleBody(note.markdown),
-       ) {
+       _onEdited = onEdited {
+    final body = visibleBody(note.markdown);
+    _controllerText = body;
+    _controller = _SessionTextEditingController(text: body);
     _controller.addListener(_handleControllerEdited);
   }
 
   VaultNoteContent _note;
   final String Function(String markdown) _visibleBody;
   final void Function(NoteDocumentSession session) _onEdited;
-  final _SessionTextEditingController _controller;
+  late final _SessionTextEditingController _controller;
+  late String _controllerText;
 
   bool _isProgrammaticChange = false;
   bool _isDisposed = false;
@@ -134,7 +135,11 @@ final class NoteDocumentSession extends ChangeNotifier {
   }
 
   void _handleControllerEdited() {
-    if (_isProgrammaticChange || _isDisposed) {
+    if (_isDisposed || _controllerText == _controller.text) {
+      return;
+    }
+    _controllerText = _controller.text;
+    if (_isProgrammaticChange) {
       return;
     }
     _savePhase = isDirty ? NoteSavePhase.dirty : NoteSavePhase.clean;
@@ -198,6 +203,7 @@ final class NoteDocumentSession extends ChangeNotifier {
     _note = update._note;
     _savePhase = update._savePhase;
     _lastSaveError = update._lastSaveError;
+    _controllerText = update._controllerBody;
     _controller.replaceTextSilently(update._controllerBody);
   }
 

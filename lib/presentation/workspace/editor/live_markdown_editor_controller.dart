@@ -542,7 +542,8 @@ class LiveMarkdownEditorController extends ChangeNotifier {
       insertion,
     );
     final activeBlock = currentActiveTextBlock();
-    if (insertion == MarkdownInsertion.divider &&
+    if ((insertion == MarkdownInsertion.divider ||
+            insertion == MarkdownInsertion.pageBreak) &&
         activeBlock != null &&
         activeBlock.text.endsWith('\n') &&
         value.text.endsWith('\n\n')) {
@@ -552,7 +553,8 @@ class LiveMarkdownEditorController extends ChangeNotifier {
       );
     }
     applyBlockValue(value);
-    if (insertion == MarkdownInsertion.divider) {
+    if (insertion == MarkdownInsertion.divider ||
+        insertion == MarkdownInsertion.pageBreak) {
       activateOffset(_document.text.length, trailingInsertion: true);
       notifyListeners();
     }

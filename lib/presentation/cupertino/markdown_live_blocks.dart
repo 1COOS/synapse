@@ -1,3 +1,5 @@
+import '../../application/exports/note_pdf_export.dart';
+
 enum MarkdownLiveBlockKind {
   heading,
   paragraph,
@@ -6,6 +8,7 @@ enum MarkdownLiveBlockKind {
   table,
   fencedCode,
   image,
+  pageBreak,
   blank,
 }
 
@@ -66,6 +69,14 @@ List<MarkdownLiveBlock> splitMarkdownLiveBlocks(String markdown) {
       }
       blocks.add(
         _block(MarkdownLiveBlockKind.fencedCode, lines, line.index, index),
+      );
+      continue;
+    }
+
+    if (_isPageBreak(trimmed)) {
+      index += 1;
+      blocks.add(
+        _block(MarkdownLiveBlockKind.pageBreak, lines, line.index, index),
       );
       continue;
     }
@@ -847,6 +858,7 @@ bool _startsSpecialBlock(String line) {
   final trimmed = line.trim();
   return trimmed.isEmpty ||
       _isFenceStart(trimmed) ||
+      _isPageBreak(trimmed) ||
       _isHeading(trimmed) ||
       _isStandaloneImage(trimmed) ||
       _isSynapseTableWidthComment(trimmed) ||
@@ -854,6 +866,8 @@ bool _startsSpecialBlock(String line) {
       _isListLine(line) ||
       _isBlockquoteLine(trimmed);
 }
+
+bool _isPageBreak(String trimmed) => trimmed == synapsePageBreakMarker;
 
 bool _isFenceStart(String trimmed) {
   return trimmed.startsWith('```') || trimmed.startsWith('~~~');

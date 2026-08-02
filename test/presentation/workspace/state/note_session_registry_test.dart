@@ -18,6 +18,28 @@ void main() {
       expect(registry.sessions, contains(same(first)));
     });
 
+    test('selection-only changes do not publish a document edit', () {
+      final edited = <NoteDocumentSession>[];
+      final registry = _createRegistry(edited: edited);
+      addTearDown(registry.dispose);
+      final session = registry.upsert(_note('A.md', 'Alpha'));
+      var sessionChanges = 0;
+      session.addListener(() => sessionChanges += 1);
+
+      session.controller.selection = const TextSelection.collapsed(offset: 2);
+
+      expect(edited, isEmpty);
+      expect(sessionChanges, 0);
+      expect(session.savePhase, NoteSavePhase.clean);
+      expect(session.isDirty, isFalse);
+
+      session.controller.text = 'Changed';
+
+      expect(edited, [same(session)]);
+      expect(sessionChanges, 1);
+      expect(session.savePhase, NoteSavePhase.dirty);
+    });
+
     test('refreshes a clean session from the latest vault snapshot', () {
       final registry = _createRegistry();
       addTearDown(registry.dispose);

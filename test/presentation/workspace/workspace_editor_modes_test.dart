@@ -78,6 +78,160 @@ void main() {
     expect(find.textContaining('Changed from edit mode'), findsWidgets);
   });
 
+  testWidgets(
+    'page breaks use a source helper and stay hidden in reading mode',
+    (tester) async {
+      final vault = MemoryVaultBackend(seedExampleData: false);
+      final note = await vault.createNote(parentPath: '', title: 'Pagination');
+      await vault.updateMarkdown(
+        noteId: note.id,
+        markdown: 'Before\n\n<!-- synapse:page-break -->\n\nAfter\n',
+      );
+
+      await pumpWorkspace(tester, vault: vault);
+
+      expect(
+        find.byKey(const Key('live-markdown-page-break-2')),
+        findsOneWidget,
+      );
+      expect(find.text('分页符'), findsOneWidget);
+      expect(find.textContaining('synapse:page-break'), findsNothing);
+
+      await tester.tap(find.byKey(const Key('live-markdown-page-break-2')));
+      await tester.pump();
+
+      expect(find.byKey(const Key('note-editor')), findsOneWidget);
+      expect(
+        activeLiveMarkdownTextField(tester).controller.text,
+        '<!-- synapse:page-break -->',
+      );
+
+      await tester.tap(find.byKey(const Key('note-mode-reading')));
+      await tester.pump(const Duration(milliseconds: 250));
+
+      expect(
+        find.byKey(const Key('live-markdown-reading-page-break-2')),
+        findsOneWidget,
+      );
+      expect(find.text('分页符'), findsNothing);
+      expect(find.textContaining('synapse:page-break'), findsNothing);
+    },
+  );
+
+  testWidgets('activating a block does not rebuild the focused pane chrome', (
+    tester,
+  ) async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Stable Click');
+    await vault.updateMarkdown(
+      noteId: note.id,
+      markdown: 'First paragraph\n\nSecond paragraph\n',
+    );
+
+    await pumpWorkspace(tester, vault: vault);
+    final titleFinder = find.byKey(const Key('split-pane-title-pane-1'));
+    final titleBefore = tester.widget<ConstrainedBox>(titleFinder);
+    final document = liveMarkdownDocumentController(tester, paneId: 1);
+    final before = document.text;
+
+    await tester.tap(find.byKey(const Key('live-markdown-block-preview-0')));
+    for (var frame = 0; frame < 3; frame += 1) {
+      await tester.pump();
+      expect(find.byKey(const Key('note-editor')), findsOneWidget);
+      expect(
+        find.byKey(const Key('live-markdown-block-preview-2')),
+        findsOneWidget,
+      );
+      expect(tester.widget<ConstrainedBox>(titleFinder), same(titleBefore));
+      expect(document.text, before);
+    }
+  });
+
+  testWidgets('activating a block covers only the editor first frame', (
+    tester,
+  ) async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Stable Block');
+    await vault.updateMarkdown(
+      noteId: note.id,
+      markdown: 'First paragraph\n\nSecond paragraph\n',
+    );
+
+    await pumpWorkspace(tester, vault: vault);
+    final previewTapTarget = find.byKey(
+      const Key('live-markdown-block-preview-0'),
+    );
+    final previewSurface = find.byKey(
+      const Key('live-markdown-preview-surface-0'),
+    );
+    final previewRenderObject = tester.renderObject(previewSurface);
+
+    await tester.tap(previewTapTarget);
+    await tester.pump();
+
+    expect(find.byKey(const Key('note-editor')), findsOneWidget);
+    expect(
+      find.byKey(const Key('live-markdown-activation-cover-0')),
+      findsOneWidget,
+    );
+    expect(previewTapTarget, findsOneWidget);
+    expect(previewSurface, findsOneWidget);
+    expect(tester.renderObject(previewSurface), same(previewRenderObject));
+    expect(previewRenderObject.attached, isTrue);
+
+    await tester.pump();
+
+    expect(
+      find.byKey(const Key('live-markdown-activation-cover-0')),
+      findsNothing,
+    );
+    expect(previewTapTarget, findsNothing);
+    expect(previewSurface, findsNothing);
+    expect(find.byKey(const Key('note-editor')), findsOneWidget);
+  });
+
+  testWidgets('a long active block grows without local editor scrolling', (
+    tester,
+  ) async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Long block');
+    final markdown =
+        '${List.generate(80, (index) => 'Line $index').join('\n')}\n';
+    await vault.updateMarkdown(noteId: note.id, markdown: markdown);
+
+    await pumpWorkspace(tester, vault: vault);
+    final preview = find.byKey(const Key('live-markdown-block-preview-0'));
+    await tester.tapAt(tester.getTopLeft(preview) + const Offset(20, 20));
+    await tester.pump();
+    await tester.pump();
+
+    final noteEditor = find.byKey(const Key('note-editor'));
+    final localScrollables = find.descendant(
+      of: noteEditor,
+      matching: find.byType(Scrollable),
+    );
+    expect(localScrollables, findsOneWidget);
+    final localScrollable = tester.state<ScrollableState>(localScrollables);
+    expect(localScrollable.position.maxScrollExtent, 0);
+    expect(
+      tester.getSize(noteEditor).height,
+      greaterThan(
+        tester.view.physicalSize.height / tester.view.devicePixelRatio,
+      ),
+    );
+
+    final documentScrollView = find.ancestor(
+      of: noteEditor,
+      matching: find.byType(SingleChildScrollView),
+    );
+    expect(documentScrollView, findsOneWidget);
+    final documentScrollable = Scrollable.of(
+      tester.element(noteEditor),
+      axis: Axis.vertical,
+    );
+    expect(documentScrollable.position.maxScrollExtent, greaterThan(0));
+  });
+
   testWidgets('enter inserts a newline in the active markdown block', (
     tester,
   ) async {

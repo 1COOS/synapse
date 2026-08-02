@@ -11,6 +11,8 @@
 - Chrome：Web/H5 内存预览；
 - Windows：工程资产存在，但不在当前 production gate 和发布承诺内。
 
+当前笔记 PDF 导出入口仅在 macOS 和 Windows 启用；Web/H5 不注册入口。Windows 的代码与插件装配在仓库中维护，但最终构建必须在 Windows 环境执行。
+
 首次安装依赖：
 
 ```bash
@@ -60,13 +62,21 @@ flutter build web --no-pub
 
 Windows 构建不是当前发布门禁。本轮不新增 GitHub Actions，生产验证以本地顺序 gate 为准。
 
+Windows 环境验证 PDF 导出前执行：
+
+```powershell
+flutter test --no-pub --concurrency=1
+flutter analyze --no-pub
+flutter build windows --no-pub
+```
+
 ## 3. 平台矩阵
 
 | 平台 | Vault backend | 数据持久化 | 当前定位 |
 | --- | --- | --- | --- |
 | macOS | `FileVaultBackend` | 本机 Markdown Vault | 唯一生产目标 |
 | Web/H5 | `MemoryVaultBackend` | 内存 | UI/流程预览 |
-| Windows | 工程资产保留 | 未纳入本轮验证 | 不在当前 production gate |
+| Windows | `FileVaultBackend` 工程资产 | PDF 导出代码与插件装配已实现，构建待 Windows 验证 | 不在当前 macOS production gate |
 
 macOS 必须验证 File Vault、Keychain、security-scoped bookmark/lease、Debug/Release build 和最终签名 entitlement。Web 只验证页面与主流程，不承担本机文件、密钥或发布能力。
 
@@ -134,13 +144,48 @@ Widget 使用 Provider 渲染并发送 intent，不得重新引入本地业务�
 - 行内/围栏代码中的选区禁用格式、段落、列表和块插入；
 - 产品菜单只暴露 H1–H4，renderer 与 outline parser 继续兼容 H5/H6；
 - `Shift+F10`/菜单键、方向键、Enter/Space、Esc 和焦点恢复是编辑器/资源菜单的共同键盘契约；
-- 表格与分隔线插入当前 block 之后；表格聚焦首个表头，分隔线聚焦后续空正文 block；
+- 表格、分隔线与分页符插入当前 block 之后；表格聚焦首个表头，分隔线和分页符聚焦后续空正文 block；
+- 分页符必须严格保存为独占一行的 `<!-- synapse:page-break -->`；非活动源码块显示辅助线，活动块显示真实 marker，阅读模式隐藏；普通 `---` 不得改写为分页；
 - active editor `TextSpan.toPlainText()` 必须与 backing controller text 完全一致；
 - focus、click、selection 和 context menu 不得修改正文或插入空行。
 
 H1 自动改名和右键笔记重命名必须把 Markdown save、严格 rename、assets 引用改写和 readback 放入同一 `VaultBackend.runMutationTransaction`。名称冲突属于可识别的普通保存错误：回滚持久层，保留 controller 文本与 dirty/failed 状态，不得误判为 backend 已提交后的 workspace invariant failure。
 
-### 5.4 设置面板
+### 5.4 PDF 导出
+
+- `NotePdfExportSnapshot` 是 flush 成功后复制的不可变快照；生成与预览不得继续读取 live session 或 Vault；
+- PDF 生成只能在后台 isolate 运行，方向/边距切换必须通过 generation token 丢弃过期结果；预览只栅格化可见页附近并限制缓存；
+- A4 纸张、15/20/25 mm 页边距、11 pt 正文、1.5 倍行高、页眉标题和 `当前页 / 总页数` 是打印契约，不读取屏幕字号或主题色；
+- 字体和许可证位于 `assets/fonts/`，不得添加运行时网络字体下载；
+- 图片必须等比 contain，缺失/损坏时产生 warning 和可见占位；表格超高行必须整表降级，不能静默裁切；
+- 保存必须复用当前 preview bytes；系统保存框取消是正常结果，写入错误保留弹窗和重试能力。
+
+PDF 目标验证顺序：
+
+```bash
+flutter test --no-pub test/infrastructure/note_pdf_exporter_test.dart
+flutter test --no-pub test/presentation/markdown_live_blocks_test.dart
+flutter test --no-pub test/presentation/markdown_context_commands_test.dart
+flutter test --no-pub test/presentation/workspace/note_pdf_export_dialog_test.dart
+flutter test --no-pub test/presentation/workspace/workspace_note_pdf_export_test.dart
+flutter test --no-pub --concurrency=1
+flutter analyze --no-pub
+flutter build macos --no-pub
+```
+
+综合样例由 `tool/generate_note_pdf_sample_test.dart` 生成到 `output/pdf/`，再用 Poppler 检查所有页面：
+
+```bash
+flutter test --no-pub tool/generate_note_pdf_sample_test.dart
+pdfinfo output/pdf/synapse-note-pdf-export-sample.pdf
+mkdir -p tmp/pdfs/sample-pages
+pdftoppm -png output/pdf/synapse-note-pdf-export-sample.pdf \
+  tmp/pdfs/sample-pages/page
+```
+
+必须逐页检查裁切、重叠、乱码、黑块和错误空白页；只检查 `%PDF` 签名或文本提取不构成视觉验收。
+
+### 5.5 设置面板
 
 - 设置值对象、数值约束和 `SettingsChangeSet` 只放在 `lib/application/settings/`；schema v2 codec、legacy migration、Keychain 与文件 IO 留在 infrastructure；
 - `settings.json` 字段、默认值和 schema version 不随 UI 重构改变。未知字段必须兼容；坏数值按字段收敛/恢复并通过 `SettingsLoadResult` 报告，不能让单个字段废弃整个文件；
@@ -223,18 +268,18 @@ macOS 目录选择和 bookmark 恢复返回 `VaultAccessLease(location, token)`�
 | `test/architecture/` | application/domain 分层与禁止反向依赖 |
 | `test/application/` | ports、settings 值对象、proposal 与 search 契约 |
 | `test/domain/` | Markdown/frontmatter、模型与基础规则 |
-| `test/infrastructure/` | File/Memory backend、资源分区/迁移、安全删除、parity/dispatch、settings、Keychain、AI、搜索 |
+| `test/infrastructure/` | File/Memory backend、资源分区/迁移、安全删除、parity/dispatch、settings、Keychain、AI、搜索、PDF 生成与分页 |
 | `test/presentation/workspace/state/` | session、save、split、materials、mutation/commit |
 | `test/presentation/workspace/controller/` | AsyncNotifier lifecycle、runtime、resource 和 workspace reduction |
-| `test/presentation/workspace/` | Vault、资源、分屏、编辑器、图片、proposal、设置和布局 |
+| `test/presentation/workspace/` | Vault、资源、分屏、编辑器、图片、proposal、设置、PDF 预览/保存和布局 |
 | `test/macos_entitlements_test.dart` | Debug/Profile/Release Keychain entitlement、本机 Team 配置模板与签名策略 |
 | `test/macos_vault_access_lease_test.dart` | Dart/Swift lease 与 terminate releaseAll 契约 |
 
-当前记录基线为 844/844 tests，共 75 个测试文件；`flutter analyze --no-pub` 无 issue，macOS Debug build 与 `git diff --check` 通过。该记录不是 Release signing production gate 结果。
+当前记录基线为 901/901 tests，共 80 个测试文件；`flutter analyze --no-pub` 无 issue，`flutter build macos --no-pub` 成功。`git diff --check` 仍需在最终交付前执行；该记录不是完整 Release signing production gate 结果。
 
 ## 10. 当前工程债
 
-- `WorkspaceController` 当前 1234 行，高于约 1000 行 review threshold；新增职责必须优先进入现有 collaborators，并在下一次增长前复审拆分；
+- `WorkspaceController` 当前 1320 行，高于约 1000 行 review threshold；新增职责必须优先进入现有 collaborators，并在下一次增长前复审拆分；
 - 搜索已能从 Markdown 重建 SQLite，但尚未索引 AI 素材、附件内容或两类 sidecar；裸附件可补建记录，但 `materials.json` 丢失后仍不能完整重建处理元数据；
 - 大 Vault 首次语义索引或 embedding profile 变化尚无进度、暂停/取消、节流和成本提示；
 - proposal 仍是 Markdown 片段，diff、局部采纳和结构化 patch 尚未实现；

@@ -203,5 +203,14 @@ void main() {
         'Alpha\n\n---\n\n',
       );
     });
+
+    test('inserts the canonical page break followed by an editable block', () {
+      final source = value('Alpha', start: 0, end: 5);
+
+      expect(
+        insertMarkdownBlock(source, MarkdownInsertion.pageBreak).text,
+        'Alpha\n\n<!-- synapse:page-break -->\n\n',
+      );
+    });
   });
 }

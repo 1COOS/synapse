@@ -733,14 +733,32 @@ void main() {
     final previewTop = tester
         .getTopLeft(find.byKey(const Key('live-markdown-block-preview-2')))
         .dy;
+    final previewSurface = find.byKey(
+      const Key('live-markdown-preview-surface-2'),
+    );
+    final previewRenderObject = tester.renderObject(previewSurface);
 
     await tester.tap(find.byKey(const Key('live-markdown-block-preview-2')));
-    await tester.pumpAndSettle();
+    await tester.pump();
 
     expect(
       find.byKey(const Key('live-markdown-table-editor-2')),
       findsOneWidget,
     );
+    expect(
+      find.byKey(const Key('live-markdown-activation-cover-2')),
+      findsOneWidget,
+    );
+    expect(tester.renderObject(previewSurface), same(previewRenderObject));
+    expect(previewRenderObject.attached, isTrue);
+
+    await tester.pump();
+
+    expect(
+      find.byKey(const Key('live-markdown-activation-cover-2')),
+      findsNothing,
+    );
+    expect(previewSurface, findsNothing);
     expect(
       find.descendant(
         of: find.byKey(const Key('live-markdown-table-editor-2')),
@@ -1303,6 +1321,8 @@ void main() {
 
       expect(find.byKey(const Key('table-menu-copy-2')), findsOneWidget);
       expect(find.byKey(const Key('table-menu-paste-2')), findsOneWidget);
+      expect(find.byKey(const Key('table-menu-find-2')), findsOneWidget);
+      expect(find.byKey(const Key('table-menu-replace-2')), findsOneWidget);
       expect(find.byKey(const Key('insert-table-row-above-2')), findsOneWidget);
       expect(find.byKey(const Key('insert-table-row-below-2')), findsOneWidget);
       expect(

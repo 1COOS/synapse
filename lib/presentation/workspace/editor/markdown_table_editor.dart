@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 
 import '../../cupertino/markdown_live_blocks.dart';
@@ -1160,6 +1161,8 @@ class LiveMarkdownTableEditor extends StatefulWidget {
     this.verticalViewportKey,
     this.onReorderStateChanged,
     required this.onFocusPane,
+    required this.onFindRequested,
+    required this.onReplaceRequested,
     required this.onDeleteTable,
     required this.onChanged,
   });
@@ -1175,6 +1178,8 @@ class LiveMarkdownTableEditor extends StatefulWidget {
   final GlobalKey? verticalViewportKey;
   final ValueChanged<bool>? onReorderStateChanged;
   final VoidCallback onFocusPane;
+  final ValueChanged<String?> onFindRequested;
+  final ValueChanged<String?> onReplaceRequested;
   final VoidCallback onDeleteTable;
   final ValueChanged<MarkdownLiveTable> onChanged;
 
@@ -1331,6 +1336,12 @@ class _LiveMarkdownTableEditorState extends State<LiveMarkdownTableEditor> {
       nativeItems,
       ContextMenuButtonType.selectAll,
     );
+    final value = editableTextState.textEditingValue;
+    final selection = value.selection;
+    final selectedText = selection.isValid && !selection.isCollapsed
+        ? value.text.substring(selection.start, selection.end)
+        : null;
+    final usesMeta = !kIsWeb && defaultTargetPlatform == TargetPlatform.macOS;
     return NoteContextMenuToolbar(
       anchors: editableTextState.contextMenuAnchors,
       tapRegionGroupId: widget.tapRegionGroupId,
@@ -1363,6 +1374,21 @@ class _LiveMarkdownTableEditorState extends State<LiveMarkdownTableEditor> {
             label: '全选',
             enabled: selectAll != null,
             onPressed: selectAll?.onPressed,
+          ),
+          const NoteMenuSeparator(key: Key('table-menu-separator-find')),
+          NoteMenuAction(
+            itemKey: Key('table-menu-find-${widget.blockIndex}'),
+            label: selectedText == null ? '查找…' : '查找所选内容',
+            enabled: true,
+            shortcutLabel: usesMeta ? '⌘F' : 'Ctrl+F',
+            onPressed: () => widget.onFindRequested(selectedText),
+          ),
+          NoteMenuAction(
+            itemKey: Key('table-menu-replace-${widget.blockIndex}'),
+            label: '替换…',
+            enabled: widget.enabled,
+            shortcutLabel: usesMeta ? '⌥⌘F' : 'Ctrl+H',
+            onPressed: () => widget.onReplaceRequested(selectedText),
           ),
           const NoteMenuSeparator(),
           NoteMenuSubmenu(

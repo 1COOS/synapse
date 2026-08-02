@@ -450,6 +450,8 @@ void main() {
     expect(find.byKey(const Key('note-menu-copy')), findsOneWidget);
     expect(find.byKey(const Key('note-menu-cut')), findsOneWidget);
     expect(find.byKey(const Key('note-menu-paste')), findsOneWidget);
+    expect(find.byKey(const Key('note-menu-find')), findsOneWidget);
+    expect(find.byKey(const Key('note-menu-replace')), findsOneWidget);
     expect(find.byKey(const Key('note-menu-insert')), findsOneWidget);
     expect(find.byKey(const Key('note-menu-text-format')), findsOneWidget);
     expect(find.byKey(const Key('note-menu-paragraph')), findsOneWidget);

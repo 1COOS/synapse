@@ -1292,7 +1292,7 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.byKey(const Key('note-context-menu')), findsOneWidget);
 
-      for (var index = 0; index < 3; index += 1) {
+      for (var index = 0; index < 5; index += 1) {
         await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
       }
       await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
@@ -1610,6 +1610,37 @@ void main() {
     expect(
       liveMarkdownDocumentController(tester, paneId: 1).text,
       'Alpha\n\n---\n\n',
+    );
+    final editor = activeLiveMarkdownTextField(tester);
+    expect(editor.controller.text, isEmpty);
+    expect(editor.focusNode.hasFocus, isTrue);
+  });
+
+  testWidgets('page break insertion writes the canonical marker', (
+    tester,
+  ) async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Page Break');
+    await vault.updateMarkdown(noteId: note.id, markdown: 'Alpha\n');
+
+    await pumpWorkspace(tester, vault: vault);
+    await switchToSourceMode(tester);
+    await activateLiveMarkdownBlock(tester, blockIndex: 0);
+    await openNoteContextMenu(tester);
+    final mouse = await hoverNoteMenuItem(
+      tester,
+      const Key('note-menu-insert'),
+    );
+    await clickNoteMenuItemWithMouse(
+      tester,
+      mouse,
+      const Key('note-menu-insert-page-break'),
+    );
+    await mouse.removePointer();
+
+    expect(
+      liveMarkdownDocumentController(tester, paneId: 1).text,
+      'Alpha\n\n<!-- synapse:page-break -->\n\n',
     );
     final editor = activeLiveMarkdownTextField(tester);
     expect(editor.controller.text, isEmpty);
