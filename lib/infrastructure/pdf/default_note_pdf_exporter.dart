@@ -76,6 +76,7 @@ Future<NotePdfBuildResult> buildNotePdf(
   final fonts = _PdfFonts(fontBytes);
   final warnings = <NotePdfExportWarning>[];
   final warningKeys = <String>{};
+  final boundaryCollector = _PageBoundaryCollector(snapshot.markdown.length);
   final pageFormat = options.orientation == NotePdfOrientation.landscape
       ? PdfPageFormat.a4.landscape
       : PdfPageFormat.a4.portrait;
@@ -89,6 +90,7 @@ Future<NotePdfBuildResult> buildNotePdf(
     contentHeight: contentHeight,
     warnings: warnings,
     warningKeys: warningKeys,
+    boundaryCollector: boundaryCollector,
   );
   final widgets = renderer.build(snapshot.markdown);
   final document = pw.Document(
@@ -181,12 +183,13 @@ Future<NotePdfBuildResult> buildNotePdf(
           : widgets,
     ),
   );
-  final pageCount = document.document.pdfPageList.pages.length;
   final bytes = await document.save(enableEventLoopBalancing: true);
+  final pageCount = document.document.pdfPageList.pages.length;
   return NotePdfBuildResult(
     bytes: bytes,
     pageCount: pageCount,
     warnings: warnings,
+    boundaries: boundaryCollector.build(pageCount),
   );
 }
 
@@ -211,7 +214,9 @@ final class _MarkdownPdfRenderer {
     required this.contentHeight,
     required this.warnings,
     required this.warningKeys,
-  }) : _assets = _indexAssets(snapshot.assets);
+    required this.boundaryCollector,
+  }) : _assets = _indexAssets(snapshot.assets),
+       _sourceCursor = _SourceCursor(snapshot.markdown);
 
   final NotePdfExportSnapshot snapshot;
   final _PdfFonts fonts;
@@ -219,7 +224,9 @@ final class _MarkdownPdfRenderer {
   final double contentHeight;
   final List<NotePdfExportWarning> warnings;
   final Set<String> warningKeys;
+  final _PageBoundaryCollector boundaryCollector;
   final Map<String, NotePdfExportAsset> _assets;
+  final _SourceCursor _sourceCursor;
 
   static final _document = md.Document(
     extensionSet: md.ExtensionSet.gitHubFlavored,
@@ -239,19 +246,30 @@ final class _MarkdownPdfRenderer {
 
   List<pw.Widget> build(String markdown) {
     final result = <pw.Widget>[];
-    final renderedSegments = <List<pw.Widget>>[];
+    final renderedSegments = <_RenderedSegment>[];
     for (final segment in _splitPageBreakSegments(markdown)) {
-      final nodes = _document.parse(segment);
+      _sourceCursor.seek(segment.startOffset, segment.endOffset);
+      final nodes = _document.parse(segment.source);
       final segmentWidgets = _blockNodes(nodes);
       if (segmentWidgets.isNotEmpty) {
-        renderedSegments.add(segmentWidgets);
+        renderedSegments.add(
+          _RenderedSegment(segment: segment, widgets: segmentWidgets),
+        );
       }
     }
     for (var index = 0; index < renderedSegments.length; index += 1) {
       if (index > 0) {
         result.add(pw.NewPage());
+        result.add(
+          _ManualPageProbe(
+            markerOffset:
+                renderedSegments[index].segment.manualBreakOffset ??
+                renderedSegments[index].segment.startOffset,
+            collector: boundaryCollector,
+          ),
+        );
       }
-      result.addAll(renderedSegments[index]);
+      result.addAll(renderedSegments[index].widgets);
     }
     return result;
   }
@@ -302,12 +320,7 @@ final class _MarkdownPdfRenderer {
       'blockquote' => [_blockquote(element)],
       'ul' => _list(element, ordered: false, depth: 0),
       'ol' => _list(element, ordered: true, depth: 0),
-      'hr' => [
-        pw.Padding(
-          padding: const pw.EdgeInsets.symmetric(vertical: 8),
-          child: pw.Divider(color: PdfColors.grey400, thickness: 0.7),
-        ),
-      ],
+      'hr' => [_divider()],
       'img' => [
         _image(
           element.attributes['src'] ?? '',
@@ -419,38 +432,60 @@ final class _MarkdownPdfRenderer {
   List<pw.Widget> _codeBlock(md.Element element) {
     final code = element.textContent.replaceFirst(RegExp(r'\n$'), '');
     final lines = code.split('\n');
+    final rows = <pw.TableRow>[];
+    for (final line in lines) {
+      final sourceOffset = line.isEmpty
+          ? _sourceCursor.claim('\n')
+          : _sourceCursor.claim(line);
+      rows.add(
+        pw.TableRow(
+          decoration: pw.BoxDecoration(color: PdfColor.fromHex('#F3F4F6')),
+          children: [
+            _tagged(
+              pw.Padding(
+                padding: const pw.EdgeInsets.symmetric(
+                  horizontal: 9,
+                  vertical: 2.5,
+                ),
+                child: pw.Text(
+                  line.isEmpty ? ' ' : line,
+                  overflow: pw.TextOverflow.span,
+                  style: pw.TextStyle(
+                    font: fonts.monospace,
+                    fontFallback: [fonts.regular, fonts.emoji],
+                    fontSize: 9.2,
+                    height: 1.45,
+                    color: PdfColors.grey900,
+                  ),
+                ),
+              ),
+              sourceOffset,
+            ),
+          ],
+        ),
+      );
+    }
     return [
       pw.SizedBox(height: 6),
       pw.Table(
         border: pw.TableBorder.all(color: PdfColors.grey300, width: 0.5),
-        children: [
-          for (final line in lines)
-            pw.TableRow(
-              decoration: pw.BoxDecoration(color: PdfColor.fromHex('#F3F4F6')),
-              children: [
-                pw.Padding(
-                  padding: const pw.EdgeInsets.symmetric(
-                    horizontal: 9,
-                    vertical: 2.5,
-                  ),
-                  child: pw.Text(
-                    line.isEmpty ? ' ' : line,
-                    overflow: pw.TextOverflow.span,
-                    style: pw.TextStyle(
-                      font: fonts.monospace,
-                      fontFallback: [fonts.regular, fonts.emoji],
-                      fontSize: 9.2,
-                      height: 1.45,
-                      color: PdfColors.grey900,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-        ],
+        children: rows,
       ),
       pw.SizedBox(height: 6),
     ];
+  }
+
+  pw.Widget _divider() {
+    final sourceOffset = _sourceCursor.claimPattern(
+      RegExp(r'^[ \t]{0,3}(?:-{3,}|\*{3,}|_{3,})[ \t]*$', multiLine: true),
+    );
+    return _tagged(
+      pw.Padding(
+        padding: const pw.EdgeInsets.symmetric(vertical: 8),
+        child: pw.Divider(color: PdfColors.grey400, thickness: 0.7),
+      ),
+      sourceOffset,
+    );
   }
 
   pw.Widget _blockquote(md.Element element) {
@@ -567,6 +602,32 @@ final class _MarkdownPdfRenderer {
     final tableRows = <pw.TableRow>[];
     for (var rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
       final row = rows[rowIndex];
+      final rowOffset = rowIndex == 0
+          ? null
+          : _sourceCursor.findAhead(
+              row
+                  .map(_plainText)
+                  .firstWhere((text) => text.isNotEmpty, orElse: () => '|'),
+            );
+      final cells = <pw.Widget>[];
+      for (var column = 0; column < columnCount; column += 1) {
+        pw.Widget cell = pw.Padding(
+          padding: const pw.EdgeInsets.symmetric(horizontal: 6, vertical: 5),
+          child: pw.RichText(
+            overflow: pw.TextOverflow.span,
+            text: pw.TextSpan(
+              style: _bodyStyle(fontSize: 9, height: 1.35, bold: rowIndex == 0),
+              children: column < row.length
+                  ? _inlineSpans(row[column], collectBoundaries: rowIndex != 0)
+                  : const [],
+            ),
+          ),
+        );
+        if (column == 0 && rowOffset != null) {
+          cell = _tagged(cell, rowOffset);
+        }
+        cells.add(cell);
+      }
       tableRows.add(
         pw.TableRow(
           repeat: rowIndex == 0,
@@ -577,28 +638,7 @@ final class _MarkdownPdfRenderer {
                 ? PdfColor.fromHex('#FAFAFB')
                 : PdfColors.white,
           ),
-          children: [
-            for (var column = 0; column < columnCount; column += 1)
-              pw.Padding(
-                padding: const pw.EdgeInsets.symmetric(
-                  horizontal: 6,
-                  vertical: 5,
-                ),
-                child: pw.RichText(
-                  overflow: pw.TextOverflow.span,
-                  text: pw.TextSpan(
-                    style: _bodyStyle(
-                      fontSize: 9,
-                      height: 1.35,
-                      bold: rowIndex == 0,
-                    ),
-                    children: column < row.length
-                        ? _inlineSpans(row[column])
-                        : const [],
-                  ),
-                ),
-              ),
-          ],
+          children: cells,
         ),
       );
     }
@@ -691,6 +731,9 @@ final class _MarkdownPdfRenderer {
   }
 
   pw.Widget _image(String source, String alt, int? sourceWidth) {
+    final sourceOffset = _sourceCursor.claim(
+      source.trim().isEmpty ? alt : source,
+    );
     final normalized = _normalizeSource(source);
     final asset = _resolveAsset(normalized);
     if (asset?.bytes == null) {
@@ -702,7 +745,7 @@ final class _MarkdownPdfRenderer {
         NotePdfExportWarningCode.missingImage,
         '图片“$label”无法读取，PDF 中已使用占位框。',
       );
-      return _missingImage(label);
+      return _tagged(_missingImage(label), sourceOffset);
     }
     final decoded = image_lib.decodeImage(asset!.bytes!);
     if (decoded == null || decoded.width <= 0 || decoded.height <= 0) {
@@ -712,7 +755,7 @@ final class _MarkdownPdfRenderer {
         NotePdfExportWarningCode.unreadableImage,
         '图片“$label”格式损坏或不受支持，PDF 中已使用占位框。',
       );
-      return _missingImage(label);
+      return _tagged(_missingImage(label), sourceOffset);
     }
     final width = math.min(
       contentWidth,
@@ -721,19 +764,28 @@ final class _MarkdownPdfRenderer {
     final naturalHeight = width * decoded.height / decoded.width;
     final height = math.min(contentHeight * 0.86, naturalHeight);
     final memoryImage = pw.MemoryImage(_optimizedImageBytes(decoded, asset));
-    return pw.Padding(
-      padding: const pw.EdgeInsets.symmetric(vertical: 7),
-      child: pw.Align(
-        alignment: pw.Alignment.centerLeft,
-        child: pw.Image(
-          memoryImage,
-          width: width,
-          height: height,
-          fit: pw.BoxFit.contain,
+    return _tagged(
+      pw.Padding(
+        padding: const pw.EdgeInsets.symmetric(vertical: 7),
+        child: pw.Align(
+          alignment: pw.Alignment.centerLeft,
+          child: pw.Image(
+            memoryImage,
+            width: width,
+            height: height,
+            fit: pw.BoxFit.contain,
+          ),
         ),
       ),
+      sourceOffset,
     );
   }
+
+  pw.Widget _tagged(pw.Widget child, int sourceOffset) => _PageTaggedWidget(
+    sourceOffset: sourceOffset,
+    collector: boundaryCollector,
+    child: child,
+  );
 
   Uint8List _optimizedImageBytes(
     image_lib.Image decoded,
@@ -775,6 +827,8 @@ final class _MarkdownPdfRenderer {
   List<pw.InlineSpan> _inlineSpans(
     List<md.Node> nodes, {
     pw.TextStyle? inherited,
+    pw.AnnotationBuilder? inheritedAnnotation,
+    bool collectBoundaries = true,
   }) {
     final style = inherited ?? _bodyStyle();
     final spans = <pw.InlineSpan>[];
@@ -782,19 +836,41 @@ final class _MarkdownPdfRenderer {
       if (node is md.Text) {
         final text = _cleanInlineHtml(node.text);
         if (text.isNotEmpty) {
-          spans.add(pw.TextSpan(text: text, style: style));
+          spans.addAll(
+            _sourceAwareTextSpans(
+              text,
+              style: style,
+              annotation: inheritedAnnotation,
+              collectBoundaries: collectBoundaries,
+            ),
+          );
         }
         continue;
       }
       if (node is! md.Element) {
         final text = _cleanInlineHtml(node.textContent);
         if (text.isNotEmpty) {
-          spans.add(pw.TextSpan(text: text, style: style));
+          spans.addAll(
+            _sourceAwareTextSpans(
+              text,
+              style: style,
+              annotation: inheritedAnnotation,
+              collectBoundaries: collectBoundaries,
+            ),
+          );
         }
         continue;
       }
       if (node.tag == 'br') {
-        spans.add(pw.TextSpan(text: '\n', style: style));
+        final sourceOffset = _sourceCursor.claim('\n');
+        spans.add(
+          pw.TextSpan(
+            text: '\n',
+            style: style,
+            annotation: inheritedAnnotation,
+          ),
+        );
+        _sourceCursor.ensureAfter(sourceOffset + 1);
         continue;
       }
       if (node.tag == 'input') {
@@ -824,15 +900,41 @@ final class _MarkdownPdfRenderer {
       };
       final annotation = node.tag == 'a'
           ? _urlAnnotation(node.attributes['href'])
-          : null;
+          : inheritedAnnotation;
+      spans.addAll(
+        _inlineSpans(
+          node.children ?? const <md.Node>[],
+          inherited: nestedStyle,
+          inheritedAnnotation: annotation,
+          collectBoundaries: collectBoundaries,
+        ),
+      );
+    }
+    return spans;
+  }
+
+  List<pw.InlineSpan> _sourceAwareTextSpans(
+    String text, {
+    required pw.TextStyle style,
+    pw.AnnotationBuilder? annotation,
+    bool collectBoundaries = true,
+  }) {
+    final spans = <pw.InlineSpan>[];
+    for (final token in _sourceTextTokens(text)) {
+      final sourceOffset = _sourceCursor.claim(token);
       spans.add(
         pw.TextSpan(
-          style: nestedStyle,
+          text: token,
+          style: token.trim().isEmpty || !collectBoundaries
+              ? style
+              : style.copyWith(
+                  background: _PageBoundaryRecordingDecoration(
+                    sourceOffset: sourceOffset,
+                    collector: boundaryCollector,
+                    delegate: style.background,
+                  ),
+                ),
           annotation: annotation,
-          children: _inlineSpans(
-            node.children ?? const <md.Node>[],
-            inherited: nestedStyle,
-          ),
         ),
       );
     }
@@ -970,12 +1072,38 @@ final class _ObsidianHighlightSyntax extends md.InlineSyntax {
   }
 }
 
-List<String> _splitPageBreakSegments(String markdown) {
-  final lines = markdown.split(RegExp(r'\r?\n'));
-  final segments = <String>[];
-  final current = StringBuffer();
+final class _RenderedSegment {
+  const _RenderedSegment({required this.segment, required this.widgets});
+
+  final _PageBreakSegment segment;
+  final List<pw.Widget> widgets;
+}
+
+final class _PageBreakSegment {
+  const _PageBreakSegment({
+    required this.source,
+    required this.startOffset,
+    required this.endOffset,
+    this.manualBreakOffset,
+  });
+
+  final String source;
+  final int startOffset;
+  final int endOffset;
+  final int? manualBreakOffset;
+}
+
+List<_PageBreakSegment> _splitPageBreakSegments(String markdown) {
+  final segments = <_PageBreakSegment>[];
+  var segmentStart = 0;
+  int? pendingManualBreak;
   String? fence;
-  for (final line in lines) {
+  final linePattern = RegExp(r'([^\r\n]*)(\r\n|\n|\r|$)');
+  for (final match in linePattern.allMatches(markdown)) {
+    if (match.start == markdown.length && match.group(0)!.isEmpty) {
+      break;
+    }
+    final line = match.group(1)!;
     final trimmed = line.trimLeft();
     final fenceMatch = RegExp(r'^(`{3,}|~{3,})').firstMatch(trimmed);
     if (fenceMatch != null) {
@@ -988,17 +1116,200 @@ List<String> _splitPageBreakSegments(String markdown) {
       }
     }
     if (fence == null && line.trim() == synapsePageBreakMarker) {
-      segments.add(current.toString());
-      current.clear();
+      final source = markdown.substring(segmentStart, match.start);
+      if (source.trim().isNotEmpty) {
+        segments.add(
+          _PageBreakSegment(
+            source: source,
+            startOffset: segmentStart,
+            endOffset: match.start,
+            manualBreakOffset: pendingManualBreak,
+          ),
+        );
+      }
+      pendingManualBreak = match.start;
+      segmentStart = match.end;
       continue;
     }
-    if (current.isNotEmpty) {
-      current.writeln();
-    }
-    current.write(line);
   }
-  segments.add(current.toString());
-  return segments.where((segment) => segment.trim().isNotEmpty).toList();
+  final trailing = markdown.substring(segmentStart);
+  if (trailing.trim().isNotEmpty) {
+    segments.add(
+      _PageBreakSegment(
+        source: trailing,
+        startOffset: segmentStart,
+        endOffset: markdown.length,
+        manualBreakOffset: pendingManualBreak,
+      ),
+    );
+  }
+  return segments;
+}
+
+final class _SourceCursor {
+  _SourceCursor(this.source) : _limit = source.length;
+
+  final String source;
+  int _offset = 0;
+  int _limit;
+
+  void seek(int offset, [int? limit]) {
+    _offset = offset.clamp(0, source.length);
+    _limit = (limit ?? source.length).clamp(_offset, source.length);
+  }
+
+  void ensureAfter(int offset) {
+    _offset = math.max(_offset, offset.clamp(0, _limit));
+  }
+
+  int claim(String value) {
+    if (value.isEmpty) {
+      return _offset;
+    }
+    final found = source.indexOf(value, _offset);
+    if (found >= 0 && found + value.length <= _limit) {
+      _offset = found + value.length;
+      return found;
+    }
+    final fallback = _offset.clamp(0, _limit);
+    _offset = math.min(_limit, fallback + value.length);
+    return fallback;
+  }
+
+  int findAhead(String value) {
+    if (value.isEmpty) {
+      return _offset;
+    }
+    final found = source.indexOf(value, _offset);
+    return found >= 0 && found + value.length <= _limit ? found : _offset;
+  }
+
+  int claimPattern(RegExp pattern) {
+    final match = pattern
+        .allMatches(source, _offset)
+        .cast<RegExpMatch?>()
+        .firstWhere(
+          (candidate) => candidate != null && candidate.end <= _limit,
+          orElse: () => null,
+        );
+    if (match == null) {
+      return _offset;
+    }
+    _offset = match.end;
+    return match.start;
+  }
+}
+
+Iterable<String> _sourceTextTokens(String text) sync* {
+  final tokenPattern = RegExp(
+    r'\s+|[\u3400-\u9FFF\uF900-\uFAFF\u3040-\u30FF\uAC00-\uD7AF]|[^\s\u3400-\u9FFF\uF900-\uFAFF\u3040-\u30FF\uAC00-\uD7AF]+',
+    unicode: true,
+  );
+  for (final match in tokenPattern.allMatches(text)) {
+    yield match.group(0)!;
+  }
+}
+
+final class _PageBoundaryCollector {
+  _PageBoundaryCollector(this.sourceLength);
+
+  final int sourceLength;
+  final Map<int, int> _firstContentOffsetByPage = <int, int>{};
+  final Map<int, int> _manualBreakOffsetByPage = <int, int>{};
+
+  void recordContent(int pageIndex, int sourceOffset) {
+    final offset = sourceOffset.clamp(0, sourceLength);
+    final current = _firstContentOffsetByPage[pageIndex];
+    if (current == null || offset < current) {
+      _firstContentOffsetByPage[pageIndex] = offset;
+    }
+  }
+
+  void recordManualBreak(int pageIndex, int markerOffset) {
+    _manualBreakOffsetByPage[pageIndex] = markerOffset.clamp(0, sourceLength);
+  }
+
+  List<NotePdfPageBoundary> build(int pageCount) {
+    final result = <NotePdfPageBoundary>[];
+    for (var pageIndex = 1; pageIndex < pageCount; pageIndex += 1) {
+      final sourceOffset =
+          _firstContentOffsetByPage[pageIndex] ??
+          _manualBreakOffsetByPage[pageIndex] ??
+          sourceLength;
+      result.add(
+        NotePdfPageBoundary(
+          pageIndex: pageIndex,
+          sourceOffset: sourceOffset,
+          kind: _manualBreakOffsetByPage.containsKey(pageIndex)
+              ? NotePdfPageBoundaryKind.manual
+              : NotePdfPageBoundaryKind.automatic,
+        ),
+      );
+    }
+    return result;
+  }
+}
+
+final class _PageBoundaryRecordingDecoration extends pw.BoxDecoration {
+  const _PageBoundaryRecordingDecoration({
+    required this.sourceOffset,
+    required this.collector,
+    this.delegate,
+  });
+
+  final int sourceOffset;
+  final _PageBoundaryCollector collector;
+  final pw.BoxDecoration? delegate;
+
+  @override
+  void paint(
+    pw.Context context,
+    PdfRect box, [
+    pw.PaintPhase phase = pw.PaintPhase.all,
+  ]) {
+    collector.recordContent(context.pageNumber - 1, sourceOffset);
+    delegate?.paint(context, box, phase);
+  }
+}
+
+final class _ManualPageProbe extends pw.Widget {
+  _ManualPageProbe({required this.markerOffset, required this.collector});
+
+  final int markerOffset;
+  final _PageBoundaryCollector collector;
+
+  @override
+  void layout(
+    pw.Context context,
+    pw.BoxConstraints constraints, {
+    bool parentUsesSize = false,
+  }) {
+    box = PdfRect.zero;
+  }
+
+  @override
+  void paint(pw.Context context) {
+    super.paint(context);
+    collector.recordManualBreak(context.pageNumber - 1, markerOffset);
+  }
+}
+
+final class _PageTaggedWidget extends pw.SingleChildWidget {
+  _PageTaggedWidget({
+    required this.sourceOffset,
+    required this.collector,
+    required pw.Widget child,
+  }) : super(child: child);
+
+  final int sourceOffset;
+  final _PageBoundaryCollector collector;
+
+  @override
+  void paint(pw.Context context) {
+    super.paint(context);
+    paintChild(context);
+    collector.recordContent(context.pageNumber - 1, sourceOffset);
+  }
 }
 
 String _normalizeSource(String source) {

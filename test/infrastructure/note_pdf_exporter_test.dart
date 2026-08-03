@@ -39,6 +39,12 @@ void main() {
 
       expect(result.pageCount, 2);
       expect(result.bytes.take(4), '%PDF'.codeUnits);
+      expect(result.boundaries, hasLength(1));
+      expect(result.boundaries.single.kind, NotePdfPageBoundaryKind.manual);
+      expect(
+        result.boundaries.single.sourceOffset,
+        greaterThanOrEqualTo(resultMarkdownSecondPageOffset),
+      );
     },
   );
 
@@ -169,6 +175,14 @@ void main() {
 
     expect(result.pageCount, greaterThan(3));
     expect(result.bytes.take(4), '%PDF'.codeUnits);
+    expect(result.boundaries, hasLength(result.pageCount - 1));
+    expect(
+      result.boundaries.map((boundary) => boundary.sourceOffset),
+      orderedEquals(
+        result.boundaries.map((boundary) => boundary.sourceOffset).toList()
+          ..sort(),
+      ),
+    );
   });
 
   test('code blocks paginate only between complete code lines', () async {
@@ -184,6 +198,16 @@ void main() {
 
     expect(result.pageCount, greaterThan(2));
     expect(result.bytes.take(4), '%PDF'.codeUnits);
+    expect(result.boundaries, hasLength(result.pageCount - 1));
+    for (final boundary in result.boundaries) {
+      expect(boundary.kind, NotePdfPageBoundaryKind.automatic);
+      expect(
+        _snapshot(
+          '# 跨页代码\n\n```dart\n$code\n```',
+        ).markdown.substring(boundary.sourceOffset),
+        startsWith('final value'),
+      );
+    }
   });
 
   test('ordinary table rows paginate without triggering fallback', () async {
@@ -204,8 +228,61 @@ void main() {
       ),
       isFalse,
     );
+    expect(result.boundaries, hasLength(result.pageCount - 1));
+    for (final boundary in result.boundaries) {
+      expect(
+        _snapshot(
+          '# 跨页表格\n\n| 序号 | 内容 | 状态 |\n| ---: | --- | :---: |\n$rows',
+        ).markdown.substring(boundary.sourceOffset),
+        matches(RegExp(r'^\d+ \|')),
+      );
+    }
   });
+
+  test(
+    'edited multipage text still reports every automatic boundary',
+    () async {
+      final paragraphs = List.generate(
+        180,
+        (index) => '第 $index 段用于验证编辑后的实时分页边界仍然完整。',
+      );
+      paragraphs[75] = '${paragraphs[75]}这里补充一段编辑后的文字。';
+      final markdown = '# 编辑后分页\n\n${paragraphs.join('\n\n')}';
+
+      final result = await buildNotePdf(
+        _snapshot(markdown),
+        const NotePdfExportOptions(),
+        fonts,
+      );
+
+      expect(result.pageCount, greaterThan(1));
+      expect(result.boundaries, hasLength(result.pageCount - 1));
+      expect(
+        result.boundaries.every(
+          (boundary) =>
+              boundary.kind == NotePdfPageBoundaryKind.automatic &&
+              boundary.sourceOffset >= 0 &&
+              boundary.sourceOffset < markdown.length,
+        ),
+        isTrue,
+      );
+    },
+  );
 }
+
+final resultMarkdownSecondPageOffset =
+    '''
+<!-- synapse:page-break -->
+# 第一页
+
+正文
+
+<!-- synapse:page-break -->
+<!-- synapse:page-break -->
+
+# 第二页
+'''
+        .lastIndexOf('# 第二页');
 
 NotePdfExportSnapshot _snapshot(String markdown) => NotePdfExportSnapshot(
   noteId: 'note-1',

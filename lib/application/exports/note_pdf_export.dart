@@ -21,6 +21,24 @@ enum NotePdfExportWarningCode {
   narrowTable,
 }
 
+enum NotePdfPageBoundaryKind { automatic, manual }
+
+final class NotePdfPageBoundary {
+  const NotePdfPageBoundary({
+    required this.pageIndex,
+    required this.sourceOffset,
+    required this.kind,
+  });
+
+  /// Zero-based index of the page that starts at [sourceOffset].
+  final int pageIndex;
+
+  /// UTF-16 offset in [NotePdfExportSnapshot.markdown] for the first visible
+  /// source content rendered on this page.
+  final int sourceOffset;
+  final NotePdfPageBoundaryKind kind;
+}
+
 final class NotePdfExportWarning {
   const NotePdfExportWarning({required this.code, required this.message});
 
@@ -88,12 +106,15 @@ final class NotePdfBuildResult {
     required Uint8List bytes,
     required this.pageCount,
     required List<NotePdfExportWarning> warnings,
+    List<NotePdfPageBoundary> boundaries = const [],
   }) : bytes = Uint8List.fromList(bytes),
-       warnings = List<NotePdfExportWarning>.unmodifiable(warnings);
+       warnings = List<NotePdfExportWarning>.unmodifiable(warnings),
+       boundaries = List<NotePdfPageBoundary>.unmodifiable(boundaries);
 
   final Uint8List bytes;
   final int pageCount;
   final List<NotePdfExportWarning> warnings;
+  final List<NotePdfPageBoundary> boundaries;
 }
 
 abstract interface class NotePdfExporter {

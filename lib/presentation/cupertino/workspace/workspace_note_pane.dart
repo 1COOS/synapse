@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../application/exports/note_pdf_export.dart';
 import '../../../domain/markdown/markdown_document.dart';
 import '../../../domain/vault/vault_resource.dart';
 import '../../workspace/controller/workspace_controller.dart';
@@ -12,6 +13,7 @@ import '../../workspace/editor/live_markdown_editor.dart';
 import '../../workspace/editor/markdown_context_menu.dart';
 import '../../workspace/editor/note_find_controller.dart';
 import '../../workspace/editor/note_find_panel.dart';
+import '../../workspace/editor/note_print_layout_controller.dart';
 import '../../workspace/editor/pane_editor_context.dart';
 import '../../workspace/outline_navigation.dart';
 import '../../workspace/state/note_document_session.dart';
@@ -45,6 +47,11 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
   final Map<String, NoteFindController> _findControllers = {};
   final Map<String, LiveMarkdownEditorState> _editorStates = {};
   final Map<String, FocusNode> _paneFocusNodes = {};
+  final Map<String, NotePrintLayoutController> _printControllers = {};
+  final Map<String, String> _printAssetSignatures = {};
+  final Map<String, String> _printLoadingSignatures = {};
+  final Map<String, int> _printSnapshotGenerations = {};
+  final Set<String> _printRefreshScheduled = {};
   var _paneStatePruneScheduled = false;
   Future<PaneEditorCommandOutcome>? _pasteIntoNoteOperation;
 
@@ -88,6 +95,9 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
     for (final focusNode in _paneFocusNodes.values) {
       focusNode.dispose();
     }
+    for (final controller in _printControllers.values) {
+      controller.dispose();
+    }
     super.dispose();
   }
 
@@ -119,6 +129,134 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
     );
   }
 
+  NotePrintLayoutController _printControllerFor(
+    SplitLeaf pane,
+    NoteDocumentSession session,
+    PaneEditorContext? editorContext,
+  ) {
+    var controller = _printControllers[pane.paneId];
+    if (controller != null &&
+        controller.noteId != null &&
+        controller.noteId != session.noteId) {
+      controller.dispose();
+      _printControllers.remove(pane.paneId);
+      _printAssetSignatures.remove(pane.paneId);
+      _printLoadingSignatures.remove(pane.paneId);
+      _printSnapshotGenerations.remove(pane.paneId);
+      controller = null;
+    }
+    controller ??= NotePrintLayoutController(
+      exporter: _controller.notePdfExporter,
+    );
+    _printControllers[pane.paneId] = controller;
+    _schedulePrintRefresh(pane.paneId, session.noteId, editorContext);
+    return controller;
+  }
+
+  void _schedulePrintRefresh(
+    String paneId,
+    String noteId,
+    PaneEditorContext? editorContext,
+  ) {
+    if (!_printRefreshScheduled.add(paneId)) {
+      return;
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _printRefreshScheduled.remove(paneId);
+      if (!mounted) {
+        return;
+      }
+      final pane = _splitWorkspaceController.pane(paneId);
+      final session = pane?.noteId == null
+          ? null
+          : _controller.sessionFor(pane!.noteId!);
+      final controller = _printControllers[paneId];
+      if (pane == null ||
+          pane.noteId != noteId ||
+          pane.mode != NoteMode.print ||
+          session == null ||
+          controller == null) {
+        return;
+      }
+      controller.updateDocument(
+        noteId: noteId,
+        title: noteTitleFromMarkdownBody(session.controller.text),
+        markdown: session.controller.text,
+      );
+      final signature = _printAttachmentSignature(session);
+      if (_printAssetSignatures[paneId] == signature ||
+          _printLoadingSignatures[paneId] == signature ||
+          editorContext == null) {
+        return;
+      }
+      _printLoadingSignatures[paneId] = signature;
+      final generation = (_printSnapshotGenerations[paneId] ?? 0) + 1;
+      _printSnapshotGenerations[paneId] = generation;
+      unawaited(
+        _loadPrintSnapshot(
+          paneId: paneId,
+          noteId: noteId,
+          signature: signature,
+          generation: generation,
+          editorContext: editorContext,
+        ),
+      );
+    });
+    WidgetsBinding.instance.scheduleFrame();
+  }
+
+  Future<void> _loadPrintSnapshot({
+    required String paneId,
+    required String noteId,
+    required String signature,
+    required int generation,
+    required PaneEditorContext editorContext,
+  }) async {
+    final snapshot = await _controller.captureNotePdfPreview(editorContext);
+    if (!mounted ||
+        _printSnapshotGenerations[paneId] != generation ||
+        _printLoadingSignatures[paneId] != signature) {
+      return;
+    }
+    _printLoadingSignatures.remove(paneId);
+    final pane = _splitWorkspaceController.pane(paneId);
+    final session = pane?.noteId == null
+        ? null
+        : _controller.sessionFor(pane!.noteId!);
+    final controller = _printControllers[paneId];
+    if (snapshot == null ||
+        pane == null ||
+        pane.mode != NoteMode.print ||
+        pane.noteId != noteId ||
+        session == null ||
+        controller == null) {
+      return;
+    }
+    if (_printAttachmentSignature(session) != signature) {
+      _schedulePrintRefresh(paneId, noteId, editorContext);
+      return;
+    }
+    _printAssetSignatures[paneId] = signature;
+    final markdown = session.controller.text;
+    controller.bindSnapshot(
+      NotePdfExportSnapshot(
+        noteId: noteId,
+        title: noteTitleFromMarkdownBody(markdown),
+        markdown: markdown,
+        assets: snapshot.assets,
+      ),
+    );
+  }
+
+  String _printAttachmentSignature(NoteDocumentSession session) => session
+      .note
+      .attachments
+      .map(
+        (attachment) =>
+            '${attachment.id}|${attachment.relativePath}|${attachment.mimeType}|${attachment.updatedAt.microsecondsSinceEpoch}',
+      )
+      .join('\n');
+
   int _findAnchor(NoteDocumentSession? session) {
     final selection = session?.controller.selection;
     return selection != null && selection.isValid ? selection.extentOffset : 0;
@@ -149,7 +287,7 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
   }) {
     setState(() {
       _focusPane(pane.paneId);
-      if (pane.mode != NoteMode.source) {
+      if (pane.mode == NoteMode.reading) {
         _splitWorkspaceController.setPaneMode(pane.paneId, NoteMode.source);
       }
     });
@@ -347,6 +485,15 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
     if (!mounted || snapshot == null) {
       return;
     }
+    final printController = pane.mode == NoteMode.print
+        ? _printControllers[pane.paneId]
+        : null;
+    final initialOptions =
+        printController?.options ?? const NotePdfExportOptions();
+    final initialResult = printController?.reusableResultFor(
+      snapshot,
+      initialOptions,
+    );
     await showCupertinoDialog<void>(
       context: context,
       barrierDismissible: false,
@@ -358,6 +505,8 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
             exporter: _controller.notePdfExporter,
             rasterizer: _controller.notePdfPreviewRasterizer,
             fileSaver: _controller.notePdfFileSaver,
+            initialOptions: initialOptions,
+            initialResult: initialResult,
           ),
         ),
       ),
@@ -399,6 +548,11 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
         _findControllers.remove(paneId)?.dispose();
         _editorStates.remove(paneId);
         _paneFocusNodes.remove(paneId)?.dispose();
+        _printControllers.remove(paneId)?.dispose();
+        _printAssetSignatures.remove(paneId);
+        _printLoadingSignatures.remove(paneId);
+        _printSnapshotGenerations.remove(paneId);
+        _printRefreshScheduled.remove(paneId);
       }
     });
   }
@@ -468,112 +622,121 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
         onTap: () => _focusPane(pane.paneId),
         child: ListenableBuilder(
           listenable: session ?? _emptyMarkdownController,
-          builder: (context, child) => ListenableBuilder(
-            listenable: findController,
-            builder: (context, child) {
-              final outlineNodes = session == null
-                  ? const <OutlineNode>[]
-                  : extractOutline(session.controller.text);
-              final canReplace =
-                  session != null &&
-                  pane.mode == NoteMode.source &&
-                  !_busy &&
-                  !_reloadRequired &&
-                  !_paneEditorCommandLocks.contains(session.noteId);
-              return DecoratedBox(
-                decoration: BoxDecoration(
-                  color: workspaceSurfaceColor,
-                  border: Border.all(
-                    color: focused ? accentColor : workspaceLineColor,
+          builder: (context, child) {
+            final printController =
+                pane.mode == NoteMode.print && session != null
+                ? _printControllerFor(pane, session, editorContext)
+                : null;
+            return ListenableBuilder(
+              listenable: Listenable.merge([findController, ?printController]),
+              builder: (context, child) {
+                final outlineNodes = session == null
+                    ? const <OutlineNode>[]
+                    : extractOutline(session.controller.text);
+                final canReplace =
+                    session != null &&
+                    pane.mode != NoteMode.reading &&
+                    !_busy &&
+                    !_reloadRequired &&
+                    !_paneEditorCommandLocks.contains(session.noteId);
+                return DecoratedBox(
+                  decoration: BoxDecoration(
+                    color: workspaceSurfaceColor,
+                    border: Border.all(
+                      color: focused ? accentColor : workspaceLineColor,
+                    ),
+                    borderRadius: workspaceBorderRadius,
                   ),
-                  borderRadius: workspaceBorderRadius,
-                ),
-                child: ClipRRect(
-                  borderRadius: workspaceBorderRadius,
-                  child: Stack(
-                    children: [
-                      Positioned.fill(
-                        child: pane.mode == NoteMode.reading
-                            ? session == null
-                                  ? const EmptyState(
-                                      text: '选择或创建笔记后开始整理 Markdown',
-                                    )
-                                  : Focus(
-                                      focusNode: paneFocusNode,
-                                      child: GestureDetector(
-                                        behavior: HitTestBehavior.translucent,
-                                        onTapDown: (_) {
-                                          if (!paneFocusNode.hasFocus) {
-                                            paneFocusNode.requestFocus();
-                                          }
-                                        },
-                                        onSecondaryTapDown: (details) =>
-                                            _showReadingFindMenu(
-                                              pane,
-                                              findController,
-                                              details.globalPosition,
-                                            ),
-                                        child: _markdownRenderer
-                                            .buildReadingPreview(
-                                              session: session,
-                                              editorContext: editorContext!,
-                                              paneId: pane.paneId,
-                                              focused: focused,
-                                              outlineNodes: outlineNodes,
-                                              outlineNavigationController: widget
-                                                  .outlineNavigationController,
-                                              findController: findController,
-                                            ),
-                                      ),
-                                    )
-                            : _buildNoteEditor(
-                                session: session,
-                                pane: pane,
-                                outlineNodes: outlineNodes,
-                                findController: findController,
-                              ),
-                      ),
-                      Positioned(
-                        top: 10,
-                        left: 12,
-                        right: 10,
-                        child: _buildPaneHeader(
-                          pane,
-                          session: session,
-                          focused: focused,
-                        ),
-                      ),
-                      if (session != null && findController.visible)
-                        Positioned(
-                          top: 42,
-                          left: 12,
-                          right: 12,
-                          child: Align(
-                            alignment: Alignment.topRight,
-                            child: ConstrainedBox(
-                              constraints: const BoxConstraints(maxWidth: 430),
-                              child: NoteFindPanel(
-                                key: Key('note-find-panel-${pane.paneId}'),
-                                controller: findController,
-                                canReplace: canReplace,
-                                onClose: () =>
-                                    _closeFind(pane.paneId, findController),
-                                onReplaceCurrent: () => _replaceCurrent(
-                                  pane.paneId,
-                                  findController,
+                  child: ClipRRect(
+                    borderRadius: workspaceBorderRadius,
+                    child: Stack(
+                      children: [
+                        Positioned.fill(
+                          child: pane.mode == NoteMode.reading
+                              ? session == null
+                                    ? const EmptyState(
+                                        text: '选择或创建笔记后开始整理 Markdown',
+                                      )
+                                    : Focus(
+                                        focusNode: paneFocusNode,
+                                        child: GestureDetector(
+                                          behavior: HitTestBehavior.translucent,
+                                          onTapDown: (_) {
+                                            if (!paneFocusNode.hasFocus) {
+                                              paneFocusNode.requestFocus();
+                                            }
+                                          },
+                                          onSecondaryTapDown: (details) =>
+                                              _showReadingFindMenu(
+                                                pane,
+                                                findController,
+                                                details.globalPosition,
+                                              ),
+                                          child: _markdownRenderer
+                                              .buildReadingPreview(
+                                                session: session,
+                                                editorContext: editorContext!,
+                                                paneId: pane.paneId,
+                                                focused: focused,
+                                                outlineNodes: outlineNodes,
+                                                outlineNavigationController: widget
+                                                    .outlineNavigationController,
+                                                findController: findController,
+                                              ),
+                                        ),
+                                      )
+                              : _buildNoteEditor(
+                                  session: session,
+                                  pane: pane,
+                                  outlineNodes: outlineNodes,
+                                  findController: findController,
+                                  printController: printController,
                                 ),
-                                onReplaceAll: () =>
-                                    _replaceAll(pane.paneId, findController),
+                        ),
+                        Positioned(
+                          top: 10,
+                          left: 12,
+                          right: 10,
+                          child: _buildPaneHeader(
+                            pane,
+                            session: session,
+                            focused: focused,
+                          ),
+                        ),
+                        if (session != null && findController.visible)
+                          Positioned(
+                            top: 42,
+                            left: 12,
+                            right: 12,
+                            child: Align(
+                              alignment: Alignment.topRight,
+                              child: ConstrainedBox(
+                                constraints: const BoxConstraints(
+                                  maxWidth: 430,
+                                ),
+                                child: NoteFindPanel(
+                                  key: Key('note-find-panel-${pane.paneId}'),
+                                  controller: findController,
+                                  canReplace: canReplace,
+                                  onClose: () =>
+                                      _closeFind(pane.paneId, findController),
+                                  onReplaceCurrent: () => _replaceCurrent(
+                                    pane.paneId,
+                                    findController,
+                                  ),
+                                  onReplaceAll: () =>
+                                      _replaceAll(pane.paneId, findController),
+                                ),
                               ),
                             ),
                           ),
-                        ),
-                    ],
+                      ],
+                    ),
                   ),
-                ),
-              );
-            },
-          ),
+                );
+              },
+            );
+          },
         ),
       ),
     );
@@ -589,7 +752,7 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.center,
         children: [
-          _buildPaneModeControls(pane, focused: focused),
+          _buildPaneModeControls(pane, session: session, focused: focused),
           const SizedBox(width: 8),
           Flexible(
             child: Align(
@@ -628,7 +791,11 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
     );
   }
 
-  Widget _buildPaneModeControls(SplitLeaf pane, {required bool focused}) {
+  Widget _buildPaneModeControls(
+    SplitLeaf pane, {
+    required NoteDocumentSession? session,
+    required bool focused,
+  }) {
     return DecoratedBox(
       decoration: BoxDecoration(
         color: workspaceSurfaceColor.withValues(alpha: 0.92),
@@ -652,6 +819,15 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
             label: '阅读',
             icon: CupertinoIcons.book,
           ),
+          if (_controller.supportsPdfExport)
+            _paneModeButton(
+              pane: pane,
+              focused: focused,
+              mode: NoteMode.print,
+              label: '打印',
+              icon: CupertinoIcons.doc_text_viewfinder,
+              enabled: _canExportPdf(pane, session),
+            ),
         ],
       ),
     );
@@ -663,22 +839,29 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
     required NoteMode mode,
     required String label,
     required IconData icon,
+    bool enabled = true,
   }) {
-    final suffix = mode == NoteMode.reading ? 'reading' : 'source';
+    final suffix = switch (mode) {
+      NoteMode.source => 'source',
+      NoteMode.reading => 'reading',
+      NoteMode.print => 'print',
+    };
     final button = PaneModeIconAction(
       key: Key('note-mode-$suffix-${pane.paneId}'),
       label: label,
       icon: icon,
       selected: pane.mode == mode,
-      onPressed: () {
-        setState(() {
-          _focusPane(pane.paneId);
-          if (mode == NoteMode.reading) {
-            _findControllers[pane.paneId]?.hideReplace();
-          }
-          _splitWorkspaceController.setPaneMode(pane.paneId, mode);
-        });
-      },
+      onPressed: enabled
+          ? () {
+              setState(() {
+                _focusPane(pane.paneId);
+                if (mode == NoteMode.reading) {
+                  _findControllers[pane.paneId]?.hideReplace();
+                }
+                _splitWorkspaceController.setPaneMode(pane.paneId, mode);
+              });
+            }
+          : null,
     );
     if (!focused) {
       return button;
@@ -691,6 +874,7 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
     SplitLeaf? pane,
     List<OutlineNode> outlineNodes = const [],
     NoteFindController? findController,
+    NotePrintLayoutController? printController,
   }) {
     final resolvedSession = pane == null ? session ?? _activeSession : session;
     final resolvedPane = pane ?? _focusedPane;
@@ -773,6 +957,7 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
                     findController:
                         findController ??
                         _findControllerFor(resolvedPane!, resolvedSession),
+                    printController: printController,
                     outlineNodes: outlineNodes,
                     outlineNavigationController:
                         widget.outlineNavigationController,

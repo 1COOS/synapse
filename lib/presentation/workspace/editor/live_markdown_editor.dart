@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 
+import '../../../application/exports/note_pdf_export.dart';
 import '../../../domain/vault/vault_resource.dart';
 import '../../cupertino/markdown_context_commands.dart';
 import '../../cupertino/markdown_live_blocks.dart';
@@ -17,6 +18,7 @@ import 'markdown_context_menu.dart';
 import 'markdown_image_transform.dart';
 import 'markdown_table_editor.dart';
 import 'note_find_controller.dart';
+import 'note_print_layout_controller.dart';
 import 'pane_editor_context.dart';
 import 'preview_image_block.dart';
 
@@ -59,6 +61,7 @@ class LiveMarkdownEditor extends StatefulWidget {
     required this.noteId,
     required this.controller,
     required this.findController,
+    this.printController,
     required this.outlineNodes,
     required this.outlineNavigationController,
     required this.enabled,
@@ -80,6 +83,7 @@ class LiveMarkdownEditor extends StatefulWidget {
   final String noteId;
   final TextEditingController controller;
   final NoteFindController findController;
+  final NotePrintLayoutController? printController;
   final List<OutlineNode> outlineNodes;
   final WorkspaceOutlineNavigationController outlineNavigationController;
   final bool enabled;
@@ -2716,8 +2720,9 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
         : _editorController.nonBlankBlockIndexForOffset(blocks, activeOffset);
     final activeInsertionOffset = _editorController.activeInsertionOffset;
     _scheduleRevealFindMatch(blocks);
+    final printBoundariesByBlock = _printBoundariesByBlock(blocks);
 
-    return CallbackShortcuts(
+    final editor = CallbackShortcuts(
       bindings: _editorShortcuts(),
       child: TapRegion(
         groupId: _editingSessionTapGroup,
@@ -2748,7 +2753,12 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
                   physics: _tableReordering || _draggingTableBlockStart != null
                       ? const NeverScrollableScrollPhysics()
                       : null,
-                  padding: const EdgeInsets.fromLTRB(16, 54, 16, 16),
+                  padding: EdgeInsets.fromLTRB(
+                    16,
+                    widget.printController == null ? 54 : 12,
+                    16,
+                    16,
+                  ),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
@@ -2763,6 +2773,7 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
                           activeIndex,
                           outlineByBlock[index],
                           blocks,
+                          printBoundariesByBlock[index] ?? const [],
                         ),
                         if (activeInsertionOffset == blocks[index].end)
                           _buildVirtualTrailingTextBlockEditor(index + 1),
@@ -2810,6 +2821,17 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
         ),
       ),
     );
+    final printController = widget.printController;
+    if (printController == null) {
+      return editor;
+    }
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _buildPrintToolbar(printController),
+        Expanded(child: editor),
+      ],
+    );
   }
 
   Widget _buildVirtualTrailingTextBlockEditor(int index) {
@@ -2819,16 +2841,176 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
     );
   }
 
+  Widget _buildPrintToolbar(NotePrintLayoutController controller) {
+    final result = controller.result;
+    final status = controller.building && result == null
+        ? '正在计算分页…'
+        : result == null
+        ? '分页不可用'
+        : '${result.pageCount} 页';
+    return DecoratedBox(
+      key: const Key('note-print-toolbar'),
+      decoration: const BoxDecoration(
+        color: workspaceSurfaceColor,
+        border: Border(bottom: BorderSide(color: workspaceSoftLineColor)),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 40, 16, 8),
+        child: Wrap(
+          spacing: 10,
+          runSpacing: 6,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          children: [
+            SizedBox(
+              width: 122,
+              child: CupertinoSlidingSegmentedControl<NotePdfOrientation>(
+                key: const Key('note-print-orientation'),
+                groupValue: controller.options.orientation,
+                children: const {
+                  NotePdfOrientation.portrait: Padding(
+                    padding: EdgeInsets.symmetric(horizontal: 5),
+                    child: Text('纵向'),
+                  ),
+                  NotePdfOrientation.landscape: Padding(
+                    padding: EdgeInsets.symmetric(horizontal: 5),
+                    child: Text('横向'),
+                  ),
+                },
+                onValueChanged: (value) {
+                  if (value != null) {
+                    controller.setOptions(
+                      controller.options.copyWith(orientation: value),
+                    );
+                  }
+                },
+              ),
+            ),
+            SizedBox(
+              width: 176,
+              child: CupertinoSlidingSegmentedControl<NotePdfMarginPreset>(
+                key: const Key('note-print-margin'),
+                groupValue: controller.options.marginPreset,
+                children: const {
+                  NotePdfMarginPreset.compact: Padding(
+                    padding: EdgeInsets.symmetric(horizontal: 3),
+                    child: Text('紧凑'),
+                  ),
+                  NotePdfMarginPreset.standard: Padding(
+                    padding: EdgeInsets.symmetric(horizontal: 3),
+                    child: Text('标准'),
+                  ),
+                  NotePdfMarginPreset.wide: Padding(
+                    padding: EdgeInsets.symmetric(horizontal: 3),
+                    child: Text('宽松'),
+                  ),
+                },
+                onValueChanged: (value) {
+                  if (value != null) {
+                    controller.setOptions(
+                      controller.options.copyWith(marginPreset: value),
+                    );
+                  }
+                },
+              ),
+            ),
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (controller.building)
+                  const Padding(
+                    padding: EdgeInsets.only(right: 6),
+                    child: CupertinoActivityIndicator(radius: 7),
+                  ),
+                Text(
+                  status,
+                  key: const Key('note-print-page-count'),
+                  style: TextStyle(
+                    color: controller.hasStaleResult
+                        ? workspaceMutedColor.withValues(alpha: 0.55)
+                        : workspaceMutedColor,
+                    fontSize: 12,
+                  ),
+                ),
+                if (result != null && result.warnings.isNotEmpty)
+                  Text(
+                    ' · ${result.warnings.length} 条警告',
+                    key: const Key('note-print-warning-count'),
+                    style: const TextStyle(
+                      color: workspaceMutedColor,
+                      fontSize: 12,
+                    ),
+                  ),
+              ],
+            ),
+            if (controller.error != null)
+              CupertinoButton(
+                key: const Key('note-print-retry'),
+                padding: EdgeInsets.zero,
+                minimumSize: Size.zero,
+                onPressed: controller.retry,
+                child: const Text('分页失败，重试'),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Map<int, List<NotePdfPageBoundary>> _printBoundariesByBlock(
+    List<MarkdownLiveBlock> blocks,
+  ) {
+    final boundaries = widget.printController?.boundaries ?? const [];
+    final result = <int, List<NotePdfPageBoundary>>{};
+    for (final boundary in boundaries) {
+      if (boundary.kind != NotePdfPageBoundaryKind.automatic ||
+          blocks.isEmpty) {
+        continue;
+      }
+      var index = markdownBlockIndexForOffset(blocks, boundary.sourceOffset);
+      while (index < blocks.length - 1 && blocks[index].isBlank) {
+        index += 1;
+      }
+      result.putIfAbsent(index, () => []).add(boundary);
+    }
+    return result;
+  }
+
+  Widget _decoratePrintBoundaries(
+    MarkdownLiveBlock block,
+    Widget child,
+    List<NotePdfPageBoundary> boundaries,
+  ) {
+    if (boundaries.isEmpty) {
+      return child;
+    }
+    return _PrintBoundaryOverlay(
+      key: Key('note-print-boundary-block-${block.start}'),
+      block: block,
+      boundaries: boundaries,
+      paneId: widget.paneId,
+      style: _textStyleForBlock(block, WorkspaceAppearanceScope.of(context)),
+      accentColor: widget.printController?.hasStaleResult == true
+          ? WorkspaceAppearanceScope.of(
+              context,
+            ).accentColor.withValues(alpha: 0.4)
+          : WorkspaceAppearanceScope.of(context).accentColor,
+      textScaler: MediaQuery.textScalerOf(context),
+      child: child,
+    );
+  }
+
   Widget _buildOutlineAwareBlock(
     MarkdownLiveBlock block,
     int index,
     int? activeIndex,
     OutlineNode? outlineNode,
     List<MarkdownLiveBlock> blocks,
+    List<NotePdfPageBoundary> printBoundaries,
   ) {
-    final child = _decorateFindBlock(
+    final child = _decoratePrintBoundaries(
       block,
-      _buildBlock(block, index, activeIndex, blocks),
+      _decorateFindBlock(block, _buildBlock(block, index, activeIndex, blocks)),
+      printBoundaries,
     );
     final outlined = outlineNode == null
         ? child
@@ -3522,6 +3704,170 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
     }
     return parseMarkdownLiveTable(block.text);
   }
+}
+
+final class _PrintBoundaryOverlay extends StatelessWidget {
+  const _PrintBoundaryOverlay({
+    super.key,
+    required this.block,
+    required this.boundaries,
+    required this.paneId,
+    required this.style,
+    required this.accentColor,
+    required this.textScaler,
+    required this.child,
+  });
+
+  final MarkdownLiveBlock block;
+  final List<NotePdfPageBoundary> boundaries;
+  final String paneId;
+  final TextStyle style;
+  final Color accentColor;
+  final TextScaler textScaler;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    return Stack(
+      fit: StackFit.passthrough,
+      clipBehavior: Clip.none,
+      children: [
+        child,
+        for (final boundary in boundaries)
+          Positioned.fill(
+            key: Key('note-print-boundary-$paneId-${boundary.pageIndex}'),
+            child: IgnorePointer(
+              child: ExcludeSemantics(
+                child: CustomPaint(
+                  painter: _PrintBoundaryPainter(
+                    block: block,
+                    boundary: boundary,
+                    style: style,
+                    accentColor: accentColor,
+                    textScaler: textScaler,
+                  ),
+                ),
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+final class _PrintBoundaryPainter extends CustomPainter {
+  const _PrintBoundaryPainter({
+    required this.block,
+    required this.boundary,
+    required this.style,
+    required this.accentColor,
+    required this.textScaler,
+  });
+
+  final MarkdownLiveBlock block;
+  final NotePdfPageBoundary boundary;
+  final TextStyle style;
+  final Color accentColor;
+  final TextScaler textScaler;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (size.isEmpty) {
+      return;
+    }
+    final maxVisibleY = size.height > 1 ? size.height - 1 : 0.0;
+    final y = _boundaryY(size).clamp(0.0, maxVisibleY);
+    final linePaint = Paint()
+      ..color = accentColor.withValues(alpha: 0.62)
+      ..strokeWidth = 1;
+    const dashWidth = 5.0;
+    const dashGap = 4.0;
+    var x = 0.0;
+    while (x < size.width) {
+      final end = (x + dashWidth).clamp(0.0, size.width);
+      canvas.drawLine(Offset(x, y), Offset(end, y), linePaint);
+      x += dashWidth + dashGap;
+    }
+
+    final label =
+        '第 ${boundary.pageIndex} 页结束 / '
+        '第 ${boundary.pageIndex + 1} 页开始';
+    final labelPainter = TextPainter(
+      text: TextSpan(
+        text: label,
+        style: TextStyle(
+          color: accentColor,
+          fontSize: 10,
+          fontWeight: FontWeight.w600,
+          height: 1.2,
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+      textScaler: textScaler,
+      maxLines: 1,
+    )..layout(maxWidth: size.width * 0.72);
+    final labelLeft = (size.width - labelPainter.width - 8).clamp(
+      0.0,
+      size.width,
+    );
+    final labelTop = (y - labelPainter.height / 2).clamp(
+      0.0,
+      (size.height - labelPainter.height).clamp(0.0, size.height),
+    );
+    final background = RRect.fromRectAndRadius(
+      Rect.fromLTWH(
+        labelLeft - 4,
+        labelTop - 2,
+        labelPainter.width + 8,
+        labelPainter.height + 4,
+      ),
+      const Radius.circular(4),
+    );
+    canvas.drawRRect(
+      background,
+      Paint()..color = workspaceSurfaceColor.withValues(alpha: 0.94),
+    );
+    labelPainter.paint(canvas, Offset(labelLeft, labelTop));
+  }
+
+  double _boundaryY(Size size) {
+    final localOffset = (boundary.sourceOffset - block.start).clamp(
+      0,
+      block.text.length,
+    );
+    if (localOffset == 0 ||
+        block.kind == MarkdownLiveBlockKind.image ||
+        block.kind == MarkdownLiveBlockKind.pageBreak) {
+      return 0;
+    }
+    if (block.kind == MarkdownLiveBlockKind.table) {
+      final linesBefore = '\n'
+          .allMatches(block.text.substring(0, localOffset))
+          .length;
+      final totalLines = '\n'.allMatches(block.text).length + 1;
+      return (size.height * linesBefore / totalLines).clamp(0.0, size.height);
+    }
+    final painter = TextPainter(
+      text: TextSpan(text: block.text, style: style),
+      textDirection: TextDirection.ltr,
+      textScaler: textScaler,
+    )..layout(maxWidth: size.width);
+    final caret = painter.getOffsetForCaret(
+      TextPosition(offset: localOffset),
+      Rect.zero,
+    );
+    return caret.dy.clamp(0.0, size.height);
+  }
+
+  @override
+  bool shouldRepaint(_PrintBoundaryPainter oldDelegate) =>
+      oldDelegate.block.start != block.start ||
+      oldDelegate.block.text != block.text ||
+      oldDelegate.boundary.pageIndex != boundary.pageIndex ||
+      oldDelegate.boundary.sourceOffset != boundary.sourceOffset ||
+      oldDelegate.style != style ||
+      oldDelegate.accentColor != accentColor ||
+      oldDelegate.textScaler != textScaler;
 }
 
 enum _MarkdownBlockDropSide { before, after }

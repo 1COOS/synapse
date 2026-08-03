@@ -122,6 +122,34 @@ void main() {
     expect(find.text('A4 · 2 页'), findsOneWidget);
     expect(find.byKey(const Key('note-pdf-build-error')), findsNothing);
   });
+
+  testWidgets('accepts a matching print-mode result without rebuilding', (
+    tester,
+  ) async {
+    final exporter = _ControlledPdfExporter();
+    final initialResult = _result(2, marker: 8);
+    const initialOptions = NotePdfExportOptions(
+      orientation: NotePdfOrientation.landscape,
+      marginPreset: NotePdfMarginPreset.compact,
+    );
+
+    await _pumpDialog(
+      tester,
+      exporter: exporter,
+      rasterizer: _RecordingRasterizer(),
+      saver: _RecordingFileSaver(),
+      initialOptions: initialOptions,
+      initialResult: initialResult,
+    );
+    await tester.pump();
+
+    expect(exporter.options, isEmpty);
+    expect(find.text('A4 · 2 页'), findsOneWidget);
+    final orientation = tester.widget<
+      CupertinoSlidingSegmentedControl<NotePdfOrientation>
+    >(find.byKey(const Key('note-pdf-orientation')));
+    expect(orientation.groupValue, NotePdfOrientation.landscape);
+  });
 }
 
 Future<void> _pumpDialog(
@@ -129,6 +157,8 @@ Future<void> _pumpDialog(
   required NotePdfExporter exporter,
   required NotePdfPreviewRasterizer rasterizer,
   required NotePdfFileSaver saver,
+  NotePdfExportOptions initialOptions = const NotePdfExportOptions(),
+  NotePdfBuildResult? initialResult,
 }) async {
   await tester.binding.setSurfaceSize(const Size(1200, 820));
   addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -155,6 +185,8 @@ Future<void> _pumpDialog(
                       exporter: exporter,
                       rasterizer: rasterizer,
                       fileSaver: saver,
+                      initialOptions: initialOptions,
+                      initialResult: initialResult,
                     ),
                   ),
                 ),

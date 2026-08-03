@@ -197,9 +197,11 @@ Live Markdown 继续遵守：活动 block 显示 Markdown marker，失焦后由�
 
 ### 6.4 PDF 导出管线
 
-`application/exports/note_pdf_export.dart` 定义 `NotePdfExportSnapshot`、`NotePdfExportOptions`、`NotePdfBuildResult`、结构化 warning 以及 exporter/rasterizer/file-saver ports。真实实现位于 `infrastructure/pdf/`：`DefaultNotePdfExporter` 使用 `pdf` 在后台 isolate 构建文档，`PrintingNotePdfPreviewRasterizer` 按需将指定页栅格化，`PlatformNotePdfFileSaver` 继续通过 `file_selector` 保存。Noto Sans SC、JetBrains Mono、Noto Emoji 及其 OFL 许可证随应用 assets 离线打包，不允许运行时下载字体。
+`application/exports/note_pdf_export.dart` 定义 `NotePdfExportSnapshot`、`NotePdfExportOptions`、`NotePdfBuildResult`、`NotePdfPageBoundary`、结构化 warning 以及 exporter/rasterizer/file-saver ports。`NotePdfPageBoundary` 使用 Markdown UTF-16 offset 标识每个新 PDF 页面首个可见源码位置，并区分自动和手动分页。真实实现位于 `infrastructure/pdf/`：`DefaultNotePdfExporter` 使用 `pdf` 在后台 isolate 构建文档，在同一次真实排版的绘制阶段采集分页映射；`PrintingNotePdfPreviewRasterizer` 按需将指定页栅格化，`PlatformNotePdfFileSaver` 继续通过 `file_selector` 保存。Noto Sans SC、JetBrains Mono、Noto Emoji 及其 OFL 许可证随应用 assets 离线打包，不允许运行时下载字体。
 
 窗格在 await 前捕获 `PaneEditorContext`，`prepareNotePdfExport` 先通过 `NoteSaveCoordinator.flush` 保存指定 session，再复制正文和图片附件得到不可变快照。flush 失败、中途 stale、workspace busy、迁移、`reloadRequired` 或 note lock 都不得进入生成。弹窗只持有快照和当前 preview bytes；方向/边距更新使用 generation token，过期 build 结果直接丢弃，缩略图按页懒加载并限制缓存。
+
+打印视图由 pane 级 `NotePrintLayoutController` 驱动。进入视图时通过 `captureNotePdfPreview` 读取当前 session 正文和附件，不触发 flush；正文变化 400 ms 防抖，方向、边距和附件代次变化立即生成，所有异步结果都以 build generation 与快照 key 丢弃过期值。控制器保留最后一次成功结果供重新计算或错误期间显示；旧结果的源码 offset 必须按当前正文的共同前后缀重定位，避免编辑期间分页线漂移或消失。只有 note id、标题、正文、附件字节和 options 全部相同时才允许导出弹窗复用 PDF bytes。Live Markdown 只绘制自动分页 overlay；overlay 使用 `IgnorePointer`/`ExcludeSemantics`，不参与文本、caret、selection、copy、undo 或 `TextSpan.toPlainText()`。手动分页仍由现有分页符 block 显示，避免同一位置出现两条线。
 
 导出器将 Markdown 转为独立打印块，不修改 Vault 数据模型。唯一新增正文契约是独占一行的 `<!-- synapse:page-break -->`；开头、结尾和连续标记折叠，fenced code 内保持字面量，`---` 继续解析为水平线。段落和长列表使用可跨页 RichText；代码块用逐行 table row 保证只在线之间分页；标题用 `NewPage(freeSpace: ...)` 防止孤立；普通表格按行分页并重复 header，超高行整表降级为可跨页字段布局；图片使用本地快照、等比 contain 和缺失占位。页眉按字体实际宽度省略标题，页脚统一使用 `pageNumber / pagesCount`。
 
@@ -355,7 +357,7 @@ Keychain、签名或 entitlement 异常必须明确报错并 fail-closed。任�
 
 ## 13. 测试与质量边界
 
-当前基线为 `flutter test --no-pub --concurrency=1` 901/901、`flutter analyze --no-pub` 无 issue、`flutter build macos --no-pub` 成功。现有 80 个测试文件覆盖架构边界、状态竞态、Vault 事务、迁移、搜索、Keychain、设置契约、PDF 分页与 UI 行为；这不等同于完整 Release signing production gate 已完成。
+当前基线为 `flutter test --no-pub --concurrency=1` 913/913、`flutter analyze --no-pub` 无 issue、`flutter build macos --no-pub` 成功。现有 81 个测试文件覆盖架构边界、状态竞态、Vault 事务、迁移、搜索、Keychain、设置契约、PDF 分页、编辑区打印视图与 UI 行为；这不等同于完整 Release signing production gate 已完成。
 
 重点测试面包括：
 

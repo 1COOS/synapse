@@ -1,6 +1,6 @@
 import 'package:flutter/foundation.dart';
 
-enum NoteMode { reading, source }
+enum NoteMode { reading, source, print }
 
 enum SplitAxis { horizontal, vertical }
 

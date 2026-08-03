@@ -872,45 +872,73 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
         _setMessage('保存失败：$error');
         return null;
       }
-      final refreshed = resolvePaneEditorContext(context);
-      if (refreshed == null ||
-          refreshed.session.noteId != resolved.session.noteId) {
-        return null;
-      }
-      final note = refreshed.session.note;
-      final assetsDirectory = '${p.basenameWithoutExtension(note.path)}.assets';
-      final assets = <NotePdfExportAsset>[];
-      for (final attachment in note.attachments) {
-        if (attachment.mediaKind != MediaKind.image) {
-          continue;
-        }
-        List<int>? bytes;
-        try {
-          bytes = await _editor.readNoteAttachment(attachment);
-        } catch (_) {
-          bytes = null;
-        }
-        assets.add(
-          NotePdfExportAsset(
-            source: '$assetsDirectory/${attachment.relativePath}'.replaceAll(
-              '\\',
-              '/',
-            ),
-            title: attachment.title,
-            mimeType: attachment.mimeType,
-            bytes: bytes == null ? null : Uint8List.fromList(bytes),
-          ),
-        );
-      }
-      return NotePdfExportSnapshot(
-        noteId: note.id,
-        title: note.title,
-        markdown: refreshed.session.controller.text,
-        assets: assets,
-      );
+      return _captureNotePdfSnapshot(context, resolved.session.noteId);
     } finally {
       _endOperation(WorkspaceOperation.pdfExport);
     }
+  }
+
+  Future<NotePdfExportSnapshot?> captureNotePdfPreview(
+    editor_context.PaneEditorContext? context,
+  ) async {
+    final current = _requireState();
+    if (context == null ||
+        current.requiresMigration ||
+        current.reloadRequired ||
+        current.activeOperation != null) {
+      return null;
+    }
+    final resolved = resolvePaneEditorContext(context);
+    if (resolved == null ||
+        current.lockedSessionNoteIds.contains(resolved.session.noteId)) {
+      return null;
+    }
+    return _captureNotePdfSnapshot(context, resolved.session.noteId);
+  }
+
+  Future<NotePdfExportSnapshot?> _captureNotePdfSnapshot(
+    editor_context.PaneEditorContext context,
+    String expectedNoteId,
+  ) async {
+    final resolved = resolvePaneEditorContext(context);
+    if (resolved == null || resolved.session.noteId != expectedNoteId) {
+      return null;
+    }
+    final note = resolved.session.note;
+    final assetsDirectory = '${p.basenameWithoutExtension(note.path)}.assets';
+    final assets = <NotePdfExportAsset>[];
+    for (final attachment in note.attachments) {
+      if (attachment.mediaKind != MediaKind.image) {
+        continue;
+      }
+      List<int>? bytes;
+      try {
+        bytes = await _editor.readNoteAttachment(attachment);
+      } catch (_) {
+        bytes = null;
+      }
+      assets.add(
+        NotePdfExportAsset(
+          source: '$assetsDirectory/${attachment.relativePath}'.replaceAll(
+            '\\',
+            '/',
+          ),
+          title: attachment.title,
+          mimeType: attachment.mimeType,
+          bytes: bytes == null ? null : Uint8List.fromList(bytes),
+        ),
+      );
+    }
+    final refreshed = resolvePaneEditorContext(context);
+    if (refreshed == null || refreshed.session.noteId != expectedNoteId) {
+      return null;
+    }
+    return NotePdfExportSnapshot(
+      noteId: refreshed.session.note.id,
+      title: refreshed.session.note.title,
+      markdown: refreshed.session.controller.text,
+      assets: assets,
+    );
   }
 
   bool get supportsPdfExport => _dependencies.supportsPdfExport;

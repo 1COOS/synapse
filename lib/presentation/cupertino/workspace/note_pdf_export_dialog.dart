@@ -14,12 +14,16 @@ final class NotePdfExportDialog extends StatefulWidget {
     required this.exporter,
     required this.rasterizer,
     required this.fileSaver,
+    this.initialOptions = const NotePdfExportOptions(),
+    this.initialResult,
   });
 
   final NotePdfExportSnapshot snapshot;
   final NotePdfExporter exporter;
   final NotePdfPreviewRasterizer rasterizer;
   final NotePdfFileSaver fileSaver;
+  final NotePdfExportOptions initialOptions;
+  final NotePdfBuildResult? initialResult;
 
   @override
   State<NotePdfExportDialog> createState() => _NotePdfExportDialogState();
@@ -28,7 +32,7 @@ final class NotePdfExportDialog extends StatefulWidget {
 final class _NotePdfExportDialogState extends State<NotePdfExportDialog> {
   static const _previewCacheLimit = 6;
 
-  NotePdfExportOptions _options = const NotePdfExportOptions();
+  late NotePdfExportOptions _options;
   NotePdfBuildResult? _result;
   final LinkedHashMap<int, Future<NotePdfPreviewPage>> _previewFutures =
       LinkedHashMap<int, Future<NotePdfPreviewPage>>();
@@ -41,7 +45,12 @@ final class _NotePdfExportDialogState extends State<NotePdfExportDialog> {
   @override
   void initState() {
     super.initState();
-    _startBuild();
+    _options = widget.initialOptions;
+    _result = widget.initialResult;
+    _building = _result == null;
+    if (_result == null) {
+      _startBuild();
+    }
   }
 
   void _startBuild() {
