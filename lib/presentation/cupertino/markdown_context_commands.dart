@@ -2,6 +2,7 @@ import 'package:flutter/services.dart';
 
 import '../../application/exports/note_pdf_export.dart';
 import 'markdown_inline_formatting.dart';
+import 'markdown_live_blocks.dart';
 
 enum MarkdownInlineFormat { bold, italic, strikethrough, highlight }
 
@@ -16,7 +17,7 @@ enum MarkdownParagraphStyle {
 
 enum MarkdownListStyle { unordered, ordered, task }
 
-enum MarkdownInsertion { table, divider, pageBreak }
+enum MarkdownInsertion { table, columns, divider, pageBreak }
 
 final class MarkdownCommandState {
   const MarkdownCommandState({
@@ -220,6 +221,10 @@ TextEditingValue insertMarkdownBlock(
 ) {
   final block = switch (insertion) {
     MarkdownInsertion.table => '| 列 1 | 列 2 |\n| --- | --- |\n|  |  |',
+    MarkdownInsertion.columns =>
+      '${synapseColumnsStartMarker(defaultMarkdownColumnsLeftPercent)}\n\n'
+          '$synapseColumnsSeparatorMarker\n\n'
+          '$synapseColumnsEndMarker',
     MarkdownInsertion.divider => '---',
     MarkdownInsertion.pageBreak => synapsePageBreakMarker,
   };
@@ -227,11 +232,12 @@ TextEditingValue insertMarkdownBlock(
   final prefix = empty ? '' : '${value.text}\n\n';
   final suffix = switch (insertion) {
     MarkdownInsertion.divider || MarkdownInsertion.pageBreak => '\n\n',
-    MarkdownInsertion.table => '',
+    MarkdownInsertion.table || MarkdownInsertion.columns => '',
   };
   final updated = '$prefix$block$suffix';
   final focusOffset = switch (insertion) {
     MarkdownInsertion.table => prefix.length + block.indexOf('列 1'),
+    MarkdownInsertion.columns => prefix.length + block.indexOf('\n\n') + 2,
     MarkdownInsertion.divider => updated.length,
     MarkdownInsertion.pageBreak => updated.length,
   };

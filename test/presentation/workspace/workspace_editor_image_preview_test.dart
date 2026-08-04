@@ -13,6 +13,175 @@ import '../../support/workspace_fakes.dart';
 import '../../support/workspace_harness.dart';
 
 void main() {
+  testWidgets(
+    'typing before images keeps full mixed and column previews mounted',
+    (tester) async {
+      final vault = _CountingAttachmentReadBackend();
+      final note = await vault.createNote(
+        parentPath: '',
+        title: 'Stable Images',
+      );
+      final pure = await vault.addImageAttachment(
+        noteId: note.id,
+        filename: 'pure.png',
+        mimeType: 'image/png',
+        bytes: tinyPng,
+      );
+      final mixed = await vault.addImageAttachment(
+        noteId: note.id,
+        filename: 'mixed.png',
+        mimeType: 'image/png',
+        bytes: tinyPng,
+      );
+      final column = await vault.addImageAttachment(
+        noteId: note.id,
+        filename: 'column.png',
+        mimeType: 'image/png',
+        bytes: tinyPng,
+      );
+      String imageTag(NoteAttachment attachment) =>
+          '<img src="Stable Images.assets/${attachment.relativePath}" '
+          'width="320">';
+      await vault.updateMarkdown(
+        noteId: note.id,
+        markdown:
+            'Lead\n\n'
+            '${imageTag(pure)}\n\n'
+            'Mixed ${imageTag(mixed)} tail\n\n'
+            '<!-- synapse:columns ratio="50:50" -->\n\n'
+            '${imageTag(column)}\n\n'
+            '<!-- synapse:column -->\n\n'
+            'Right\n\n'
+            '<!-- synapse:columns-end -->\n',
+      );
+
+      await pumpWorkspace(tester, vault: vault, size: const Size(1600, 900));
+      await tester.pumpAndSettle();
+
+      final previews = [
+        for (final attachment in [pure, mixed, column])
+          find.byKey(Key('preview-image-${attachment.id}')),
+      ];
+      for (final preview in previews) {
+        expect(preview, findsOneWidget);
+        expect(
+          find.descendant(of: preview, matching: find.byType(Image)),
+          findsOneWidget,
+        );
+      }
+      final previewElements = [
+        for (final preview in previews) tester.element(preview),
+      ];
+      final imageElements = [
+        for (final preview in previews)
+          tester.element(
+            find.descendant(of: preview, matching: find.byType(Image)),
+          ),
+      ];
+      final attachmentReads = vault.attachmentReadCalls;
+
+      await activateLiveMarkdownBlock(tester, blockIndex: 0);
+      final editable = activeLiveMarkdownEditableTextState(tester);
+      for (final text in const ['Lead1', 'Lead12', 'Lead123']) {
+        editable.updateEditingValue(
+          TextEditingValue(
+            text: text,
+            selection: TextSelection.collapsed(offset: text.length),
+          ),
+        );
+        await tester.pump();
+
+        for (var index = 0; index < previews.length; index += 1) {
+          expect(tester.element(previews[index]), same(previewElements[index]));
+          expect(
+            tester.element(
+              find.descendant(
+                of: previews[index],
+                matching: find.byType(Image),
+              ),
+            ),
+            same(imageElements[index]),
+          );
+          expect(
+            find.descendant(
+              of: previews[index],
+              matching: find.byType(CupertinoActivityIndicator),
+            ),
+            findsNothing,
+          );
+        }
+        expect(vault.attachmentReadCalls, attachmentReads);
+      }
+    },
+  );
+
+  testWidgets('typing in one pane keeps reading-pane images mounted', (
+    tester,
+  ) async {
+    final vault = _CountingAttachmentReadBackend();
+    final note = await vault.createNote(parentPath: '', title: 'Shared Image');
+    final attachment = await vault.addImageAttachment(
+      noteId: note.id,
+      filename: 'shared.png',
+      mimeType: 'image/png',
+      bytes: tinyPng,
+    );
+    await vault.updateMarkdown(
+      noteId: note.id,
+      markdown:
+          'Lead\n\n'
+          '<img src="Shared Image.assets/${attachment.relativePath}" '
+          'width="320">\n',
+    );
+
+    await pumpWorkspace(tester, vault: vault, size: const Size(1600, 900));
+    await tester.tap(find.byKey(const Key('split-pane-right-button')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(Key('resource-row-${note.id}')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('note-mode-reading-pane-2')));
+    await tester.pumpAndSettle();
+
+    final readingPreview = find.descendant(
+      of: find.byKey(const Key('split-pane-pane-2')),
+      matching: find.byKey(Key('preview-image-${attachment.id}')),
+    );
+    final readingImage = find.descendant(
+      of: readingPreview,
+      matching: find.byType(Image),
+    );
+    expect(readingPreview, findsOneWidget);
+    expect(readingImage, findsOneWidget);
+    final previewElement = tester.element(readingPreview);
+    final imageElement = tester.element(readingImage);
+
+    tester
+        .widget<GestureDetector>(find.byKey(const Key('split-pane-pane-1')))
+        .onTap!();
+    await tester.pump();
+    await activateLiveMarkdownBlock(tester, blockIndex: 0);
+    final editable = activeLiveMarkdownEditableTextState(tester);
+    final attachmentReads = vault.attachmentReadCalls;
+    editable.updateEditingValue(
+      const TextEditingValue(
+        text: 'Lead changed',
+        selection: TextSelection.collapsed(offset: 12),
+      ),
+    );
+    await tester.pump();
+
+    expect(tester.element(readingPreview), same(previewElement));
+    expect(tester.element(readingImage), same(imageElement));
+    expect(
+      find.descendant(
+        of: readingPreview,
+        matching: find.byType(CupertinoActivityIndicator),
+      ),
+      findsNothing,
+    );
+    expect(vault.attachmentReadCalls, attachmentReads);
+  });
+
   testWidgets('weakens exact missing local image tags in editor previews', (
     tester,
   ) async {
@@ -154,7 +323,7 @@ void main() {
         attachment: attachment,
         src: 'Corrupt.assets/attachments/corrupt.png',
         failureLabel: tag,
-        imageBytes: Future.value(const [1, 2, 3, 4]),
+        loadImageBytes: () => Future.value(const [1, 2, 3, 4]),
       ),
     );
     await tester.pumpAndSettle();
@@ -209,7 +378,7 @@ void main() {
           src: 'Note.assets/attachments/first.png',
           failureLabel:
               '<img src="Note.assets/attachments/first.png" width="320">',
-          imageBytes: firstBytes.future,
+          loadImageBytes: () => firstBytes.future,
         ),
       );
       await tester.pumpWidget(
@@ -218,7 +387,7 @@ void main() {
           src: 'Note.assets/attachments/second.png',
           failureLabel:
               '<img src="Note.assets/attachments/second.png" width="320">',
-          imageBytes: secondBytes.future,
+          loadImageBytes: () => secondBytes.future,
         ),
       );
 
@@ -231,6 +400,64 @@ void main() {
       expect(find.byKey(const Key('preview-image-tap-second')), findsOneWidget);
     },
   );
+
+  testWidgets('reloads image bytes only when attachment metadata changes', (
+    tester,
+  ) async {
+    final createdAt = DateTime.utc(2026, 8, 3);
+    var readCalls = 0;
+    Future<List<int>> loadImageBytes() async {
+      readCalls += 1;
+      return tinyPng;
+    }
+
+    NoteAttachment attachment(DateTime updatedAt) => NoteAttachment(
+      id: 'stable-image',
+      noteId: 'stable-note',
+      mediaKind: MediaKind.image,
+      title: 'stable.png',
+      relativePath: 'attachments/stable.png',
+      mimeType: 'image/png',
+      createdAt: createdAt,
+      updatedAt: updatedAt,
+    );
+
+    await tester.pumpWidget(
+      _previewImageApp(
+        attachment: attachment(createdAt),
+        src: 'Stable.assets/attachments/stable.png',
+        failureLabel: 'stable.png',
+        loadImageBytes: loadImageBytes,
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(readCalls, 1);
+
+    await tester.pumpWidget(
+      _previewImageApp(
+        attachment: attachment(createdAt),
+        src: 'Stable.assets/attachments/stable.png',
+        failureLabel: 'stable.png',
+        loadImageBytes: loadImageBytes,
+        width: 420,
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(readCalls, 1);
+
+    await tester.pumpWidget(
+      _previewImageApp(
+        attachment: attachment(createdAt.add(const Duration(seconds: 1))),
+        src: 'Stable.assets/attachments/stable.png',
+        failureLabel: 'stable.png',
+        loadImageBytes: loadImageBytes,
+        width: 420,
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(readCalls, 2);
+    expect(find.byType(Image), findsOneWidget);
+  });
 
   testWidgets('renders pasted HTML images in the note preview', (tester) async {
     final vault = MemoryVaultBackend(seedExampleData: false);
@@ -657,17 +884,18 @@ Widget _previewImageApp({
   required NoteAttachment attachment,
   required String src,
   required String failureLabel,
-  required Future<List<int>> imageBytes,
+  required Future<List<int>> Function() loadImageBytes,
+  double width = 320,
 }) {
   return CupertinoApp(
     home: Center(
       child: PreviewImageBlock(
         attachment: attachment,
         src: src,
-        width: 320,
+        width: width,
         editableControls: true,
         selectedImageSrc: src,
-        loadImageBytes: () => imageBytes,
+        loadImageBytes: loadImageBytes,
         failureLabel: failureLabel,
         onTap: () {},
         onWidthChanged: (_) {},
@@ -689,6 +917,18 @@ final class _GatedAttachmentReadBackend extends MemoryVaultBackend {
     if (attachment.id == gatedAttachmentId && gate != null) {
       return gate.future;
     }
+    return super.readNoteAttachment(attachment);
+  }
+}
+
+final class _CountingAttachmentReadBackend extends MemoryVaultBackend {
+  _CountingAttachmentReadBackend() : super(seedExampleData: false);
+
+  int attachmentReadCalls = 0;
+
+  @override
+  Future<List<int>> readNoteAttachment(NoteAttachment attachment) {
+    attachmentReadCalls += 1;
     return super.readNoteAttachment(attachment);
   }
 }

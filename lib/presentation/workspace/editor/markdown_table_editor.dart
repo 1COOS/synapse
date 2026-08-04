@@ -7,6 +7,7 @@ import 'package:flutter/gestures.dart';
 import '../../cupertino/markdown_live_blocks.dart';
 import '../../cupertino/workspace/workspace_theme.dart';
 import 'markdown_context_menu.dart';
+import 'markdown_document_selection.dart';
 import 'markdown_table_layout.dart';
 
 typedef MarkdownTableCellBuilder =
@@ -99,6 +100,9 @@ class _MarkdownTableFrameState extends State<MarkdownTableFrame> {
   Offset? _pointerDownPosition;
   _TableDragKind? _hoveredDragKind;
   int? _hoveredDragSource;
+  int? _contentTapPointer;
+  Offset? _contentTapOrigin;
+  var _contentTapMoved = false;
 
   @override
   void didUpdateWidget(covariant MarkdownTableFrame oldWidget) {
@@ -151,13 +155,12 @@ class _MarkdownTableFrameState extends State<MarkdownTableFrame> {
     );
     _lastTableWidth = tableWidth;
 
-    return SingleChildScrollView(
+    return MarkdownSelectionHorizontalScrollView(
       key: _horizontalViewportKey,
       controller: _horizontalScrollController,
       physics: _reorderKind == null
           ? null
           : const NeverScrollableScrollPhysics(),
-      scrollDirection: Axis.horizontal,
       clipBehavior: Clip.none,
       child: Stack(
         clipBehavior: Clip.none,
@@ -167,10 +170,8 @@ class _MarkdownTableFrameState extends State<MarkdownTableFrame> {
             width: tableWidth,
             child: Stack(
               children: [
-                GestureDetector(
-                  behavior: HitTestBehavior.opaque,
-                  onTap: widget.onContentTap,
-                  child: Table(
+                _buildContentTapSurface(
+                  Table(
                     columnWidths: {
                       for (
                         var index = 0;
@@ -263,6 +264,49 @@ class _MarkdownTableFrameState extends State<MarkdownTableFrame> {
         ],
       ),
     );
+  }
+
+  Widget _buildContentTapSurface(Widget child) {
+    if (widget.onContentTap == null) {
+      return child;
+    }
+    return Listener(
+      behavior: HitTestBehavior.opaque,
+      onPointerDown: (event) {
+        if (event.buttons != kPrimaryMouseButton &&
+            event.kind == PointerDeviceKind.mouse) {
+          return;
+        }
+        _contentTapPointer = event.pointer;
+        _contentTapOrigin = event.position;
+        _contentTapMoved = false;
+      },
+      onPointerMove: (event) {
+        if (_contentTapPointer != event.pointer || _contentTapOrigin == null) {
+          return;
+        }
+        if ((event.position - _contentTapOrigin!).distance > kTouchSlop) {
+          _contentTapMoved = true;
+        }
+      },
+      onPointerUp: (event) {
+        if (_contentTapPointer == event.pointer && !_contentTapMoved) {
+          widget.onContentTap?.call();
+        }
+        _clearContentTapPointer(event.pointer);
+      },
+      onPointerCancel: (event) => _clearContentTapPointer(event.pointer),
+      child: child,
+    );
+  }
+
+  void _clearContentTapPointer(int pointer) {
+    if (_contentTapPointer != pointer) {
+      return;
+    }
+    _contentTapPointer = null;
+    _contentTapOrigin = null;
+    _contentTapMoved = false;
   }
 
   List<Widget> _buildFrameSelectionTargets() {

@@ -204,6 +204,31 @@ void main() {
       );
     });
 
+    test(
+      'inserts an empty local two-column block and focuses the left side',
+      () {
+        final source = value('Alpha', start: 5, end: 5);
+
+        final updated = insertMarkdownBlock(source, MarkdownInsertion.columns);
+
+        expect(
+          updated.text,
+          'Alpha\n\n'
+          '<!-- synapse:columns ratio="50:50" -->\n\n'
+          '<!-- synapse:column -->\n\n'
+          '<!-- synapse:columns-end -->',
+        );
+        expect(
+          updated.selection.extentOffset,
+          updated.text.indexOf(
+                '\n\n',
+                updated.text.indexOf('synapse:columns'),
+              ) +
+              2,
+        );
+      },
+    );
+
     test('inserts the canonical page break followed by an editable block', () {
       final source = value('Alpha', start: 0, end: 5);
 

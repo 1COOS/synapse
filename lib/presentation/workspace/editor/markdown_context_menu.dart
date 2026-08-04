@@ -15,10 +15,15 @@ void dismissAllMacContextMenus() {
 }
 
 class MarkdownCommandTarget {
-  const MarkdownCommandTarget({required this.value, required this.blockStart});
+  const MarkdownCommandTarget({
+    required this.value,
+    required this.blockStart,
+    this.documentScoped = false,
+  });
 
   final TextEditingValue value;
   final int? blockStart;
+  final bool documentScoped;
 
   TextSelection get selection => value.selection;
 

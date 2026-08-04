@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart';
@@ -15,6 +16,7 @@ import 'live_markdown_context_menu.dart';
 import 'live_markdown_editable_text.dart';
 import 'live_markdown_editor_controller.dart';
 import 'markdown_context_menu.dart';
+import 'markdown_document_selection.dart';
 import 'markdown_image_transform.dart';
 import 'markdown_table_editor.dart';
 import 'note_find_controller.dart';
@@ -119,12 +121,18 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
   late final LiveMarkdownEditorController _editorController;
   final _blockFocusNode = FocusNode();
   final _editorFocusNode = FocusNode();
+  final _documentSelectionFocusNode = FocusNode();
+  final _documentInputFocusNode = FocusNode();
+  final _documentSelectableRegionKey = GlobalKey<SelectableRegionState>();
   late final _ActiveEditScrollController _scrollController;
   final _scrollViewportKey = GlobalKey();
   late final WorkspaceOutlineViewportCoordinator _outlineViewport;
   final _activeTextEditorKey = GlobalKey();
   final Map<int, GlobalKey> _findBlockKeys = <int, GlobalKey>{};
   final Map<int, GlobalKey> _previewSurfaceKeys = <int, GlobalKey>{};
+  final Map<int, ScrollController> _columnsScrollControllers =
+      <int, ScrollController>{};
+  final Map<int, int> _columnsPreviewPercents = <int, int>{};
   final _editingSessionTapGroup = Object();
   var _openContextMenuCount = 0;
   var _autofocusInsertedTable = false;
@@ -144,6 +152,11 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
   var _activationCoverGeneration = 0;
   _PasteViewportTransaction? _pasteViewportTransaction;
   final Set<String> _failedImageSources = <String>{};
+  final Map<int, MarkdownSelectedBlockRange> _documentBlockSelections = {};
+  SelectedContent? _documentSelectedContent;
+  var _documentSelectionSyncScheduled = false;
+  OverlayEntry? _selectionFeedbackOverlay;
+  Timer? _selectionFeedbackTimer;
 
   bool get _pasteInFlight => _pasteViewportTransaction?.inFlight ?? false;
 
@@ -188,8 +201,9 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
   void didUpdateWidget(LiveMarkdownEditor oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.controller != widget.controller) {
+      _clearDocumentSelectionState();
       _clearActivationCover();
-      _previewSurfaceKeys.clear();
+      _resetRenderIdentityCaches();
       _cancelPasteViewportTransaction();
       oldWidget.controller.removeListener(_handleFullDocumentChanged);
       widget.controller.addListener(_handleFullDocumentChanged);
@@ -202,6 +216,7 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
       _failedImageSources.clear();
     }
     if (!widget.focused) {
+      _clearDocumentSelectionState();
       _clearActivationCover();
       _cancelPasteViewportTransaction();
     }
@@ -219,6 +234,8 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
   @override
   void dispose() {
     _clearActivationCover();
+    _selectionFeedbackTimer?.cancel();
+    _selectionFeedbackOverlay?.remove();
     widget.onStateChanged(this, false);
     widget.controller.removeListener(_handleFullDocumentChanged);
     _stopTableBlockAutoScroll();
@@ -226,8 +243,23 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
     _outlineViewport.dispose();
     _blockFocusNode.dispose();
     _editorFocusNode.dispose();
+    _documentSelectionFocusNode.dispose();
+    _documentInputFocusNode.dispose();
     _scrollController.dispose();
+    for (final controller in _columnsScrollControllers.values) {
+      controller.dispose();
+    }
     super.dispose();
+  }
+
+  void _resetRenderIdentityCaches() {
+    _previewSurfaceKeys.clear();
+    _findBlockKeys.clear();
+    _columnsPreviewPercents.clear();
+    for (final controller in _columnsScrollControllers.values) {
+      controller.dispose();
+    }
+    _columnsScrollControllers.clear();
   }
 
   void _focusBlockEditor({bool keepLatestEditVisible = true}) {
@@ -464,7 +496,11 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
           _pasteInFlight ||
           _openContextMenuCount > 0 ||
           _editorFocusNode.hasFocus ||
-          _blockFocusNode.hasFocus) {
+          _blockFocusNode.hasFocus ||
+          _documentSelectionFocusNode.hasFocus ||
+          _documentInputFocusNode.hasFocus ||
+          _documentSelectedContent != null ||
+          _activeBlockIsTable()) {
         return;
       }
       _clearActiveBlock();
@@ -560,11 +596,285 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
     _editorController.clearStaleSelectionTarget();
   }
 
+  void _handleDocumentSelectedContentChanged(SelectedContent? content) {
+    _documentSelectedContent = content;
+    _scheduleDocumentSelectionSync();
+  }
+
+  void _handleDocumentBlockSelectionChanged(
+    MarkdownLiveBlock block,
+    MarkdownSelectionProjection projection,
+    SelectedContentRange? range,
+  ) {
+    if (range == null || range.startOffset == range.endOffset) {
+      _documentBlockSelections.remove(block.start);
+    } else {
+      _documentBlockSelections[block.start] = MarkdownSelectedBlockRange(
+        block: block,
+        projection: projection,
+        range: range,
+      );
+    }
+    _scheduleDocumentSelectionSync();
+  }
+
+  void _scheduleDocumentSelectionSync() {
+    if (_documentSelectionSyncScheduled) {
+      return;
+    }
+    _documentSelectionSyncScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _documentSelectionSyncScheduled = false;
+      if (!mounted) {
+        return;
+      }
+      final content = _documentSelectedContent;
+      var selection = content == null || content.plainText.isEmpty
+          ? null
+          : combineMarkdownBlockSelections(_documentBlockSelections.values);
+      if (selection == null &&
+          content != null &&
+          content.plainText.isNotEmpty) {
+        final first = widget.controller.text.indexOf(content.plainText);
+        if (first >= 0 &&
+            widget.controller.text.indexOf(content.plainText, first + 1) < 0) {
+          selection = TextSelection(
+            baseOffset: first,
+            extentOffset: first + content.plainText.length,
+          );
+        }
+      }
+      if (selection == null) {
+        _editorController.clearDocumentSelection();
+        return;
+      }
+      final activeBlock = _editorController.currentActiveTextBlock();
+      if (activeBlock != null &&
+          selection.start >= activeBlock.start &&
+          selection.end <= activeBlock.end) {
+        final editableLength = _editorController
+            .editableTextForBlock(activeBlock)
+            .length;
+        final localSelection = TextSelection(
+          baseOffset: _clampOffset(
+            selection.baseOffset - activeBlock.start,
+            editableLength,
+          ),
+          extentOffset: _clampOffset(
+            selection.extentOffset - activeBlock.start,
+            editableLength,
+          ),
+        );
+        _editorController.clearDocumentSelection();
+        _editorController.blockController.selection = localSelection;
+        _handleBlockSelectionChanged(
+          localSelection,
+          SelectionChangedCause.drag,
+        );
+        _editorController.beginDocumentUpdate();
+        widget.controller.selection = TextSelection(
+          baseOffset: activeBlock.start + localSelection.baseOffset,
+          extentOffset: activeBlock.start + localSelection.extentOffset,
+        );
+        _editorController.endDocumentUpdate();
+        _blockFocusNode.requestFocus();
+        return;
+      }
+      _editorController.setDocumentSelection(selection);
+      _editorController.beginDocumentUpdate();
+      widget.controller.selection = selection;
+      _editorController.endDocumentUpdate();
+      if (_editorController.activeOffset != null) {
+        _blockFocusNode.unfocus();
+        setState(() {
+          _editorController.clearActiveBlock();
+        });
+      }
+      if (_editorController.documentSelectionCanMutate) {
+        _documentInputFocusNode.requestFocus();
+      } else {
+        _documentSelectionFocusNode.requestFocus();
+      }
+    });
+  }
+
+  void _clearDocumentSelectionState({bool clearVisual = true}) {
+    final hadDocumentSelection =
+        _documentSelectedContent != null ||
+        _documentBlockSelections.isNotEmpty ||
+        _editorController.hasDocumentSelection;
+    _documentSelectedContent = null;
+    _documentBlockSelections.clear();
+    _editorController.clearDocumentSelection();
+    if (clearVisual && hadDocumentSelection) {
+      _documentSelectableRegionKey.currentState?.clearSelection();
+    }
+  }
+
+  void _handleDocumentSelectionInputChanged(String _) {
+    if (!_editorController.hasDocumentSelection) {
+      return;
+    }
+    final composing = widget.controller.value.composing;
+    if (composing.isValid && !composing.isCollapsed) {
+      return;
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) {
+        return;
+      }
+      _clearDocumentSelectionState(clearVisual: false);
+      _activateCollapsedDocumentSelection();
+    });
+  }
+
+  void _selectAllDocument() {
+    if (widget.controller.text.isEmpty) {
+      return;
+    }
+    _clearSelectedImageTarget();
+    _clearSelectedTableTarget();
+    final selection = TextSelection(
+      baseOffset: 0,
+      extentOffset: widget.controller.text.length,
+    );
+    _editorController.setDocumentSelection(selection);
+    _editorController.beginDocumentUpdate();
+    widget.controller.selection = selection;
+    _editorController.endDocumentUpdate();
+    _documentSelectableRegionKey.currentState?.selectAll(
+      SelectionChangedCause.keyboard,
+    );
+    _documentSelectionFocusNode.requestFocus();
+  }
+
+  Future<void> _cutDocumentSelection() async {
+    if (!_editorController.hasDocumentSelection) {
+      await _editorController.cutSelection(busy: widget.busy);
+      return;
+    }
+    if (!_editorController.documentSelectionCanMutate) {
+      _showSelectionStructureFeedback();
+      return;
+    }
+    await _editorController.cutSelection(busy: widget.busy);
+    if (!mounted) {
+      return;
+    }
+    _clearDocumentSelectionState(clearVisual: false);
+    _activateCollapsedDocumentSelection();
+  }
+
+  Future<void> _pastePlainCurrentSelection() async {
+    final documentSelectionPaste = _editorController.hasDocumentSelection;
+    if (documentSelectionPaste &&
+        !_editorController.documentSelectionCanMutate) {
+      _showSelectionStructureFeedback();
+      return;
+    }
+    final before = widget.controller.text;
+    await _editorController.pastePlainText(busy: widget.busy);
+    if (!mounted ||
+        !documentSelectionPaste ||
+        widget.controller.text == before) {
+      return;
+    }
+    _clearDocumentSelectionState(clearVisual: false);
+    _activateCollapsedDocumentSelection();
+  }
+
+  bool _deleteDocumentSelection() {
+    if (!_editorController.hasDocumentSelection) {
+      return false;
+    }
+    if (!_editorController.documentSelectionCanMutate ||
+        !_editorController.replaceDocumentSelection('')) {
+      _showSelectionStructureFeedback();
+      return true;
+    }
+    _clearDocumentSelectionState(clearVisual: false);
+    _activateCollapsedDocumentSelection();
+    return true;
+  }
+
+  void _activateCollapsedDocumentSelection() {
+    final selection = widget.controller.selection;
+    final offset = selection.isValid
+        ? _clampOffset(selection.extentOffset, widget.controller.text.length)
+        : widget.controller.text.length;
+    final blocks = splitMarkdownLiveBlocks(widget.controller.text);
+    if (blocks.isEmpty || widget.controller.text.isEmpty) {
+      _activateTrailingTextBlock(deferDocumentSelectionVisualClear: true);
+      return;
+    }
+    final index = _editorController.nonBlankBlockIndexForOffset(blocks, offset);
+    if (index == null) {
+      _activateTrailingTextBlock(deferDocumentSelectionVisualClear: true);
+      return;
+    }
+    final block = blocks[index];
+    final localOffset = _clampOffset(
+      offset - block.start,
+      _editorController.editableTextForBlock(block).length,
+    );
+    _activateBlock(
+      block,
+      selectionOffset: localOffset,
+      deferDocumentSelectionVisualClear: true,
+    );
+  }
+
+  void _showSelectionStructureFeedback() {
+    _selectionFeedbackTimer?.cancel();
+    _selectionFeedbackOverlay?.remove();
+    final overlay = Overlay.maybeOf(context);
+    if (overlay == null) {
+      return;
+    }
+    final appearance = WorkspaceAppearanceScope.of(context);
+    final entry = OverlayEntry(
+      builder: (context) => Positioned(
+        top: MediaQuery.paddingOf(context).top + 54,
+        left: 0,
+        right: 0,
+        child: IgnorePointer(
+          child: Center(
+            child: WorkspaceAppearanceScope(
+              appearance: appearance,
+              child: CupertinoPopupSurface(
+                isSurfacePainted: true,
+                child: const Padding(
+                  padding: EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+                  child: Text(
+                    '请完整选择图片、表格或分页符后再修改',
+                    style: TextStyle(fontSize: 12),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    _selectionFeedbackOverlay = entry;
+    overlay.insert(entry);
+    _selectionFeedbackTimer = Timer(const Duration(seconds: 2), () {
+      if (identical(_selectionFeedbackOverlay, entry)) {
+        entry.remove();
+        _selectionFeedbackOverlay = null;
+      }
+    });
+  }
+
   void _activateBlock(
     MarkdownLiveBlock block, {
     Offset? globalPosition,
     int selectionOffset = 0,
+    bool deferDocumentSelectionVisualClear = false,
   }) {
+    _clearDocumentSelectionState(
+      clearVisual: !deferDocumentSelectionVisualClear,
+    );
     _editorController.endUndoGroup();
     _cancelPasteViewportTransaction();
     if (block.isBlank) {
@@ -641,6 +951,9 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
   }
 
   void _replaceActiveBlock(String text) {
+    if (_documentSelectedContent != null) {
+      _clearDocumentSelectionState();
+    }
     _cancelPasteViewportTransaction();
     if (!_editorController.replaceActiveBlock(text)) {
       return;
@@ -824,6 +1137,10 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
     if (historyResult != KeyEventResult.ignored) {
       return historyResult;
     }
+    final documentSelectionResult = _handleDocumentSelectionKeyEvent(event);
+    if (documentSelectionResult != KeyEventResult.ignored) {
+      return documentSelectionResult;
+    }
     final tableClipboardResult = _handleSelectedTableClipboardKeyEvent(event);
     if (tableClipboardResult != KeyEventResult.ignored) {
       return tableClipboardResult;
@@ -876,6 +1193,63 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
       return _deleteSelectedImageReference()
           ? KeyEventResult.handled
           : KeyEventResult.ignored;
+    }
+    return KeyEventResult.ignored;
+  }
+
+  KeyEventResult _handleDocumentSelectionKeyEvent(KeyEvent event) {
+    if ((event is! KeyDownEvent && event is! KeyRepeatEvent) ||
+        !_editorController.hasDocumentSelection) {
+      return KeyEventResult.ignored;
+    }
+    final usesMeta = !kIsWeb && defaultTargetPlatform == TargetPlatform.macOS;
+    final primaryPressed = usesMeta
+        ? HardwareKeyboard.instance.isMetaPressed
+        : HardwareKeyboard.instance.isControlPressed;
+    final unexpectedPressed = usesMeta
+        ? HardwareKeyboard.instance.isControlPressed
+        : HardwareKeyboard.instance.isMetaPressed;
+    final key = event.logicalKey;
+    if (primaryPressed &&
+        !unexpectedPressed &&
+        !HardwareKeyboard.instance.isAltPressed) {
+      if (key == LogicalKeyboardKey.keyA) {
+        _selectAllDocument();
+        return KeyEventResult.handled;
+      }
+      if (key == LogicalKeyboardKey.keyC) {
+        unawaited(_editorController.copySelection());
+        return KeyEventResult.handled;
+      }
+      if (key == LogicalKeyboardKey.keyX) {
+        unawaited(_cutDocumentSelection());
+        return KeyEventResult.handled;
+      }
+      if (key == LogicalKeyboardKey.keyV) {
+        if (!_editorController.documentSelectionCanMutate) {
+          _showSelectionStructureFeedback();
+        } else if (HardwareKeyboard.instance.isShiftPressed) {
+          unawaited(_pastePlainCurrentSelection());
+        } else {
+          unawaited(_pasteFromContextMenu());
+        }
+        return KeyEventResult.handled;
+      }
+    }
+    if (!primaryPressed &&
+        !HardwareKeyboard.instance.isAltPressed &&
+        !HardwareKeyboard.instance.isMetaPressed &&
+        !HardwareKeyboard.instance.isControlPressed) {
+      if (key == LogicalKeyboardKey.backspace ||
+          key == LogicalKeyboardKey.delete) {
+        _deleteDocumentSelection();
+        return KeyEventResult.handled;
+      }
+      if (key == LogicalKeyboardKey.escape) {
+        _clearDocumentSelectionState();
+        _editorFocusNode.requestFocus();
+        return KeyEventResult.handled;
+      }
     }
     return KeyEventResult.ignored;
   }
@@ -1171,6 +1545,7 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
   }
 
   void _activateTextInsertionAt(int insertionOffset) {
+    _clearDocumentSelectionState();
     _editorController.endUndoGroup();
     _cancelPasteViewportTransaction();
     _clearSelectedImageTarget();
@@ -1519,7 +1894,9 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
 
   MarkdownLiveBlock? _textBlockForCaretOffset(int offset) {
     for (final block in splitMarkdownLiveBlocks(widget.controller.text)) {
-      if (block.isBlank || _tableForBlock(block) != null) {
+      if (block.isBlank ||
+          block.isColumnsMarker ||
+          _tableForBlock(block) != null) {
         continue;
       }
       final editableEnd =
@@ -1710,7 +2087,9 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
   }
 
   bool _isKeyboardEditableTextBlock(MarkdownLiveBlock block) {
-    return !block.isBlank && _tableForBlock(block) == null;
+    return !block.isBlank &&
+        !block.isColumnsMarker &&
+        _tableForBlock(block) == null;
   }
 
   void _handleEditorControllerChanged() {
@@ -1725,6 +2104,9 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
     });
     if (insertion == MarkdownInsertion.divider ||
         insertion == MarkdownInsertion.pageBreak) {
+      _focusBlockEditor();
+    }
+    if (insertion == MarkdownInsertion.columns) {
       _focusBlockEditor();
     }
     if (insertion == MarkdownInsertion.table && _openContextMenuCount == 0) {
@@ -1838,6 +2220,14 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
     Offset globalPosition, {
     int? selectionOffset,
   }) {
+    if (_editorController.hasDocumentSelection) {
+      _showContextMenuAt(
+        globalPosition,
+        menuTarget: _editorController.captureCommandTargetForMenu(),
+      );
+      return;
+    }
+    _clearDocumentSelectionState();
     if (block.isBlank) {
       _clearActiveBlock();
       return;
@@ -1882,9 +2272,21 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
     if (blocks.isEmpty) {
       return;
     }
+    final selectedTarget = _editorController.captureCommandTargetForMenu();
+    if (selectedTarget == null) {
+      _activateTrailingTextBlock();
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          _showContextMenuAt(globalPosition);
+        }
+      });
+      return;
+    }
     MarkdownLiveBlock? block;
     for (final candidate in blocks.reversed) {
-      if (!candidate.isBlank && _tableForBlock(candidate) == null) {
+      if (!candidate.isBlank &&
+          !candidate.isColumnsMarker &&
+          _tableForBlock(candidate) == null) {
         block = candidate;
         break;
       }
@@ -2175,6 +2577,29 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
       if (!usesMeta)
         const SingleActivator(LogicalKeyboardKey.keyY, control: true): _redo,
       SingleActivator(
+        LogicalKeyboardKey.keyA,
+        meta: usesMeta,
+        control: !usesMeta,
+      ): _selectAllDocument,
+      SingleActivator(
+        LogicalKeyboardKey.keyC,
+        meta: usesMeta,
+        control: !usesMeta,
+      ): () =>
+          unawaited(_editorController.copySelection()),
+      SingleActivator(
+        LogicalKeyboardKey.keyX,
+        meta: usesMeta,
+        control: !usesMeta,
+      ): () =>
+          unawaited(_cutDocumentSelection()),
+      SingleActivator(
+        LogicalKeyboardKey.keyV,
+        meta: usesMeta,
+        control: !usesMeta,
+      ): () =>
+          unawaited(_pasteFromContextMenu()),
+      SingleActivator(
         LogicalKeyboardKey.keyB,
         meta: usesMeta,
         control: !usesMeta,
@@ -2192,7 +2617,7 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
         meta: usesMeta,
         control: !usesMeta,
       ): () =>
-          unawaited(_editorController.pastePlainText(busy: widget.busy)),
+          unawaited(_pastePlainCurrentSelection()),
       SingleActivator(
         LogicalKeyboardKey.keyF,
         meta: usesMeta,
@@ -2254,6 +2679,12 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
     if (widget.busy) {
       return;
     }
+    final documentSelectionPaste = _editorController.hasDocumentSelection;
+    if (documentSelectionPaste &&
+        !_editorController.documentSelectionCanMutate) {
+      _showSelectionStructureFeedback();
+      return;
+    }
     dismissAllMacContextMenus();
     _editorController.endUndoGroup();
     final pasteStartPrimaryFocus = FocusManager.instance.primaryFocus;
@@ -2278,6 +2709,13 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
     }
     if (!mounted) {
       _cancelPasteViewportTransaction(transaction);
+      return;
+    }
+    if (documentSelectionPaste) {
+      if (outcome == PaneEditorCommandOutcome.committed) {
+        _clearDocumentSelectionState();
+        _activateCollapsedDocumentSelection();
+      }
       return;
     }
     _syncBlockController();
@@ -2335,7 +2773,12 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
     }
   }
 
-  void _activateTrailingTextBlock() {
+  void _activateTrailingTextBlock({
+    bool deferDocumentSelectionVisualClear = false,
+  }) {
+    _clearDocumentSelectionState(
+      clearVisual: !deferDocumentSelectionVisualClear,
+    );
     _editorController.endUndoGroup();
     _cancelPasteViewportTransaction();
     _clearSelectedImageTarget();
@@ -2354,6 +2797,7 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
   }
 
   void _activateBlankBlock(MarkdownLiveBlock block) {
+    _clearDocumentSelectionState();
     _editorController.endUndoGroup();
     _cancelPasteViewportTransaction();
     _clearSelectedImageTarget();
@@ -2379,7 +2823,22 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
     _focusBlockEditor();
   }
 
-  void _clearActiveBlock() {
+  void _activateBlankBlockAndOpenContextMenu(
+    MarkdownLiveBlock block,
+    Offset globalPosition,
+  ) {
+    _activateBlankBlock(block);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && _editorController.activeInsertionOffset == block.end) {
+        _showContextMenuAt(globalPosition);
+      }
+    });
+  }
+
+  void _clearActiveBlock({bool preserveDocumentSelection = false}) {
+    if (!preserveDocumentSelection) {
+      _clearDocumentSelectionState();
+    }
     _editorController.endUndoGroup();
     final hadBlockSelection =
         _selectedImageSrc != null || _selectedTableBlockStart != null;
@@ -2427,6 +2886,7 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
     String src, {
     String? sourceId,
   }) {
+    _clearDocumentSelectionState();
     _editorController.endUndoGroup();
     _cancelPasteViewportTransaction();
     _clearSelectedTableTarget();
@@ -2450,6 +2910,7 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
   }
 
   void _handleTableFrameTap(MarkdownLiveBlock block) {
+    _clearDocumentSelectionState();
     _editorController.endUndoGroup();
     _cancelPasteViewportTransaction();
     _clearSelectedImageTarget();
@@ -2578,6 +3039,114 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
       return;
     }
     _moveSelectedTableToOffset(data, widget.controller.text.length);
+  }
+
+  bool _canAcceptImageBlockDrop(PreviewImageDragData data) {
+    return widget.enabled &&
+        !widget.busy &&
+        widget.hasImageAttachment(data.src) &&
+        findMarkdownImageReference(
+              markdown: widget.controller.text,
+              src: data.src,
+            ) !=
+            null;
+  }
+
+  void _handleImageBlockDrop(
+    PreviewImageDragData data,
+    MarkdownLiveBlock target,
+    _MarkdownBlockDropSide side,
+  ) {
+    _moveImageToOffset(
+      data,
+      side == _MarkdownBlockDropSide.before ? target.start : target.end,
+    );
+  }
+
+  void _moveImageToOffset(PreviewImageDragData data, int targetOffset) {
+    if (!_canAcceptImageBlockDrop(data)) {
+      return;
+    }
+    final markdown = widget.controller.text;
+    final reference = findMarkdownImageReference(
+      markdown: markdown,
+      src: data.src,
+    );
+    if (reference == null ||
+        (targetOffset >= reference.start && targetOffset <= reference.end)) {
+      return;
+    }
+    final imageMarkdown = markdown.substring(reference.start, reference.end);
+    final rememberedOffset = _resolvedRememberedCaretOffset(
+      fallback: reference.start,
+    );
+    final rememberedLineInsertion = _lastTextCaretOffset == null
+        ? true
+        : _lastTextCaretWasLineInsertion;
+    final removed = removeMarkdownImageReference(
+      markdown: markdown,
+      reference: reference,
+    );
+    final mappedTarget = _remapOffsetAfterDocumentChange(
+      before: markdown,
+      after: removed.markdown,
+      offset: _clampOffset(targetOffset, markdown.length),
+    );
+    final caretAfterRemoval = _remapOffsetAfterDocumentChange(
+      before: markdown,
+      after: removed.markdown,
+      offset: rememberedOffset,
+    );
+    final insertion = blockImageInsertion(
+      text: removed.markdown,
+      start: mappedTarget,
+      end: mappedTarget,
+      tag: imageMarkdown,
+    );
+    final updated = removed.markdown.replaceRange(
+      mappedTarget,
+      mappedTarget,
+      insertion,
+    );
+    if (updated == markdown) {
+      return;
+    }
+    final imageStart = mappedTarget + insertion.indexOf(imageMarkdown);
+    final movedBlock = splitMarkdownLiveBlocks(updated)
+        .cast<MarkdownLiveBlock?>()
+        .firstWhere(
+          (block) =>
+              block != null &&
+              imageStart >= block.start &&
+              imageStart < block.end,
+          orElse: () => null,
+        );
+    final activeOffset = movedBlock?.start ?? imageStart;
+    final mappedCaret = _remapOffsetAfterDocumentChange(
+      before: removed.markdown,
+      after: updated,
+      offset: caretAfterRemoval,
+    );
+    _editorController.endUndoGroup();
+    _setDocumentSelectionForHistory(rememberedOffset);
+    _clearSelectedTableTarget();
+    _persistentBlankInsertion = false;
+    _editorController.beginDocumentUpdate();
+    widget.controller.value = TextEditingValue(
+      text: updated,
+      selection: TextSelection.collapsed(offset: activeOffset),
+    );
+    _editorController.endDocumentUpdate();
+    _rememberTextCaret(mappedCaret, lineInsertion: rememberedLineInsertion);
+    final normalizedSrc = normalizeImageSrc(data.src);
+    setState(() {
+      _selectedImageSrc = normalizedSrc;
+      _selectedImageSourceId = data.sourceId;
+      _selectedImageBlockStart = activeOffset;
+      _editorController.activateOffset(activeOffset);
+    });
+    widget.onImageSelectionChanged(normalizedSrc);
+    _focusEditorSession();
   }
 
   void _moveSelectedTableToOffset(
@@ -2721,103 +3290,158 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
     final activeInsertionOffset = _editorController.activeInsertionOffset;
     _scheduleRevealFindMatch(blocks);
     final printBoundariesByBlock = _printBoundariesByBlock(blocks);
+    final documentChildren = _buildDocumentChildren(
+      blocks: blocks,
+      activeIndex: activeIndex,
+      activeInsertionOffset: activeInsertionOffset,
+      outlineByBlock: outlineByBlock,
+      printBoundariesByBlock: printBoundariesByBlock,
+    );
 
     final editor = CallbackShortcuts(
       bindings: _editorShortcuts(),
-      child: TapRegion(
-        groupId: _editingSessionTapGroup,
-        onTapOutside: (_) => _clearActiveBlock(),
-        child: Focus(
-          focusNode: _editorFocusNode,
-          onKeyEvent: _handleEditorSessionKeyEvent,
-          onFocusChange: _handleEditorFocusChanged,
-          child: GestureDetector(
-            behavior: HitTestBehavior.translucent,
-            onTap: _clearActiveBlock,
-            onSecondaryTapDown: (details) {
-              if (_globalPositionHitsBlockEditor(details.globalPosition)) {
-                return;
-              }
-              _openContextMenuAtDocumentEnd(blocks, details.globalPosition);
-            },
-            child: CupertinoScrollbar(
-              key: _scrollViewportKey,
-              controller: _scrollController,
-              child: NotificationListener<ScrollNotification>(
-                onNotification: _handleScrollNotification,
-                child: SingleChildScrollView(
-                  key: PageStorageKey<String>(
-                    'live-markdown-scroll-${widget.paneId}-${widget.noteId}',
-                  ),
-                  controller: _scrollController,
-                  physics: _tableReordering || _draggingTableBlockStart != null
-                      ? const NeverScrollableScrollPhysics()
-                      : null,
-                  padding: EdgeInsets.fromLTRB(
-                    16,
-                    widget.printController == null ? 54 : 12,
-                    16,
-                    16,
-                  ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      for (
-                        var index = 0;
-                        index < blocks.length;
-                        index += 1
-                      ) ...[
-                        _buildOutlineAwareBlock(
-                          blocks[index],
-                          index,
-                          activeIndex,
-                          outlineByBlock[index],
-                          blocks,
-                          printBoundariesByBlock[index] ?? const [],
-                        ),
-                        if (activeInsertionOffset == blocks[index].end)
-                          _buildVirtualTrailingTextBlockEditor(index + 1),
-                      ],
-                      if (activeInsertionOffset != null &&
-                          !blocks.any(
-                            (block) => block.end == activeInsertionOffset,
-                          ))
-                        _buildVirtualTrailingTextBlockEditor(blocks.length),
-                      _MarkdownTableBlockDropTarget(
-                        key: const Key(
-                          'markdown-table-document-end-drop-target',
-                        ),
-                        enabled: _draggingTableBlockStart != null,
-                        noteId: widget.noteId,
-                        targetBlockStart: -1,
-                        fixedSide: _MarkdownBlockDropSide.after,
-                        onDragMove: (position) =>
-                            _tableBlockDragPosition = position,
-                        onAccept: (data, _) =>
-                            _handleTableBlockDropAtDocumentEnd(data),
-                        child: GestureDetector(
-                          key: const Key('live-markdown-end-edit-target'),
-                          behavior: HitTestBehavior.opaque,
-                          onTap: _activateTrailingTextBlock,
-                          onSecondaryTapDown: (details) {
-                            _openContextMenuAtDocumentEnd(
-                              blocks,
-                              details.globalPosition,
-                            );
-                          },
-                          child: SizedBox(
-                            height: _editorController.activeTrailingInsertion
-                                ? 24
-                                : 96,
+      child: Focus(
+        canRequestFocus: false,
+        onKeyEvent: (node, event) => _handleDocumentSelectionKeyEvent(event),
+        child: Stack(
+          fit: StackFit.passthrough,
+          children: [
+            SelectableRegion(
+              key: _documentSelectableRegionKey,
+              focusNode: _documentSelectionFocusNode,
+              selectionControls: cupertinoTextSelectionHandleControls,
+              onSelectionChanged: _handleDocumentSelectedContentChanged,
+              contextMenuBuilder: (context, selectableRegionState) =>
+                  const SizedBox.shrink(),
+              child: Stack(
+                fit: StackFit.passthrough,
+                children: [
+                  TapRegion(
+                    groupId: _editingSessionTapGroup,
+                    onTapOutside: (_) => _clearActiveBlock(),
+                    child: Focus(
+                      focusNode: _editorFocusNode,
+                      onKeyEvent: _handleEditorSessionKeyEvent,
+                      onFocusChange: _handleEditorFocusChanged,
+                      child: GestureDetector(
+                        behavior: HitTestBehavior.translucent,
+                        onTap: _clearActiveBlock,
+                        onSecondaryTapDown: (details) {
+                          if (_globalPositionHitsBlockEditor(
+                            details.globalPosition,
+                          )) {
+                            return;
+                          }
+                          _openContextMenuAtDocumentEnd(
+                            blocks,
+                            details.globalPosition,
+                          );
+                        },
+                        child: CupertinoScrollbar(
+                          key: _scrollViewportKey,
+                          controller: _scrollController,
+                          child: NotificationListener<ScrollNotification>(
+                            onNotification: _handleScrollNotification,
+                            child: MarkdownDocumentSelectionScrollView(
+                              scrollViewKey: PageStorageKey<String>(
+                                'live-markdown-scroll-${widget.paneId}-${widget.noteId}',
+                              ),
+                              controller: _scrollController,
+                              physics:
+                                  _tableReordering ||
+                                      _draggingTableBlockStart != null
+                                  ? const NeverScrollableScrollPhysics()
+                                  : null,
+                              padding: EdgeInsets.fromLTRB(
+                                16,
+                                widget.printController == null ? 54 : 12,
+                                16,
+                                16,
+                              ),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.stretch,
+                                children: [
+                                  ...documentChildren,
+                                  if (activeInsertionOffset != null &&
+                                      !blocks.any(
+                                        (block) =>
+                                            block.end == activeInsertionOffset,
+                                      ))
+                                    _buildVirtualTrailingTextBlockEditor(
+                                      blocks.length,
+                                    ),
+                                  _MarkdownTableBlockDropTarget(
+                                    key: const Key(
+                                      'markdown-table-document-end-drop-target',
+                                    ),
+                                    enabled: _draggingTableBlockStart != null,
+                                    noteId: widget.noteId,
+                                    targetBlockStart: -1,
+                                    fixedSide: _MarkdownBlockDropSide.after,
+                                    onDragMove: (position) =>
+                                        _tableBlockDragPosition = position,
+                                    onAccept: (data, _) =>
+                                        _handleTableBlockDropAtDocumentEnd(
+                                          data,
+                                        ),
+                                    child: GestureDetector(
+                                      key: const Key(
+                                        'live-markdown-end-edit-target',
+                                      ),
+                                      behavior: HitTestBehavior.opaque,
+                                      onTap: _activateTrailingTextBlock,
+                                      onSecondaryTapDown: (details) {
+                                        _openContextMenuAtDocumentEnd(
+                                          blocks,
+                                          details.globalPosition,
+                                        );
+                                      },
+                                      child: SizedBox(
+                                        height:
+                                            _editorController
+                                                .activeTrailingInsertion
+                                            ? 24
+                                            : 96,
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
                           ),
                         ),
                       ),
-                    ],
+                    ),
                   ),
-                ),
+                  Positioned(
+                    left: 0,
+                    top: 0,
+                    width: 1,
+                    height: 1,
+                    child: Offstage(
+                      offstage: true,
+                      child: IgnorePointer(
+                        child: SelectionContainer.disabled(
+                          child: EditableText(
+                            key: const Key('markdown-document-selection-input'),
+                            controller: widget.controller,
+                            focusNode: _documentInputFocusNode,
+                            style: const TextStyle(fontSize: 1),
+                            cursorColor: CupertinoColors.transparent,
+                            backgroundCursorColor: CupertinoColors.transparent,
+                            maxLines: null,
+                            onChanged: _handleDocumentSelectionInputChanged,
+                            contextMenuBuilder: (context, editableTextState) =>
+                                const SizedBox.shrink(),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
               ),
             ),
-          ),
+          ],
         ),
       ),
     );
@@ -2832,6 +3456,489 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
         Expanded(child: editor),
       ],
     );
+  }
+
+  List<Widget> _buildDocumentChildren({
+    required List<MarkdownLiveBlock> blocks,
+    required int? activeIndex,
+    required int? activeInsertionOffset,
+    required Map<int, OutlineNode> outlineByBlock,
+    required Map<int, List<NotePdfPageBoundary>> printBoundariesByBlock,
+  }) {
+    final layouts = findMarkdownColumnsLayouts(blocks);
+    final layoutByStart = <int, MarkdownColumnsLayout>{
+      for (final layout in layouts) layout.startBlockIndex: layout,
+    };
+    final children = <Widget>[];
+    var index = 0;
+    while (index < blocks.length) {
+      final layout = layoutByStart[index];
+      if (layout != null) {
+        children.add(
+          _buildColumnsLayout(
+            layout: layout,
+            blocks: blocks,
+            activeIndex: activeIndex,
+            activeInsertionOffset: activeInsertionOffset,
+            outlineByBlock: outlineByBlock,
+            printBoundariesByBlock: printBoundariesByBlock,
+          ),
+        );
+        index = layout.endBlockIndex + 1;
+        continue;
+      }
+      final block = blocks[index];
+      if (block.isColumnsMarker) {
+        children.add(
+          SizedBox.shrink(key: Key('live-markdown-columns-marker-$index')),
+        );
+        index += 1;
+        continue;
+      }
+      children.add(
+        _buildOutlineAwareBlock(
+          block,
+          index,
+          activeIndex,
+          outlineByBlock[index],
+          blocks,
+          printBoundariesByBlock[index] ?? const [],
+        ),
+      );
+      if (activeInsertionOffset == block.end) {
+        children.add(_buildVirtualTrailingTextBlockEditor(index + 1));
+      }
+      index += 1;
+    }
+    return children;
+  }
+
+  Widget _buildColumnsLayout({
+    required MarkdownColumnsLayout layout,
+    required List<MarkdownLiveBlock> blocks,
+    required int? activeIndex,
+    required int? activeInsertionOffset,
+    required Map<int, OutlineNode> outlineByBlock,
+    required Map<int, List<NotePdfPageBoundary>> printBoundariesByBlock,
+  }) {
+    const gap = 16.0;
+    const minColumnWidth = 280.0;
+    final startBlock = blocks[layout.startBlockIndex];
+    final endBlock = blocks[layout.endBlockIndex];
+    final layoutIdentity = layout.startBlockIndex;
+    final layoutStart = startBlock.start;
+    final leftPercent =
+        _columnsPreviewPercents[layoutIdentity] ?? layout.leftPercent;
+    final activeOffset = _editorController.activeOffset;
+    final selected =
+        activeOffset != null &&
+        activeOffset >= startBlock.start &&
+        activeOffset < endBlock.end;
+    final horizontalController = _columnsScrollControllers.putIfAbsent(
+      layoutIdentity,
+      ScrollController.new,
+    );
+
+    return KeyedSubtree(
+      key: Key('live-markdown-columns-$layoutIdentity'),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 5),
+        child: DecoratedBox(
+          key: Key('live-markdown-columns-frame-$layoutIdentity'),
+          decoration: BoxDecoration(
+            border: Border.all(
+              color: selected
+                  ? WorkspaceAppearanceScope.of(
+                      context,
+                    ).accentColor.withValues(alpha: 0.45)
+                  : const Color(0x00000000),
+            ),
+            borderRadius: workspaceBorderRadius,
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              if (selected)
+                _buildColumnsControls(
+                  layoutIdentity: layoutIdentity,
+                  layoutStart: layoutStart,
+                  endOffset: endBlock.end,
+                  leftPercent: leftPercent,
+                ),
+              LayoutBuilder(
+                builder: (context, constraints) {
+                  final leftFraction = leftPercent / 100;
+                  final rightFraction = 1 - leftFraction;
+                  final minimumContentWidth = math.max(
+                    minColumnWidth / leftFraction,
+                    minColumnWidth / rightFraction,
+                  );
+                  final layoutWidth = math.max(
+                    constraints.maxWidth,
+                    minimumContentWidth + gap,
+                  );
+                  final contentWidth = layoutWidth - gap;
+                  return CupertinoScrollbar(
+                    controller: horizontalController,
+                    child: MarkdownSelectionHorizontalScrollView(
+                      controller: horizontalController,
+                      child: SizedBox(
+                        width: layoutWidth,
+                        child: _EqualHeightRow(
+                          children: [
+                            SizedBox(
+                              width: contentWidth * leftFraction,
+                              child: Padding(
+                                padding: const EdgeInsets.all(10),
+                                child: MarkdownSelectionGroup(
+                                  child: _buildColumnsSide(
+                                    layoutIdentity: layoutIdentity,
+                                    blocks: blocks,
+                                    startIndex: layout.startBlockIndex + 1,
+                                    endIndex: layout.separatorBlockIndex,
+                                    emptyInsertionOffset:
+                                        blocks[layout.startBlockIndex].end,
+                                    trailingInsertionOffset:
+                                        blocks[layout.separatorBlockIndex]
+                                            .start,
+                                    activeIndex: activeIndex,
+                                    activeInsertionOffset:
+                                        activeInsertionOffset,
+                                    outlineByBlock: outlineByBlock,
+                                    printBoundariesByBlock:
+                                        printBoundariesByBlock,
+                                    side: 'left',
+                                  ),
+                                ),
+                              ),
+                            ),
+                            _buildColumnsDivider(
+                              layoutIdentity: layoutIdentity,
+                              layoutStart: layoutStart,
+                              layoutWidth: contentWidth,
+                              leftPercent: leftPercent,
+                            ),
+                            SizedBox(
+                              width: contentWidth * rightFraction,
+                              child: Padding(
+                                padding: const EdgeInsets.all(10),
+                                child: MarkdownSelectionGroup(
+                                  child: _buildColumnsSide(
+                                    layoutIdentity: layoutIdentity,
+                                    blocks: blocks,
+                                    startIndex: layout.separatorBlockIndex + 1,
+                                    endIndex: layout.endBlockIndex,
+                                    emptyInsertionOffset:
+                                        blocks[layout.separatorBlockIndex].end,
+                                    trailingInsertionOffset:
+                                        blocks[layout.endBlockIndex].start,
+                                    activeIndex: activeIndex,
+                                    activeInsertionOffset:
+                                        activeInsertionOffset,
+                                    outlineByBlock: outlineByBlock,
+                                    printBoundariesByBlock:
+                                        printBoundariesByBlock,
+                                    side: 'right',
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildColumnsSide({
+    required int layoutIdentity,
+    required List<MarkdownLiveBlock> blocks,
+    required int startIndex,
+    required int endIndex,
+    required int emptyInsertionOffset,
+    required int trailingInsertionOffset,
+    required int? activeIndex,
+    required int? activeInsertionOffset,
+    required Map<int, OutlineNode> outlineByBlock,
+    required Map<int, List<NotePdfPageBoundary>> printBoundariesByBlock,
+    required String side,
+  }) {
+    final children = <Widget>[];
+    for (var index = startIndex; index < endIndex; index += 1) {
+      final block = blocks[index];
+      if (block.isColumnsMarker) {
+        continue;
+      }
+      children.add(
+        _MarkdownImageBlockDropTarget(
+          key: Key('markdown-image-columns-block-drop-target-$index'),
+          enabled: widget.enabled && !widget.busy,
+          targetBlockStart: block.start,
+          canAccept: _canAcceptImageBlockDrop,
+          onAccept: (data, dropSide) =>
+              _handleImageBlockDrop(data, block, dropSide),
+          child: _buildOutlineAwareBlock(
+            block,
+            index,
+            activeIndex,
+            outlineByBlock[index],
+            blocks,
+            printBoundariesByBlock[index] ?? const [],
+          ),
+        ),
+      );
+      if (activeInsertionOffset == block.end) {
+        children.add(_buildVirtualTrailingTextBlockEditor(index + 1));
+      }
+    }
+    if (children.isEmpty) {
+      children.add(
+        GestureDetector(
+          key: Key('live-markdown-columns-$side-empty'),
+          behavior: HitTestBehavior.opaque,
+          onTap: () => _activateColumnsInsertion(emptyInsertionOffset),
+          child: const SizedBox(height: 42),
+        ),
+      );
+    }
+    Widget sideContent = KeyedSubtree(
+      key: Key('live-markdown-columns-$side-$layoutIdentity'),
+      child: GestureDetector(
+        behavior: HitTestBehavior.translucent,
+        onTap: () => _activateColumnsInsertion(trailingInsertionOffset),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: children,
+        ),
+      ),
+    );
+    sideContent = _MarkdownImageBlockDropTarget(
+      key: Key('markdown-image-columns-$side-drop-target-$layoutIdentity'),
+      enabled: widget.enabled && !widget.busy,
+      targetBlockStart: -1,
+      fixedSide: _MarkdownBlockDropSide.after,
+      canAccept: _canAcceptImageBlockDrop,
+      onAccept: (data, _) => _moveImageToOffset(data, trailingInsertionOffset),
+      child: sideContent,
+    );
+    return _MarkdownTableBlockDropTarget(
+      key: Key('markdown-table-columns-$side-drop-target-$layoutIdentity'),
+      enabled: _draggingTableBlockStart != null,
+      noteId: widget.noteId,
+      targetBlockStart: -1,
+      fixedSide: _MarkdownBlockDropSide.after,
+      onDragMove: (position) => _tableBlockDragPosition = position,
+      onAccept: (data, _) =>
+          _moveSelectedTableToOffset(data, trailingInsertionOffset),
+      child: sideContent,
+    );
+  }
+
+  Widget _buildColumnsDivider({
+    required int layoutIdentity,
+    required int layoutStart,
+    required double layoutWidth,
+    required int leftPercent,
+  }) {
+    return MouseRegion(
+      cursor: SystemMouseCursors.resizeColumn,
+      child: GestureDetector(
+        key: Key('live-markdown-columns-divider-$layoutIdentity'),
+        behavior: HitTestBehavior.opaque,
+        onHorizontalDragUpdate: widget.enabled && !widget.busy
+            ? (details) {
+                final deltaPercent = details.primaryDelta! / layoutWidth * 100;
+                final next = clampMarkdownColumnsLeftPercent(
+                  (leftPercent + deltaPercent).round(),
+                );
+                if (_columnsPreviewPercents[layoutIdentity] != next) {
+                  setState(
+                    () => _columnsPreviewPercents[layoutIdentity] = next,
+                  );
+                }
+              }
+            : null,
+        onHorizontalDragEnd: widget.enabled && !widget.busy
+            ? (_) {
+                final next =
+                    _columnsPreviewPercents.remove(layoutIdentity) ??
+                    leftPercent;
+                _commitColumnsRatio(
+                  layoutIdentity: layoutIdentity,
+                  layoutStart: layoutStart,
+                  leftPercent: next,
+                );
+              }
+            : null,
+        child: const SizedBox(
+          width: 16,
+          child: Center(
+            child: SizedBox(
+              width: 1,
+              height: 42,
+              child: ColoredBox(color: workspaceSoftLineColor),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildColumnsControls({
+    required int layoutIdentity,
+    required int layoutStart,
+    required int endOffset,
+    required int leftPercent,
+  }) {
+    final appearance = WorkspaceAppearanceScope.of(context);
+    Widget ratioButton(int value, String label) => CupertinoButton(
+      key: Key('live-markdown-columns-ratio-$value'),
+      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+      minimumSize: Size.zero,
+      onPressed: widget.enabled && !widget.busy
+          ? () => _commitColumnsRatio(
+              layoutIdentity: layoutIdentity,
+              layoutStart: layoutStart,
+              leftPercent: value,
+            )
+          : null,
+      child: Text(
+        label,
+        style: TextStyle(
+          fontSize: 11,
+          color: leftPercent == value
+              ? appearance.accentColor
+              : workspaceMutedColor,
+        ),
+      ),
+    );
+    return DecoratedBox(
+      decoration: const BoxDecoration(
+        border: Border(bottom: BorderSide(color: workspaceSoftLineColor)),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+        child: Row(
+          children: [
+            const Text(
+              '双栏',
+              style: TextStyle(fontSize: 11, color: workspaceMutedColor),
+            ),
+            const SizedBox(width: 6),
+            ratioButton(50, '1:1'),
+            ratioButton(40, '2:3'),
+            ratioButton(60, '3:2'),
+            const Spacer(),
+            CupertinoButton(
+              key: const Key('live-markdown-columns-continue-full-width'),
+              padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+              minimumSize: Size.zero,
+              onPressed: () => _activateColumnsInsertion(endOffset),
+              child: const Text('下方全宽', style: TextStyle(fontSize: 11)),
+            ),
+            CupertinoButton(
+              key: const Key('live-markdown-columns-flatten'),
+              padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+              minimumSize: Size.zero,
+              onPressed: widget.enabled && !widget.busy
+                  ? () => _flattenColumns(
+                      layoutIdentity: layoutIdentity,
+                      layoutStart: layoutStart,
+                    )
+                  : null,
+              child: const Text('取消双栏', style: TextStyle(fontSize: 11)),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _activateColumnsInsertion(int offset) {
+    _clearDocumentSelectionState();
+    _editorController.endUndoGroup();
+    _cancelPasteViewportTransaction();
+    _clearSelectedImageTarget();
+    _clearSelectedTableTarget();
+    widget.onFocusPane();
+    final resolved = _clampOffset(offset, widget.controller.text.length);
+    setState(() {
+      _editorController.activateOffset(resolved, trailingInsertion: true);
+      _editorController.beginDocumentUpdate();
+      widget.controller.selection = TextSelection.collapsed(offset: resolved);
+      _editorController.endDocumentUpdate();
+    });
+    _focusBlockEditor();
+  }
+
+  void _commitColumnsRatio({
+    required int layoutIdentity,
+    required int layoutStart,
+    required int leftPercent,
+  }) {
+    final before = widget.controller.text;
+    final after = updateMarkdownColumnsRatio(
+      markdown: before,
+      layoutStart: layoutStart,
+      leftPercent: leftPercent,
+    );
+    if (before == after) {
+      if (mounted) {
+        setState(() => _columnsPreviewPercents.remove(layoutIdentity));
+      }
+      return;
+    }
+    final selection = widget.controller.selection;
+    final mappedOffset = _remapOffsetAfterDocumentChange(
+      before: before,
+      after: after,
+      offset: selection.isValid ? selection.extentOffset : layoutStart,
+    );
+    _editorController.endUndoGroup();
+    _editorController.beginDocumentUpdate();
+    widget.controller.value = TextEditingValue(
+      text: after,
+      selection: TextSelection.collapsed(offset: mappedOffset),
+    );
+    _editorController.endDocumentUpdate();
+    _editorController.endUndoGroup();
+    _editorController.updateActiveOffset(mappedOffset);
+    setState(() => _columnsPreviewPercents.remove(layoutIdentity));
+  }
+
+  void _flattenColumns({
+    required int layoutIdentity,
+    required int layoutStart,
+  }) {
+    final before = widget.controller.text;
+    final after = flattenMarkdownColumns(
+      markdown: before,
+      layoutStart: layoutStart,
+    );
+    if (before == after) {
+      return;
+    }
+    final offset = _clampOffset(layoutStart, after.length);
+    _editorController.endUndoGroup();
+    _editorController.beginDocumentUpdate();
+    widget.controller.value = TextEditingValue(
+      text: after,
+      selection: TextSelection.collapsed(offset: offset),
+    );
+    _editorController.endDocumentUpdate();
+    _editorController.endUndoGroup();
+    _editorController.clearActiveBlock();
+    setState(() {
+      _columnsPreviewPercents.remove(layoutIdentity);
+      _columnsScrollControllers.remove(layoutIdentity)?.dispose();
+    });
   }
 
   Widget _buildVirtualTrailingTextBlockEditor(int index) {
@@ -2977,6 +4084,7 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
 
   Widget _decoratePrintBoundaries(
     MarkdownLiveBlock block,
+    int blockIndex,
     Widget child,
     List<NotePdfPageBoundary> boundaries,
   ) {
@@ -2984,7 +4092,7 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
       return child;
     }
     return _PrintBoundaryOverlay(
-      key: Key('note-print-boundary-block-${block.start}'),
+      key: Key('note-print-boundary-block-$blockIndex'),
       block: block,
       boundaries: boundaries,
       paneId: widget.paneId,
@@ -3009,7 +4117,12 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
   ) {
     final child = _decoratePrintBoundaries(
       block,
-      _decorateFindBlock(block, _buildBlock(block, index, activeIndex, blocks)),
+      index,
+      _decorateFindBlock(
+        block,
+        index,
+        _buildBlock(block, index, activeIndex, blocks),
+      ),
       printBoundaries,
     );
     final outlined = outlineNode == null
@@ -3020,8 +4133,16 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
             accentColor: WorkspaceAppearanceScope.of(context).accentColor,
             child: child,
           );
+    final selectionAware = block.isBlank || block.isColumnsMarker
+        ? outlined
+        : MarkdownSelectionBlock(
+            key: ValueKey(('markdown-selection-block', index)),
+            block: block,
+            onSelectionChanged: _handleDocumentBlockSelectionChanged,
+            child: outlined,
+          );
     if (block.isBlank) {
-      return outlined;
+      return selectionAware;
     }
     return _MarkdownTableBlockDropTarget(
       key: Key('markdown-table-block-drop-target-$index'),
@@ -3030,11 +4151,15 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
       targetBlockStart: block.start,
       onDragMove: (position) => _tableBlockDragPosition = position,
       onAccept: (data, side) => _handleTableBlockDrop(data, block, side),
-      child: outlined,
+      child: selectionAware,
     );
   }
 
-  Widget _decorateFindBlock(MarkdownLiveBlock block, Widget child) {
+  Widget _decorateFindBlock(
+    MarkdownLiveBlock block,
+    int blockIndex,
+    Widget child,
+  ) {
     if (!widget.findController.visible) {
       return child;
     }
@@ -3048,11 +4173,11 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
       block.end,
     );
     return KeyedSubtree(
-      key: Key('editor-find-block-${block.start}'),
+      key: Key('editor-find-block-$blockIndex'),
       child: KeyedSubtree(
         key: _findBlockKeys.putIfAbsent(
-          block.start,
-          () => GlobalKey(debugLabel: 'editor-find-block-${block.start}'),
+          blockIndex,
+          () => GlobalKey(debugLabel: 'editor-find-block-$blockIndex'),
         ),
         child: DecoratedBox(
           decoration: BoxDecoration(
@@ -3139,9 +4264,15 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
         });
       }
     }
+    final blockIndex = blocks.indexWhere(
+      (candidate) => candidate.start == block.start,
+    );
+    if (blockIndex < 0) {
+      return;
+    }
     final key = _findBlockKeys.putIfAbsent(
-      block.start,
-      () => GlobalKey(debugLabel: 'editor-find-block-${block.start}'),
+      blockIndex,
+      () => GlobalKey(debugLabel: 'editor-find-block-$blockIndex'),
     );
     WidgetsBinding.instance.addPostFrameCallback((_) {
       final targetContext = key.currentContext;
@@ -3166,6 +4297,7 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
     for (var index = 0; index < blocks.length; index += 1) {
       final block = blocks[index];
       if (!match.overlaps(block.start, block.end) ||
+          block.isColumnsMarker ||
           markdownBlockIsHiddenTableSeparator(blocks, index)) {
         continue;
       }
@@ -3173,12 +4305,14 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
     }
     final startIndex = markdownBlockIndexForOffset(blocks, match.start);
     for (var index = startIndex + 1; index < blocks.length; index += 1) {
-      if (!markdownBlockIsHiddenTableSeparator(blocks, index)) {
+      if (!blocks[index].isColumnsMarker &&
+          !markdownBlockIsHiddenTableSeparator(blocks, index)) {
         return blocks[index];
       }
     }
     for (var index = startIndex - 1; index >= 0; index -= 1) {
-      if (!markdownBlockIsHiddenTableSeparator(blocks, index)) {
+      if (!blocks[index].isColumnsMarker &&
+          !markdownBlockIsHiddenTableSeparator(blocks, index)) {
         return blocks[index];
       }
     }
@@ -3205,6 +4339,10 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
         key: Key('live-markdown-block-preview-$index'),
         behavior: HitTestBehavior.opaque,
         onTap: () => _activateBlankBlock(block),
+        onSecondaryTapDown: (details) => _activateBlankBlockAndOpenContextMenu(
+          block,
+          details.globalPosition,
+        ),
         child: SizedBox(height: 12.0 * visibleLineCount),
       );
     }
@@ -3360,8 +4498,8 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
   ) {
     return KeyedSubtree(
       key: _previewSurfaceKeys.putIfAbsent(
-        block.start,
-        () => GlobalKey(debugLabel: 'markdown-preview-${block.start}'),
+        index,
+        () => GlobalKey(debugLabel: 'markdown-preview-$index'),
       ),
       child: KeyedSubtree(
         key: Key('live-markdown-preview-surface-$index'),
@@ -3438,7 +4576,16 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
       onTableFrameTap: () => _handleTableFrameTap(block),
       onTableFrameSecondaryTapDown: (details) =>
           _handleTableFrameSecondaryTap(block, details),
-      onTableContentTap: () => _activateBlock(block),
+      onTableContentTap: () {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted &&
+              widget.controller.text.length >= block.end &&
+              widget.controller.text.substring(block.start, block.end) ==
+                  block.text) {
+            _activateBlock(block);
+          }
+        });
+      },
     );
     if (selected) {
       preview = KeyedSubtree(
@@ -3455,8 +4602,6 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
             blockEnd: block.end,
             blockText: block.text,
           ),
-          axis: Axis.vertical,
-          affinity: Axis.vertical,
           dragAnchorStrategy: pointerDragAnchorStrategy,
           rootOverlay: true,
           maxSimultaneousDrags: 1,
@@ -3473,10 +4618,11 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
     }
     return GestureDetector(
       key: Key('live-markdown-block-preview-$index'),
-      behavior: HitTestBehavior.opaque,
-      onTapUp: (details) =>
-          _activateBlock(block, globalPosition: details.globalPosition),
-      onSecondaryTapDown: (_) {},
+      behavior: HitTestBehavior.translucent,
+      onTap: () => _activateBlock(block),
+      onSecondaryTapDown: selected
+          ? (details) => _handleTableFrameSecondaryTap(block, details)
+          : (_) {},
       child: Padding(
         padding: const EdgeInsets.symmetric(vertical: 3),
         child: preview,
@@ -3563,11 +4709,44 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
   }
 
   Widget _buildTextBlockEditor(MarkdownLiveBlock block, int index) {
+    final projection = MarkdownSelectionProjection.forBlock(block);
+    final appearance = WorkspaceAppearanceScope.of(context);
+    final proxyStyle = _textStyleForBlock(
+      block,
+      appearance,
+    ).copyWith(color: CupertinoColors.transparent);
     return KeyedSubtree(
       key: Key('live-markdown-block-editor-$index'),
-      child: _buildTextFieldEditor(
-        block: block,
-        onTap: () => _updateActiveOffsetFromBlockSelection(block),
+      child: Stack(
+        fit: StackFit.passthrough,
+        children: [
+          SelectionContainer.disabled(
+            child: _buildTextFieldEditor(
+              block: block,
+              onTap: () => _updateActiveOffsetFromBlockSelection(block),
+            ),
+          ),
+          if (projection.visibleText.isNotEmpty)
+            Positioned.fill(
+              child: IgnorePointer(
+                child: ExcludeSemantics(
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 3),
+                    child: Align(
+                      alignment: AlignmentDirectional.topStart,
+                      child: Text(
+                        projection.visibleText,
+                        style: proxyStyle,
+                        selectionColor: appearance.accentColor.withValues(
+                          alpha: 0.22,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+        ],
       ),
     );
   }
@@ -3608,6 +4787,14 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
         contextMenuBuilder: _buildContextMenu,
         onChanged: _replaceActiveBlock,
         onTap: onTap,
+        onTapUp: block == null
+            ? null
+            : (details) =>
+                  _placeCaretAtGlobalPosition(block, details.globalPosition),
+        onSecondaryTapDown: block == null
+            ? null
+            : (details) => _showContextMenuAt(details.globalPosition),
+        useDocumentSelectionGestures: block != null,
         onSelectionChanged: _handleBlockSelectionChanged,
         onPaste: () => unawaited(_pasteFromContextMenu()),
         onKeyEvent: _handleBlockKeyEvent,
@@ -3872,6 +5059,71 @@ final class _PrintBoundaryPainter extends CustomPainter {
 
 enum _MarkdownBlockDropSide { before, after }
 
+class _EqualHeightRow extends MultiChildRenderObjectWidget {
+  const _EqualHeightRow({required super.children});
+
+  @override
+  RenderObject createRenderObject(BuildContext context) =>
+      _RenderEqualHeightRow();
+}
+
+class _EqualHeightRowParentData extends ContainerBoxParentData<RenderBox> {}
+
+class _RenderEqualHeightRow extends RenderBox
+    with
+        ContainerRenderObjectMixin<RenderBox, _EqualHeightRowParentData>,
+        RenderBoxContainerDefaultsMixin<RenderBox, _EqualHeightRowParentData> {
+  @override
+  void setupParentData(RenderBox child) {
+    if (child.parentData is! _EqualHeightRowParentData) {
+      child.parentData = _EqualHeightRowParentData();
+    }
+  }
+
+  @override
+  void performLayout() {
+    final firstPassConstraints = BoxConstraints(maxWidth: constraints.maxWidth);
+    var maxHeight = 0.0;
+    var child = firstChild;
+    while (child != null) {
+      child.layout(firstPassConstraints, parentUsesSize: true);
+      maxHeight = math.max(maxHeight, child.size.height);
+      final parentData = child.parentData! as _EqualHeightRowParentData;
+      child = parentData.nextSibling;
+    }
+
+    var width = 0.0;
+    child = firstChild;
+    while (child != null) {
+      final childWidth = child.size.width;
+      child.layout(
+        BoxConstraints(
+          minWidth: childWidth,
+          maxWidth: childWidth,
+          minHeight: maxHeight,
+        ),
+        parentUsesSize: true,
+      );
+      final parentData = child.parentData! as _EqualHeightRowParentData;
+      parentData.offset = Offset(width, 0);
+      width += child.size.width;
+      maxHeight = math.max(maxHeight, child.size.height);
+      child = parentData.nextSibling;
+    }
+    size = constraints.constrain(Size(width, maxHeight));
+  }
+
+  @override
+  void paint(PaintingContext context, Offset offset) {
+    defaultPaint(context, offset);
+  }
+
+  @override
+  bool hitTestChildren(BoxHitTestResult result, {required Offset position}) {
+    return defaultHitTestChildren(result, position: position);
+  }
+}
+
 final class _MarkdownTableDragData {
   const _MarkdownTableDragData({
     required this.noteId,
@@ -3984,32 +5236,148 @@ class _MarkdownTableBlockDropTargetState
       onMove: _handleMove,
       onLeave: _handleLeave,
       onAcceptWithDetails: _handleAccept,
-      builder: (context, candidateData, rejectedData) => Stack(
-        clipBehavior: Clip.none,
-        children: [
-          widget.child,
-          if (side != null)
-            Positioned(
-              key: Key(
-                'markdown-table-block-drop-line-'
-                '${widget.targetBlockStart}-${side.name}',
-              ),
-              top: side == _MarkdownBlockDropSide.before ? -1 : null,
-              bottom: side == _MarkdownBlockDropSide.after ? -1 : null,
-              left: 0,
-              right: 0,
-              height: 3,
-              child: IgnorePointer(
-                child: DecoratedBox(
-                  decoration: BoxDecoration(
-                    color: WorkspaceAppearanceScope.of(context).accentColor,
-                    borderRadius: BorderRadius.circular(2),
-                  ),
-                ),
-              ),
+      builder: (context, candidateData, rejectedData) {
+        if (side == null) {
+          return widget.child;
+        }
+        final accentColor = WorkspaceAppearanceScope.of(context).accentColor;
+        return DecoratedBox(
+          key: Key(
+            'markdown-table-block-drop-line-'
+            '${widget.targetBlockStart}-${side.name}',
+          ),
+          decoration: BoxDecoration(
+            border: Border(
+              top: side == _MarkdownBlockDropSide.before
+                  ? BorderSide(color: accentColor, width: 3)
+                  : BorderSide.none,
+              bottom: side == _MarkdownBlockDropSide.after
+                  ? BorderSide(color: accentColor, width: 3)
+                  : BorderSide.none,
             ),
-        ],
-      ),
+          ),
+          child: widget.child,
+        );
+      },
+    );
+  }
+}
+
+class _MarkdownImageBlockDropTarget extends StatefulWidget {
+  const _MarkdownImageBlockDropTarget({
+    super.key,
+    required this.enabled,
+    required this.targetBlockStart,
+    this.fixedSide,
+    required this.canAccept,
+    required this.onAccept,
+    required this.child,
+  });
+
+  final bool enabled;
+  final int targetBlockStart;
+  final _MarkdownBlockDropSide? fixedSide;
+  final bool Function(PreviewImageDragData data) canAccept;
+  final void Function(PreviewImageDragData data, _MarkdownBlockDropSide side)
+  onAccept;
+  final Widget child;
+
+  @override
+  State<_MarkdownImageBlockDropTarget> createState() =>
+      _MarkdownImageBlockDropTargetState();
+}
+
+class _MarkdownImageBlockDropTargetState
+    extends State<_MarkdownImageBlockDropTarget> {
+  _MarkdownBlockDropSide? _side;
+
+  @override
+  void didUpdateWidget(covariant _MarkdownImageBlockDropTarget oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!widget.enabled && _side != null) {
+      _side = null;
+    }
+  }
+
+  bool _canAccept(PreviewImageDragData data) =>
+      widget.enabled && widget.canAccept(data);
+
+  _MarkdownBlockDropSide _sideForGlobalOffset(Offset globalOffset) {
+    final fixedSide = widget.fixedSide;
+    if (fixedSide != null) {
+      return fixedSide;
+    }
+    final renderObject = context.findRenderObject();
+    if (renderObject is! RenderBox || !renderObject.attached) {
+      return _MarkdownBlockDropSide.after;
+    }
+    final local = renderObject.globalToLocal(globalOffset);
+    return local.dy < renderObject.size.height / 2
+        ? _MarkdownBlockDropSide.before
+        : _MarkdownBlockDropSide.after;
+  }
+
+  void _handleMove(DragTargetDetails<PreviewImageDragData> details) {
+    if (!_canAccept(details.data)) {
+      return;
+    }
+    final side = _sideForGlobalOffset(details.offset);
+    if (side != _side) {
+      setState(() => _side = side);
+    }
+  }
+
+  void _handleLeave(PreviewImageDragData? data) {
+    if (_side != null) {
+      setState(() => _side = null);
+    }
+  }
+
+  void _handleAccept(DragTargetDetails<PreviewImageDragData> details) {
+    if (!_canAccept(details.data)) {
+      return;
+    }
+    final side = _sideForGlobalOffset(details.offset);
+    if (_side != null) {
+      setState(() => _side = null);
+    }
+    widget.onAccept(details.data, side);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!widget.enabled) {
+      return widget.child;
+    }
+    final side = _side;
+    return DragTarget<PreviewImageDragData>(
+      onWillAcceptWithDetails: (details) => _canAccept(details.data),
+      onMove: _handleMove,
+      onLeave: _handleLeave,
+      onAcceptWithDetails: _handleAccept,
+      builder: (context, candidateData, rejectedData) {
+        if (side == null) {
+          return widget.child;
+        }
+        final accentColor = WorkspaceAppearanceScope.of(context).accentColor;
+        return DecoratedBox(
+          key: Key(
+            'markdown-image-block-drop-line-'
+            '${widget.targetBlockStart}-${side.name}',
+          ),
+          decoration: BoxDecoration(
+            border: Border(
+              top: side == _MarkdownBlockDropSide.before
+                  ? BorderSide(color: accentColor, width: 3)
+                  : BorderSide.none,
+              bottom: side == _MarkdownBlockDropSide.after
+                  ? BorderSide(color: accentColor, width: 3)
+                  : BorderSide.none,
+            ),
+          ),
+          child: widget.child,
+        );
+      },
     );
   }
 }

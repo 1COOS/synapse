@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import '../../cupertino/markdown_context_commands.dart';
 import '../../cupertino/markdown_live_blocks.dart';
 import 'markdown_context_menu.dart';
+import 'markdown_document_selection.dart';
 import 'markdown_styled_controller.dart';
 
 class LiveMarkdownEditorController extends ChangeNotifier {
@@ -32,6 +33,7 @@ class LiveMarkdownEditorController extends ChangeNotifier {
   bool _activeTrailingInsertion = false;
   int? _activeInsertionOffset;
   MarkdownInsertion? _pendingInsertionFocus;
+  TextSelection? _documentSelection;
 
   TextEditingController get document => _document;
   int? get activeOffset => _activeOffset;
@@ -41,6 +43,30 @@ class LiveMarkdownEditorController extends ChangeNotifier {
   int? get activeInsertionOffset => _activeInsertionOffset;
   bool get canUndo => _undoHistory.isNotEmpty;
   bool get canRedo => _redoHistory.isNotEmpty;
+  TextSelection? get documentSelection => _normalizedDocumentSelection();
+  bool get hasDocumentSelection => documentSelection != null;
+  bool get documentSelectionCanMutate {
+    final target = _documentSelectionTarget();
+    if (target == null) {
+      return true;
+    }
+    return replaceMarkdownDocumentSelection(
+      value: target.value,
+      replacement: '',
+    ).allowed;
+  }
+
+  bool get activeBlockIsInsideColumns {
+    final offset = _activeOffset;
+    if (offset == null) {
+      return false;
+    }
+    return markdownColumnsLayoutForOffset(
+          splitMarkdownLiveBlocks(_document.text),
+          offset,
+        ) !=
+        null;
+  }
 
   MarkdownInsertion? takePendingInsertionFocus() {
     final pending = _pendingInsertionFocus;
@@ -61,6 +87,7 @@ class LiveMarkdownEditorController extends ChangeNotifier {
     _activeSelectionTarget = null;
     _activeTrailingInsertion = false;
     _activeInsertionOffset = null;
+    _documentSelection = null;
   }
 
   @override
@@ -169,6 +196,7 @@ class LiveMarkdownEditorController extends ChangeNotifier {
       _restoringHistory = false;
     }
     _activeSelectionTarget = null;
+    _documentSelection = null;
   }
 
   void activateOffset(
@@ -180,6 +208,7 @@ class LiveMarkdownEditorController extends ChangeNotifier {
         trailingInsertion &&
         (!_activeTrailingInsertion || _activeOffset != offset);
     _activeOffset = offset;
+    _documentSelection = null;
     _activeTrailingInsertion = trailingInsertion;
     _activeInsertionOffset = trailingInsertion ? offset : null;
     if (enteringTrailingInsertion) {
@@ -216,6 +245,30 @@ class LiveMarkdownEditorController extends ChangeNotifier {
 
   void setSelectionTarget(MarkdownCommandTarget? target) {
     _activeSelectionTarget = target;
+  }
+
+  void setDocumentSelection(TextSelection? selection) {
+    if (selection == null || !selection.isValid || selection.isCollapsed) {
+      _documentSelection = null;
+      return;
+    }
+    final start = _clampOffset(selection.start, _document.text.length);
+    final end = _clampOffset(selection.end, _document.text.length);
+    if (start == end) {
+      _documentSelection = null;
+      return;
+    }
+    _documentSelection = TextSelection(
+      baseOffset: selection.baseOffset <= selection.extentOffset ? start : end,
+      extentOffset: selection.baseOffset <= selection.extentOffset
+          ? end
+          : start,
+    );
+    _activeSelectionTarget = null;
+  }
+
+  void clearDocumentSelection() {
+    _documentSelection = null;
   }
 
   bool handleFullDocumentChanged() {
@@ -300,6 +353,7 @@ class LiveMarkdownEditorController extends ChangeNotifier {
     if (_syncingBlock || activeOffset == null) {
       return false;
     }
+    _documentSelection = null;
     if (_activeTrailingInsertion) {
       return _replaceVirtualTrailingBlock(text);
     }
@@ -487,7 +541,7 @@ class LiveMarkdownEditorController extends ChangeNotifier {
       return;
     }
     dismissAllMacContextMenus();
-    applyBlockValue(applyMarkdownInlineFormat(target.value, format));
+    _applyCommandValue(target, applyMarkdownInlineFormat(target.value, format));
   }
 
   void applyParagraphStyle(
@@ -500,11 +554,10 @@ class LiveMarkdownEditorController extends ChangeNotifier {
       return;
     }
     dismissAllMacContextMenus();
-    applyBlockValue(
-      applyMarkdownParagraphStyle(
-        commandTarget(menuTarget: menuTarget).value,
-        style,
-      ),
+    final target = commandTarget(menuTarget: menuTarget);
+    _applyCommandValue(
+      target,
+      applyMarkdownParagraphStyle(target.value, style),
     );
   }
 
@@ -518,12 +571,8 @@ class LiveMarkdownEditorController extends ChangeNotifier {
       return;
     }
     dismissAllMacContextMenus();
-    applyBlockValue(
-      applyMarkdownListStyle(
-        commandTarget(menuTarget: menuTarget).value,
-        style,
-      ),
-    );
+    final target = commandTarget(menuTarget: menuTarget);
+    _applyCommandValue(target, applyMarkdownListStyle(target.value, style));
   }
 
   void applyInsertion(
@@ -531,16 +580,15 @@ class LiveMarkdownEditorController extends ChangeNotifier {
     MarkdownCommandTarget? menuTarget,
     required bool busy,
   }) {
+    final target = resolveCommandTarget(menuTarget: menuTarget);
     if (busy ||
+        target?.documentScoped == true ||
         !commandState(menuTarget: menuTarget).canUseStructuralCommands) {
       return;
     }
     dismissAllMacContextMenus();
     _pendingInsertionFocus = insertion;
-    var value = insertMarkdownBlock(
-      commandTarget(menuTarget: menuTarget).value,
-      insertion,
-    );
+    var value = insertMarkdownBlock(target!.value, insertion);
     final activeBlock = currentActiveTextBlock();
     if ((insertion == MarkdownInsertion.divider ||
             insertion == MarkdownInsertion.pageBreak) &&
@@ -553,6 +601,14 @@ class LiveMarkdownEditorController extends ChangeNotifier {
       );
     }
     applyBlockValue(value);
+    if (insertion == MarkdownInsertion.columns) {
+      final offset = _document.selection.isValid
+          ? _document.selection.extentOffset
+          : _document.text.length;
+      activateOffset(offset, trailingInsertion: true);
+      notifyListeners();
+      return;
+    }
     if (insertion == MarkdownInsertion.divider ||
         insertion == MarkdownInsertion.pageBreak) {
       activateOffset(_document.text.length, trailingInsertion: true);
@@ -565,6 +621,10 @@ class LiveMarkdownEditorController extends ChangeNotifier {
     MarkdownCommandTarget? target,
   }) {
     final resolvedTarget = target ?? commandTarget();
+    if (resolvedTarget.documentScoped) {
+      replaceDocumentSelection(replacement, target: resolvedTarget);
+      return;
+    }
     final value = resolvedTarget.value;
     final selection = resolvedTarget.selection;
     final updated = value.text.replaceRange(
@@ -590,7 +650,63 @@ class LiveMarkdownEditorController extends ChangeNotifier {
     replaceActiveBlock(value.text);
   }
 
+  bool replaceDocumentSelection(
+    String replacement, {
+    MarkdownCommandTarget? target,
+  }) {
+    final resolvedTarget = target ?? _documentSelectionTarget();
+    if (resolvedTarget == null || !resolvedTarget.documentScoped) {
+      return false;
+    }
+    final result = replaceMarkdownDocumentSelection(
+      value: resolvedTarget.value,
+      replacement: replacement,
+    );
+    final value = result.value;
+    if (value == null) {
+      return false;
+    }
+    _applyDocumentValue(value, preserveSelection: false);
+    return true;
+  }
+
+  void _applyCommandValue(
+    MarkdownCommandTarget target,
+    TextEditingValue value,
+  ) {
+    if (target.documentScoped) {
+      _applyDocumentValue(value, preserveSelection: true);
+      return;
+    }
+    applyBlockValue(value);
+  }
+
+  void _applyDocumentValue(
+    TextEditingValue value, {
+    required bool preserveSelection,
+  }) {
+    _endUndoGroup();
+    _activeSelectionTarget = null;
+    _updatingDocument = true;
+    _document.value = value.copyWith(composing: TextRange.empty);
+    _updatingDocument = false;
+    _activeOffset = null;
+    _activeTrailingInsertion = false;
+    _activeInsertionOffset = null;
+    _documentSelection = preserveSelection && !value.selection.isCollapsed
+        ? value.selection
+        : null;
+    notifyListeners();
+  }
+
   void syncDocumentSelectionFromBlock({MarkdownCommandTarget? menuTarget}) {
+    final documentTarget = _documentSelectionTarget();
+    if (documentTarget != null) {
+      _updatingDocument = true;
+      _document.selection = documentTarget.selection;
+      _updatingDocument = false;
+      return;
+    }
     final activeOffset = _activeOffset;
     if (activeOffset == null) {
       return;
@@ -663,6 +779,10 @@ class LiveMarkdownEditorController extends ChangeNotifier {
   MarkdownCommandTarget? captureCommandTargetForMenu([
     TextEditingValue? editingValue,
   ]) {
+    final documentTarget = _documentSelectionTarget();
+    if (documentTarget != null) {
+      return documentTarget;
+    }
     if (editingValue != null) {
       final block = currentActiveTextBlock();
       if (block == null || editingValue.text != blockController.text) {
@@ -688,6 +808,13 @@ class LiveMarkdownEditorController extends ChangeNotifier {
     MarkdownCommandTarget? menuTarget,
     bool requireSelection = false,
   }) {
+    final documentTarget = _documentSelectionTarget();
+    if (documentTarget != null) {
+      return documentTarget;
+    }
+    if (_validDocumentMenuTarget(menuTarget)) {
+      return menuTarget;
+    }
     final selection = normalizedBlockSelection();
     if (!selection.isCollapsed) {
       return MarkdownCommandTarget(
@@ -717,6 +844,29 @@ class LiveMarkdownEditorController extends ChangeNotifier {
       return markdownCommandState(blockController.value);
     }
     var fencedCode = false;
+    if (target.documentScoped) {
+      final selection = target.selection;
+      fencedCode = splitMarkdownLiveBlocks(target.value.text).any(
+        (block) =>
+            block.kind == MarkdownLiveBlockKind.fencedCode &&
+            selection.start < block.end &&
+            selection.end > block.start,
+      );
+      final state = markdownCommandState(target.value, fencedCode: fencedCode);
+      if (markdownDocumentSelectionIntersectsProtectedStructure(
+        target.value.text,
+        target.selection,
+      )) {
+        return MarkdownCommandState(
+          hasSelection: state.hasSelection,
+          inCode: true,
+          activeInlineFormats: const {},
+          paragraphStyle: null,
+          listStyle: null,
+        );
+      }
+      return state;
+    }
     final blockStart = target.blockStart;
     if (blockStart != null) {
       final blocks = splitMarkdownLiveBlocks(_document.text);
@@ -726,6 +876,46 @@ class LiveMarkdownEditorController extends ChangeNotifier {
       }
     }
     return markdownCommandState(target.value, fencedCode: fencedCode);
+  }
+
+  TextSelection? _normalizedDocumentSelection() {
+    final selection = _documentSelection;
+    if (selection == null || !selection.isValid || selection.isCollapsed) {
+      return null;
+    }
+    final start = _clampOffset(selection.start, _document.text.length);
+    final end = _clampOffset(selection.end, _document.text.length);
+    if (start == end) {
+      return null;
+    }
+    return TextSelection(
+      baseOffset: selection.baseOffset <= selection.extentOffset ? start : end,
+      extentOffset: selection.baseOffset <= selection.extentOffset
+          ? end
+          : start,
+    );
+  }
+
+  MarkdownCommandTarget? _documentSelectionTarget() {
+    final selection = _normalizedDocumentSelection();
+    if (selection == null) {
+      return null;
+    }
+    return MarkdownCommandTarget(
+      value: _document.value.copyWith(
+        selection: selection,
+        composing: TextRange.empty,
+      ),
+      blockStart: null,
+      documentScoped: true,
+    );
+  }
+
+  bool _validDocumentMenuTarget(MarkdownCommandTarget? target) {
+    return target != null &&
+        target.documentScoped &&
+        target.hasSelection &&
+        target.value.text == _document.text;
   }
 
   void clearStaleSelectionTarget() {
@@ -741,16 +931,16 @@ class LiveMarkdownEditorController extends ChangeNotifier {
       return null;
     }
     final index = markdownBlockIndexForOffset(blocks, offset);
-    if (!blocks[index].isBlank) {
+    if (!blocks[index].isBlank && !blocks[index].isColumnsMarker) {
       return index;
     }
     for (var previous = index - 1; previous >= 0; previous -= 1) {
-      if (!blocks[previous].isBlank) {
+      if (!blocks[previous].isBlank && !blocks[previous].isColumnsMarker) {
         return previous;
       }
     }
     for (var next = index + 1; next < blocks.length; next += 1) {
-      if (!blocks[next].isBlank) {
+      if (!blocks[next].isBlank && !blocks[next].isColumnsMarker) {
         return next;
       }
     }
@@ -871,6 +1061,12 @@ class LiveMarkdownEditorController extends ChangeNotifier {
       return false;
     }
     final target = command.target;
+    if (target.documentScoped) {
+      final selection = _normalizedDocumentSelection();
+      return selection != null &&
+          target.value.text == _document.text &&
+          target.selection == selection;
+    }
     if (target.blockStart == null) {
       return command.trailingInsertion &&
           _activeTrailingInsertion &&

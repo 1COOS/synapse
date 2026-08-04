@@ -9,6 +9,7 @@ import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 
 import '../../application/exports/note_pdf_export.dart';
+import '../../domain/markdown/markdown_columns.dart';
 
 typedef NotePdfFontLoader = Future<NotePdfFontBytes> Function();
 
@@ -220,7 +221,7 @@ final class _MarkdownPdfRenderer {
 
   final NotePdfExportSnapshot snapshot;
   final _PdfFonts fonts;
-  final double contentWidth;
+  double contentWidth;
   final double contentHeight;
   final List<NotePdfExportWarning> warnings;
   final Set<String> warningKeys;
@@ -246,32 +247,177 @@ final class _MarkdownPdfRenderer {
 
   List<pw.Widget> build(String markdown) {
     final result = <pw.Widget>[];
-    final renderedSegments = <_RenderedSegment>[];
-    for (final segment in _splitPageBreakSegments(markdown)) {
-      _sourceCursor.seek(segment.startOffset, segment.endOffset);
-      final nodes = _document.parse(segment.source);
-      final segmentWidgets = _blockNodes(nodes);
-      if (segmentWidgets.isNotEmpty) {
-        renderedSegments.add(
-          _RenderedSegment(segment: segment, widgets: segmentWidgets),
+    var hasVisibleContent = false;
+    int? pendingManualBreak;
+
+    void appendPendingManualBreak() {
+      if (pendingManualBreak == null) {
+        return;
+      }
+      if (!hasVisibleContent) {
+        pendingManualBreak = null;
+        return;
+      }
+      result.add(pw.NewPage());
+      result.add(
+        _ManualPageProbe(
+          markerOffset: pendingManualBreak!,
+          collector: boundaryCollector,
+        ),
+      );
+      pendingManualBreak = null;
+    }
+
+    void appendMarkdownRange(int start, int end) {
+      if (start >= end) {
+        return;
+      }
+      final source = markdown.substring(start, end);
+      for (final relative in _splitPageBreakSegments(source)) {
+        final segment = _PageBreakSegment(
+          source: relative.source,
+          startOffset: start + relative.startOffset,
+          endOffset: start + relative.endOffset,
+          manualBreakOffset: relative.manualBreakOffset == null
+              ? null
+              : start + relative.manualBreakOffset!,
         );
+        final widgets = _fragment(
+          segment.source,
+          segment.startOffset,
+          segment.endOffset,
+        );
+        if (widgets.isEmpty) {
+          pendingManualBreak = segment.manualBreakOffset ?? pendingManualBreak;
+          continue;
+        }
+        pendingManualBreak = segment.manualBreakOffset ?? pendingManualBreak;
+        appendPendingManualBreak();
+        result.addAll(widgets);
+        hasVisibleContent = true;
       }
     }
-    for (var index = 0; index < renderedSegments.length; index += 1) {
-      if (index > 0) {
-        result.add(pw.NewPage());
-        result.add(
-          _ManualPageProbe(
-            markerOffset:
-                renderedSegments[index].segment.manualBreakOffset ??
-                renderedSegments[index].segment.startOffset,
-            collector: boundaryCollector,
-          ),
-        );
+
+    var cursor = 0;
+    for (final layout in findMarkdownColumnsSourceLayouts(markdown)) {
+      appendMarkdownRange(cursor, layout.start);
+      appendPendingManualBreak();
+      final columns = _columns(layout, markdown);
+      if (columns.minimumStartHeight > 0) {
+        result.add(pw.NewPage(freeSpace: columns.minimumStartHeight));
       }
-      result.addAll(renderedSegments[index].widgets);
+      result.add(columns.widget);
+      hasVisibleContent = true;
+      cursor = layout.end;
     }
+    appendMarkdownRange(cursor, markdown.length);
     return result;
+  }
+
+  List<pw.Widget> _fragment(String source, int startOffset, int endOffset) {
+    _sourceCursor.seek(startOffset, endOffset);
+    return _blockNodes(_document.parse(source));
+  }
+
+  ({pw.Widget widget, double minimumStartHeight}) _columns(
+    MarkdownColumnsSourceLayout layout,
+    String markdown,
+  ) {
+    const gutter = 12.0;
+    final availableWidth = math.max(1.0, contentWidth - gutter);
+    final leftWidth = availableWidth * layout.leftPercent / 100;
+    final rightWidth = availableWidth - leftWidth;
+    final previousWidth = contentWidth;
+
+    final leftSource = markdown.substring(
+      layout.startMarkerEnd,
+      layout.separatorStart,
+    );
+    final rightSource = markdown.substring(
+      layout.separatorEnd,
+      layout.endMarkerStart,
+    );
+    final minimumStartHeight = math.max(
+      _leadingImageHeight(leftSource, leftWidth),
+      _leadingImageHeight(rightSource, rightWidth),
+    );
+
+    contentWidth = leftWidth;
+    final leftWidgets = _fragment(
+      leftSource,
+      layout.startMarkerEnd,
+      layout.separatorStart,
+    );
+    contentWidth = rightWidth;
+    final rightWidgets = _fragment(
+      rightSource,
+      layout.separatorEnd,
+      layout.endMarkerStart,
+    );
+    contentWidth = previousWidth;
+
+    List<pw.Widget> padded(List<pw.Widget> widgets, {required bool left}) => [
+      for (final widget in widgets)
+        pw.Padding(
+          padding: left
+              ? const pw.EdgeInsets.only(right: gutter / 2)
+              : const pw.EdgeInsets.only(left: gutter / 2),
+          child: widget,
+        ),
+    ];
+
+    return (
+      widget: pw.Partitions(
+        children: [
+          pw.Partition(
+            flex: layout.leftPercent,
+            child: pw.Column(children: padded(leftWidgets, left: true)),
+          ),
+          pw.Partition(
+            flex: layout.rightPercent,
+            child: pw.Column(children: padded(rightWidgets, left: false)),
+          ),
+        ],
+      ),
+      minimumStartHeight: minimumStartHeight,
+    );
+  }
+
+  double _leadingImageHeight(String source, double columnWidth) {
+    final trimmed = source.trimLeft();
+    String? imageSource;
+    int? sourceWidth;
+    final markdownMatch = RegExp(
+      r'^!\[[^\]]*\]\(([^)]+)\)',
+    ).firstMatch(trimmed);
+    if (markdownMatch != null) {
+      imageSource = markdownMatch.group(1);
+    } else {
+      final htmlMatch = _htmlImagePattern.firstMatch(trimmed);
+      if (htmlMatch?.start == 0) {
+        final images = _htmlImages(htmlMatch!.group(0)!);
+        if (images.isNotEmpty) {
+          imageSource = images.first.source;
+          sourceWidth = images.first.width;
+        }
+      }
+    }
+    if (imageSource == null) {
+      return 0;
+    }
+    final asset = _assets[_normalizeSource(imageSource)];
+    final decoded = asset?.bytes == null
+        ? null
+        : image_lib.decodeImage(asset!.bytes!);
+    if (decoded == null || decoded.width <= 0 || decoded.height <= 0) {
+      return 110;
+    }
+    final width = math.min(
+      columnWidth,
+      sourceWidth == null ? 360.0 : math.max(60.0, sourceWidth * 0.75),
+    );
+    final naturalHeight = width * decoded.height / decoded.width;
+    return math.min(contentHeight * 0.86, naturalHeight) + 14;
   }
 
   List<pw.Widget> _blockNodes(List<md.Node> nodes) {
@@ -1072,13 +1218,6 @@ final class _ObsidianHighlightSyntax extends md.InlineSyntax {
   }
 }
 
-final class _RenderedSegment {
-  const _RenderedSegment({required this.segment, required this.widgets});
-
-  final _PageBreakSegment segment;
-  final List<pw.Widget> widgets;
-}
-
 final class _PageBreakSegment {
   const _PageBreakSegment({
     required this.source,
@@ -1138,6 +1277,15 @@ List<_PageBreakSegment> _splitPageBreakSegments(String markdown) {
       _PageBreakSegment(
         source: trailing,
         startOffset: segmentStart,
+        endOffset: markdown.length,
+        manualBreakOffset: pendingManualBreak,
+      ),
+    );
+  } else if (pendingManualBreak != null) {
+    segments.add(
+      _PageBreakSegment(
+        source: '',
+        startOffset: markdown.length,
         endOffset: markdown.length,
         manualBreakOffset: pendingManualBreak,
       ),

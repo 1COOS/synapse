@@ -1,4 +1,5 @@
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
@@ -6,6 +7,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:synapse/application/settings/synapse_settings.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
 import 'package:synapse/presentation/cupertino/browser_context_menu_guard.dart';
+import 'package:synapse/presentation/cupertino/markdown_live_blocks.dart';
 import 'package:synapse/presentation/cupertino/workspace/workspace_theme.dart';
 
 import '../../support/workspace_fakes.dart';
@@ -76,6 +78,282 @@ void main() {
     await tester.pump();
 
     expect(find.textContaining('Changed from edit mode'), findsWidgets);
+  });
+
+  testWidgets(
+    'local columns keep surrounding content full width in edit and reading modes',
+    (tester) async {
+      final vault = MemoryVaultBackend(seedExampleData: false);
+      final note = await vault.createNote(parentPath: '', title: 'Columns');
+      const markdown =
+          'Before full width\n\n'
+          '<!-- synapse:columns ratio="40:60" -->\n\n'
+          'Left column\n\n'
+          '<!-- synapse:column -->\n\n'
+          'Right column\n\n'
+          '<!-- synapse:columns-end -->\n\n'
+          'After full width\n';
+      await vault.updateMarkdown(noteId: note.id, markdown: markdown);
+
+      await pumpWorkspace(tester, vault: vault);
+
+      final layoutIdentity = findMarkdownColumnsLayouts(
+        splitMarkdownLiveBlocks(markdown),
+      ).single.startBlockIndex;
+      final columns = find.byKey(Key('live-markdown-columns-$layoutIdentity'));
+      final columnsFrame = find.byKey(
+        Key('live-markdown-columns-frame-$layoutIdentity'),
+      );
+      Color columnsFrameColor() {
+        final decoration =
+            tester.widget<DecoratedBox>(columnsFrame).decoration
+                as BoxDecoration;
+        return (decoration.border! as Border).top.color;
+      }
+
+      expect(columns, findsOneWidget);
+      expect(columnsFrameColor(), const Color(0x00000000));
+      expect(find.text('Left column'), findsOneWidget);
+      expect(find.text('Right column'), findsOneWidget);
+      expect(
+        tester.getTopLeft(find.text('Left column')).dy,
+        closeTo(tester.getTopLeft(find.text('Right column')).dy, 2),
+      );
+      expect(
+        tester.getTopLeft(find.text('After full width')).dy,
+        greaterThan(tester.getBottomLeft(columns).dy - 1),
+      );
+      final horizontalScroll = find.descendant(
+        of: columns,
+        matching: find.byWidgetPredicate(
+          (widget) =>
+              widget is SingleChildScrollView &&
+              widget.scrollDirection == Axis.horizontal,
+        ),
+      );
+      expect(horizontalScroll, findsOneWidget);
+      expect(
+        tester
+            .state<ScrollableState>(
+              find.descendant(
+                of: horizontalScroll,
+                matching: find.byType(Scrollable),
+              ),
+            )
+            .position
+            .maxScrollExtent,
+        greaterThan(0),
+      );
+
+      await tester.tap(find.byKey(const Key('live-markdown-block-preview-4')));
+      await tester.pump();
+      expect(columnsFrameColor(), isNot(const Color(0x00000000)));
+      tester.testTextInput.enterText('Left edited');
+      await tester.pump();
+      await tester.tap(find.byKey(const Key('live-markdown-block-preview-8')));
+      await tester.pump();
+      expect(
+        activeLiveMarkdownTextField(tester).controller.text,
+        'Right column',
+      );
+      expect(activeLiveMarkdownTextField(tester).focusNode.hasFocus, isTrue);
+      tester.testTextInput.enterText('Right edited');
+      await tester.pump();
+      expect(
+        liveMarkdownDocumentController(tester, paneId: 1).text,
+        contains('Left edited'),
+      );
+      expect(
+        liveMarkdownDocumentController(tester, paneId: 1).text,
+        contains('Right edited'),
+      );
+
+      await tester.tap(find.text('After full width'));
+      await tester.pump();
+      expect(columnsFrameColor(), const Color(0x00000000));
+
+      await tester.tap(find.byKey(const Key('note-mode-reading')));
+      await tester.pump(const Duration(milliseconds: 250));
+
+      expect(
+        find.byKey(Key('live-markdown-reading-columns-$layoutIdentity')),
+        findsOneWidget,
+      );
+      expect(find.text('Before full width'), findsOneWidget);
+      expect(find.text('After full width'), findsOneWidget);
+      expect(find.textContaining('synapse:columns'), findsNothing);
+    },
+  );
+
+  testWidgets(
+    'inserts, edits, resizes, and flattens an empty local column block',
+    (tester) async {
+      final vault = MemoryVaultBackend(seedExampleData: false);
+      final note = await vault.createNote(parentPath: '', title: 'Columns');
+      await vault.updateMarkdown(noteId: note.id, markdown: 'Alpha\n');
+
+      await pumpWorkspace(tester, vault: vault);
+      await switchToSourceMode(tester);
+      await activateLiveMarkdownBlock(tester, blockIndex: 0);
+      await openNoteContextMenu(tester);
+      final mouse = await hoverNoteMenuItem(
+        tester,
+        const Key('note-menu-insert'),
+      );
+      final columnsMenuItem = find.byKey(const Key('note-menu-insert-columns'));
+      final menuPosition = tester.getCenter(columnsMenuItem);
+      await mouse.moveTo(menuPosition);
+      await mouse.down(menuPosition);
+      await tester.pump();
+      await mouse.up();
+      await tester.pumpAndSettle();
+      await mouse.removePointer();
+
+      final document = liveMarkdownDocumentController(tester, paneId: 1);
+      expect(document.text, contains('<!-- synapse:columns ratio="50:50" -->'));
+      expect(find.byKey(const Key('note-editor')), findsOneWidget);
+
+      tester.testTextInput.enterText(
+        List.generate(12, (index) => 'Left content $index').join('\n'),
+      );
+      await tester.pump();
+      final layoutIdentity = findMarkdownColumnsLayouts(
+        splitMarkdownLiveBlocks(document.text),
+      ).single.startBlockIndex;
+      final right = find.byKey(
+        Key('live-markdown-columns-right-$layoutIdentity'),
+      );
+      await tester.ensureVisible(right);
+      final rightSize = tester.getSize(right);
+      expect(rightSize.height, greaterThan(100));
+      await tester.tapAt(
+        tester.getTopLeft(right) +
+            Offset(rightSize.width / 2, rightSize.height - 4),
+      );
+      await tester.pump();
+      tester.testTextInput.enterText('Right content');
+      await tester.pump();
+
+      await tester.drag(
+        find.byKey(Key('live-markdown-columns-divider-$layoutIdentity')),
+        const Offset(-240, 0),
+      );
+      await tester.pump();
+      expect(document.text, contains('<!-- synapse:columns ratio="30:70" -->'));
+
+      await tester.tap(find.byKey(const Key('live-markdown-columns-ratio-40')));
+      await tester.pump();
+      expect(document.text, contains('<!-- synapse:columns ratio="40:60" -->'));
+
+      await tester.tap(find.byKey(const Key('live-markdown-columns-flatten')));
+      await tester.pump();
+      expect(document.text, isNot(contains('synapse:columns')));
+      expect(document.text, contains('Left content'));
+      expect(document.text, contains('Right content'));
+      expect(find.text('Alpha'), findsWidgets);
+    },
+  );
+
+  testWidgets('drags image and table blocks into local columns', (
+    tester,
+  ) async {
+    const imageTag =
+        '<img src="Columns Drag.assets/attachments/figure.png" width="320">';
+    const table = '| A |\n| --- |\n| 1 |';
+    const markdown =
+        '$imageTag\n\n'
+        '$table\n\n'
+        '<!-- synapse:columns ratio="50:50" -->\n\n'
+        '<!-- synapse:column -->\n\n'
+        '<!-- synapse:columns-end -->\n';
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Columns Drag');
+    final image = await vault.addImageAttachment(
+      noteId: note.id,
+      filename: 'figure.png',
+      mimeType: 'image/png',
+      bytes: tinyPng,
+    );
+    await vault.updateMarkdown(noteId: note.id, markdown: markdown);
+
+    await pumpWorkspace(tester, vault: vault);
+    await tester.pumpAndSettle();
+
+    final layoutIdentity = findMarkdownColumnsLayouts(
+      splitMarkdownLiveBlocks(markdown),
+    ).single.startBlockIndex;
+    final rightColumn = find.byKey(
+      Key('live-markdown-columns-right-$layoutIdentity'),
+    );
+    final imageSource = find.byKey(Key('preview-image-tap-${image.id}'));
+    final imageGesture = await tester.startGesture(
+      tester.getCenter(imageSource),
+      kind: PointerDeviceKind.mouse,
+    );
+    await imageGesture.moveBy(const Offset(0, 12));
+    await tester.pump();
+    await imageGesture.moveTo(tester.getCenter(rightColumn));
+    await tester.pump();
+    expect(
+      find.byWidgetPredicate(
+        (widget) =>
+            widget.key.toString().contains('markdown-image-block-drop-line'),
+      ),
+      findsOneWidget,
+    );
+    await imageGesture.up();
+    await tester.pumpAndSettle();
+
+    var updated = liveMarkdownDocumentController(tester, paneId: 1).text;
+    var separator = updated.indexOf('<!-- synapse:column -->');
+    var columnsEnd = updated.indexOf('<!-- synapse:columns-end -->');
+    final movedImage = updated.indexOf(imageTag);
+    expect(movedImage, greaterThan(separator));
+    expect(movedImage, lessThan(columnsEnd));
+
+    final tableSelectionTarget = find.byWidgetPredicate(
+      (widget) =>
+          widget.key.toString().contains('table-frame-selection-target-'),
+    );
+    await tester.tap(tableSelectionTarget);
+    await tester.pumpAndSettle();
+    final tableSource = find.byWidgetPredicate(
+      (widget) =>
+          widget.key.toString().contains('markdown-table-block-drag-source-'),
+    );
+    final movedLayoutIdentity = findMarkdownColumnsLayouts(
+      splitMarkdownLiveBlocks(updated),
+    ).single.startBlockIndex;
+    final leftColumn = find.byKey(
+      Key('live-markdown-columns-left-$movedLayoutIdentity'),
+    );
+    final tableGesture = await tester.startGesture(
+      tester.getCenter(tableSource),
+      kind: PointerDeviceKind.mouse,
+    );
+    await tableGesture.moveBy(const Offset(0, 12));
+    await tester.pump();
+    await tableGesture.moveTo(tester.getCenter(leftColumn));
+    await tester.pump();
+    expect(
+      find.byWidgetPredicate(
+        (widget) =>
+            widget.key.toString().contains('markdown-table-block-drop-line'),
+      ),
+      findsOneWidget,
+    );
+    await tableGesture.up();
+    await tester.pumpAndSettle();
+
+    updated = liveMarkdownDocumentController(tester, paneId: 1).text;
+    final columnsStart = updated.indexOf('<!-- synapse:columns');
+    separator = updated.indexOf('<!-- synapse:column -->');
+    columnsEnd = updated.indexOf('<!-- synapse:columns-end -->');
+    final movedTable = updated.indexOf('| A |');
+    expect(movedTable, greaterThan(columnsStart));
+    expect(movedTable, lessThan(separator));
+    expect(updated.indexOf(imageTag), greaterThan(separator));
+    expect(updated.indexOf(imageTag), lessThan(columnsEnd));
   });
 
   testWidgets(

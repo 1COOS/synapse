@@ -26,6 +26,7 @@ List<Widget> buildLiveMarkdownContextMenuItems({
 }) {
   final commandState = controller.commandState(menuTarget: menuTarget);
   final hasSelection = commandState.hasSelection;
+  final canMutateSelection = controller.documentSelectionCanMutate;
   final canUseStructure = canEdit && commandState.canUseStructuralCommands;
   final canFormat = canEdit && commandState.canFormat;
   final shortcuts = _contextMenuShortcuts();
@@ -56,7 +57,8 @@ List<Widget> buildLiveMarkdownContextMenuItems({
     NoteMenuAction(
       itemKey: const Key('note-menu-cut'),
       label: '剪切',
-      enabled: canCutOverride ?? (canEdit && hasSelection),
+      enabled:
+          canCutOverride ?? (canEdit && hasSelection && canMutateSelection),
       onPressed:
           onCutOverride ??
           () => controller.cutSelection(menuTarget: menuTarget, busy: busy),
@@ -64,13 +66,13 @@ List<Widget> buildLiveMarkdownContextMenuItems({
     NoteMenuAction(
       itemKey: const Key('note-menu-paste'),
       label: '粘贴',
-      enabled: canPasteOverride ?? (canEdit && canPaste),
+      enabled: canPasteOverride ?? (canEdit && canPaste && canMutateSelection),
       onPressed: () => onPaste(menuTarget),
     ),
     NoteMenuAction(
       itemKey: const Key('note-menu-paste-plain'),
       label: '以纯文本粘贴',
-      enabled: canEdit && hasText,
+      enabled: canEdit && hasText && canMutateSelection,
       shortcutLabel: shortcuts.pastePlain,
       onPressed: () =>
           controller.pastePlainText(menuTarget: menuTarget, busy: busy),
@@ -109,6 +111,16 @@ List<Widget> buildLiveMarkdownContextMenuItems({
           ),
         ),
         NoteMenuAction(
+          itemKey: const Key('note-menu-insert-columns'),
+          label: '双栏',
+          enabled: canUseStructure && !controller.activeBlockIsInsideColumns,
+          onPressed: () => controller.applyInsertion(
+            MarkdownInsertion.columns,
+            menuTarget: menuTarget,
+            busy: busy,
+          ),
+        ),
+        NoteMenuAction(
           itemKey: const Key('note-menu-insert-divider'),
           label: '分隔线',
           enabled: canUseStructure,
@@ -121,7 +133,7 @@ List<Widget> buildLiveMarkdownContextMenuItems({
         NoteMenuAction(
           itemKey: const Key('note-menu-insert-page-break'),
           label: '分页符',
-          enabled: canUseStructure,
+          enabled: canUseStructure && !controller.activeBlockIsInsideColumns,
           onPressed: () => controller.applyInsertion(
             MarkdownInsertion.pageBreak,
             menuTarget: menuTarget,

@@ -848,6 +848,50 @@ void main() {
     expect(document.text, markdown);
   });
 
+  testWidgets(
+    'blank markdown space inserts columns at that blank without a selection',
+    (tester) async {
+      const markdown = 'Alpha\n\nBeta\n';
+      final vault = MemoryVaultBackend(seedExampleData: false);
+      final note = await vault.createNote(
+        parentPath: '',
+        title: 'Blank Columns',
+      );
+      await vault.updateMarkdown(noteId: note.id, markdown: markdown);
+
+      await pumpWorkspace(tester, vault: vault);
+      await switchToSourceMode(tester);
+      await activateLiveMarkdownBlock(tester, blockIndex: 0);
+      final document = liveMarkdownDocumentController(tester, paneId: 1);
+
+      await tester.tap(
+        find.byKey(const Key('live-markdown-block-preview-1')),
+        buttons: kSecondaryMouseButton,
+      );
+      await tester.pumpAndSettle();
+      final mouse = await hoverNoteMenuItem(
+        tester,
+        const Key('note-menu-insert'),
+      );
+      await clickNoteMenuItemWithMouse(
+        tester,
+        mouse,
+        const Key('note-menu-insert-columns'),
+      );
+      await mouse.removePointer();
+
+      expect(
+        document.text,
+        'Alpha\n\n'
+        '<!-- synapse:columns ratio="50:50" -->\n\n'
+        '<!-- synapse:column -->\n\n'
+        '<!-- synapse:columns-end -->\n\n'
+        'Beta\n',
+      );
+      expect(find.byKey(const Key('note-editor')), findsOneWidget);
+    },
+  );
+
   testWidgets('empty note opens the editor context menu', (tester) async {
     final vault = MemoryVaultBackend(seedExampleData: false);
     final note = await vault.createNote(parentPath: '', title: 'Empty Menu');
@@ -866,6 +910,20 @@ void main() {
     expect(find.byKey(const Key('note-context-menu')), findsOneWidget);
     expect(find.byKey(const Key('note-menu-paste')), findsOneWidget);
     expect(document.text, isEmpty);
+
+    final mouse = await hoverNoteMenuItem(
+      tester,
+      const Key('note-menu-insert'),
+    );
+    await clickNoteMenuItemWithMouse(
+      tester,
+      mouse,
+      const Key('note-menu-insert-columns'),
+    );
+    await mouse.removePointer();
+
+    expect(document.text, startsWith('<!-- synapse:columns ratio="50:50" -->'));
+    expect(document.text, contains('<!-- synapse:columns-end -->'));
   });
 
   testWidgets(

@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -659,30 +660,58 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
                                       )
                                     : Focus(
                                         focusNode: paneFocusNode,
-                                        child: GestureDetector(
+                                        child: Listener(
                                           behavior: HitTestBehavior.translucent,
-                                          onTapDown: (_) {
-                                            if (!paneFocusNode.hasFocus) {
-                                              paneFocusNode.requestFocus();
-                                            }
-                                          },
-                                          onSecondaryTapDown: (details) =>
+                                          onPointerDown: (event) {
+                                            if (event.buttons &
+                                                    kSecondaryMouseButton !=
+                                                0) {
                                               _showReadingFindMenu(
                                                 pane,
                                                 findController,
-                                                details.globalPosition,
-                                              ),
-                                          child: _markdownRenderer
-                                              .buildReadingPreview(
-                                                session: session,
-                                                editorContext: editorContext!,
-                                                paneId: pane.paneId,
-                                                focused: focused,
-                                                outlineNodes: outlineNodes,
-                                                outlineNavigationController: widget
-                                                    .outlineNavigationController,
-                                                findController: findController,
-                                              ),
+                                                event.position,
+                                              );
+                                            }
+                                          },
+                                          child: GestureDetector(
+                                            behavior:
+                                                HitTestBehavior.translucent,
+                                            onTapDown: (_) {
+                                              if (!paneFocusNode.hasFocus) {
+                                                paneFocusNode.requestFocus();
+                                              }
+                                            },
+                                            child: _markdownRenderer
+                                                .buildReadingPreview(
+                                                  session: session,
+                                                  editorContext: editorContext!,
+                                                  paneId: pane.paneId,
+                                                  focused: focused,
+                                                  outlineNodes: outlineNodes,
+                                                  outlineNavigationController:
+                                                      widget
+                                                          .outlineNavigationController,
+                                                  findController:
+                                                      findController,
+                                                  onFindRequested: () =>
+                                                      _openFind(
+                                                        pane,
+                                                        findController,
+                                                      ),
+                                                  onReplaceRequested: () =>
+                                                      _openReplace(
+                                                        pane,
+                                                        findController,
+                                                      ),
+                                                  canReplace:
+                                                      !_busy &&
+                                                      !_reloadRequired &&
+                                                      !_paneEditorCommandLocks
+                                                          .contains(
+                                                            session.noteId,
+                                                          ),
+                                                ),
+                                          ),
                                         ),
                                       )
                               : _buildNoteEditor(

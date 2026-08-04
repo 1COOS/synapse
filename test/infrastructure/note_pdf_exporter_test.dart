@@ -164,6 +164,61 @@ void main() {
     expect(result.bytes.take(4), '%PDF'.codeUnits);
   });
 
+  test(
+    'local columns stay side by side and both sides can span pages',
+    () async {
+      final left = List.generate(
+        90,
+        (index) => '左栏第 $index 段：图片、摘要或短说明。',
+      ).join('\n\n');
+      final right = List.generate(
+        130,
+        (index) => '右栏第 $index 段：用于验证独立跨页的正文内容。',
+      ).join('\n\n');
+      final markdown =
+          '# 双栏之前\n\n'
+          '<!-- synapse:columns ratio="40:60" -->\n\n'
+          '$left\n\n'
+          '<!-- synapse:column -->\n\n'
+          '$right\n\n'
+          '<!-- synapse:columns-end -->\n\n'
+          '# 双栏之后\n\n全宽内容';
+
+      final result = await buildNotePdf(
+        _snapshot(markdown),
+        const NotePdfExportOptions(),
+        fonts,
+      );
+
+      expect(result.pageCount, greaterThan(2));
+      expect(result.pageCount, lessThan(1000));
+      expect(result.bytes.take(4), '%PDF'.codeUnits);
+      expect(result.boundaries, hasLength(result.pageCount - 1));
+    },
+  );
+
+  test(
+    'a top-level page break immediately before columns starts a new page',
+    () async {
+      final result = await buildNotePdf(
+        _snapshot(
+          'Before\n\n'
+          '<!-- synapse:page-break -->\n\n'
+          '<!-- synapse:columns ratio="50:50" -->\n\n'
+          'Left\n\n'
+          '<!-- synapse:column -->\n\n'
+          'Right\n\n'
+          '<!-- synapse:columns-end -->\n',
+        ),
+        const NotePdfExportOptions(),
+        fonts,
+      );
+
+      expect(result.pageCount, 2);
+      expect(result.boundaries.single.kind, NotePdfPageBoundaryKind.manual);
+    },
+  );
+
   test('one long paragraph and one long list item can span pages', () async {
     final paragraph = List.filled(1600, '连续段落内容').join('，');
     final listItem = List.filled(1400, '列表内容').join('，');

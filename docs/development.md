@@ -142,9 +142,16 @@ Widget 使用 Provider 渲染并发送 intent，不得重新引入本地业务�
 - inline parser 统一识别加粗、斜体、删除线、`==高亮==`、转义、任意嵌套和代码范围；formatting command 同时更新 Markdown source 和 styled display；
 - inline format 使用 toggle 语义；混合选区统一应用，跨行逐个非空行处理，只移除目标 marker，并保持相同可见文字选区；
 - 行内/围栏代码中的选区禁用格式、段落、列表和块插入；
+- 编辑、阅读和打印共用窗格级 selection projection；每个可见叶子把渲染位置映射回全局 Markdown UTF-16 offset，滚动与无正文变化的保存不得清除选区，切换笔记、窗格绑定或模式必须清除；
+- selection tree 必须按 Markdown source 注册顺序遍历，双栏严格为左栏全部、右栏全部、下方全宽；横向滚动 viewport 不得创建隔离正文叶子的 selection container，纵向边缘拖选必须持续自动滚动；
+- `⌘A`/`Ctrl+A` 选中当前窗格正文且排除 frontmatter；Copy 输出 source range，Cut/Delete/Backspace/输入/粘贴复用同一 document replacement pipeline，并形成一个 undo/autosave 变更；
+- 图片、真实表格、分页符和分隔线按原子 source segment 保护；部分覆盖只能复制，禁止破坏性命令并提示完整选择。双栏部分删除必须保留成套 start/separator/end marker，完整覆盖整个布局时才允许一并删除；
 - 产品菜单只暴露 H1–H4，renderer 与 outline parser 继续兼容 H5/H6；
 - `Shift+F10`/菜单键、方向键、Enter/Space、Esc 和焦点恢复是编辑器/资源菜单的共同键盘契约；
 - 表格、分隔线与分页符插入当前 block 之后；表格聚焦首个表头，分隔线和分页符聚焦后续空正文 block；
+- 双栏是局部复合 block，使用 `synapse:columns` / `synapse:column` / `synapse:columns-end` 三类独占行注释包住两段普通 Markdown；内部叶子 block 必须继续保留全局 UTF-16 source offset，活动编辑器不得把整段布局源码压成单个不可编辑 widget；
+- 双栏插入后聚焦左栏空正文；栏内禁止再次插入双栏。“取消双栏”只删除布局注释并按左后右展平；栏宽拖动只在 pointer-up 时写回一个归一化 `30:70` 至 `70:30` 比例，形成单个 undo 变更；
+- 双栏的横向滚动只属于该布局块，不能替换或联动正文纵向 scroll controller；查找、大纲、图片和表格操作仍按内部叶子 block 定位；
 - 分页符必须严格保存为独占一行的 `<!-- synapse:page-break -->`；非活动源码块显示辅助线，活动块显示真实 marker，阅读模式隐藏；普通 `---` 不得改写为分页；
 - 打印模式继续复用 Live Markdown editor；自动分页线只能作为 `IgnorePointer`/`ExcludeSemantics` overlay，禁止插入占位字符或 widget span，禁止改变 caret、selection、copy、undo 和 `TextSpan.toPlainText()`；手动分页符继续使用现有源码辅助线；
 - active editor `TextSpan.toPlainText()` 必须与 backing controller text 完全一致；
@@ -161,6 +168,7 @@ H1 自动改名和右键笔记重命名必须把 Markdown save、严格 rename�
 - A4 纸张、15/20/25 mm 页边距、11 pt 正文、1.5 倍行高、页眉标题和 `当前页 / 总页数` 是打印契约，不读取屏幕字号或主题色；
 - 字体和许可证位于 `assets/fonts/`，不得添加运行时网络字体下载；
 - 图片必须等比 contain，缺失/损坏时产生 warning 和可见占位；表格超高行必须整表降级，不能静默裁切；
+- PDF 双栏使用可跨页的独立 partition，始终保留保存的比例；双栏后的全宽内容必须等待左右两栏都结束后继续，栏内图片与表格使用各自栏宽计算，布局注释本身不得进入 PDF；
 - 保存必须复用当前 preview bytes；系统保存框取消是正常结果，写入错误保留弹窗和重试能力。
 
 PDF 目标验证顺序：

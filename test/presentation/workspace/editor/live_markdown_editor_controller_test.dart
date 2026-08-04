@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:synapse/presentation/cupertino/markdown_context_commands.dart';
 import 'package:synapse/presentation/workspace/editor/live_markdown_editor_controller.dart';
 
 void main() {
@@ -198,6 +199,67 @@ void main() {
     await paste;
 
     expect(document.text, 'Alpha pasted');
+  });
+
+  test('document selection formats multiple blocks as one command', () {
+    final document = TextEditingController(text: 'Alpha\n\nBeta\n');
+    final controller = LiveMarkdownEditorController(document: document);
+    addTearDown(() {
+      controller.dispose();
+      document.dispose();
+    });
+    controller.setDocumentSelection(
+      TextSelection(baseOffset: 0, extentOffset: document.text.length),
+    );
+
+    controller.applyInlineFormat(MarkdownInlineFormat.bold, busy: false);
+
+    expect(document.text, '**Alpha**\n\n**Beta**\n');
+    expect(controller.hasDocumentSelection, isTrue);
+    expect(controller.canUndo, isTrue);
+  });
+
+  test('document replacement protects a partial table', () {
+    final document = TextEditingController(
+      text: '| A | B |\n| --- | --- |\n| 1 | 2 |\n',
+    );
+    final controller = LiveMarkdownEditorController(document: document);
+    addTearDown(() {
+      controller.dispose();
+      document.dispose();
+    });
+    controller.setDocumentSelection(
+      const TextSelection(baseOffset: 2, extentOffset: 3),
+    );
+
+    expect(controller.replaceDocumentSelection(''), isFalse);
+    expect(document.text, '| A | B |\n| --- | --- |\n| 1 | 2 |\n');
+  });
+
+  test('document replacement preserves partial column structure', () {
+    const markdown =
+        '<!-- synapse:columns ratio="50:50" -->\n\n'
+        'Left tail\n\n'
+        '<!-- synapse:column -->\n\n'
+        'Right head\n\n'
+        '<!-- synapse:columns-end -->\n';
+    final document = TextEditingController(text: markdown);
+    final controller = LiveMarkdownEditorController(document: document);
+    addTearDown(() {
+      controller.dispose();
+      document.dispose();
+    });
+    controller.setDocumentSelection(
+      TextSelection(
+        baseOffset: markdown.indexOf('tail'),
+        extentOffset: markdown.indexOf(' head') + 1,
+      ),
+    );
+
+    expect(controller.replaceDocumentSelection('kept'), isTrue);
+    expect(document.text, contains('Left kept'));
+    expect(document.text, contains('<!-- synapse:column -->'));
+    expect(document.text, contains('<!-- synapse:columns-end -->'));
   });
 }
 

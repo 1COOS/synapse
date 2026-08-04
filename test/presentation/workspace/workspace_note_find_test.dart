@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:synapse/infrastructure/input/image_input_service.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
+import 'package:synapse/presentation/cupertino/markdown_live_blocks.dart';
 import 'package:synapse/presentation/cupertino/workspace/workspace_titlebar.dart';
 import 'package:synapse/presentation/workspace/editor/live_markdown_editor.dart';
 
@@ -54,7 +55,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('2/2'), findsOneWidget);
     expect(
-      _findBlockBorder(tester, const Key('reading-find-block-9')),
+      _findBlockBorder(tester, const Key('reading-find-block-2')),
       isNotNull,
     );
     await tester.sendKeyEvent(LogicalKeyboardKey.escape);
@@ -303,80 +304,78 @@ void main() {
     );
   }
 
-  testWidgets(
-    'replace covers rendered markdown source without flattening table',
-    (tester) async {
-      const markdown =
-          '# Alpha\n\n'
-          '- Alpha\n\n'
-          '[Alpha](https://example.com)\n\n'
-          '![Alpha](assets/asset.png)\n\n'
-          '| Alpha |\n'
-          '| --- |\n'
-          '| Alpha |\n';
-      const replaced =
-          '# Omega\n\n'
-          '- Omega\n\n'
-          '[Omega](https://example.com)\n\n'
-          '![Omega](assets/asset.png)\n\n'
-          '| Omega |\n'
-          '| --- |\n'
-          '| Omega |\n';
-      final vault = MemoryVaultBackend(seedExampleData: false);
-      final note = await vault.createNote(
-        parentPath: '',
-        title: 'Source Match',
-      );
-      await vault.updateMarkdown(noteId: note.id, markdown: markdown);
+  testWidgets('replace covers rendered markdown source without flattening table', (
+    tester,
+  ) async {
+    const markdown =
+        '# Alpha\n\n'
+        '- Alpha\n\n'
+        '[Alpha](https://example.com)\n\n'
+        '![Alpha](assets/asset.png)\n\n'
+        '| Alpha |\n'
+        '| --- |\n'
+        '| Alpha |\n';
+    const replaced =
+        '# Omega\n\n'
+        '- Omega\n\n'
+        '[Omega](https://example.com)\n\n'
+        '![Omega](assets/asset.png)\n\n'
+        '| Omega |\n'
+        '| --- |\n'
+        '| Omega |\n';
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Source Match');
+    await vault.updateMarkdown(noteId: note.id, markdown: markdown);
 
-      await pumpWorkspace(tester, vault: vault);
-      expect(find.byType(Table), findsWidgets);
-      await activateLiveMarkdownBlock(tester);
-      await _sendFindShortcut(tester, replace: true);
+    await pumpWorkspace(tester, vault: vault);
+    expect(find.byType(Table), findsWidgets);
+    await activateLiveMarkdownBlock(tester);
+    await _sendFindShortcut(tester, replace: true);
 
-      await tester.enterText(
-        find.byKey(const Key('note-find-query')),
-        'asset.png',
-      );
-      await tester.pumpAndSettle();
-      expect(
-        _findBlockBorder(
-          tester,
-          Key('editor-find-block-${markdown.indexOf('![')}'),
+    await tester.enterText(
+      find.byKey(const Key('note-find-query')),
+      'asset.png',
+    );
+    await tester.pumpAndSettle();
+    final blocks = splitMarkdownLiveBlocks(markdown);
+    expect(
+      _findBlockBorder(
+        tester,
+        Key(
+          'editor-find-block-${markdownBlockIndexForOffset(blocks, markdown.indexOf('!['))}',
         ),
-        isNotNull,
-      );
-      expect(
-        find.byKey(const Key('live-markdown-image-tag-editor-6')),
-        findsNothing,
-      );
+      ),
+      isNotNull,
+    );
+    expect(
+      find.byKey(const Key('live-markdown-image-tag-editor-6')),
+      findsNothing,
+    );
 
-      await tester.enterText(
-        find.byKey(const Key('note-find-query')),
-        '| --- |',
-      );
-      await tester.pumpAndSettle();
-      expect(
-        _findBlockBorder(
-          tester,
-          Key('editor-find-block-${markdown.indexOf('| Alpha |')}'),
+    await tester.enterText(find.byKey(const Key('note-find-query')), '| --- |');
+    await tester.pumpAndSettle();
+    expect(
+      _findBlockBorder(
+        tester,
+        Key(
+          'editor-find-block-${markdownBlockIndexForOffset(blocks, markdown.indexOf('| Alpha |'))}',
         ),
-        isNotNull,
-      );
-      expect(find.byType(Table), findsWidgets);
+      ),
+      isNotNull,
+    );
+    expect(find.byType(Table), findsWidgets);
 
-      await tester.enterText(find.byKey(const Key('note-find-query')), 'Alpha');
-      await tester.enterText(
-        find.byKey(const Key('note-find-replacement')),
-        'Omega',
-      );
-      await tester.tap(find.byKey(const Key('note-find-replace-all')));
-      await tester.pumpAndSettle();
+    await tester.enterText(find.byKey(const Key('note-find-query')), 'Alpha');
+    await tester.enterText(
+      find.byKey(const Key('note-find-replacement')),
+      'Omega',
+    );
+    await tester.tap(find.byKey(const Key('note-find-replace-all')));
+    await tester.pumpAndSettle();
 
-      expect(liveMarkdownDocumentController(tester, paneId: 1).text, replaced);
-      expect(find.byType(Table), findsWidgets);
-    },
-  );
+    expect(liveMarkdownDocumentController(tester, paneId: 1).text, replaced);
+    expect(find.byType(Table), findsWidgets);
+  });
 
   testWidgets('find remains available while a session lock disables replace', (
     tester,

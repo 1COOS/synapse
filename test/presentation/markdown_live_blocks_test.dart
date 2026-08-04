@@ -94,6 +94,100 @@ void main() {}
     expect(blocks.map((block) => block.text).join(), markdown);
   });
 
+  test('recognizes a local two-column layout without consuming its blocks', () {
+    const markdown =
+        'Before\n\n'
+        '<!-- synapse:columns ratio="40:60" -->\n\n'
+        '![Diagram](note.assets/attachments/a.png)\n\n'
+        '<!-- synapse:column -->\n\n'
+        'Explanation\n\n'
+        '<!-- synapse:columns-end -->\n\n'
+        '| Wide | Table |\n|---|---|\n| A | B |\n';
+
+    final blocks = splitMarkdownLiveBlocks(markdown);
+    final layouts = findMarkdownColumnsLayouts(blocks);
+
+    expect(layouts, hasLength(1));
+    expect(layouts.single.leftPercent, 40);
+    expect(
+      blocks[layouts.single.startBlockIndex].kind,
+      MarkdownLiveBlockKind.columnsStart,
+    );
+    expect(
+      blocks[layouts.single.separatorBlockIndex].kind,
+      MarkdownLiveBlockKind.columnsSeparator,
+    );
+    expect(
+      blocks[layouts.single.endBlockIndex].kind,
+      MarkdownLiveBlockKind.columnsEnd,
+    );
+    expect(blocks.map((block) => block.text).join(), markdown);
+    expect(
+      blocks
+          .sublist(
+            layouts.single.startBlockIndex + 1,
+            layouts.single.separatorBlockIndex,
+          )
+          .any((block) => block.kind == MarkdownLiveBlockKind.image),
+      isTrue,
+    );
+  });
+
+  test(
+    'rejects nested columns and flattens a layout without losing content',
+    () {
+      const markdown =
+          '<!-- synapse:columns ratio="50:50" -->\n\n'
+          'Left\n\n'
+          '<!-- synapse:column -->\n\n'
+          'Right\n\n'
+          '<!-- synapse:columns-end -->\n';
+      final blocks = splitMarkdownLiveBlocks(markdown);
+      final start = blocks.firstWhere(
+        (block) => block.kind == MarkdownLiveBlockKind.columnsStart,
+      );
+
+      expect(
+        flattenMarkdownColumns(markdown: markdown, layoutStart: start.start),
+        'Left\n\nRight',
+      );
+
+      const nested =
+          '<!-- synapse:columns ratio="50:50" -->\n'
+          '<!-- synapse:columns ratio="50:50" -->\n'
+          '<!-- synapse:column -->\n'
+          '<!-- synapse:columns-end -->\n'
+          '<!-- synapse:column -->\n'
+          '<!-- synapse:columns-end -->\n';
+      expect(
+        findMarkdownColumnsLayouts(splitMarkdownLiveBlocks(nested)),
+        isEmpty,
+      );
+    },
+  );
+
+  test(
+    'updates and clamps a two-column ratio without touching its content',
+    () {
+      const markdown =
+          '<!-- synapse:columns ratio="50:50" -->\n\n'
+          'Left\n\n'
+          '<!-- synapse:column -->\n\n'
+          'Right\n\n'
+          '<!-- synapse:columns-end -->\n';
+
+      final updated = updateMarkdownColumnsRatio(
+        markdown: markdown,
+        layoutStart: 0,
+        leftPercent: 5,
+      );
+
+      expect(updated, startsWith('<!-- synapse:columns ratio="30:70" -->'));
+      expect(updated, contains('Left'));
+      expect(updated, contains('Right'));
+    },
+  );
+
   test('finds and replaces the block containing a text offset', () {
     const markdown = '# Title\n\nold paragraph\n\n- first\n- second\n';
     final blocks = splitMarkdownLiveBlocks(markdown);

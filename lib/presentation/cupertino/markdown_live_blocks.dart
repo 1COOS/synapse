@@ -1,4 +1,7 @@
 import '../../application/exports/note_pdf_export.dart';
+import '../../domain/markdown/markdown_columns.dart';
+
+export '../../domain/markdown/markdown_columns.dart';
 
 enum MarkdownLiveBlockKind {
   heading,
@@ -9,6 +12,9 @@ enum MarkdownLiveBlockKind {
   fencedCode,
   image,
   pageBreak,
+  columnsStart,
+  columnsSeparator,
+  columnsEnd,
   blank,
 }
 
@@ -29,6 +35,97 @@ class MarkdownLiveBlock {
   final int end;
 
   bool get isBlank => kind == MarkdownLiveBlockKind.blank;
+  bool get isColumnsMarker =>
+      kind == MarkdownLiveBlockKind.columnsStart ||
+      kind == MarkdownLiveBlockKind.columnsSeparator ||
+      kind == MarkdownLiveBlockKind.columnsEnd;
+}
+
+final class MarkdownColumnsLayout {
+  const MarkdownColumnsLayout({
+    required this.startBlockIndex,
+    required this.separatorBlockIndex,
+    required this.endBlockIndex,
+    required this.leftPercent,
+  });
+
+  final int startBlockIndex;
+  final int separatorBlockIndex;
+  final int endBlockIndex;
+  final int leftPercent;
+
+  int get rightPercent => 100 - leftPercent;
+}
+
+List<MarkdownColumnsLayout> findMarkdownColumnsLayouts(
+  List<MarkdownLiveBlock> blocks,
+) {
+  final layouts = <MarkdownColumnsLayout>[];
+  var index = 0;
+  while (index < blocks.length) {
+    if (blocks[index].kind != MarkdownLiveBlockKind.columnsStart) {
+      index += 1;
+      continue;
+    }
+    int? separator;
+    int? end;
+    var nested = false;
+    var depth = 1;
+    for (var cursor = index + 1; cursor < blocks.length; cursor += 1) {
+      final kind = blocks[cursor].kind;
+      if (kind == MarkdownLiveBlockKind.columnsStart) {
+        nested = true;
+        depth += 1;
+        continue;
+      }
+      if (kind == MarkdownLiveBlockKind.columnsSeparator && depth == 1) {
+        if (separator != null) {
+          nested = true;
+          continue;
+        }
+        separator = cursor;
+        continue;
+      }
+      if (kind == MarkdownLiveBlockKind.columnsEnd) {
+        depth -= 1;
+        if (depth == 0) {
+          end = cursor;
+          break;
+        }
+      }
+    }
+    if (!nested && separator != null && end != null) {
+      layouts.add(
+        MarkdownColumnsLayout(
+          startBlockIndex: index,
+          separatorBlockIndex: separator,
+          endBlockIndex: end,
+          leftPercent: markdownColumnsLeftPercentFromMarker(blocks[index].text),
+        ),
+      );
+      index = end + 1;
+      continue;
+    }
+    if (end != null) {
+      index = end + 1;
+      continue;
+    }
+    index += 1;
+  }
+  return layouts;
+}
+
+MarkdownColumnsLayout? markdownColumnsLayoutForOffset(
+  List<MarkdownLiveBlock> blocks,
+  int offset,
+) {
+  for (final layout in findMarkdownColumnsLayouts(blocks)) {
+    if (offset >= blocks[layout.startBlockIndex].start &&
+        offset < blocks[layout.endBlockIndex].end) {
+      return layout;
+    }
+  }
+  return null;
 }
 
 List<MarkdownLiveBlock> splitMarkdownLiveBlocks(String markdown) {
@@ -50,6 +147,13 @@ List<MarkdownLiveBlock> splitMarkdownLiveBlocks(String markdown) {
   while (index < lines.length) {
     final line = lines[index];
     final trimmed = line.text.trim();
+
+    final columnsMarkerKind = _columnsMarkerKind(trimmed);
+    if (columnsMarkerKind != null) {
+      index += 1;
+      blocks.add(_block(columnsMarkerKind, lines, line.index, index));
+      continue;
+    }
 
     if (trimmed.isEmpty) {
       index = _collectWhile(lines, index, (line) => line.text.trim().isEmpty);
@@ -859,6 +963,7 @@ bool _startsSpecialBlock(String line) {
   return trimmed.isEmpty ||
       _isFenceStart(trimmed) ||
       _isPageBreak(trimmed) ||
+      _columnsMarkerKind(trimmed) != null ||
       _isHeading(trimmed) ||
       _isStandaloneImage(trimmed) ||
       _isSynapseTableWidthComment(trimmed) ||
@@ -868,6 +973,19 @@ bool _startsSpecialBlock(String line) {
 }
 
 bool _isPageBreak(String trimmed) => trimmed == synapsePageBreakMarker;
+
+MarkdownLiveBlockKind? _columnsMarkerKind(String trimmed) {
+  if (markdownColumnsStartPattern.hasMatch(trimmed)) {
+    return MarkdownLiveBlockKind.columnsStart;
+  }
+  if (trimmed == synapseColumnsSeparatorMarker) {
+    return MarkdownLiveBlockKind.columnsSeparator;
+  }
+  if (trimmed == synapseColumnsEndMarker) {
+    return MarkdownLiveBlockKind.columnsEnd;
+  }
+  return null;
+}
 
 bool _isFenceStart(String trimmed) {
   return trimmed.startsWith('```') || trimmed.startsWith('~~~');

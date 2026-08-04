@@ -1,6 +1,10 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/foundation.dart';
+import 'package:flutter/rendering.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:markdown/markdown.dart' as md;
@@ -11,6 +15,8 @@ import '../../../domain/vault/vault_resource.dart';
 import '../../workspace/controller/workspace_controller.dart';
 import '../markdown_inline_formatting.dart';
 import '../../workspace/editor/markdown_image_transform.dart';
+import '../../workspace/editor/markdown_context_menu.dart';
+import '../../workspace/editor/markdown_document_selection.dart';
 import '../../workspace/editor/markdown_table_editor.dart';
 import '../../workspace/editor/note_find_controller.dart';
 import '../../workspace/editor/pane_editor_context.dart';
@@ -44,6 +50,9 @@ final class WorkspaceMarkdownRenderer {
     required List<OutlineNode> outlineNodes,
     required WorkspaceOutlineNavigationController outlineNavigationController,
     required NoteFindController findController,
+    required VoidCallback onFindRequested,
+    required VoidCallback onReplaceRequested,
+    required bool canReplace,
   }) {
     return _WorkspaceReadingPreview(
       renderer: this,
@@ -54,6 +63,9 @@ final class WorkspaceMarkdownRenderer {
       outlineNodes: outlineNodes,
       outlineNavigationController: outlineNavigationController,
       findController: findController,
+      onFindRequested: onFindRequested,
+      onReplaceRequested: onReplaceRequested,
+      canReplace: canReplace,
     );
   }
 
@@ -71,6 +83,11 @@ final class WorkspaceMarkdownRenderer {
     if (block.kind == MarkdownLiveBlockKind.pageBreak) {
       return SizedBox.shrink(
         key: Key('live-markdown-reading-page-break-$index'),
+      );
+    }
+    if (block.isColumnsMarker) {
+      return SizedBox.shrink(
+        key: Key('live-markdown-reading-columns-marker-$index'),
       );
     }
     if (block.isBlank) {
@@ -605,6 +622,9 @@ final class _WorkspaceReadingPreview extends StatefulWidget {
     required this.outlineNodes,
     required this.outlineNavigationController,
     required this.findController,
+    required this.onFindRequested,
+    required this.onReplaceRequested,
+    required this.canReplace,
   });
 
   final WorkspaceMarkdownRenderer renderer;
@@ -615,6 +635,9 @@ final class _WorkspaceReadingPreview extends StatefulWidget {
   final List<OutlineNode> outlineNodes;
   final WorkspaceOutlineNavigationController outlineNavigationController;
   final NoteFindController findController;
+  final VoidCallback onFindRequested;
+  final VoidCallback onReplaceRequested;
+  final bool canReplace;
 
   @override
   State<_WorkspaceReadingPreview> createState() =>
@@ -626,8 +649,17 @@ final class _WorkspaceReadingPreviewState
   final _scrollController = ScrollController();
   final _scrollViewportKey = GlobalKey();
   final Map<int, GlobalKey> _findBlockKeys = <int, GlobalKey>{};
+  final Map<int, ScrollController> _columnsScrollControllers =
+      <int, ScrollController>{};
   late final WorkspaceOutlineViewportCoordinator _outlineViewport;
   int _lastFindNavigationRevision = -1;
+  final _selectionFocusNode = FocusNode();
+  final _selectableRegionKey = GlobalKey<SelectableRegionState>();
+  final Map<int, MarkdownSelectedBlockRange> _selectedBlocks = {};
+  SelectedContent? _selectedContent;
+  TextSelection? _sourceSelection;
+  var _selectionSyncScheduled = false;
+  var _currentMarkdown = '';
 
   @override
   void initState() {
@@ -643,9 +675,33 @@ final class _WorkspaceReadingPreviewState
 
   @override
   void dispose() {
+    _selectionFocusNode.dispose();
     _outlineViewport.dispose();
     _scrollController.dispose();
+    for (final controller in _columnsScrollControllers.values) {
+      controller.dispose();
+    }
     super.dispose();
+  }
+
+  @override
+  void didUpdateWidget(_WorkspaceReadingPreview oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.session != widget.session ||
+        oldWidget.paneId != widget.paneId) {
+      _resetRenderIdentityCaches();
+      _clearSelection();
+    } else if (!widget.focused) {
+      _clearSelection();
+    }
+  }
+
+  void _resetRenderIdentityCaches() {
+    _findBlockKeys.clear();
+    for (final controller in _columnsScrollControllers.values) {
+      controller.dispose();
+    }
+    _columnsScrollControllers.clear();
   }
 
   @override
@@ -653,6 +709,7 @@ final class _WorkspaceReadingPreviewState
     final markdown = MarkdownDocument.parse(
       widget.session.controller.text,
     ).body;
+    _currentMarkdown = markdown;
     final blocks = splitMarkdownLiveBlocks(markdown);
     final outlineByBlock = outlineNodesByBlockIndex(
       markdown,
@@ -667,29 +724,162 @@ final class _WorkspaceReadingPreviewState
     );
     _scheduleRevealFindMatch(blocks);
     final accentColor = widget.renderer._appearance.accentColor;
-    return CupertinoScrollbar(
-      controller: _scrollController,
-      child: KeyedSubtree(
-        key: Key('markdown-reading-preview-${widget.paneId}'),
-        child: KeyedSubtree(
-          key: widget.focused ? const Key('markdown-reading-preview') : null,
-          child: SingleChildScrollView(
-            key: _scrollViewportKey,
-            controller: _scrollController,
-            padding: const EdgeInsets.fromLTRB(16, 54, 16, 16),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                for (var index = 0; index < blocks.length; index += 1)
-                  _buildReadingBlock(
-                    blocks,
-                    index,
-                    outlineByBlock[index],
-                    accentColor,
-                  ),
-              ],
+    final readingChildren = _buildReadingChildren(
+      blocks,
+      outlineByBlock,
+      accentColor,
+    );
+    return CallbackShortcuts(
+      bindings: _selectionShortcuts(),
+      child: SelectableRegion(
+        key: _selectableRegionKey,
+        focusNode: _selectionFocusNode,
+        selectionControls: cupertinoTextSelectionHandleControls,
+        onSelectionChanged: _handleSelectedContentChanged,
+        contextMenuBuilder: _buildSelectionContextMenu,
+        child: CupertinoScrollbar(
+          controller: _scrollController,
+          child: KeyedSubtree(
+            key: Key('markdown-reading-preview-${widget.paneId}'),
+            child: KeyedSubtree(
+              key: widget.focused
+                  ? const Key('markdown-reading-preview')
+                  : null,
+              child: MarkdownDocumentSelectionScrollView(
+                scrollViewKey: _scrollViewportKey,
+                controller: _scrollController,
+                padding: const EdgeInsets.fromLTRB(16, 54, 16, 16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: readingChildren,
+                ),
+              ),
             ),
           ),
+        ),
+      ),
+    );
+  }
+
+  List<Widget> _buildReadingChildren(
+    List<MarkdownLiveBlock> blocks,
+    Map<int, OutlineNode> outlineByBlock,
+    Color accentColor,
+  ) {
+    final layouts = findMarkdownColumnsLayouts(blocks);
+    final layoutByStart = <int, MarkdownColumnsLayout>{
+      for (final layout in layouts) layout.startBlockIndex: layout,
+    };
+    final children = <Widget>[];
+    var index = 0;
+    while (index < blocks.length) {
+      final layout = layoutByStart[index];
+      if (layout != null) {
+        children.add(
+          _buildReadingColumns(blocks, layout, outlineByBlock, accentColor),
+        );
+        index = layout.endBlockIndex + 1;
+        continue;
+      }
+      children.add(
+        _buildReadingBlock(blocks, index, outlineByBlock[index], accentColor),
+      );
+      index += 1;
+    }
+    return children;
+  }
+
+  Widget _buildReadingColumns(
+    List<MarkdownLiveBlock> blocks,
+    MarkdownColumnsLayout layout,
+    Map<int, OutlineNode> outlineByBlock,
+    Color accentColor,
+  ) {
+    const gap = 16.0;
+    const minColumnWidth = 280.0;
+    final controller = _columnsScrollControllers.putIfAbsent(
+      layout.startBlockIndex,
+      ScrollController.new,
+    );
+    final leftFraction = layout.leftPercent / 100;
+    final rightFraction = 1 - leftFraction;
+
+    Widget side(int startIndex, int endIndex) => Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        for (var index = startIndex; index < endIndex; index += 1)
+          _buildReadingBlock(blocks, index, outlineByBlock[index], accentColor),
+      ],
+    );
+
+    return Padding(
+      key: Key('live-markdown-reading-columns-${layout.startBlockIndex}'),
+      padding: const EdgeInsets.symmetric(vertical: 5),
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          border: Border.all(color: workspaceSoftLineColor),
+          borderRadius: workspaceBorderRadius,
+        ),
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final minimumContentWidth = math.max(
+              minColumnWidth / leftFraction,
+              minColumnWidth / rightFraction,
+            );
+            final layoutWidth = math.max(
+              constraints.maxWidth,
+              minimumContentWidth + gap,
+            );
+            final contentWidth = layoutWidth - gap;
+            return CupertinoScrollbar(
+              controller: controller,
+              child: MarkdownSelectionHorizontalScrollView(
+                controller: controller,
+                child: SizedBox(
+                  width: layoutWidth,
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      SizedBox(
+                        width: contentWidth * leftFraction,
+                        child: Padding(
+                          padding: const EdgeInsets.all(10),
+                          child: MarkdownSelectionGroup(
+                            child: side(
+                              layout.startBlockIndex + 1,
+                              layout.separatorBlockIndex,
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(
+                        width: gap,
+                        child: Center(
+                          child: SizedBox(
+                            width: 1,
+                            height: 42,
+                            child: ColoredBox(color: workspaceSoftLineColor),
+                          ),
+                        ),
+                      ),
+                      SizedBox(
+                        width: contentWidth * rightFraction,
+                        child: Padding(
+                          padding: const EdgeInsets.all(10),
+                          child: MarkdownSelectionGroup(
+                            child: side(
+                              layout.separatorBlockIndex + 1,
+                              layout.endBlockIndex,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            );
+          },
         ),
       ),
     );
@@ -708,20 +898,161 @@ final class _WorkspaceReadingPreviewState
       widget.editorContext,
       hiddenTableSeparator: markdownBlockIsHiddenTableSeparator(blocks, index),
     );
-    final decorated = _decorateFindBlock(block, child, accentColor);
-    if (outlineNode == null) {
-      return decorated;
+    final decorated = _decorateFindBlock(block, index, child, accentColor);
+    final outlined = outlineNode == null
+        ? decorated
+        : WorkspaceOutlineHeadingAnchor(
+            coordinator: _outlineViewport,
+            node: outlineNode,
+            accentColor: accentColor,
+            child: decorated,
+          );
+    if (block.isBlank || block.isColumnsMarker) {
+      return outlined;
     }
-    return WorkspaceOutlineHeadingAnchor(
-      coordinator: _outlineViewport,
-      node: outlineNode,
-      accentColor: accentColor,
-      child: decorated,
+    return MarkdownSelectionBlock(
+      key: ValueKey(('reading-markdown-selection-block', index)),
+      block: block,
+      onSelectionChanged: _handleBlockSelectionChanged,
+      child: outlined,
+    );
+  }
+
+  void _handleSelectedContentChanged(SelectedContent? content) {
+    _selectedContent = content;
+    _scheduleSelectionSync();
+  }
+
+  void _handleBlockSelectionChanged(
+    MarkdownLiveBlock block,
+    MarkdownSelectionProjection projection,
+    SelectedContentRange? range,
+  ) {
+    if (range == null || range.startOffset == range.endOffset) {
+      _selectedBlocks.remove(block.start);
+    } else {
+      _selectedBlocks[block.start] = MarkdownSelectedBlockRange(
+        block: block,
+        projection: projection,
+        range: range,
+      );
+    }
+    _scheduleSelectionSync();
+  }
+
+  void _scheduleSelectionSync() {
+    if (_selectionSyncScheduled) {
+      return;
+    }
+    _selectionSyncScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _selectionSyncScheduled = false;
+      if (!mounted) {
+        return;
+      }
+      _sourceSelection =
+          _selectedContent == null || _selectedContent!.plainText.isEmpty
+          ? null
+          : combineMarkdownBlockSelections(_selectedBlocks.values);
+    });
+  }
+
+  void _clearSelection() {
+    _selectedContent = null;
+    _sourceSelection = null;
+    _selectedBlocks.clear();
+    _selectableRegionKey.currentState?.clearSelection();
+  }
+
+  void _selectAll() {
+    if (_currentMarkdown.isEmpty) {
+      return;
+    }
+    _sourceSelection = TextSelection(
+      baseOffset: 0,
+      extentOffset: _currentMarkdown.length,
+    );
+    _selectableRegionKey.currentState?.selectAll(
+      SelectionChangedCause.keyboard,
+    );
+    _selectionFocusNode.requestFocus();
+  }
+
+  Future<void> _copySelection() async {
+    final selection = _sourceSelection;
+    if (selection == null || !selection.isValid || selection.isCollapsed) {
+      return;
+    }
+    dismissAllMacContextMenus();
+    await Clipboard.setData(
+      ClipboardData(
+        text: _currentMarkdown.substring(selection.start, selection.end),
+      ),
+    );
+  }
+
+  Map<ShortcutActivator, VoidCallback> _selectionShortcuts() {
+    final usesMeta = !kIsWeb && defaultTargetPlatform == TargetPlatform.macOS;
+    return {
+      SingleActivator(
+        LogicalKeyboardKey.keyA,
+        meta: usesMeta,
+        control: !usesMeta,
+      ): _selectAll,
+      SingleActivator(
+        LogicalKeyboardKey.keyC,
+        meta: usesMeta,
+        control: !usesMeta,
+      ): () =>
+          unawaited(_copySelection()),
+    };
+  }
+
+  Widget _buildSelectionContextMenu(
+    BuildContext context,
+    SelectableRegionState selectableRegionState,
+  ) {
+    final hasSelection = _sourceSelection != null;
+    final usesMeta = !kIsWeb && defaultTargetPlatform == TargetPlatform.macOS;
+    return NoteContextMenuToolbar(
+      anchors: selectableRegionState.contextMenuAnchors,
+      child: NoteContextMenu(
+        children: [
+          NoteMenuAction(
+            itemKey: const Key('reading-selection-copy'),
+            label: '复制',
+            enabled: hasSelection,
+            onPressed: _copySelection,
+          ),
+          NoteMenuAction(
+            itemKey: const Key('reading-selection-select-all'),
+            label: '全选',
+            enabled: _currentMarkdown.isNotEmpty,
+            onPressed: _selectAll,
+          ),
+          const NoteMenuSeparator(key: Key('reading-selection-find-separator')),
+          NoteMenuAction(
+            itemKey: const Key('note-menu-find'),
+            label: '查找…',
+            enabled: true,
+            shortcutLabel: usesMeta ? '⌘F' : 'Ctrl+F',
+            onPressed: widget.onFindRequested,
+          ),
+          NoteMenuAction(
+            itemKey: const Key('note-menu-replace'),
+            label: '替换…',
+            enabled: widget.canReplace,
+            shortcutLabel: usesMeta ? '⌥⌘F' : 'Ctrl+H',
+            onPressed: widget.onReplaceRequested,
+          ),
+        ],
+      ),
     );
   }
 
   Widget _decorateFindBlock(
     MarkdownLiveBlock block,
+    int blockIndex,
     Widget child,
     Color accentColor,
   ) {
@@ -737,11 +1068,11 @@ final class _WorkspaceReadingPreviewState
       block.end,
     );
     return KeyedSubtree(
-      key: Key('reading-find-block-${block.start}'),
+      key: Key('reading-find-block-$blockIndex'),
       child: KeyedSubtree(
         key: _findBlockKeys.putIfAbsent(
-          block.start,
-          () => GlobalKey(debugLabel: 'reading-find-block-${block.start}'),
+          blockIndex,
+          () => GlobalKey(debugLabel: 'reading-find-block-$blockIndex'),
         ),
         child: DecoratedBox(
           decoration: BoxDecoration(
@@ -773,9 +1104,15 @@ final class _WorkspaceReadingPreviewState
     if (block == null) {
       return;
     }
+    final blockIndex = blocks.indexWhere(
+      (candidate) => candidate.start == block.start,
+    );
+    if (blockIndex < 0) {
+      return;
+    }
     final key = _findBlockKeys.putIfAbsent(
-      block.start,
-      () => GlobalKey(debugLabel: 'reading-find-block-${block.start}'),
+      blockIndex,
+      () => GlobalKey(debugLabel: 'reading-find-block-$blockIndex'),
     );
     WidgetsBinding.instance.addPostFrameCallback((_) {
       final targetContext = key.currentContext;
@@ -800,6 +1137,7 @@ final class _WorkspaceReadingPreviewState
     for (var index = 0; index < blocks.length; index += 1) {
       final block = blocks[index];
       if (!match.overlaps(block.start, block.end) ||
+          block.isColumnsMarker ||
           markdownBlockIsHiddenTableSeparator(blocks, index)) {
         continue;
       }
@@ -807,12 +1145,14 @@ final class _WorkspaceReadingPreviewState
     }
     final startIndex = markdownBlockIndexForOffset(blocks, match.start);
     for (var index = startIndex + 1; index < blocks.length; index += 1) {
-      if (!markdownBlockIsHiddenTableSeparator(blocks, index)) {
+      if (!blocks[index].isColumnsMarker &&
+          !markdownBlockIsHiddenTableSeparator(blocks, index)) {
         return blocks[index];
       }
     }
     for (var index = startIndex - 1; index >= 0; index -= 1) {
-      if (!markdownBlockIsHiddenTableSeparator(blocks, index)) {
+      if (!blocks[index].isColumnsMarker &&
+          !markdownBlockIsHiddenTableSeparator(blocks, index)) {
         return blocks[index];
       }
     }
