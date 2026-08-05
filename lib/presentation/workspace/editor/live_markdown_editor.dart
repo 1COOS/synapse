@@ -154,6 +154,8 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
   final Set<String> _failedImageSources = <String>{};
   final Map<int, MarkdownSelectedBlockRange> _documentBlockSelections = {};
   SelectedContent? _documentSelectedContent;
+  MarkdownDocumentSelectionSpan? _documentSelectionSpan;
+  var _documentSelectionGeneration = 0;
   var _documentSelectionSyncScheduled = false;
   OverlayEntry? _selectionFeedbackOverlay;
   Timer? _selectionFeedbackTimer;
@@ -603,18 +605,50 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
 
   void _handleDocumentBlockSelectionChanged(
     MarkdownLiveBlock block,
+    int sourceOrder,
+    int selectionGeneration,
     MarkdownSelectionProjection projection,
     SelectedContentRange? range,
   ) {
+    if (selectionGeneration != _documentSelectionGeneration) {
+      return;
+    }
     if (range == null || range.startOffset == range.endOffset) {
-      _documentBlockSelections.remove(block.start);
+      final span = _documentSelectionSpan;
+      final isCurrentEdge =
+          span != null &&
+          (sourceOrder == span.baseSourceOrder ||
+              sourceOrder == span.extentSourceOrder);
+      if (!isCurrentEdge) {
+        _documentBlockSelections.remove(block.start);
+      }
     } else {
       _documentBlockSelections[block.start] = MarkdownSelectedBlockRange(
         block: block,
+        sourceOrder: sourceOrder,
         projection: projection,
         range: range,
       );
     }
+    _scheduleDocumentSelectionSync();
+  }
+
+  void _handleDocumentSelectionGestureStarted(int selectionGeneration) {
+    _documentSelectionGeneration = selectionGeneration;
+    _documentSelectedContent = null;
+    _documentSelectionSpan = null;
+    _documentBlockSelections.clear();
+    _editorController.clearDocumentSelection();
+  }
+
+  void _handleDocumentSelectionSpanChanged(
+    int selectionGeneration,
+    MarkdownDocumentSelectionSpan? span,
+  ) {
+    if (selectionGeneration != _documentSelectionGeneration) {
+      return;
+    }
+    _documentSelectionSpan = span;
     _scheduleDocumentSelectionSync();
   }
 
@@ -629,21 +663,12 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
         return;
       }
       final content = _documentSelectedContent;
-      var selection = content == null || content.plainText.isEmpty
+      final selection = content == null || content.plainText.isEmpty
           ? null
-          : combineMarkdownBlockSelections(_documentBlockSelections.values);
-      if (selection == null &&
-          content != null &&
-          content.plainText.isNotEmpty) {
-        final first = widget.controller.text.indexOf(content.plainText);
-        if (first >= 0 &&
-            widget.controller.text.indexOf(content.plainText, first + 1) < 0) {
-          selection = TextSelection(
-            baseOffset: first,
-            extentOffset: first + content.plainText.length,
-          );
-        }
-      }
+          : combineMarkdownBlockSelections(
+              _documentBlockSelections.values,
+              _documentSelectionSpan,
+            );
       if (selection == null) {
         _editorController.clearDocumentSelection();
         return;
@@ -704,6 +729,7 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
         _documentBlockSelections.isNotEmpty ||
         _editorController.hasDocumentSelection;
     _documentSelectedContent = null;
+    _documentSelectionSpan = null;
     _documentBlockSelections.clear();
     _editorController.clearDocumentSelection();
     if (clearVisual && hadDocumentSelection) {
@@ -3347,6 +3373,10 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
                                 'live-markdown-scroll-${widget.paneId}-${widget.noteId}',
                               ),
                               controller: _scrollController,
+                              onSelectionGestureStarted:
+                                  _handleDocumentSelectionGestureStarted,
+                              onSelectionSpanChanged:
+                                  _handleDocumentSelectionSpanChanged,
                               physics:
                                   _tableReordering ||
                                       _draggingTableBlockStart != null
@@ -3559,11 +3589,13 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               if (selected)
-                _buildColumnsControls(
-                  layoutIdentity: layoutIdentity,
-                  layoutStart: layoutStart,
-                  endOffset: endBlock.end,
-                  leftPercent: leftPercent,
+                SelectionContainer.disabled(
+                  child: _buildColumnsControls(
+                    layoutIdentity: layoutIdentity,
+                    layoutStart: layoutStart,
+                    endOffset: endBlock.end,
+                    leftPercent: leftPercent,
+                  ),
                 ),
               LayoutBuilder(
                 builder: (context, constraints) {
@@ -4138,6 +4170,7 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
         : MarkdownSelectionBlock(
             key: ValueKey(('markdown-selection-block', index)),
             block: block,
+            sourceOrder: index,
             onSelectionChanged: _handleDocumentBlockSelectionChanged,
             child: outlined,
           );

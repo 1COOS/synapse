@@ -11,9 +11,27 @@ import '../../cupertino/markdown_live_blocks.dart';
 typedef MarkdownBlockSelectionChanged =
     void Function(
       MarkdownLiveBlock block,
+      int sourceOrder,
+      int selectionGeneration,
       MarkdownSelectionProjection projection,
       SelectedContentRange? range,
     );
+
+typedef MarkdownDocumentSelectionSpanChanged =
+    void Function(int selectionGeneration, MarkdownDocumentSelectionSpan? span);
+
+final class MarkdownDocumentSelectionSpan {
+  const MarkdownDocumentSelectionSpan({
+    required this.baseSourceOrder,
+    required this.extentSourceOrder,
+  });
+
+  final int baseSourceOrder;
+  final int extentSourceOrder;
+
+  int get firstSourceOrder => math.min(baseSourceOrder, extentSourceOrder);
+  int get lastSourceOrder => math.max(baseSourceOrder, extentSourceOrder);
+}
 
 /// Maps the text exposed by Flutter's selection tree back to the Markdown
 /// source owned by one live-preview block.
@@ -96,11 +114,13 @@ final class MarkdownSelectionBlock extends StatefulWidget {
   const MarkdownSelectionBlock({
     super.key,
     required this.block,
+    required this.sourceOrder,
     required this.onSelectionChanged,
     required this.child,
   });
 
   final MarkdownLiveBlock block;
+  final int sourceOrder;
   final MarkdownBlockSelectionChanged onSelectionChanged;
   final Widget child;
 
@@ -110,7 +130,12 @@ final class MarkdownSelectionBlock extends StatefulWidget {
 
 final class _MarkdownSelectionBlockState extends State<MarkdownSelectionBlock> {
   final _selectionNotifier = SelectionListenerNotifier();
+  final _blockDelegate = _MarkdownBlockSelectionContainerDelegate();
+  late final _orderedRegistrar = _MarkdownSourceOrderedSelectionRegistrar(
+    sourceOrder: widget.sourceOrder,
+  );
   late MarkdownSelectionProjection _projection;
+  ValueGetter<int>? _selectionGeneration;
 
   @override
   void initState() {
@@ -122,15 +147,23 @@ final class _MarkdownSelectionBlockState extends State<MarkdownSelectionBlock> {
   @override
   void didUpdateWidget(MarkdownSelectionBlock oldWidget) {
     super.didUpdateWidget(oldWidget);
+    _orderedRegistrar.updateSourceOrder(widget.sourceOrder);
     if (oldWidget.block.start != widget.block.start ||
         oldWidget.block.end != widget.block.end ||
         oldWidget.block.text != widget.block.text ||
         oldWidget.block.kind != widget.block.kind) {
-      widget.onSelectionChanged(oldWidget.block, _projection, null);
+      final selectionGeneration = _currentSelectionGeneration();
+      widget.onSelectionChanged(
+        oldWidget.block,
+        oldWidget.sourceOrder,
+        selectionGeneration,
+        _projection,
+        null,
+      );
       _projection = MarkdownSelectionProjection.forBlock(widget.block);
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) {
-          _handleSelectionChanged();
+          _handleSelectionChanged(selectionGeneration);
         }
       });
     }
@@ -138,36 +171,173 @@ final class _MarkdownSelectionBlockState extends State<MarkdownSelectionBlock> {
 
   @override
   void dispose() {
-    widget.onSelectionChanged(widget.block, _projection, null);
+    widget.onSelectionChanged(
+      widget.block,
+      widget.sourceOrder,
+      _currentSelectionGeneration(),
+      _projection,
+      null,
+    );
     _selectionNotifier
       ..removeListener(_handleSelectionChanged)
       ..dispose();
+    _blockDelegate.dispose();
+    _orderedRegistrar.dispose();
     super.dispose();
   }
 
-  void _handleSelectionChanged() {
+  void _handleSelectionChanged([int? expectedGeneration]) {
     if (!_selectionNotifier.registered) {
       return;
     }
     final details = _selectionNotifier.selection;
     widget.onSelectionChanged(
       widget.block,
+      widget.sourceOrder,
+      expectedGeneration ?? _currentSelectionGeneration(),
       _projection,
       details.status == SelectionStatus.none ? null : details.range,
     );
   }
 
+  int _currentSelectionGeneration() => _selectionGeneration?.call() ?? 0;
+
   @override
   Widget build(BuildContext context) {
-    return SelectionListener(
-      selectionNotifier: _selectionNotifier,
-      child: widget.child,
+    _selectionGeneration = context
+        .getInheritedWidgetOfExactType<
+          _MarkdownDocumentSelectionGenerationScope
+        >()
+        ?.selectionGeneration;
+    _orderedRegistrar.updateParent(SelectionContainer.maybeOf(context));
+    return SelectionRegistrarScope(
+      registrar: _orderedRegistrar,
+      child: SelectionContainer(
+        delegate: _blockDelegate,
+        child: SelectionListener(
+          selectionNotifier: _selectionNotifier,
+          child: widget.child,
+        ),
+      ),
     );
   }
 }
 
+final class _MarkdownBlockSelectionContainerDelegate
+    extends StaticSelectionContainerDelegate {
+  @override
+  SelectionGeometry get value {
+    final geometry = super.value;
+    if (geometry.hasContent) {
+      return geometry;
+    }
+    return const SelectionGeometry(
+      status: SelectionStatus.none,
+      hasContent: true,
+    );
+  }
+}
+
+final class _MarkdownDocumentSelectionGenerationScope extends InheritedWidget {
+  const _MarkdownDocumentSelectionGenerationScope({
+    required this.selectionGeneration,
+    required super.child,
+  });
+
+  final ValueGetter<int> selectionGeneration;
+
+  @override
+  bool updateShouldNotify(_MarkdownDocumentSelectionGenerationScope oldWidget) {
+    return false;
+  }
+}
+
+final class _MarkdownSourceOrderedSelectionRegistrar
+    implements SelectionRegistrar {
+  _MarkdownSourceOrderedSelectionRegistrar({required int sourceOrder})
+    : _sourceOrder = sourceOrder;
+
+  final Set<Selectable> _selectables = <Selectable>{};
+  SelectionRegistrar? _parent;
+  int _sourceOrder;
+
+  void updateParent(SelectionRegistrar? parent) {
+    if (identical(parent, _parent)) {
+      return;
+    }
+    final previous = _parent;
+    if (previous != null) {
+      for (final selectable in _selectables) {
+        _removeFrom(previous, selectable);
+      }
+    }
+    _parent = parent;
+    if (parent != null) {
+      for (final selectable in _selectables) {
+        _addTo(parent, selectable);
+      }
+    }
+  }
+
+  void updateSourceOrder(int sourceOrder) {
+    if (_sourceOrder == sourceOrder) {
+      return;
+    }
+    _sourceOrder = sourceOrder;
+    final parent = _parent;
+    if (parent is _MarkdownSourceOrderSelectionContainerDelegate) {
+      for (final selectable in _selectables) {
+        parent.updateSourceOrder(selectable, sourceOrder);
+      }
+    }
+  }
+
+  @override
+  void add(Selectable selectable) {
+    if (!_selectables.add(selectable)) {
+      return;
+    }
+    final parent = _parent;
+    if (parent != null) {
+      _addTo(parent, selectable);
+    }
+  }
+
+  @override
+  void remove(Selectable selectable) {
+    if (!_selectables.remove(selectable)) {
+      return;
+    }
+    final parent = _parent;
+    if (parent != null) {
+      _removeFrom(parent, selectable);
+    }
+  }
+
+  void _addTo(SelectionRegistrar parent, Selectable selectable) {
+    if (parent is _MarkdownSourceOrderSelectionContainerDelegate) {
+      parent.addWithSourceOrder(selectable, _sourceOrder);
+      return;
+    }
+    parent.add(selectable);
+  }
+
+  void _removeFrom(SelectionRegistrar parent, Selectable selectable) {
+    if (parent is _MarkdownSourceOrderSelectionContainerDelegate) {
+      parent.removeWithSourceOrder(selectable);
+      return;
+    }
+    parent.remove(selectable);
+  }
+
+  void dispose() {
+    updateParent(null);
+    _selectables.clear();
+  }
+}
+
 /// Keeps column call sites explicit. Column ordering is owned by the
-/// document-level registration-order delegate below.
+/// document-level source-order delegate below.
 final class MarkdownSelectionGroup extends StatelessWidget {
   const MarkdownSelectionGroup({super.key, required this.child});
 
@@ -227,10 +397,10 @@ final class MarkdownSelectionHorizontalScrollView extends StatelessWidget {
 ///
 /// Flutter's automatic scroll selection container sorts siblings by their
 /// screen geometry, which interleaves equal-height columns row by row. The
-/// Markdown document instead registers leaves in source order (left column,
-/// then right column, then full-width content). The surrounding scrollable is
-/// hidden from the selection tree so this delegate is the sole ordering
-/// authority.
+/// Markdown blocks instead tag their selectable containers with the current
+/// absolute source index (left column, then right column, then full-width
+/// content). The surrounding scrollable is hidden from the selection tree so
+/// this delegate is the sole ordering authority.
 final class MarkdownDocumentSelectionScrollView extends StatefulWidget {
   const MarkdownDocumentSelectionScrollView({
     super.key,
@@ -239,6 +409,8 @@ final class MarkdownDocumentSelectionScrollView extends StatefulWidget {
     this.scrollViewKey,
     this.physics,
     this.padding,
+    this.onSelectionGestureStarted,
+    this.onSelectionSpanChanged,
   });
 
   final ScrollController controller;
@@ -246,6 +418,8 @@ final class MarkdownDocumentSelectionScrollView extends StatefulWidget {
   final Key? scrollViewKey;
   final ScrollPhysics? physics;
   final EdgeInsetsGeometry? padding;
+  final ValueChanged<int>? onSelectionGestureStarted;
+  final MarkdownDocumentSelectionSpanChanged? onSelectionSpanChanged;
 
   @override
   State<MarkdownDocumentSelectionScrollView> createState() =>
@@ -254,11 +428,16 @@ final class MarkdownDocumentSelectionScrollView extends StatefulWidget {
 
 final class _MarkdownDocumentSelectionScrollViewState
     extends State<MarkdownDocumentSelectionScrollView> {
-  final _delegate = _MarkdownSourceOrderSelectionContainerDelegate();
+  late final _delegate = _MarkdownSourceOrderSelectionContainerDelegate(
+    onSelectionSpanChanged: (selectionGeneration, span) {
+      widget.onSelectionSpanChanged?.call(selectionGeneration, span);
+    },
+  );
   final _viewportKey = GlobalKey();
   Timer? _autoScrollTimer;
   int? _selectionPointer;
   Offset? _selectionDragPosition;
+  var _selectionGeneration = 0;
 
   @override
   void dispose() {
@@ -276,7 +455,11 @@ final class _MarkdownDocumentSelectionScrollViewState
     if (HardwareKeyboard.instance.isShiftPressed &&
         _delegate.hasActiveSelectionEdges) {
       _delegate.beginShiftExtension();
+      return;
     }
+    _selectionGeneration += 1;
+    _delegate.beginNewSelectionGesture(_selectionGeneration);
+    widget.onSelectionGestureStarted?.call(_selectionGeneration);
   }
 
   void _handlePointerMove(PointerMoveEvent event) {
@@ -297,6 +480,7 @@ final class _MarkdownDocumentSelectionScrollViewState
     }
     _selectionPointer = null;
     _selectionDragPosition = null;
+    _delegate.endPointerSelectionGesture();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _delegate.endShiftExtension();
     });
@@ -356,7 +540,10 @@ final class _MarkdownDocumentSelectionScrollViewState
   @override
   Widget build(BuildContext context) {
     final registrar = SelectionContainer.maybeOf(context);
-    Widget content = widget.child;
+    Widget content = _MarkdownDocumentSelectionGenerationScope(
+      selectionGeneration: () => _selectionGeneration,
+      child: widget.child,
+    );
     if (registrar != null) {
       content = SelectionContainer(
         registrar: registrar,
@@ -388,19 +575,53 @@ final class _MarkdownDocumentSelectionScrollViewState
 
 final class _MarkdownSourceOrderSelectionContainerDelegate
     extends MultiSelectableSelectionContainerDelegate {
-  final Map<Selectable, int> _registrationOrder = {};
+  _MarkdownSourceOrderSelectionContainerDelegate({
+    required this.onSelectionSpanChanged,
+  });
+
+  final MarkdownDocumentSelectionSpanChanged onSelectionSpanChanged;
+  final Map<Selectable, int> _sourceOrder = <Selectable, int>{};
+  final Map<Selectable, int> _registrationOrder = <Selectable, int>{};
   var _nextRegistrationOrder = 0;
   SelectionEdgeUpdateEvent? _startEvent;
   SelectionEdgeUpdateEvent? _endEvent;
   Selectable? _anchorSelectable;
   Offset? _anchorLocalPosition;
   var _shiftExtensionInProgress = false;
+  var _pointerSelectionInProgress = false;
+  var _selectionGeneration = 0;
 
   bool get hasActiveSelectionEdges => _startEvent != null && _endEvent != null;
 
   void beginShiftExtension() => _shiftExtensionInProgress = true;
 
   void endShiftExtension() => _shiftExtensionInProgress = false;
+
+  void beginNewSelectionGesture(int selectionGeneration) {
+    _shiftExtensionInProgress = false;
+    _selectionGeneration = selectionGeneration;
+    dispatchSelectionEvent(const ClearSelectionEvent());
+    _pointerSelectionInProgress = true;
+  }
+
+  void endPointerSelectionGesture() => _pointerSelectionInProgress = false;
+
+  void addWithSourceOrder(Selectable selectable, int sourceOrder) {
+    _sourceOrder[selectable] = sourceOrder;
+    add(selectable);
+  }
+
+  void updateSourceOrder(Selectable selectable, int sourceOrder) {
+    if (!_sourceOrder.containsKey(selectable)) {
+      return;
+    }
+    _sourceOrder[selectable] = sourceOrder;
+  }
+
+  void removeWithSourceOrder(Selectable selectable) {
+    _sourceOrder.remove(selectable);
+    remove(selectable);
+  }
 
   @override
   void add(Selectable selectable) {
@@ -410,12 +631,25 @@ final class _MarkdownSourceOrderSelectionContainerDelegate
 
   @override
   void remove(Selectable selectable) {
+    _sourceOrder.remove(selectable);
     _registrationOrder.remove(selectable);
     super.remove(selectable);
   }
 
   @override
   Comparator<Selectable> get compareOrder => (left, right) {
+    final leftSourceOrder = _sourceOrder[left];
+    final rightSourceOrder = _sourceOrder[right];
+    if (leftSourceOrder != null && rightSourceOrder != null) {
+      final sourceResult = leftSourceOrder.compareTo(rightSourceOrder);
+      if (sourceResult != 0) {
+        return sourceResult;
+      }
+    } else if (leftSourceOrder != null) {
+      return -1;
+    } else if (rightSourceOrder != null) {
+      return 1;
+    }
     return (_registrationOrder[left] ?? 0).compareTo(
       _registrationOrder[right] ?? 0,
     );
@@ -423,14 +657,37 @@ final class _MarkdownSourceOrderSelectionContainerDelegate
 
   @override
   SelectionResult handleClearSelection(ClearSelectionEvent event) {
-    if (_shiftExtensionInProgress && hasActiveSelectionEdges) {
+    if ((_shiftExtensionInProgress || _pointerSelectionInProgress) &&
+        hasActiveSelectionEdges) {
       return SelectionResult.none;
     }
     _startEvent = null;
     _endEvent = null;
     _anchorSelectable = null;
     _anchorLocalPosition = null;
+    onSelectionSpanChanged(_selectionGeneration, null);
     return super.handleClearSelection(event);
+  }
+
+  @override
+  SelectionResult handleSelectAll(SelectAllSelectionEvent event) {
+    final result = super.handleSelectAll(event);
+    _notifySelectionSpan();
+    return result;
+  }
+
+  @override
+  SelectionResult handleSelectWord(SelectWordSelectionEvent event) {
+    final result = super.handleSelectWord(event);
+    _notifySelectionSpan();
+    return result;
+  }
+
+  @override
+  SelectionResult handleSelectParagraph(SelectParagraphSelectionEvent event) {
+    final result = super.handleSelectParagraph(event);
+    _notifySelectionSpan();
+    return result;
   }
 
   @override
@@ -441,6 +698,9 @@ final class _MarkdownSourceOrderSelectionContainerDelegate
     final targetIndex = _targetIndexFor(event.globalPosition);
     if (event.type == SelectionEventType.startEdgeUpdate) {
       if (_shiftExtensionInProgress && hasActiveSelectionEdges) {
+        return SelectionResult.end;
+      }
+      if (_pointerSelectionInProgress && _startEvent != null) {
         return SelectionResult.end;
       }
       _startEvent = event;
@@ -499,6 +759,7 @@ final class _MarkdownSourceOrderSelectionContainerDelegate
       final selectable = selectables[startIndex];
       dispatchSelectionEventToChild(selectable, startEvent);
       dispatchSelectionEventToChild(selectable, endEvent);
+      _restoreSelectionIndexesAndNotify(startIndex, endIndex);
       return;
     }
     final first = math.min(startIndex, endIndex);
@@ -528,6 +789,7 @@ final class _MarkdownSourceOrderSelectionContainerDelegate
         ),
       );
       dispatchSelectionEventToChild(extent, endEvent);
+      _restoreSelectionIndexesAndNotify(startIndex, endIndex);
       return;
     }
     final extent = selectables[endIndex];
@@ -546,6 +808,38 @@ final class _MarkdownSourceOrderSelectionContainerDelegate
       SelectionEdgeUpdateEvent.forEnd(
         globalPosition: _outsidePosition(anchor, after: false),
         granularity: endEvent.granularity,
+      ),
+    );
+    _restoreSelectionIndexesAndNotify(startIndex, endIndex);
+  }
+
+  void _restoreSelectionIndexesAndNotify(int startIndex, int endIndex) {
+    currentSelectionStartIndex = startIndex;
+    currentSelectionEndIndex = endIndex;
+    _notifySelectionSpan(startIndex: startIndex, endIndex: endIndex);
+  }
+
+  void _notifySelectionSpan({int? startIndex, int? endIndex}) {
+    final resolvedStartIndex = startIndex ?? currentSelectionStartIndex;
+    final resolvedEndIndex = endIndex ?? currentSelectionEndIndex;
+    if (resolvedStartIndex < 0 ||
+        resolvedStartIndex >= selectables.length ||
+        resolvedEndIndex < 0 ||
+        resolvedEndIndex >= selectables.length) {
+      onSelectionSpanChanged(_selectionGeneration, null);
+      return;
+    }
+    final startOrder = _sourceOrder[selectables[resolvedStartIndex]];
+    final endOrder = _sourceOrder[selectables[resolvedEndIndex]];
+    if (startOrder == null || endOrder == null) {
+      onSelectionSpanChanged(_selectionGeneration, null);
+      return;
+    }
+    onSelectionSpanChanged(
+      _selectionGeneration,
+      MarkdownDocumentSelectionSpan(
+        baseSourceOrder: startOrder,
+        extentSourceOrder: endOrder,
       ),
     );
   }
@@ -568,7 +862,8 @@ final class _MarkdownSourceOrderSelectionContainerDelegate
 
   int _targetIndexFor(Offset globalPosition) {
     var closestIndex = 0;
-    var closestDistanceSquared = double.infinity;
+    var closestVerticalDistance = double.infinity;
+    var closestHorizontalDistance = double.infinity;
     for (var index = 0; index < selectables.length; index += 1) {
       final bounds = _globalBounds(selectables[index]);
       if (bounds.contains(globalPosition)) {
@@ -584,9 +879,10 @@ final class _MarkdownSourceOrderSelectionContainerDelegate
           : globalPosition.dy > bounds.bottom
           ? globalPosition.dy - bounds.bottom
           : 0.0;
-      final distanceSquared = dx * dx + dy * dy;
-      if (distanceSquared < closestDistanceSquared) {
-        closestDistanceSquared = distanceSquared;
+      if (dy < closestVerticalDistance ||
+          (dy == closestVerticalDistance && dx < closestHorizontalDistance)) {
+        closestVerticalDistance = dy;
+        closestHorizontalDistance = dx;
         closestIndex = index;
       }
     }
@@ -611,11 +907,13 @@ final class _MarkdownSourceOrderSelectionContainerDelegate
 final class MarkdownSelectedBlockRange {
   const MarkdownSelectedBlockRange({
     required this.block,
+    required this.sourceOrder,
     required this.projection,
     required this.range,
   });
 
   final MarkdownLiveBlock block;
+  final int sourceOrder;
   final MarkdownSelectionProjection projection;
   final SelectedContentRange range;
 
@@ -625,14 +923,21 @@ final class MarkdownSelectedBlockRange {
 
 TextSelection? combineMarkdownBlockSelections(
   Iterable<MarkdownSelectedBlockRange> selected,
+  MarkdownDocumentSelectionSpan? span,
 ) {
-  final ranges = selected.toList()
-    ..sort((left, right) => left.block.start.compareTo(right.block.start));
-  if (ranges.isEmpty) {
+  if (span == null) {
     return null;
   }
-  final first = ranges.first.sourceSelection;
-  final last = ranges.last.sourceSelection;
+  final ranges = <int, MarkdownSelectedBlockRange>{
+    for (final range in selected) range.sourceOrder: range,
+  };
+  final firstRange = ranges[span.firstSourceOrder];
+  final lastRange = ranges[span.lastSourceOrder];
+  if (firstRange == null || lastRange == null) {
+    return null;
+  }
+  final first = firstRange.sourceSelection;
+  final last = lastRange.sourceSelection;
   final start = math.min(first.start, last.start);
   final end = math.max(first.end, last.end);
   if (start == end) {

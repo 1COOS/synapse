@@ -74,27 +74,97 @@ void main() {
     final firstStart = first.visibleText.indexOf('😀');
     final lastEnd = last.visibleText.indexOf('bold') + 'bold'.length;
 
-    final selection = combineMarkdownBlockSelections([
-      MarkdownSelectedBlockRange(
-        block: blocks[0],
-        projection: first,
-        range: SelectedContentRange(
-          startOffset: firstStart,
-          endOffset: first.visibleLength,
+    final selection = combineMarkdownBlockSelections(
+      [
+        MarkdownSelectedBlockRange(
+          block: blocks[0],
+          sourceOrder: 0,
+          projection: first,
+          range: SelectedContentRange(
+            startOffset: firstStart,
+            endOffset: first.visibleLength,
+          ),
         ),
+        MarkdownSelectedBlockRange(
+          block: blocks[2],
+          sourceOrder: 2,
+          projection: last,
+          range: SelectedContentRange(startOffset: 0, endOffset: lastEnd),
+        ),
+      ],
+      const MarkdownDocumentSelectionSpan(
+        baseSourceOrder: 0,
+        extentSourceOrder: 2,
       ),
-      MarkdownSelectedBlockRange(
-        block: blocks[2],
-        projection: last,
-        range: SelectedContentRange(startOffset: 0, endOffset: lastEnd),
-      ),
-    ]);
+    );
 
     expect(selection, isNotNull);
     expect(
       markdown.substring(selection!.start, selection.end),
       '😀\n\nTwo **bold**\n',
     );
+  });
+
+  test('selection edges ignore a stale distant block range', () {
+    const markdown =
+        'Alpha **one**\n\n'
+        'Beta ==two==\n\n'
+        'Gamma three\n';
+    final blocks = splitMarkdownLiveBlocks(markdown);
+    final selected = <MarkdownSelectedBlockRange>[
+      for (final index in const [0, 2, 4])
+        MarkdownSelectedBlockRange(
+          block: blocks[index],
+          sourceOrder: index,
+          projection: MarkdownSelectionProjection.forBlock(blocks[index]),
+          range: SelectedContentRange(
+            startOffset: 0,
+            endOffset: MarkdownSelectionProjection.forBlock(
+              blocks[index],
+            ).visibleLength,
+          ),
+        ),
+    ];
+
+    final selection = combineMarkdownBlockSelections(
+      selected,
+      const MarkdownDocumentSelectionSpan(
+        baseSourceOrder: 0,
+        extentSourceOrder: 2,
+      ),
+    );
+
+    expect(selection, isNotNull);
+    expect(
+      markdown.substring(selection!.start, selection.end),
+      'Alpha **one**\n\nBeta ==two==\n',
+    );
+  });
+
+  test('selection is unavailable until both current edge ranges exist', () {
+    const markdown = 'Alpha\n\nBeta\n';
+    final blocks = splitMarkdownLiveBlocks(markdown);
+    final projection = MarkdownSelectionProjection.forBlock(blocks.first);
+
+    final selection = combineMarkdownBlockSelections(
+      [
+        MarkdownSelectedBlockRange(
+          block: blocks.first,
+          sourceOrder: 0,
+          projection: projection,
+          range: SelectedContentRange(
+            startOffset: 0,
+            endOffset: projection.visibleLength,
+          ),
+        ),
+      ],
+      const MarkdownDocumentSelectionSpan(
+        baseSourceOrder: 0,
+        extentSourceOrder: 2,
+      ),
+    );
+
+    expect(selection, isNull);
   });
 
   test('normalizes reverse visible ranges to the complete source block', () {

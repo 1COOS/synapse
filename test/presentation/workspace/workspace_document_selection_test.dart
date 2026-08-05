@@ -45,6 +45,145 @@ void main() {
   });
 
   testWidgets(
+    'selection follows current source order after a block is inserted',
+    (tester) async {
+      const initialMarkdown =
+          '# First\n\n'
+          '# Later B\n\n'
+          '# Later C\n\n'
+          '# Later D\n';
+      const updatedMarkdown =
+          '# First\n'
+          '# Inserted\n'
+          '# Later B\n\n'
+          '# Later C\n\n'
+          '# Later D\n';
+      final vault = MemoryVaultBackend(seedExampleData: false);
+      final note = await vault.createNote(parentPath: '', title: 'Selection');
+      await vault.updateMarkdown(noteId: note.id, markdown: initialMarkdown);
+      final clipboard = _SelectionClipboard()..install();
+
+      await pumpWorkspace(tester, vault: vault);
+      liveMarkdownDocumentController(tester, paneId: 1).text = updatedMarkdown;
+      await tester.pumpAndSettle();
+
+      final first = _blockText(0, 'First');
+      final inserted = _blockText(1, 'Inserted');
+      final laterB = _blockText(2, 'Later B');
+      final laterC = _blockText(4, 'Later C');
+      final laterD = _blockText(6, 'Later D');
+      await _dragBetween(tester, first, inserted, pointer: 96);
+
+      await _sendPrimaryShortcut(tester, LogicalKeyboardKey.keyC);
+      expect(clipboard.text, '# First\n# Inserted\n');
+
+      expect(laterB, findsOneWidget);
+      expect(laterC, findsOneWidget);
+      expect(laterD, findsOneWidget);
+    },
+  );
+
+  testWidgets(
+    'reading selection follows current source order after a block is inserted',
+    (tester) async {
+      const initialMarkdown =
+          '# First\n\n'
+          '# Later B\n\n'
+          '# Later C\n';
+      const updatedMarkdown =
+          '# First\n'
+          '# Inserted\n'
+          '# Later B\n\n'
+          '# Later C\n';
+      final vault = MemoryVaultBackend(seedExampleData: false);
+      final note = await vault.createNote(parentPath: '', title: 'Selection');
+      await vault.updateMarkdown(noteId: note.id, markdown: initialMarkdown);
+      final clipboard = _SelectionClipboard()..install();
+
+      await pumpWorkspace(tester, vault: vault);
+      final document = liveMarkdownDocumentController(tester, paneId: 1);
+      await tester.tap(find.byKey(const Key('note-mode-reading')));
+      await tester.pumpAndSettle();
+      document.text = updatedMarkdown;
+      await tester.pumpAndSettle();
+
+      await _dragBetween(
+        tester,
+        _readingBlockText(0, 'First'),
+        _readingBlockText(1, 'Inserted'),
+        pointer: 100,
+      );
+      await _sendPrimaryShortcut(tester, LogicalKeyboardKey.keyC);
+
+      expect(clipboard.text, '# First\n# Inserted\n');
+    },
+  );
+
+  testWidgets(
+    'dragging through trailing whitespace does not jump to a wider later block',
+    (tester) async {
+      const firstLine = 'First paragraph';
+      const nearLine = 'Near';
+      const farLine =
+          'Far paragraph that is intentionally much wider than the nearby line '
+          'so horizontal distance must not outweigh vertical distance';
+      const markdown = '$firstLine\n\n$nearLine\n\n$farLine\n';
+      final vault = MemoryVaultBackend(seedExampleData: false);
+      final note = await vault.createNote(parentPath: '', title: 'Selection');
+      await vault.updateMarkdown(noteId: note.id, markdown: markdown);
+      final clipboard = _SelectionClipboard()..install();
+
+      await pumpWorkspace(tester, vault: vault, size: const Size(1600, 900));
+      final first = _blockText(0, firstLine);
+      final near = _blockText(2, nearLine);
+      final far = _blockText(4, farLine);
+      final nearRect = tester.getRect(near);
+      final farRect = tester.getRect(far);
+      final end = Offset(farRect.right - 2, nearRect.bottom + 1);
+      final gesture = await tester.createGesture(
+        pointer: 97,
+        kind: PointerDeviceKind.mouse,
+      );
+      final start = tester.getTopLeft(first) + const Offset(1, 2);
+      await gesture.moveTo(start);
+      await gesture.down(start);
+      await tester.pump();
+      await gesture.moveTo(end);
+      await tester.pump();
+      await gesture.up();
+      await gesture.removePointer();
+      await tester.pumpAndSettle();
+
+      await _sendPrimaryShortcut(tester, LogicalKeyboardKey.keyC);
+      expect(clipboard.text, '$firstLine\n\n$nearLine\n');
+    },
+  );
+
+  testWidgets('a new drag cannot reuse distant ranges from the previous drag', (
+    tester,
+  ) async {
+    const markdown = 'Alpha\n\nBeta\n\nGamma\n\nDelta\n';
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Selection');
+    await vault.updateMarkdown(noteId: note.id, markdown: markdown);
+    final clipboard = _SelectionClipboard()..install();
+
+    await pumpWorkspace(tester, vault: vault);
+    final alpha = _blockText(0, 'Alpha');
+    final beta = _blockText(2, 'Beta');
+    final gamma = _blockText(4, 'Gamma');
+    final delta = _blockText(6, 'Delta');
+
+    await _dragBetween(tester, alpha, delta, pointer: 98);
+    await _sendPrimaryShortcut(tester, LogicalKeyboardKey.keyC);
+    expect(clipboard.text, markdown);
+
+    await _dragBetween(tester, beta, gamma, pointer: 99);
+    await _sendPrimaryShortcut(tester, LogicalKeyboardKey.keyC);
+    expect(clipboard.text, 'Beta\n\nGamma\n');
+  });
+
+  testWidgets(
     'document selection stays visible when the IME bridge takes focus',
     (tester) async {
       tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
@@ -568,6 +707,20 @@ Offset _textRangeCenter(
     TextSelection(baseOffset: start, extentOffset: end),
   );
   return paragraph.localToGlobal(boxes.first.toRect().center);
+}
+
+Finder _blockText(int blockIndex, String text) {
+  return find.descendant(
+    of: find.byKey(Key('live-markdown-block-preview-$blockIndex')),
+    matching: find.text(text),
+  );
+}
+
+Finder _readingBlockText(int blockIndex, String text) {
+  return find.descendant(
+    of: find.byKey(ValueKey(('reading-markdown-selection-block', blockIndex))),
+    matching: find.text(text),
+  );
 }
 
 Future<void> _mouseClicks(

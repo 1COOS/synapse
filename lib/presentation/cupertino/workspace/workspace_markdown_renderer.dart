@@ -657,6 +657,8 @@ final class _WorkspaceReadingPreviewState
   final _selectableRegionKey = GlobalKey<SelectableRegionState>();
   final Map<int, MarkdownSelectedBlockRange> _selectedBlocks = {};
   SelectedContent? _selectedContent;
+  MarkdownDocumentSelectionSpan? _selectionSpan;
+  var _selectionGeneration = 0;
   TextSelection? _sourceSelection;
   var _selectionSyncScheduled = false;
   var _currentMarkdown = '';
@@ -749,6 +751,8 @@ final class _WorkspaceReadingPreviewState
                 scrollViewKey: _scrollViewportKey,
                 controller: _scrollController,
                 padding: const EdgeInsets.fromLTRB(16, 54, 16, 16),
+                onSelectionGestureStarted: _handleSelectionGestureStarted,
+                onSelectionSpanChanged: _handleSelectionSpanChanged,
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: readingChildren,
@@ -913,6 +917,7 @@ final class _WorkspaceReadingPreviewState
     return MarkdownSelectionBlock(
       key: ValueKey(('reading-markdown-selection-block', index)),
       block: block,
+      sourceOrder: index,
       onSelectionChanged: _handleBlockSelectionChanged,
       child: outlined,
     );
@@ -925,18 +930,50 @@ final class _WorkspaceReadingPreviewState
 
   void _handleBlockSelectionChanged(
     MarkdownLiveBlock block,
+    int sourceOrder,
+    int selectionGeneration,
     MarkdownSelectionProjection projection,
     SelectedContentRange? range,
   ) {
+    if (selectionGeneration != _selectionGeneration) {
+      return;
+    }
     if (range == null || range.startOffset == range.endOffset) {
-      _selectedBlocks.remove(block.start);
+      final span = _selectionSpan;
+      final isCurrentEdge =
+          span != null &&
+          (sourceOrder == span.baseSourceOrder ||
+              sourceOrder == span.extentSourceOrder);
+      if (!isCurrentEdge) {
+        _selectedBlocks.remove(block.start);
+      }
     } else {
       _selectedBlocks[block.start] = MarkdownSelectedBlockRange(
         block: block,
+        sourceOrder: sourceOrder,
         projection: projection,
         range: range,
       );
     }
+    _scheduleSelectionSync();
+  }
+
+  void _handleSelectionGestureStarted(int selectionGeneration) {
+    _selectionGeneration = selectionGeneration;
+    _selectedContent = null;
+    _selectionSpan = null;
+    _sourceSelection = null;
+    _selectedBlocks.clear();
+  }
+
+  void _handleSelectionSpanChanged(
+    int selectionGeneration,
+    MarkdownDocumentSelectionSpan? span,
+  ) {
+    if (selectionGeneration != _selectionGeneration) {
+      return;
+    }
+    _selectionSpan = span;
     _scheduleSelectionSync();
   }
 
@@ -953,12 +990,16 @@ final class _WorkspaceReadingPreviewState
       _sourceSelection =
           _selectedContent == null || _selectedContent!.plainText.isEmpty
           ? null
-          : combineMarkdownBlockSelections(_selectedBlocks.values);
+          : combineMarkdownBlockSelections(
+              _selectedBlocks.values,
+              _selectionSpan,
+            );
     });
   }
 
   void _clearSelection() {
     _selectedContent = null;
+    _selectionSpan = null;
     _sourceSelection = null;
     _selectedBlocks.clear();
     _selectableRegionKey.currentState?.clearSelection();
