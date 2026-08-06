@@ -11,6 +11,7 @@ import package_info_plus
 import pasteboard
 import printing
 import sqlite3_flutter_libs
+import webview_flutter_wkwebview
 
 func RegisterGeneratedPlugins(registry: FlutterPluginRegistry) {
   FileSelectorPlugin.register(with: registry.registrar(forPlugin: "FileSelectorPlugin"))
@@ -19,4 +20,5 @@ func RegisterGeneratedPlugins(registry: FlutterPluginRegistry) {
   PasteboardPlugin.register(with: registry.registrar(forPlugin: "PasteboardPlugin"))
   PrintingPlugin.register(with: registry.registrar(forPlugin: "PrintingPlugin"))
   Sqlite3FlutterLibsPlugin.register(with: registry.registrar(forPlugin: "Sqlite3FlutterLibsPlugin"))
+  WebViewFlutterPlugin.register(with: registry.registrar(forPlugin: "WebViewFlutterPlugin"))
 }

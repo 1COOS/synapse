@@ -25,6 +25,7 @@ final class WorkspaceEditorOperationCoordinator {
     required this.setMessage,
     required this.reloadRequired,
     required this.onStateChanged,
+    required this.flushEditorSurface,
   });
 
   final WorkspaceRuntimeManager runtimes;
@@ -45,6 +46,8 @@ final class WorkspaceEditorOperationCoordinator {
   final void Function(String message) setMessage;
   final bool Function() reloadRequired;
   final void Function() onStateChanged;
+  final Future<bool> Function(editor_context.PaneEditorContext context)
+  flushEditorSurface;
 
   final Set<NoteDocumentSession> _lockedSessions =
       Set<NoteDocumentSession>.identity();
@@ -74,6 +77,12 @@ final class WorkspaceEditorOperationCoordinator {
       return editor_context.PaneEditorCommandOutcome.unchanged;
     }
     try {
+      if (context != null && !await flushEditorSurface(context)) {
+        return editor_context.PaneEditorCommandOutcome.unchanged;
+      }
+      if (context != null && resolveContext(context) == null) {
+        return editor_context.PaneEditorCommandOutcome.staleTarget;
+      }
       return await operation();
     } on WorkspaceCommitInvariantError {
       return editor_context.PaneEditorCommandOutcome.unchanged;

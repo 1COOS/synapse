@@ -64,3 +64,4 @@ windows/flutter/ephemeral/
 .env.*
 *.tmp
 *.temp
+/tool/editor_web/node_modules/

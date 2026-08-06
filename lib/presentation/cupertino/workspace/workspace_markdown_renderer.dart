@@ -818,7 +818,7 @@ final class _WorkspaceReadingPreviewState
 
     return Padding(
       key: Key('live-markdown-reading-columns-${layout.startBlockIndex}'),
-      padding: const EdgeInsets.symmetric(vertical: 5),
+      padding: EdgeInsets.zero,
       child: DecoratedBox(
         decoration: BoxDecoration(
           border: Border.all(color: workspaceSoftLineColor),
@@ -847,7 +847,7 @@ final class _WorkspaceReadingPreviewState
                       SizedBox(
                         width: contentWidth * leftFraction,
                         child: Padding(
-                          padding: const EdgeInsets.all(10),
+                          padding: const EdgeInsets.symmetric(horizontal: 10),
                           child: MarkdownSelectionGroup(
                             child: side(
                               layout.startBlockIndex + 1,
@@ -869,7 +869,7 @@ final class _WorkspaceReadingPreviewState
                       SizedBox(
                         width: contentWidth * rightFraction,
                         child: Padding(
-                          padding: const EdgeInsets.all(10),
+                          padding: const EdgeInsets.symmetric(horizontal: 10),
                           child: MarkdownSelectionGroup(
                             child: side(
                               layout.separatorBlockIndex + 1,

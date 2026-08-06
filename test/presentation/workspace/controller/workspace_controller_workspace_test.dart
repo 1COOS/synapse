@@ -52,6 +52,65 @@ void main() {
       expect(controller.sessionFor(betaNote.id), isNotNull);
     });
 
+    test(
+      'flushes the focused document surface before switching notes',
+      () async {
+        final vault = MemoryVaultBackend();
+        final alpha = await vault.createNote(parentPath: '', title: 'Alpha');
+        final beta = await vault.createNote(parentPath: '', title: 'Beta');
+        final container = ProviderContainer(
+          overrides: [
+            workspaceDependenciesProvider.overrideWithValue(
+              createWorkspaceDependencies(
+                initialVault: vault,
+                settingsStore: FakeSettingsStore(),
+              ),
+            ),
+          ],
+        );
+        addTearDown(container.dispose);
+        final initial = await container.read(
+          workspaceControllerProvider.future,
+        );
+        final controller = container.read(workspaceControllerProvider.notifier);
+        final flushGate = Completer<int>();
+        final owner = Object();
+        var flushCalls = 0;
+        controller.attachDocumentSurface(
+          paneId: initial.focusedPaneId,
+          owner: owner,
+          flush: () {
+            flushCalls += 1;
+            return flushGate.future;
+          },
+        );
+
+        final selecting = controller.selectResource(
+          _findResource(initial.resources, beta.id)!,
+        );
+        await Future<void>.delayed(Duration.zero);
+
+        expect(flushCalls, 1);
+        expect(
+          container
+              .read(workspaceControllerProvider)
+              .requireValue
+              .selectedResourceId,
+          alpha.id,
+        );
+
+        flushGate.complete(0);
+        expect(await selecting, WorkspaceActionResult.committed);
+        expect(
+          container
+              .read(workspaceControllerProvider)
+              .requireValue
+              .selectedResourceId,
+          beta.id,
+        );
+      },
+    );
+
     test('publishes navigation and immutable split tree updates', () async {
       final vault = MemoryVaultBackend();
       final note = await vault.createNote(parentPath: '', title: 'Split');

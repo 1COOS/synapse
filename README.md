@@ -19,7 +19,7 @@ Synapse 不是 Obsidian 的替代品，而是 Obsidian 之前的「结构化整�
 - 桌面端 Vault：首次选择并记住本地 Markdown 仓库目录。
 - Web 预览库：使用内存示例数据，不直接访问本机文件系统。
 - 普通资源创建：直接创建文件夹和 Markdown 笔记，不要求选择项目模板。
-- 笔记编辑：默认进入块级 Live Preview 编辑模式，当前编辑块显示 Markdown 标签，离开后渲染为预览；剪贴板图片可直接粘贴为 Obsidian 友好的相对附件引用，并在阅读预览中拖拽调整显示宽度或拖到另一张图片旁边并排。
+- 笔记编辑：macOS 的编辑与阅读视图共用本地离线 CodeMirror 文档内核，当前编辑区域显示 Markdown 标签，其他区域使用 Live Preview；切换模式不会重载正文、滚动或选区。剪贴板图片仍保存为 Obsidian 友好的相对附件引用。
 - 图片素材：支持导入图片、粘贴剪贴板截图，再生成 OCR/整理建议。
 - AI Provider：桌面端支持 OpenAI 兼容 `baseURL/apiKey/model` 配置；无 key 时提示先设置模型。
 - AI proposal：未确认时保留在右侧素材栏且不修改正文；用户明确确认后可追加写入 Markdown，并把 proposal 状态标记为 `applied`。
@@ -87,6 +87,7 @@ Embedding Model: 留空
 - [架构文档](./docs/architecture.md)：分层设计、模块职责、数据模型、Vault 契约、AI 与搜索流程。
 - [开发文档](./docs/development.md)：环境要求、常用命令、测试验证和平台说明。
 - [macOS 生产说明](./docs/macos-production.md)：entitlement、Keychain fail-closed、Vault lease 生命周期和本地生产门禁。
+- [编辑器架构](./docs/editor-architecture.md)：CodeMirror 离线资产、UTF-16 事务协议、附件桥接、flush 和测试门禁。
 
 ## 本地开发
 

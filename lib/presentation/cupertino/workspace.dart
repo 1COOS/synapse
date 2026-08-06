@@ -7,6 +7,8 @@ import '../../application/search/search_index.dart';
 import '../../domain/markdown/markdown_document.dart';
 import '../../domain/vault/vault_resource.dart';
 import '../workspace/controller/workspace_controller.dart';
+import '../workspace/editor/codemirror/document_surface.dart';
+import '../workspace/editor/codemirror/document_surface_factory.dart';
 import '../workspace/editor/pane_editor_context.dart';
 import '../workspace/outline_navigation.dart';
 import '../workspace/state/note_document_session.dart';
@@ -42,7 +44,12 @@ enum _WorkspaceSection {
 enum _LeftPaneMode { resources, search }
 
 class SynapseWorkspace extends ConsumerStatefulWidget {
-  const SynapseWorkspace({super.key});
+  const SynapseWorkspace({
+    super.key,
+    this.documentSurfaceFactory = const PlatformDocumentSurfaceFactory(),
+  });
+
+  final DocumentSurfaceFactory documentSurfaceFactory;
 
   @override
   ConsumerState<SynapseWorkspace> createState() => _SynapseWorkspaceState();
@@ -952,6 +959,7 @@ class _SynapseWorkspaceState extends ConsumerState<SynapseWorkspace> {
       workspace: _workspace,
       controller: _controller,
       outlineNavigationController: _outlineNavigationController,
+      documentSurfaceFactory: widget.documentSurfaceFactory,
     );
   }
 

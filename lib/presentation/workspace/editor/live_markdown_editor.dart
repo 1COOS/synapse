@@ -144,6 +144,7 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
   int? _lastTextCaretOffset;
   var _lastTextCaretWasLineInsertion = false;
   int? _draggingTableBlockStart;
+  final _tableBlockDragSource = ValueNotifier<int?>(null);
   Offset? _tableBlockDragPosition;
   Timer? _tableBlockAutoScrollTimer;
   var _persistentBlankInsertion = false;
@@ -151,6 +152,8 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
   int? _activationCoverBlockStart;
   var _activationCoverGeneration = 0;
   _PasteViewportTransaction? _pasteViewportTransaction;
+  _StructuralInsertionViewportTransaction?
+  _structuralInsertionViewportTransaction;
   final Set<String> _failedImageSources = <String>{};
   final Map<int, MarkdownSelectedBlockRange> _documentBlockSelections = {};
   SelectedContent? _documentSelectedContent;
@@ -207,6 +210,7 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
       _clearActivationCover();
       _resetRenderIdentityCaches();
       _cancelPasteViewportTransaction();
+      _cancelStructuralInsertionViewportTransaction();
       oldWidget.controller.removeListener(_handleFullDocumentChanged);
       widget.controller.addListener(_handleFullDocumentChanged);
       _editorController.replaceDocument(widget.controller);
@@ -214,6 +218,7 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
       _lastTextCaretWasLineInsertion = false;
       _stopTableBlockAutoScroll();
       _draggingTableBlockStart = null;
+      _tableBlockDragSource.value = null;
       _tableBlockDragPosition = null;
       _failedImageSources.clear();
     }
@@ -221,6 +226,7 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
       _clearDocumentSelectionState();
       _clearActivationCover();
       _cancelPasteViewportTransaction();
+      _cancelStructuralInsertionViewportTransaction();
     }
     if (!widget.focused && _editorController.activeOffset != null) {
       _blockFocusNode.unfocus();
@@ -241,6 +247,7 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
     widget.onStateChanged(this, false);
     widget.controller.removeListener(_handleFullDocumentChanged);
     _stopTableBlockAutoScroll();
+    _tableBlockDragSource.dispose();
     _editorController.dispose();
     _outlineViewport.dispose();
     _blockFocusNode.dispose();
@@ -295,15 +302,41 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
     ScrollMetrics newPosition,
   ) {
     final transaction = _pasteViewportTransaction;
-    if (transaction == null ||
-        transaction.cancelled ||
-        !_pasteTransactionIsCurrent(transaction)) {
+    if (transaction != null &&
+        !transaction.cancelled &&
+        _pasteTransactionIsCurrent(transaction)) {
+      final targetPixels = switch (transaction.mode) {
+        _ViewportAnchorMode.preserveOffset => transaction.originalOffset,
+        _ViewportAnchorMode.followDocumentEnd => newPosition.maxScrollExtent,
+      };
+      return _scrollCorrectionForTarget(targetPixels, newPosition);
+    }
+
+    final structuralTransaction = _structuralInsertionViewportTransaction;
+    if (structuralTransaction == null ||
+        structuralTransaction.cancelled ||
+        !_structuralInsertionTransactionIsCurrent(structuralTransaction)) {
       return null;
     }
-    final targetPixels = switch (transaction.mode) {
-      _PasteViewportMode.preserveOffset => transaction.originalOffset,
-      _PasteViewportMode.followDocumentEnd => newPosition.maxScrollExtent,
-    };
+    final targetPixels =
+        structuralTransaction.targetOffsetOverride ??
+        switch (structuralTransaction.mode) {
+          _ViewportAnchorMode.preserveOffset =>
+            structuralTransaction.originalOffset,
+          _ViewportAnchorMode.followDocumentEnd => newPosition.maxScrollExtent,
+        };
+    return _scrollCorrectionForTarget(
+      targetPixels,
+      newPosition,
+      claimDimensionsWhenStable: true,
+    );
+  }
+
+  double? _scrollCorrectionForTarget(
+    double? targetPixels,
+    ScrollMetrics newPosition, {
+    bool claimDimensionsWhenStable = false,
+  }) {
     if (targetPixels == null) {
       return null;
     }
@@ -311,7 +344,11 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
         .clamp(newPosition.minScrollExtent, newPosition.maxScrollExtent)
         .toDouble();
     final correction = anchoredPixels - newPosition.pixels;
-    return correction.abs() < 0.5 ? null : correction;
+    return correction.abs() < 0.5
+        ? claimDimensionsWhenStable
+              ? 0.0
+              : null
+        : correction;
   }
 
   _PasteViewportTransaction _beginPasteViewportTransaction(
@@ -356,7 +393,7 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
     transaction.imageCommitted = true;
     if (transaction.targetEndsAtDocumentEnd &&
         transaction.viewportStartedAtDocumentEnd) {
-      transaction.mode = _PasteViewportMode.followDocumentEnd;
+      transaction.mode = _ViewportAnchorMode.followDocumentEnd;
     }
   }
 
@@ -371,6 +408,130 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
       return;
     }
     _pasteViewportTransaction = null;
+  }
+
+  _StructuralInsertionViewportTransaction?
+  _beginStructuralInsertionViewportTransaction() {
+    _cancelPasteViewportTransaction();
+    _cancelStructuralInsertionViewportTransaction();
+    if (!_scrollController.hasClients) {
+      return null;
+    }
+    final position = _scrollController.position;
+    final transaction = _StructuralInsertionViewportTransaction(
+      paneId: widget.paneId,
+      noteId: widget.noteId,
+      documentController: widget.controller,
+      originalOffset: position.pixels,
+      originalMaxScrollExtent: position.maxScrollExtent,
+    );
+    _structuralInsertionViewportTransaction = transaction;
+    return transaction;
+  }
+
+  bool _structuralInsertionTransactionIsCurrent(
+    _StructuralInsertionViewportTransaction transaction,
+  ) {
+    return identical(_structuralInsertionViewportTransaction, transaction) &&
+        identical(transaction.documentController, widget.controller) &&
+        transaction.paneId == widget.paneId &&
+        transaction.noteId == widget.noteId;
+  }
+
+  void _cancelStructuralInsertionViewportTransaction([
+    _StructuralInsertionViewportTransaction? expected,
+  ]) {
+    final transaction = _structuralInsertionViewportTransaction;
+    if (transaction == null ||
+        (expected != null && !identical(transaction, expected))) {
+      return;
+    }
+    transaction.cancelled = true;
+    _structuralInsertionViewportTransaction = null;
+  }
+
+  void _scheduleResolveStructuralInsertionViewport(
+    _StructuralInsertionViewportTransaction transaction,
+  ) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _observeStructuralInsertionViewport(transaction);
+    });
+  }
+
+  void _observeStructuralInsertionViewport(
+    _StructuralInsertionViewportTransaction transaction,
+  ) {
+    if (!mounted ||
+        !_scrollController.hasClients ||
+        transaction.cancelled ||
+        !_structuralInsertionTransactionIsCurrent(transaction)) {
+      return;
+    }
+    final position = _scrollController.position;
+    final maxScrollExtent = position.maxScrollExtent;
+    final previousMaxScrollExtent = transaction.lastMaxScrollExtent;
+    transaction.observedFrames += 1;
+    if (previousMaxScrollExtent != null &&
+        (previousMaxScrollExtent - maxScrollExtent).abs() < 0.5) {
+      transaction.stableFrames += 1;
+    } else {
+      transaction.stableFrames = 0;
+    }
+    transaction.lastMaxScrollExtent = maxScrollExtent;
+    if (transaction.stableFrames < 2 && transaction.observedFrames < 12) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _observeStructuralInsertionViewport(transaction);
+      });
+      return;
+    }
+    _resolveStructuralInsertionViewport(transaction, position);
+  }
+
+  void _resolveStructuralInsertionViewport(
+    _StructuralInsertionViewportTransaction transaction,
+    ScrollPosition position,
+  ) {
+    if (transaction.cancelled ||
+        !_structuralInsertionTransactionIsCurrent(transaction)) {
+      return;
+    }
+    var targetOffset = switch (transaction.mode) {
+      _ViewportAnchorMode.preserveOffset => transaction.originalOffset,
+      _ViewportAnchorMode.followDocumentEnd => position.maxScrollExtent,
+    };
+    if (transaction.mode == _ViewportAnchorMode.preserveOffset) {
+      final editorRenderObject = _activeTextEditorKey.currentContext
+          ?.findRenderObject();
+      final viewportRenderObject = _scrollViewportKey.currentContext
+          ?.findRenderObject();
+      if (editorRenderObject is RenderBox &&
+          editorRenderObject.attached &&
+          viewportRenderObject is RenderBox &&
+          viewportRenderObject.attached) {
+        final editorRect =
+            editorRenderObject.localToGlobal(Offset.zero) &
+            editorRenderObject.size;
+        final viewportRect =
+            viewportRenderObject.localToGlobal(Offset.zero) &
+            viewportRenderObject.size;
+        const edgePadding = 8.0;
+        final visibleTop = viewportRect.top + edgePadding;
+        final visibleBottom = viewportRect.bottom - edgePadding;
+        if (editorRect.top < visibleTop) {
+          targetOffset = position.pixels + editorRect.top - visibleTop;
+        } else if (editorRect.bottom > visibleBottom) {
+          targetOffset = position.pixels + editorRect.bottom - visibleBottom;
+        }
+      }
+    }
+    final anchoredOffset = targetOffset
+        .clamp(position.minScrollExtent, position.maxScrollExtent)
+        .toDouble();
+    transaction.targetOffsetOverride = anchoredOffset;
+    if ((position.pixels - anchoredOffset).abs() >= 0.5) {
+      position.jumpTo(anchoredOffset);
+    }
+    _structuralInsertionViewportTransaction = null;
   }
 
   void _scheduleResolveTextPasteViewport(
@@ -428,13 +589,15 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
   }
 
   void _scheduleKeepLatestEditVisible() {
-    if (_pasteViewportTransaction != null) {
+    if (_pasteViewportTransaction != null ||
+        _structuralInsertionViewportTransaction != null) {
       return;
     }
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted ||
           !_scrollController.hasClients ||
-          _pasteViewportTransaction != null) {
+          _pasteViewportTransaction != null ||
+          _structuralInsertionViewportTransaction != null) {
         return;
       }
       final targetContext = _activeTextEditorKey.currentContext;
@@ -462,6 +625,7 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
         notification.direction != ScrollDirection.idle;
     if (userStartedDragging || userChangedDirection) {
       _cancelPasteViewportTransaction();
+      _cancelStructuralInsertionViewportTransaction();
     }
     return false;
   }
@@ -2133,7 +2297,12 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
       _focusBlockEditor();
     }
     if (insertion == MarkdownInsertion.columns) {
-      _focusBlockEditor();
+      _focusBlockEditor(keepLatestEditVisible: false);
+      final transaction = _structuralInsertionViewportTransaction;
+      if (transaction != null &&
+          _structuralInsertionTransactionIsCurrent(transaction)) {
+        _scheduleResolveStructuralInsertionViewport(transaction);
+      }
     }
     if (insertion == MarkdownInsertion.table && _openContextMenuCount == 0) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -2143,6 +2312,24 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
       });
     }
     _scheduleKeepLatestEditVisible();
+  }
+
+  void _applyContextMenuInsertion(
+    MarkdownInsertion insertion,
+    MarkdownCommandTarget? menuTarget,
+  ) {
+    final beforeText = widget.controller.text;
+    final transaction = insertion == MarkdownInsertion.columns
+        ? _beginStructuralInsertionViewportTransaction()
+        : null;
+    _editorController.applyInsertion(
+      insertion,
+      menuTarget: menuTarget,
+      busy: widget.busy,
+    );
+    if (transaction != null && widget.controller.text == beforeText) {
+      _cancelStructuralInsertionViewportTransaction(transaction);
+    }
   }
 
   Widget _buildContextMenu(
@@ -2230,6 +2417,7 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
                   onRedo: _redo,
                   onFind: _requestFind,
                   onReplace: _requestReplace,
+                  onInsertion: _applyContextMenuInsertion,
                   onPaste: (target) =>
                       _pasteFromContextMenu(menuTarget: target),
                 ),
@@ -2401,6 +2589,7 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
                     onRedo: _redo,
                     onFind: _requestFind,
                     onReplace: _requestReplace,
+                    onInsertion: _applyContextMenuInsertion,
                     onPaste: (_) => _pasteSelectedImageAtRememberedCaret(),
                     canCopyOverride: imageTargetIsCurrent,
                     onCopyOverride: _copySelectedImage,
@@ -2978,10 +3167,9 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
       const Duration(milliseconds: 16),
       (_) => _tableBlockAutoScrollTick(),
     );
-    setState(() {
-      _draggingTableBlockStart = block.start;
-      _tableBlockDragPosition = null;
-    });
+    _draggingTableBlockStart = block.start;
+    _tableBlockDragSource.value = block.start;
+    _tableBlockDragPosition = null;
   }
 
   void _handleTableBlockDragUpdate(DragUpdateDetails details) {
@@ -2994,10 +3182,9 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
         (_draggingTableBlockStart == null && _tableBlockDragPosition == null)) {
       return;
     }
-    setState(() {
-      _draggingTableBlockStart = null;
-      _tableBlockDragPosition = null;
-    });
+    _draggingTableBlockStart = null;
+    _tableBlockDragSource.value = null;
+    _tableBlockDragPosition = null;
   }
 
   void _stopTableBlockAutoScroll() {
@@ -3404,7 +3591,8 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
                                     key: const Key(
                                       'markdown-table-document-end-drop-target',
                                     ),
-                                    enabled: _draggingTableBlockStart != null,
+                                    enabled: widget.enabled && !widget.busy,
+                                    dragSource: _tableBlockDragSource,
                                     noteId: widget.noteId,
                                     targetBlockStart: -1,
                                     fixedSide: _MarkdownBlockDropSide.after,
@@ -3572,7 +3760,7 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
     return KeyedSubtree(
       key: Key('live-markdown-columns-$layoutIdentity'),
       child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 5),
+        padding: EdgeInsets.zero,
         child: DecoratedBox(
           key: Key('live-markdown-columns-frame-$layoutIdentity'),
           decoration: BoxDecoration(
@@ -3621,7 +3809,9 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
                             SizedBox(
                               width: contentWidth * leftFraction,
                               child: Padding(
-                                padding: const EdgeInsets.all(10),
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 10,
+                                ),
                                 child: MarkdownSelectionGroup(
                                   child: _buildColumnsSide(
                                     layoutIdentity: layoutIdentity,
@@ -3653,7 +3843,9 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
                             SizedBox(
                               width: contentWidth * rightFraction,
                               child: Padding(
-                                padding: const EdgeInsets.all(10),
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 10,
+                                ),
                                 child: MarkdownSelectionGroup(
                                   child: _buildColumnsSide(
                                     layoutIdentity: layoutIdentity,
@@ -3762,7 +3954,8 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
     );
     return _MarkdownTableBlockDropTarget(
       key: Key('markdown-table-columns-$side-drop-target-$layoutIdentity'),
-      enabled: _draggingTableBlockStart != null,
+      enabled: widget.enabled && !widget.busy,
+      dragSource: _tableBlockDragSource,
       noteId: widget.noteId,
       targetBlockStart: -1,
       fixedSide: _MarkdownBlockDropSide.after,
@@ -4179,7 +4372,8 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
     }
     return _MarkdownTableBlockDropTarget(
       key: Key('markdown-table-block-drop-target-$index'),
-      enabled: _draggingTableBlockStart != null,
+      enabled: widget.enabled && !widget.busy,
+      dragSource: _tableBlockDragSource,
       noteId: widget.noteId,
       targetBlockStart: block.start,
       onDragMove: (position) => _tableBlockDragPosition = position,
@@ -4627,24 +4821,20 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
       );
       if (widget.enabled && !widget.busy) {
         final table = _tableForBlock(block)!;
-        preview = Draggable<_MarkdownTableDragData>(
-          key: Key('markdown-table-block-drag-source-$index'),
+        preview = _MarkdownTableMoveHandlePortal(
+          key: ValueKey(('markdown-table-move-handle', block.start)),
+          blockIndex: index,
+          tapRegionGroupId: _editingSessionTapGroup,
           data: _MarkdownTableDragData(
             noteId: widget.noteId,
             blockStart: block.start,
             blockEnd: block.end,
             blockText: block.text,
           ),
-          dragAnchorStrategy: pointerDragAnchorStrategy,
-          rootOverlay: true,
-          maxSimultaneousDrags: 1,
-          feedback: _MarkdownTableDragFeedback(table: table),
           onDragStarted: () => _handleTableBlockDragStarted(block),
           onDragUpdate: _handleTableBlockDragUpdate,
-          onDragCompleted: _handleTableBlockDragEnded,
-          onDraggableCanceled: (_, _) => _handleTableBlockDragEnded(),
-          onDragEnd: (_) => _handleTableBlockDragEnded(),
-          childWhenDragging: Opacity(opacity: 0.45, child: preview),
+          onDragEnded: _handleTableBlockDragEnded,
+          feedback: _MarkdownTableDragFeedback(table: table),
           child: preview,
         );
       }
@@ -5171,10 +5361,277 @@ final class _MarkdownTableDragData {
   final String blockText;
 }
 
+class _MarkdownTableMoveHandlePortal extends StatefulWidget {
+  const _MarkdownTableMoveHandlePortal({
+    super.key,
+    required this.blockIndex,
+    required this.tapRegionGroupId,
+    required this.data,
+    required this.onDragStarted,
+    required this.onDragUpdate,
+    required this.onDragEnded,
+    required this.feedback,
+    required this.child,
+  });
+
+  final int blockIndex;
+  final Object tapRegionGroupId;
+  final _MarkdownTableDragData data;
+  final VoidCallback onDragStarted;
+  final ValueChanged<DragUpdateDetails> onDragUpdate;
+  final VoidCallback onDragEnded;
+  final Widget feedback;
+  final Widget child;
+
+  @override
+  State<_MarkdownTableMoveHandlePortal> createState() =>
+      _MarkdownTableMoveHandlePortalState();
+}
+
+class _MarkdownTableMoveHandlePortalState
+    extends State<_MarkdownTableMoveHandlePortal> {
+  final _layerLink = LayerLink();
+  final _overlayController = OverlayPortalController(
+    debugLabel: 'markdown-table-move-handle',
+  );
+  var _dragging = false;
+  var _showHint = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _overlayController.show();
+  }
+
+  @override
+  void dispose() {
+    super.dispose();
+  }
+
+  void _handleDragStarted() {
+    setState(() {
+      _dragging = true;
+      _showHint = false;
+    });
+    widget.onDragStarted();
+  }
+
+  void _handleDragEnded() {
+    if (mounted) {
+      setState(() => _dragging = false);
+    }
+    widget.onDragEnded();
+  }
+
+  void _handlePointerEnter(PointerEnterEvent event) {
+    if (_dragging || _showHint) {
+      return;
+    }
+    setState(() => _showHint = true);
+  }
+
+  void _handlePointerExit(PointerExitEvent event) {
+    if (!_showHint) {
+      return;
+    }
+    setState(() => _showHint = false);
+  }
+
+  void _handleRejectedDragEnded(DraggableDetails details) {
+    if (!details.wasAccepted) {
+      _handleDragEnded();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return OverlayPortal(
+      controller: _overlayController,
+      overlayChildBuilder: (context) => Positioned(
+        top: 0,
+        left: 0,
+        child: CompositedTransformFollower(
+          link: _layerLink,
+          showWhenUnlinked: false,
+          targetAnchor: Alignment.topLeft,
+          followerAnchor: Alignment.topRight,
+          offset: const Offset(-4, 0),
+          child: TapRegion(
+            groupId: widget.tapRegionGroupId,
+            child: Draggable<_MarkdownTableDragData>(
+              key: ValueKey((
+                'markdown-table-block-draggable',
+                widget.data.blockStart,
+              )),
+              data: widget.data,
+              dragAnchorStrategy: pointerDragAnchorStrategy,
+              rootOverlay: true,
+              maxSimultaneousDrags: 1,
+              feedback: widget.feedback,
+              onDragStarted: _handleDragStarted,
+              onDragUpdate: widget.onDragUpdate,
+              onDragCompleted: _handleDragEnded,
+              onDragEnd: _handleRejectedDragEnded,
+              childWhenDragging: _MarkdownTableMoveHandle(
+                handleKey: Key(
+                  'markdown-table-block-drag-source-${widget.blockIndex}',
+                ),
+                dragging: true,
+                showHint: false,
+              ),
+              child: _MarkdownTableMoveHandle(
+                handleKey: Key(
+                  'markdown-table-block-drag-source-${widget.blockIndex}',
+                ),
+                dragging: false,
+                showHint: _showHint,
+                onEnter: _handlePointerEnter,
+                onExit: _handlePointerExit,
+              ),
+            ),
+          ),
+        ),
+      ),
+      child: CompositedTransformTarget(
+        link: _layerLink,
+        child: Opacity(opacity: _dragging ? 0.45 : 1, child: widget.child),
+      ),
+    );
+  }
+}
+
+class _MarkdownTableMoveHandle extends StatelessWidget {
+  const _MarkdownTableMoveHandle({
+    required this.handleKey,
+    required this.dragging,
+    required this.showHint,
+    this.onEnter,
+    this.onExit,
+  });
+
+  final Key handleKey;
+  final bool dragging;
+  final bool showHint;
+  final PointerEnterEventListener? onEnter;
+  final PointerExitEventListener? onExit;
+
+  @override
+  Widget build(BuildContext context) {
+    final accentColor = WorkspaceAppearanceScope.of(context).accentColor;
+    return Semantics(
+      label: '拖动整个表格',
+      child: MouseRegion(
+        cursor: dragging
+            ? SystemMouseCursors.grabbing
+            : SystemMouseCursors.grab,
+        onEnter: onEnter,
+        onExit: onExit,
+        child: SizedBox.square(
+          key: handleKey,
+          dimension: 28,
+          child: Stack(
+            clipBehavior: Clip.none,
+            fit: StackFit.expand,
+            children: [
+              DecoratedBox(
+                decoration: BoxDecoration(
+                  color: dragging
+                      ? accentColor.withValues(alpha: 0.14)
+                      : workspaceSurfaceColor.withValues(alpha: 0.98),
+                  border: Border.all(
+                    color: accentColor.withValues(alpha: dragging ? 1 : 0.65),
+                  ),
+                  borderRadius: BorderRadius.circular(7),
+                  boxShadow: const [
+                    BoxShadow(
+                      color: Color(0x1F000000),
+                      blurRadius: 6,
+                      offset: Offset(0, 2),
+                    ),
+                  ],
+                ),
+                child: CustomPaint(
+                  painter: _MarkdownTableMoveGripPainter(color: accentColor),
+                ),
+              ),
+              if (showHint)
+                Positioned(
+                  top: 34,
+                  left: 0,
+                  child: IgnorePointer(
+                    child: DecoratedBox(
+                      decoration: BoxDecoration(
+                        color: const Color(0xEB252525),
+                        borderRadius: BorderRadius.circular(5),
+                        boxShadow: const [
+                          BoxShadow(
+                            color: Color(0x26000000),
+                            blurRadius: 5,
+                            offset: Offset(0, 2),
+                          ),
+                        ],
+                      ),
+                      child: const Padding(
+                        padding: EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 5,
+                        ),
+                        child: Text(
+                          '拖动整个表格',
+                          key: Key('markdown-table-move-hint'),
+                          maxLines: 1,
+                          style: TextStyle(
+                            color: CupertinoColors.white,
+                            fontSize: 12,
+                            fontWeight: FontWeight.w500,
+                            decoration: TextDecoration.none,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _MarkdownTableMoveGripPainter extends CustomPainter {
+  const _MarkdownTableMoveGripPainter({required this.color});
+
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()..color = color;
+    const spacing = 5.0;
+    final startX = (size.width - spacing) / 2;
+    final startY = (size.height - spacing * 2) / 2;
+    for (var row = 0; row < 3; row += 1) {
+      for (var column = 0; column < 2; column += 1) {
+        canvas.drawCircle(
+          Offset(startX + column * spacing, startY + row * spacing),
+          1.35,
+          paint,
+        );
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(_MarkdownTableMoveGripPainter oldDelegate) {
+    return color != oldDelegate.color;
+  }
+}
+
 class _MarkdownTableBlockDropTarget extends StatefulWidget {
   const _MarkdownTableBlockDropTarget({
     super.key,
     required this.enabled,
+    required this.dragSource,
     required this.noteId,
     required this.targetBlockStart,
     this.fixedSide,
@@ -5184,6 +5641,7 @@ class _MarkdownTableBlockDropTarget extends StatefulWidget {
   });
 
   final bool enabled;
+  final ValueListenable<int?> dragSource;
   final String noteId;
   final int targetBlockStart;
   final _MarkdownBlockDropSide? fixedSide;
@@ -5200,17 +5658,59 @@ class _MarkdownTableBlockDropTarget extends StatefulWidget {
 class _MarkdownTableBlockDropTargetState
     extends State<_MarkdownTableBlockDropTarget> {
   _MarkdownBlockDropSide? _side;
+  int? _dragSourceStart;
+
+  bool get _interactionEnabled =>
+      widget.enabled &&
+      _dragSourceStart != null &&
+      _dragSourceStart != widget.targetBlockStart;
+
+  @override
+  void initState() {
+    super.initState();
+    _dragSourceStart = widget.dragSource.value;
+    widget.dragSource.addListener(_handleDragSourceChanged);
+  }
 
   @override
   void didUpdateWidget(covariant _MarkdownTableBlockDropTarget oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (!widget.enabled && _side != null) {
+    if (oldWidget.dragSource != widget.dragSource) {
+      oldWidget.dragSource.removeListener(_handleDragSourceChanged);
+      _dragSourceStart = widget.dragSource.value;
+      widget.dragSource.addListener(_handleDragSourceChanged);
+    }
+    if (!_interactionEnabled && _side != null) {
       _side = null;
     }
   }
 
+  @override
+  void dispose() {
+    widget.dragSource.removeListener(_handleDragSourceChanged);
+    super.dispose();
+  }
+
+  void _handleDragSourceChanged() {
+    final wasEnabled = _interactionEnabled;
+    final nextSource = widget.dragSource.value;
+    if (nextSource == _dragSourceStart) {
+      return;
+    }
+    _dragSourceStart = nextSource;
+    final enabled = _interactionEnabled;
+    if (wasEnabled == enabled && (enabled || _side == null)) {
+      return;
+    }
+    setState(() {
+      if (!enabled) {
+        _side = null;
+      }
+    });
+  }
+
   bool _canAccept(_MarkdownTableDragData data) {
-    return widget.enabled &&
+    return _interactionEnabled &&
         data.noteId == widget.noteId &&
         data.blockStart != widget.targetBlockStart;
   }
@@ -5260,7 +5760,7 @@ class _MarkdownTableBlockDropTargetState
 
   @override
   Widget build(BuildContext context) {
-    if (!widget.enabled) {
+    if (!_interactionEnabled) {
       return widget.child;
     }
     final side = _side;
@@ -5486,7 +5986,7 @@ class _MarkdownTableDragFeedback extends StatelessWidget {
   }
 }
 
-enum _PasteViewportMode { preserveOffset, followDocumentEnd }
+enum _ViewportAnchorMode { preserveOffset, followDocumentEnd }
 
 final class _PasteViewportTransaction {
   _PasteViewportTransaction({
@@ -5506,7 +6006,7 @@ final class _PasteViewportTransaction {
   final TextSelection targetSelection;
   final double? originalOffset;
   final double? originalMaxScrollExtent;
-  var mode = _PasteViewportMode.preserveOffset;
+  var mode = _ViewportAnchorMode.preserveOffset;
   var inFlight = true;
   var cancelled = false;
   var imageCommitted = false;
@@ -5518,6 +6018,30 @@ final class _PasteViewportTransaction {
       originalOffset != null &&
       originalMaxScrollExtent != null &&
       (originalMaxScrollExtent! - originalOffset!).abs() < 0.5;
+}
+
+final class _StructuralInsertionViewportTransaction {
+  _StructuralInsertionViewportTransaction({
+    required this.paneId,
+    required this.noteId,
+    required this.documentController,
+    required this.originalOffset,
+    required this.originalMaxScrollExtent,
+  }) : mode = (originalMaxScrollExtent - originalOffset).abs() < 0.5
+           ? _ViewportAnchorMode.followDocumentEnd
+           : _ViewportAnchorMode.preserveOffset;
+
+  final String paneId;
+  final String noteId;
+  final TextEditingController documentController;
+  final double originalOffset;
+  final double originalMaxScrollExtent;
+  final _ViewportAnchorMode mode;
+  bool cancelled = false;
+  int observedFrames = 0;
+  int stableFrames = 0;
+  double? lastMaxScrollExtent;
+  double? targetOffsetOverride;
 }
 
 final class _ActiveEditScrollController extends ScrollController {

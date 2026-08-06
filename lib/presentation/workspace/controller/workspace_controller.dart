@@ -11,7 +11,9 @@ import '../../../application/settings/synapse_settings.dart';
 import '../../../domain/markdown/markdown_document.dart';
 import '../../../domain/vault/vault_migration.dart';
 import '../../../domain/vault/vault_resource.dart';
+import '../../../infrastructure/input/image_input_service.dart';
 import '../../../infrastructure/vault/vault_backend.dart';
+import '../editor/codemirror/document_surface_registry.dart';
 import '../editor/pane_editor_context.dart' as editor_context;
 import '../editor/live_markdown_editor.dart' show NoteEditorPasteAvailability;
 import '../state/note_document_session.dart';
@@ -64,6 +66,7 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
   late final WorkspaceEditorCoordinator _editor;
   late final WorkspaceEditorOperationCoordinator _editorOperations;
   late final WorkspaceStartupCoordinator _startup;
+  final DocumentSurfaceRegistry _documentSurfaces = DocumentSurfaceRegistry();
   bool _isDisposed = false;
   bool _reloadRequired = false;
   int _searchIntent = 0;
@@ -145,6 +148,7 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
       setMessage: _setMessage,
       reloadRequired: () => _reloadRequired,
       onStateChanged: _publishCollaboratorSnapshot,
+      flushEditorSurface: _flushEditorSurfaceForContext,
     );
     _startup = WorkspaceStartupCoordinator(
       dependencies: _dependencies,
@@ -237,6 +241,18 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
 
   NoteDocumentSession? sessionFor(String noteId) =>
       _sessions.sessionFor(noteId);
+
+  void attachDocumentSurface({
+    required String paneId,
+    required Object owner,
+    required DocumentSurfaceFlusher flush,
+  }) {
+    _documentSurfaces.attach(paneId: paneId, owner: owner, flush: flush);
+  }
+
+  void detachDocumentSurface({required String paneId, required Object owner}) {
+    _documentSurfaces.detach(paneId: paneId, owner: owner);
+  }
 
   bool get isBusy => state.value?.isBusy ?? true;
 
@@ -361,6 +377,9 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
       _beginOperation(WorkspaceOperation.resourceMutation);
     }
     try {
+      if (!await _flushFocusedEditorSurface()) {
+        return WorkspaceActionResult.aborted;
+      }
       final targetSession = _sessions.sessionFor(resource.id);
       if (!await _flushFocusedSession()) {
         return WorkspaceActionResult.aborted;
@@ -457,6 +476,9 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
       _beginOperation(WorkspaceOperation.resourceMutation);
     }
     try {
+      if (!await _flushFocusedEditorSurface()) {
+        return WorkspaceActionResult.aborted;
+      }
       if (!await _flushFocusedSession()) {
         return WorkspaceActionResult.aborted;
       }
@@ -549,6 +571,10 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
     }
     _pendingCloseOperations += 1;
     try {
+      if (_documentSurfaces.contains(_splits.focusedPaneId) &&
+          !await _flushFocusedEditorSurface()) {
+        return WorkspaceActionResult.aborted;
+      }
       final result = await _documents.closeFocusedPane();
       if (result == WorkspaceActionResult.aborted) {
         final error = _documents.lastCloseError;
@@ -675,6 +701,21 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
     );
   }
 
+  Future<editor_context.PaneEditorCommandOutcome> pasteImportedImage(
+    editor_context.PaneEditorContext? context,
+    ImportedImage image,
+    TextEditingValue target,
+  ) {
+    if (context == null) {
+      _setMessage('请先选择或创建笔记');
+      return Future.value(editor_context.PaneEditorCommandOutcome.unchanged);
+    }
+    return _editorOperations.runOperation(
+      () => _editor.pasteImportedImage(context, image, target),
+      context: context,
+    );
+  }
+
   Future<editor_context.PaneEditorCommandOutcome> copyImage(
     editor_context.PaneEditorContext context,
     String sourceId, {
@@ -770,7 +811,10 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
     required bool automatic,
     required bool rescheduleIfDirty,
     String? successMessage,
-  }) {
+  }) async {
+    if (!await _flushEditorSurfaceForContext(context)) {
+      return editor_context.PaneEditorCommandOutcome.unchanged;
+    }
     return _editorOperations.withSessionSaveScope(
       context,
       session,
@@ -822,7 +866,11 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
   Future<AttachmentDeletionImpact?> analyzeAttachmentDeletion(
     editor_context.PaneEditorContext context,
     List<NoteAttachment> attachments,
-  ) {
+  ) async {
+    if (_documentSurfaces.contains(context.paneId) &&
+        !await _flushEditorSurfaceForContext(context)) {
+      return null;
+    }
     return _editor.analyzeAttachmentDeletion(context, attachments);
   }
 
@@ -855,6 +903,9 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
         current.requiresMigration ||
         current.reloadRequired ||
         current.activeOperation != null) {
+      return null;
+    }
+    if (!await _flushEditorSurfaceForContext(context)) {
       return null;
     }
     final resolved = resolvePaneEditorContext(context);
@@ -971,6 +1022,9 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
       _beginOperation(WorkspaceOperation.resourceMutation);
     }
     try {
+      if (!await _flushFocusedEditorSurface()) {
+        return WorkspaceActionResult.aborted;
+      }
       return await operation();
     } catch (error) {
       if (!_reloadRequired) {
@@ -984,9 +1038,12 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
     }
   }
 
-  Future<WorkspaceActionResult> chooseVault() {
+  Future<WorkspaceActionResult> chooseVault() async {
     if (_reloadRequired) {
-      return Future.value(WorkspaceActionResult.aborted);
+      return WorkspaceActionResult.aborted;
+    }
+    if (!await _flushFocusedEditorSurface()) {
+      return WorkspaceActionResult.aborted;
     }
     return _startup.chooseVault();
   }
@@ -1048,6 +1105,33 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
       _setMessage('保存失败：$error');
     }
     return report.succeeded;
+  }
+
+  Future<bool> _flushFocusedEditorSurface() =>
+      _flushEditorSurface(_splits.focusedPaneId);
+
+  Future<bool> _flushEditorSurfaceForContext(
+    editor_context.PaneEditorContext context,
+  ) async {
+    if (resolvePaneEditorContext(context) == null) {
+      return false;
+    }
+    if (!await _flushEditorSurface(context.paneId)) {
+      return false;
+    }
+    return resolvePaneEditorContext(context) != null;
+  }
+
+  Future<bool> _flushEditorSurface(String paneId) async {
+    try {
+      await _documentSurfaces.flush(paneId);
+      return true;
+    } catch (error) {
+      if (!_reloadRequired) {
+        _setMessage('编辑器同步失败：$error');
+      }
+      return false;
+    }
   }
 
   WorkspaceActionResult _applyResourceResult(
@@ -1329,6 +1413,7 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
     _mutations.dispose();
     _startup.dispose();
     _editorOperations.dispose();
+    _documentSurfaces.clear();
     _runtimeManager.dispose();
     _saves.dispose();
     _materials.dispose();

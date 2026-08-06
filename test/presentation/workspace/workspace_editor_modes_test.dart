@@ -113,8 +113,20 @@ void main() {
 
       expect(columns, findsOneWidget);
       expect(columnsFrameColor(), const Color(0x00000000));
+      expect(tester.getRect(columns), tester.getRect(columnsFrame));
       expect(find.text('Left column'), findsOneWidget);
       expect(find.text('Right column'), findsOneWidget);
+      expect(
+        find.ancestor(
+          of: find.text('Left column'),
+          matching: find.byWidgetPredicate(
+            (widget) =>
+                widget is Padding &&
+                widget.padding == const EdgeInsets.symmetric(horizontal: 10),
+          ),
+        ),
+        findsOneWidget,
+      );
       expect(
         tester.getTopLeft(find.text('Left column')).dy,
         closeTo(tester.getTopLeft(find.text('Right column')).dy, 2),
@@ -177,6 +189,25 @@ void main() {
 
       expect(
         find.byKey(Key('live-markdown-reading-columns-$layoutIdentity')),
+        findsOneWidget,
+      );
+      expect(
+        tester
+            .widget<Padding>(
+              find.byKey(Key('live-markdown-reading-columns-$layoutIdentity')),
+            )
+            .padding,
+        EdgeInsets.zero,
+      );
+      expect(
+        find.ancestor(
+          of: find.text('Left edited'),
+          matching: find.byWidgetPredicate(
+            (widget) =>
+                widget is Padding &&
+                widget.padding == const EdgeInsets.symmetric(horizontal: 10),
+          ),
+        ),
         findsOneWidget,
       );
       expect(find.text('Before full width'), findsOneWidget);
@@ -253,6 +284,146 @@ void main() {
       expect(find.text('Alpha'), findsWidgets);
     },
   );
+
+  testWidgets('inserting local columns keeps every bottom frame anchored', (
+    tester,
+  ) async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(
+      parentPath: '',
+      title: 'Stable Columns',
+    );
+    await vault.updateMarkdown(
+      noteId: note.id,
+      markdown: List.generate(48, (index) => 'Paragraph $index\n\n').join(),
+    );
+
+    await pumpWorkspace(tester, vault: vault, size: const Size(1200, 620));
+    await switchToSourceMode(tester);
+    final target = find.byKey(const Key('live-markdown-block-preview-94'));
+    await tester.ensureVisible(target);
+    await tester.pumpAndSettle();
+
+    final vertical = tester
+        .stateList<ScrollableState>(find.byType(Scrollable))
+        .firstWhere(
+          (state) =>
+              state.axisDirection == AxisDirection.down &&
+              state.position.maxScrollExtent > 0,
+        );
+    vertical.position.jumpTo(vertical.position.maxScrollExtent);
+    await tester.pump();
+
+    await tester.tap(target);
+    await tester.pumpAndSettle();
+    await openNoteContextMenu(tester);
+    final mouse = await hoverNoteMenuItem(
+      tester,
+      const Key('note-menu-insert'),
+    );
+    final columnsMenuItem = find.byKey(const Key('note-menu-insert-columns'));
+    final menuPosition = tester.getCenter(columnsMenuItem);
+    await mouse.moveTo(menuPosition);
+    await mouse.down(menuPosition);
+    await tester.pump();
+    final bottomGaps = <double>[
+      vertical.position.maxScrollExtent - vertical.position.pixels,
+    ];
+    await mouse.up();
+
+    for (var frame = 0; frame < 8; frame += 1) {
+      await tester.pump(const Duration(milliseconds: 16));
+      bottomGaps.add(
+        vertical.position.maxScrollExtent - vertical.position.pixels,
+      );
+    }
+    await tester.pumpAndSettle();
+    bottomGaps.add(
+      vertical.position.maxScrollExtent - vertical.position.pixels,
+    );
+    await mouse.removePointer();
+
+    expect(
+      bottomGaps,
+      everyElement(closeTo(0, 0.5)),
+      reason: '文末插入双栏的任何中间帧都必须保持贴底，不能先滑走再返回',
+    );
+    expect(
+      liveMarkdownDocumentController(tester, paneId: 1).text,
+      contains('<!-- synapse:columns ratio="50:50" -->'),
+    );
+  });
+
+  testWidgets('inserting local columns preserves every middle viewport frame', (
+    tester,
+  ) async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(
+      parentPath: '',
+      title: 'Stable Middle Columns',
+    );
+    await vault.updateMarkdown(
+      noteId: note.id,
+      markdown: List.generate(48, (index) => 'Paragraph $index\n\n').join(),
+    );
+
+    await pumpWorkspace(tester, vault: vault, size: const Size(1200, 620));
+    await switchToSourceMode(tester);
+    final target = find.byKey(const Key('live-markdown-block-preview-40'));
+    await tester.ensureVisible(target);
+    await tester.pumpAndSettle();
+
+    final vertical = tester
+        .stateList<ScrollableState>(find.byType(Scrollable))
+        .firstWhere(
+          (state) =>
+              state.axisDirection == AxisDirection.down &&
+              state.position.maxScrollExtent > 0,
+        );
+    final viewportRect = tester.getRect(find.byWidget(vertical.widget));
+    final targetRect = tester.getRect(target);
+    final centeredOffset =
+        (vertical.position.pixels +
+                targetRect.center.dy -
+                viewportRect.center.dy)
+            .clamp(
+              vertical.position.minScrollExtent,
+              vertical.position.maxScrollExtent,
+            )
+            .toDouble();
+    vertical.position.jumpTo(centeredOffset);
+    await tester.pump();
+
+    await tester.tap(target);
+    await tester.pumpAndSettle();
+    await openNoteContextMenu(tester);
+    final mouse = await hoverNoteMenuItem(
+      tester,
+      const Key('note-menu-insert'),
+    );
+    final columnsMenuItem = find.byKey(const Key('note-menu-insert-columns'));
+    final menuPosition = tester.getCenter(columnsMenuItem);
+    await mouse.moveTo(menuPosition);
+    final originalOffset = vertical.position.pixels;
+    await mouse.down(menuPosition);
+    await tester.pump();
+    final frameOffsets = <double>[vertical.position.pixels];
+    await mouse.up();
+
+    for (var frame = 0; frame < 8; frame += 1) {
+      await tester.pump(const Duration(milliseconds: 16));
+      frameOffsets.add(vertical.position.pixels);
+    }
+    await tester.pumpAndSettle();
+    frameOffsets.add(vertical.position.pixels);
+    await mouse.removePointer();
+
+    expect(
+      frameOffsets,
+      everyElement(closeTo(originalOffset, 0.5)),
+      reason: '视口中部插入双栏时，每一帧都必须保持原滚动锚点',
+    );
+  });
 
   testWidgets('drags image and table blocks into local columns', (
     tester,

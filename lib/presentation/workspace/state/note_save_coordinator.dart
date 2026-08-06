@@ -253,7 +253,6 @@ final class NoteSaveCoordinator {
     });
     _timers[session] = timer;
     session.setSavePhase(NoteSavePhase.scheduled);
-    _onStateChanged();
   }
 
   void cancel(NoteDocumentSession session) {

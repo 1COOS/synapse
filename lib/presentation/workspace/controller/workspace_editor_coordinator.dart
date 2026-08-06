@@ -186,6 +186,19 @@ final class WorkspaceEditorCoordinator {
     return PaneEditorCommandOutcome.committed;
   }
 
+  Future<PaneEditorCommandOutcome> pasteImportedImage(
+    PaneEditorContext context,
+    ImportedImage image,
+    TextEditingValue target,
+  ) {
+    if (_resolvePasteTarget(context, target) == null) {
+      return Future<PaneEditorCommandOutcome>.value(
+        PaneEditorCommandOutcome.staleTarget,
+      );
+    }
+    return _insertPastedImage(context: context, image: image, target: target);
+  }
+
   Future<PaneEditorCommandOutcome> copyImage(
     PaneEditorContext context,
     String attachmentId,

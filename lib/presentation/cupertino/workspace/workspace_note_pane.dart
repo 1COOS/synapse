@@ -5,13 +5,22 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:path/path.dart' as p;
 
 import '../../../application/exports/note_pdf_export.dart';
 import '../../../domain/markdown/markdown_document.dart';
 import '../../../domain/vault/vault_resource.dart';
+import '../../../infrastructure/input/image_input_service.dart';
 import '../../workspace/controller/workspace_controller.dart';
+import '../../workspace/editor/codemirror/document_surface.dart';
+import '../../workspace/editor/codemirror/document_surface_factory.dart';
+import '../../workspace/editor/codemirror/editor_command_service.dart';
+import '../../workspace/editor/codemirror/editor_document_hub.dart';
+import '../../workspace/editor/codemirror/editor_protocol.dart';
+import '../../workspace/editor/codemirror/external_link_opener.dart';
 import '../../workspace/editor/live_markdown_editor.dart';
 import '../../workspace/editor/markdown_context_menu.dart';
+import '../../workspace/editor/markdown_image_transform.dart';
 import '../../workspace/editor/note_find_controller.dart';
 import '../../workspace/editor/note_find_panel.dart';
 import '../../workspace/editor/note_print_layout_controller.dart';
@@ -32,11 +41,13 @@ final class WorkspaceNotePane extends ConsumerStatefulWidget {
     required this.workspace,
     required this.controller,
     required this.outlineNavigationController,
+    this.documentSurfaceFactory = const PlatformDocumentSurfaceFactory(),
   });
 
   final WorkspaceState workspace;
   final WorkspaceController controller;
   final WorkspaceOutlineNavigationController outlineNavigationController;
+  final DocumentSurfaceFactory documentSurfaceFactory;
 
   @override
   ConsumerState<WorkspaceNotePane> createState() => _WorkspaceNotePaneState();
@@ -47,6 +58,13 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
   final _editorPasteFocusNode = FocusNode();
   final Map<String, NoteFindController> _findControllers = {};
   final Map<String, LiveMarkdownEditorState> _editorStates = {};
+  final Map<String, EditorDocumentSurfaceController> _codeMirrorEditorStates =
+      <String, EditorDocumentSurfaceController>{};
+  final Map<Object, EditorDocumentHub> _editorDocumentHubs =
+      Map<Object, EditorDocumentHub>.identity();
+  final Map<String, List<OutlineNode>> _codeMirrorOutlines = {};
+  final Map<String, String> _codeMirrorOutlineSignatures = {};
+  final Map<String, int> _codeMirrorFindRevisions = {};
   final Map<String, FocusNode> _paneFocusNodes = {};
   final Map<String, NotePrintLayoutController> _printControllers = {};
   final Map<String, String> _printAssetSignatures = {};
@@ -86,6 +104,14 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
     controller: _controller,
   );
 
+  bool get _codeMirrorEnabled => widget.documentSurfaceFactory.supported;
+
+  EditorDocumentHub _editorDocumentHubFor(NoteDocumentSession session) =>
+      _editorDocumentHubs.putIfAbsent(
+        session,
+        () => EditorDocumentHub(session),
+      );
+
   @override
   void dispose() {
     _emptyMarkdownController.dispose();
@@ -99,13 +125,50 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
     for (final controller in _printControllers.values) {
       controller.dispose();
     }
+    for (final hub in _editorDocumentHubs.values) {
+      hub.dispose();
+    }
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) => _buildEditorPane();
 
-  void _focusPane(String paneId) => _controller.focusPane(paneId);
+  void _focusPane(String paneId) {
+    final currentPaneId = _splitWorkspaceController.focusedPaneId;
+    if (currentPaneId == paneId) {
+      _controller.focusPane(paneId);
+      return;
+    }
+    final currentEditor = _codeMirrorEditorStates[currentPaneId];
+    if (currentEditor == null) {
+      _controller.focusPane(paneId);
+      return;
+    }
+    unawaited(_focusPaneAfterFlush(currentEditor, paneId));
+  }
+
+  Future<void> _focusPaneAfterFlush(
+    EditorDocumentSurfaceController currentEditor,
+    String paneId,
+  ) async {
+    try {
+      await currentEditor.flush();
+    } on Object catch (error, stackTrace) {
+      FlutterError.reportError(
+        FlutterErrorDetails(
+          exception: error,
+          stack: stackTrace,
+          library: 'synapse CodeMirror editor',
+          context: ErrorDescription('while flushing before pane focus change'),
+        ),
+      );
+    }
+    if (!mounted || _splitWorkspaceController.pane(paneId) == null) {
+      return;
+    }
+    _controller.focusPane(paneId);
+  }
 
   NoteFindController _findControllerFor(
     SplitLeaf pane,
@@ -278,6 +341,7 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
             pane.noteId == null ? null : _controller.sessionFor(pane.noteId!),
           ),
     );
+    _syncCodeMirrorSearch(pane.paneId, controller);
   }
 
   void _openReplace(
@@ -300,10 +364,12 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
             pane.noteId == null ? null : _controller.sessionFor(pane.noteId!),
           ),
     );
+    _syncCodeMirrorSearch(pane.paneId, controller);
   }
 
   void _closeFind(String paneId, NoteFindController controller) {
     controller.close();
+    unawaited(_codeMirrorEditorStates[paneId]?.closeSearch());
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) {
         return;
@@ -318,6 +384,18 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
   }
 
   void _replaceCurrent(String paneId, NoteFindController controller) {
+    final codeMirror = _codeMirrorEditorStates[paneId];
+    if (codeMirror != null) {
+      unawaited(
+        _replaceCodeMirrorFindMatch(
+          paneId: paneId,
+          surface: codeMirror,
+          controller: controller,
+          replaceAll: false,
+        ),
+      );
+      return;
+    }
     final editor = _editorStates[paneId];
     if (editor == null) {
       return;
@@ -326,11 +404,136 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
   }
 
   void _replaceAll(String paneId, NoteFindController controller) {
+    final codeMirror = _codeMirrorEditorStates[paneId];
+    if (codeMirror != null) {
+      unawaited(
+        _replaceCodeMirrorFindMatch(
+          paneId: paneId,
+          surface: codeMirror,
+          controller: controller,
+          replaceAll: true,
+        ),
+      );
+      return;
+    }
     final editor = _editorStates[paneId];
     if (editor == null) {
       return;
     }
     controller.replaceAll(beforeChange: editor.prepareFindReplacement);
+  }
+
+  Future<void> _replaceCodeMirrorFindMatch({
+    required String paneId,
+    required EditorDocumentSurfaceController surface,
+    required NoteFindController controller,
+    required bool replaceAll,
+  }) async {
+    try {
+      await surface.flush();
+    } on Object catch (error, stackTrace) {
+      FlutterError.reportError(
+        FlutterErrorDetails(
+          exception: error,
+          stack: stackTrace,
+          library: 'synapse CodeMirror editor',
+          context: ErrorDescription('while flushing before find replacement'),
+        ),
+      );
+      return;
+    }
+    if (!mounted || !identical(_codeMirrorEditorStates[paneId], surface)) {
+      return;
+    }
+    await surface.replaceSearch(all: replaceAll);
+    await surface.flush();
+  }
+
+  void _syncCodeMirrorSearch(String paneId, NoteFindController controller) {
+    final surface = _codeMirrorEditorStates[paneId];
+    if (surface == null) {
+      return;
+    }
+    controller.setExternalSearch(true, notify: false);
+    unawaited(
+      surface.setSearch(
+        EditorSearchQuery(
+          query: controller.query,
+          replacement: controller.replacement,
+          caseSensitive: controller.options.caseSensitive,
+          wholeWord: controller.options.wholeWord,
+          visible: controller.visible,
+        ),
+      ),
+    );
+  }
+
+  void _updateFindQuery(
+    String paneId,
+    NoteFindController controller,
+    String query,
+  ) {
+    controller.updateQuery(query);
+    _syncCodeMirrorSearch(paneId, controller);
+  }
+
+  void _updateFindReplacement(
+    String paneId,
+    NoteFindController controller,
+    String replacement,
+  ) {
+    controller.updateReplacement(replacement);
+    _syncCodeMirrorSearch(paneId, controller);
+  }
+
+  void _toggleFindOption(
+    String paneId,
+    NoteFindController controller, {
+    required bool caseSensitive,
+  }) {
+    if (caseSensitive) {
+      controller.toggleCaseSensitive();
+    } else {
+      controller.toggleWholeWord();
+    }
+    _syncCodeMirrorSearch(paneId, controller);
+  }
+
+  void _navigateFind(
+    String paneId,
+    NoteFindController controller, {
+    required bool forward,
+  }) {
+    final surface = _codeMirrorEditorStates[paneId];
+    if (surface == null) {
+      if (forward) {
+        controller.next();
+      } else {
+        controller.previous();
+      }
+      return;
+    }
+    unawaited(surface.navigateSearch(forward: forward));
+  }
+
+  void _handleCodeMirrorCommandState(
+    String paneId,
+    NoteFindController controller,
+    EditorCommandState state,
+  ) {
+    if (_codeMirrorEditorStates[paneId] == null) {
+      return;
+    }
+    controller.applyExternalSearchState(
+      query: state.search.query,
+      caseSensitive: state.search.caseSensitive,
+      wholeWord: state.search.wholeWord,
+      currentIndex: state.search.currentIndex,
+      matches: [
+        for (final match in state.search.matches)
+          NoteFindMatch(start: match.from, end: match.to),
+      ],
+    );
   }
 
   Map<ShortcutActivator, VoidCallback> _findShortcuts(
@@ -353,14 +556,19 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
       ): () =>
           _openReplace(pane, controller),
       if (usesMeta) ...{
-        const SingleActivator(LogicalKeyboardKey.keyG, meta: true):
-            controller.next,
-        const SingleActivator(LogicalKeyboardKey.keyG, meta: true, shift: true):
-            controller.previous,
+        const SingleActivator(LogicalKeyboardKey.keyG, meta: true): () =>
+            _navigateFind(pane.paneId, controller, forward: true),
+        const SingleActivator(
+          LogicalKeyboardKey.keyG,
+          meta: true,
+          shift: true,
+        ): () =>
+            _navigateFind(pane.paneId, controller, forward: false),
       } else ...{
-        const SingleActivator(LogicalKeyboardKey.f3): controller.next,
-        const SingleActivator(LogicalKeyboardKey.f3, shift: true):
-            controller.previous,
+        const SingleActivator(LogicalKeyboardKey.f3): () =>
+            _navigateFind(pane.paneId, controller, forward: true),
+        const SingleActivator(LogicalKeyboardKey.f3, shift: true): () =>
+            _navigateFind(pane.paneId, controller, forward: false),
       },
     };
   }
@@ -548,12 +756,30 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
         }
         _findControllers.remove(paneId)?.dispose();
         _editorStates.remove(paneId);
+        _codeMirrorEditorStates.remove(paneId);
+        _codeMirrorOutlines.remove(paneId);
+        _codeMirrorOutlineSignatures.remove(paneId);
+        _codeMirrorFindRevisions.remove(paneId);
         _paneFocusNodes.remove(paneId)?.dispose();
         _printControllers.remove(paneId)?.dispose();
         _printAssetSignatures.remove(paneId);
         _printLoadingSignatures.remove(paneId);
         _printSnapshotGenerations.remove(paneId);
         _printRefreshScheduled.remove(paneId);
+      }
+      final retainedSessions = Set<Object>.identity();
+      for (final paneId in currentPaneIds) {
+        final noteId = _splitWorkspaceController.pane(paneId)?.noteId;
+        final session = noteId == null ? null : _controller.sessionFor(noteId);
+        if (session != null) {
+          retainedSessions.add(session);
+        }
+      }
+      for (final entry in _editorDocumentHubs.entries.toList()) {
+        if (retainedSessions.contains(entry.key)) {
+          continue;
+        }
+        _editorDocumentHubs.remove(entry.key)?.dispose();
       }
     });
   }
@@ -615,6 +841,9 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
     final findController = _findControllerFor(pane, session);
     final paneFocusNode = _paneFocusNodeFor(pane.paneId);
     final accentColor = _workspaceAppearance.accentColor;
+    final useCodeMirror =
+        _codeMirrorEnabled && session != null && pane.mode != NoteMode.print;
+    findController.setExternalSearch(useCodeMirror, notify: false);
     return CallbackShortcuts(
       bindings: _findShortcuts(pane, findController),
       child: GestureDetector(
@@ -622,7 +851,9 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
         behavior: HitTestBehavior.opaque,
         onTap: () => _focusPane(pane.paneId),
         child: ListenableBuilder(
-          listenable: session ?? _emptyMarkdownController,
+          listenable: useCodeMirror
+              ? _emptyMarkdownController
+              : session ?? _emptyMarkdownController,
           builder: (context, child) {
             final printController =
                 pane.mode == NoteMode.print && session != null
@@ -633,6 +864,9 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
               builder: (context, child) {
                 final outlineNodes = session == null
                     ? const <OutlineNode>[]
+                    : useCodeMirror
+                    ? _codeMirrorOutlines[pane.paneId] ??
+                          extractOutline(session.controller.text)
                     : extractOutline(session.controller.text);
                 final canReplace =
                     session != null &&
@@ -653,7 +887,15 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
                     child: Stack(
                       children: [
                         Positioned.fill(
-                          child: pane.mode == NoteMode.reading
+                          child: useCodeMirror
+                              ? _buildCodeMirrorDocumentSurface(
+                                  pane: pane,
+                                  session: session,
+                                  editorContext: editorContext!,
+                                  focused: focused,
+                                  findController: findController,
+                                )
+                              : pane.mode == NoteMode.reading
                               ? session == null
                                     ? const EmptyState(
                                         text: '选择或创建笔记后开始整理 Markdown',
@@ -755,6 +997,48 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
                                   ),
                                   onReplaceAll: () =>
                                       _replaceAll(pane.paneId, findController),
+                                  onQueryChanged: useCodeMirror
+                                      ? (value) => _updateFindQuery(
+                                          pane.paneId,
+                                          findController,
+                                          value,
+                                        )
+                                      : null,
+                                  onReplacementChanged: useCodeMirror
+                                      ? (value) => _updateFindReplacement(
+                                          pane.paneId,
+                                          findController,
+                                          value,
+                                        )
+                                      : null,
+                                  onToggleCaseSensitive: useCodeMirror
+                                      ? () => _toggleFindOption(
+                                          pane.paneId,
+                                          findController,
+                                          caseSensitive: true,
+                                        )
+                                      : null,
+                                  onToggleWholeWord: useCodeMirror
+                                      ? () => _toggleFindOption(
+                                          pane.paneId,
+                                          findController,
+                                          caseSensitive: false,
+                                        )
+                                      : null,
+                                  onPrevious: useCodeMirror
+                                      ? () => _navigateFind(
+                                          pane.paneId,
+                                          findController,
+                                          forward: false,
+                                        )
+                                      : null,
+                                  onNext: useCodeMirror
+                                      ? () => _navigateFind(
+                                          pane.paneId,
+                                          findController,
+                                          forward: true,
+                                        )
+                                      : null,
                                 ),
                               ),
                             ),
@@ -882,13 +1166,7 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
       selected: pane.mode == mode,
       onPressed: enabled
           ? () {
-              setState(() {
-                _focusPane(pane.paneId);
-                if (mode == NoteMode.reading) {
-                  _findControllers[pane.paneId]?.hideReplace();
-                }
-                _splitWorkspaceController.setPaneMode(pane.paneId, mode);
-              });
+              unawaited(_setPaneMode(pane, mode));
             }
           : null,
     );
@@ -896,6 +1174,381 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
       return button;
     }
     return KeyedSubtree(key: Key('note-mode-$suffix'), child: button);
+  }
+
+  Future<void> _setPaneMode(SplitLeaf pane, NoteMode mode) async {
+    if (mode == NoteMode.print) {
+      await _codeMirrorEditorStates[pane.paneId]?.flush();
+    }
+    if (!mounted || _splitWorkspaceController.pane(pane.paneId) == null) {
+      return;
+    }
+    setState(() {
+      _focusPane(pane.paneId);
+      if (mode == NoteMode.reading) {
+        _findControllers[pane.paneId]?.hideReplace();
+      }
+      _splitWorkspaceController.setPaneMode(pane.paneId, mode);
+    });
+  }
+
+  Widget _buildCodeMirrorDocumentSurface({
+    required SplitLeaf pane,
+    required NoteDocumentSession session,
+    required PaneEditorContext editorContext,
+    required bool focused,
+    required NoteFindController findController,
+  }) {
+    findController.setExternalSearch(true, notify: false);
+    final hub = _editorDocumentHubFor(session);
+    final findRevision = findController.navigationRevision;
+    final currentMatch = findController.visible
+        ? findController.currentMatch
+        : null;
+    if (currentMatch != null &&
+        _codeMirrorFindRevisions[pane.paneId] != findRevision) {
+      _codeMirrorFindRevisions[pane.paneId] = findRevision;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        final state = _codeMirrorEditorStates[pane.paneId];
+        if (!mounted || state == null) {
+          return;
+        }
+        unawaited(
+          state.revealRange(
+            currentMatch.start,
+            currentMatch.end,
+            focus: pane.mode != NoteMode.reading,
+          ),
+        );
+      });
+    }
+    return widget.documentSurfaceFactory.build(
+      key: ValueKey(
+        'codemirror-editor-${pane.paneId}-${identityHashCode(session)}',
+      ),
+      paneId: pane.paneId,
+      hub: hub,
+      mode: pane.mode == NoteMode.reading
+          ? CodeMirrorDocumentMode.reading
+          : CodeMirrorDocumentMode.editing,
+      focused: focused,
+      enabled:
+          !_busy &&
+          !_reloadRequired &&
+          !_paneEditorCommandLocks.contains(session.noteId),
+      appearance: _workspaceAppearance,
+      loadAttachment: (src) => _loadCodeMirrorAttachment(session, src),
+      onImageAction: (action) =>
+          _handleCodeMirrorImageAction(editorContext, session, hub, action),
+      onPastedImage: (image) =>
+          _handleCodeMirrorPastedImage(editorContext, hub, image),
+      onCommandRequest: (request) =>
+          _handleCodeMirrorCommandRequest(hub, request),
+      onOutlineChanged: (outline) =>
+          _handleCodeMirrorOutlineChanged(pane.paneId, outline),
+      onFocusPane: () => _focusPane(pane.paneId),
+      onCommandState: (state) =>
+          _handleCodeMirrorCommandState(pane.paneId, findController, state),
+      onFindRequested: () => _openFind(pane, findController),
+      onReplaceRequested: () => _openReplace(pane, findController),
+      onOpenLink: _openCodeMirrorLink,
+      onError: (error) {
+        FlutterError.reportError(
+          FlutterErrorDetails(
+            exception: error,
+            library: 'synapse CodeMirror editor',
+            context: ErrorDescription(
+              'while serving pane ${pane.paneId} for ${session.noteId}',
+            ),
+          ),
+        );
+      },
+      onStateChanged: (state, attached) {
+        if (attached) {
+          _codeMirrorEditorStates[pane.paneId] = state;
+          _controller.attachDocumentSurface(
+            paneId: pane.paneId,
+            owner: state,
+            flush: state.flush,
+          );
+          _syncCodeMirrorSearch(pane.paneId, findController);
+        } else if (identical(_codeMirrorEditorStates[pane.paneId], state)) {
+          _codeMirrorEditorStates.remove(pane.paneId);
+          _controller.detachDocumentSurface(paneId: pane.paneId, owner: state);
+        }
+      },
+    );
+  }
+
+  void _openCodeMirrorLink(Uri uri) {
+    unawaited(
+      openExternalEditorLink(uri).catchError((Object error, StackTrace stack) {
+        FlutterError.reportError(
+          FlutterErrorDetails(
+            exception: error,
+            stack: stack,
+            library: 'synapse CodeMirror editor',
+            context: ErrorDescription(
+              'while opening an external Markdown link',
+            ),
+          ),
+        );
+      }),
+    );
+  }
+
+  Future<EditorAttachmentPayload?> _loadCodeMirrorAttachment(
+    NoteDocumentSession session,
+    String src,
+  ) async {
+    final attachment = _attachmentForMarkdownSrc(session, src);
+    if (attachment == null) {
+      return null;
+    }
+    return EditorAttachmentPayload(
+      attachment: attachment,
+      bytes: await _controller.readNoteAttachment(attachment),
+    );
+  }
+
+  NoteAttachment? _attachmentForMarkdownSrc(
+    NoteDocumentSession session,
+    String src,
+  ) {
+    final decoded = safeUriDecode(src.split('#').first);
+    final wanted = normalizeImageSrc(decoded);
+    final wantedBasename = p.basename(wanted);
+    NoteAttachment? basenameFallback;
+    for (final attachment in session.note.attachments) {
+      if (attachment.mediaKind != MediaKind.image) {
+        continue;
+      }
+      final relative = normalizeImageSrc(attachment.relativePath);
+      final title = normalizeImageSrc(attachment.title);
+      if (wanted == relative ||
+          wanted.endsWith('/$relative') ||
+          wanted.endsWith('/attachments/${p.basename(relative)}')) {
+        return attachment;
+      }
+      if (p.basename(relative) != wantedBasename &&
+          p.basename(title) != wantedBasename) {
+        continue;
+      }
+      if (basenameFallback != null && basenameFallback.id != attachment.id) {
+        basenameFallback = null;
+        break;
+      }
+      basenameFallback = attachment;
+    }
+    return basenameFallback;
+  }
+
+  Future<void> _handleCodeMirrorImageAction(
+    PaneEditorContext context,
+    NoteDocumentSession session,
+    EditorDocumentHub hub,
+    EditorImageAction action,
+  ) async {
+    if (action.revision != hub.revision) {
+      return;
+    }
+    final attachment = _attachmentForMarkdownSrc(session, action.src);
+    if (attachment == null ||
+        _controller.resolvePaneEditorContext(context) == null) {
+      return;
+    }
+    switch (action.action) {
+      case 'copy':
+        await _controller.copyImage(context, attachment.id);
+      case 'cut':
+        final copied = await _controller.copyImage(
+          context,
+          attachment.id,
+          successMessage: '图片已剪切',
+        );
+        if (copied != PaneEditorCommandOutcome.committed) {
+          return;
+        }
+        if (action.revision != hub.revision) {
+          return;
+        }
+        final reference = findMarkdownImageReference(
+          markdown: session.controller.text,
+          src: action.src,
+        );
+        if (reference == null) {
+          return;
+        }
+        final removed = removeMarkdownImageReference(
+          markdown: session.controller.text,
+          reference: reference,
+        );
+        hub.runUserHostMutation(
+          () => session.controller.value = TextEditingValue(
+            text: removed.markdown,
+            selection: TextSelection.collapsed(offset: removed.insertionOffset),
+          ),
+        );
+      case 'resize':
+        final width = action.width;
+        if (width == null) {
+          return;
+        }
+        final before = session.controller.text;
+        final after = replaceImageWidthInMarkdown(
+          markdown: before,
+          src: action.src,
+          width: clampImageWidth(width),
+        );
+        if (before == after) {
+          return;
+        }
+        hub.runUserHostMutation(
+          () => session.controller.value = session.controller.value.copyWith(
+            text: after,
+            selection: TextSelection.collapsed(
+              offset: session.controller.selection.extentOffset
+                  .clamp(0, after.length)
+                  .toInt(),
+            ),
+            composing: TextRange.empty,
+          ),
+        );
+        await _controller.saveEditorSession(
+          context,
+          session,
+          automatic: false,
+          rescheduleIfDirty: false,
+          successMessage: '图片宽度已更新',
+        );
+      case 'move':
+        final targetSrc = action.targetSrc;
+        if (targetSrc == null) {
+          return;
+        }
+        final before = session.controller.text;
+        final after = moveImageTagInMarkdown(
+          markdown: before,
+          draggedSrc: action.src,
+          targetSrc: targetSrc,
+          beforeTarget: action.beforeTarget ?? false,
+        );
+        if (before == after) {
+          return;
+        }
+        hub.runUserHostMutation(
+          () => session.controller.value = session.controller.value.copyWith(
+            text: after,
+            selection: TextSelection.collapsed(
+              offset: session.controller.selection.extentOffset
+                  .clamp(0, after.length)
+                  .toInt(),
+            ),
+            composing: TextRange.empty,
+          ),
+        );
+        await _controller.saveEditorSession(
+          context,
+          session,
+          automatic: false,
+          rescheduleIfDirty: false,
+          successMessage: '图片位置已更新',
+        );
+    }
+  }
+
+  Future<void> _handleCodeMirrorPastedImage(
+    PaneEditorContext context,
+    EditorDocumentHub hub,
+    EditorPastedImage image,
+  ) async {
+    if (image.revision != hub.revision) {
+      return;
+    }
+    final target = TextEditingValue(
+      text: hub.markdown,
+      selection: TextSelection(
+        baseOffset: image.selection.anchor.clamp(0, hub.markdown.length),
+        extentOffset: image.selection.head.clamp(0, hub.markdown.length),
+      ),
+    );
+    await _controller.pasteImportedImage(
+      context,
+      ImportedImage(
+        filename: image.filename,
+        mimeType: image.mimeType,
+        bytes: image.bytes,
+      ),
+      target,
+    );
+  }
+
+  Future<void> _handleCodeMirrorCommandRequest(
+    EditorDocumentHub hub,
+    EditorCommandRequest request,
+  ) async {
+    if (request.revision != hub.revision) {
+      return;
+    }
+    final updated = const EditorCommandService().apply(
+      markdown: hub.markdown,
+      request: request,
+    );
+    final value = TextEditingValue(
+      text: hub.markdown,
+      selection: TextSelection(
+        baseOffset: request.selection.anchor
+            .clamp(0, hub.markdown.length)
+            .toInt(),
+        extentOffset: request.selection.head
+            .clamp(0, hub.markdown.length)
+            .toInt(),
+      ),
+    );
+    if (updated.text == value.text && updated.selection == value.selection) {
+      return;
+    }
+    hub.replaceFromHost(
+      updated.text,
+      selection: updated.selection,
+      addToHistory: true,
+    );
+  }
+
+  void _handleCodeMirrorOutlineChanged(
+    String paneId,
+    List<OutlineNode> outline,
+  ) {
+    final signature = _outlineSignature(outline);
+    if (_codeMirrorOutlineSignatures[paneId] == signature) {
+      return;
+    }
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _codeMirrorOutlineSignatures[paneId] = signature;
+      _codeMirrorOutlines[paneId] = outline;
+    });
+  }
+
+  String _outlineSignature(List<OutlineNode> nodes) {
+    final buffer = StringBuffer();
+    void append(List<OutlineNode> values) {
+      for (final node in values) {
+        buffer
+          ..write(node.level)
+          ..write(':')
+          ..write(node.line)
+          ..write(':')
+          ..write(node.title)
+          ..write('|');
+        append(node.children);
+      }
+    }
+
+    append(nodes);
+    return buffer.toString();
   }
 
   Widget _buildNoteEditor({

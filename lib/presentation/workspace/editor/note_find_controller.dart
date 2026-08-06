@@ -69,6 +69,7 @@ class NoteFindController extends ChangeNotifier {
   int _currentIndex = -1;
   bool _visible = false;
   bool _replaceVisible = false;
+  bool _externalSearch = false;
   bool _mutatingDocument = false;
   int _navigationRevision = 0;
   int _focusRevision = 0;
@@ -88,6 +89,7 @@ class NoteFindController extends ChangeNotifier {
   int get navigationRevision => _navigationRevision;
   int get focusRevision => _focusRevision;
   bool get hasMatches => _matches.isNotEmpty;
+  bool get externalSearch => _externalSearch;
   String get matchLabel =>
       hasMatches ? '${_currentIndex + 1}/${_matches.length}' : '0/0';
 
@@ -195,6 +197,13 @@ class NoteFindController extends ChangeNotifier {
       return;
     }
     _query = value;
+    if (_externalSearch) {
+      _matches = const <NoteFindMatch>[];
+      _currentIndex = -1;
+      _navigationRevision += 1;
+      notifyListeners();
+      return;
+    }
     _rebuildMatches(
       anchorOffset: _documentSelectionOffset,
       forceNavigation: true,
@@ -211,6 +220,13 @@ class NoteFindController extends ChangeNotifier {
 
   void toggleCaseSensitive() {
     _options = _options.copyWith(caseSensitive: !_options.caseSensitive);
+    if (_externalSearch) {
+      _matches = const <NoteFindMatch>[];
+      _currentIndex = -1;
+      _navigationRevision += 1;
+      notifyListeners();
+      return;
+    }
     _rebuildMatches(
       anchorOffset: currentMatch?.start ?? _documentSelectionOffset,
       forceNavigation: true,
@@ -219,6 +235,13 @@ class NoteFindController extends ChangeNotifier {
 
   void toggleWholeWord() {
     _options = _options.copyWith(wholeWord: !_options.wholeWord);
+    if (_externalSearch) {
+      _matches = const <NoteFindMatch>[];
+      _currentIndex = -1;
+      _navigationRevision += 1;
+      notifyListeners();
+      return;
+    }
     _rebuildMatches(
       anchorOffset: currentMatch?.start ?? _documentSelectionOffset,
       forceNavigation: true,
@@ -226,6 +249,9 @@ class NoteFindController extends ChangeNotifier {
   }
 
   void next() {
+    if (_externalSearch) {
+      return;
+    }
     if (_matches.isEmpty) {
       return;
     }
@@ -236,6 +262,9 @@ class NoteFindController extends ChangeNotifier {
   }
 
   void previous() {
+    if (_externalSearch) {
+      return;
+    }
     if (_matches.isEmpty) {
       return;
     }
@@ -326,7 +355,68 @@ class NoteFindController extends ChangeNotifier {
     }
     final anchor = currentMatch?.start ?? _documentSelectionOffset;
     _documentText = document.text;
+    if (_externalSearch) {
+      return;
+    }
     _rebuildMatches(anchorOffset: anchor, forceNavigation: false);
+  }
+
+  void setExternalSearch(bool enabled, {bool notify = true}) {
+    if (_externalSearch == enabled) {
+      return;
+    }
+    _externalSearch = enabled;
+    if (enabled) {
+      _matches = const <NoteFindMatch>[];
+      _currentIndex = -1;
+      _navigationRevision += 1;
+      if (notify) {
+        notifyListeners();
+      }
+      return;
+    }
+    if (!notify) {
+      final source = _document?.text ?? '';
+      final nextMatches = findNoteMatches(source, _query, options: _options);
+      final anchor = _documentSelectionOffset.clamp(0, source.length);
+      var nextIndex = nextMatches.indexWhere((match) => match.start >= anchor);
+      if (nextMatches.isNotEmpty && nextIndex < 0) {
+        nextIndex = 0;
+      }
+      _matches = List<NoteFindMatch>.unmodifiable(nextMatches);
+      _currentIndex = nextMatches.isEmpty ? -1 : nextIndex;
+      _navigationRevision += 1;
+      return;
+    }
+    _rebuildMatches(
+      anchorOffset: _documentSelectionOffset,
+      forceNavigation: notify,
+    );
+  }
+
+  void applyExternalSearchState({
+    required String query,
+    required bool caseSensitive,
+    required bool wholeWord,
+    required int currentIndex,
+    required List<NoteFindMatch> matches,
+  }) {
+    if (!_externalSearch ||
+        query != _query ||
+        caseSensitive != _options.caseSensitive ||
+        wholeWord != _options.wholeWord) {
+      return;
+    }
+    final resolvedIndex = matches.isEmpty
+        ? -1
+        : currentIndex.clamp(-1, matches.length - 1);
+    if (listEquals(_matches, matches) && _currentIndex == resolvedIndex) {
+      return;
+    }
+    _matches = List<NoteFindMatch>.unmodifiable(matches);
+    _currentIndex = resolvedIndex;
+    _navigationRevision += 1;
+    notifyListeners();
   }
 
   void _setDocumentValue(TextEditingValue value) {
@@ -347,6 +437,16 @@ class NoteFindController extends ChangeNotifier {
     required int anchorOffset,
     required bool forceNavigation,
   }) {
+    if (_externalSearch) {
+      final changed = _matches.isNotEmpty || _currentIndex != -1;
+      _matches = const <NoteFindMatch>[];
+      _currentIndex = -1;
+      if (changed || forceNavigation) {
+        _navigationRevision += 1;
+        notifyListeners();
+      }
+      return;
+    }
     final source = _document?.text ?? '';
     final nextMatches = findNoteMatches(source, _query, options: _options);
     final clampedAnchor = anchorOffset.clamp(0, source.length);

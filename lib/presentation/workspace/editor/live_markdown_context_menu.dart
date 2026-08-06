@@ -5,6 +5,12 @@ import '../../cupertino/markdown_context_commands.dart';
 import 'live_markdown_editor_controller.dart';
 import 'markdown_context_menu.dart';
 
+typedef LiveMarkdownInsertionCallback =
+    void Function(
+      MarkdownInsertion insertion,
+      MarkdownCommandTarget? menuTarget,
+    );
+
 List<Widget> buildLiveMarkdownContextMenuItems({
   required LiveMarkdownEditorController controller,
   required MarkdownCommandTarget? menuTarget,
@@ -17,6 +23,7 @@ List<Widget> buildLiveMarkdownContextMenuItems({
   required VoidCallback onRedo,
   required ValueChanged<MarkdownCommandTarget?> onFind,
   required ValueChanged<MarkdownCommandTarget?> onReplace,
+  required LiveMarkdownInsertionCallback onInsertion,
   required Future<void> Function(MarkdownCommandTarget? target) onPaste,
   bool? canCopyOverride,
   Future<void> Function()? onCopyOverride,
@@ -104,41 +111,25 @@ List<Widget> buildLiveMarkdownContextMenuItems({
           itemKey: const Key('note-menu-insert-table'),
           label: '表格',
           enabled: canUseStructure,
-          onPressed: () => controller.applyInsertion(
-            MarkdownInsertion.table,
-            menuTarget: menuTarget,
-            busy: busy,
-          ),
+          onPressed: () => onInsertion(MarkdownInsertion.table, menuTarget),
         ),
         NoteMenuAction(
           itemKey: const Key('note-menu-insert-columns'),
           label: '双栏',
           enabled: canUseStructure && !controller.activeBlockIsInsideColumns,
-          onPressed: () => controller.applyInsertion(
-            MarkdownInsertion.columns,
-            menuTarget: menuTarget,
-            busy: busy,
-          ),
+          onPressed: () => onInsertion(MarkdownInsertion.columns, menuTarget),
         ),
         NoteMenuAction(
           itemKey: const Key('note-menu-insert-divider'),
           label: '分隔线',
           enabled: canUseStructure,
-          onPressed: () => controller.applyInsertion(
-            MarkdownInsertion.divider,
-            menuTarget: menuTarget,
-            busy: busy,
-          ),
+          onPressed: () => onInsertion(MarkdownInsertion.divider, menuTarget),
         ),
         NoteMenuAction(
           itemKey: const Key('note-menu-insert-page-break'),
           label: '分页符',
           enabled: canUseStructure && !controller.activeBlockIsInsideColumns,
-          onPressed: () => controller.applyInsertion(
-            MarkdownInsertion.pageBreak,
-            menuTarget: menuTarget,
-            busy: busy,
-          ),
+          onPressed: () => onInsertion(MarkdownInsertion.pageBreak, menuTarget),
         ),
       ],
     ),

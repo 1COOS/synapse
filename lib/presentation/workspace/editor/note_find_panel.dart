@@ -13,6 +13,12 @@ class NoteFindPanel extends StatefulWidget {
     required this.onClose,
     required this.onReplaceCurrent,
     required this.onReplaceAll,
+    this.onQueryChanged,
+    this.onReplacementChanged,
+    this.onToggleCaseSensitive,
+    this.onToggleWholeWord,
+    this.onPrevious,
+    this.onNext,
   });
 
   final NoteFindController controller;
@@ -20,6 +26,12 @@ class NoteFindPanel extends StatefulWidget {
   final VoidCallback onClose;
   final VoidCallback onReplaceCurrent;
   final VoidCallback onReplaceAll;
+  final ValueChanged<String>? onQueryChanged;
+  final ValueChanged<String>? onReplacementChanged;
+  final VoidCallback? onToggleCaseSensitive;
+  final VoidCallback? onToggleWholeWord;
+  final VoidCallback? onPrevious;
+  final VoidCallback? onNext;
 
   @override
   State<NoteFindPanel> createState() => _NoteFindPanelState();
@@ -108,9 +120,9 @@ class _NoteFindPanelState extends State<NoteFindPanel> {
 
   void _submitQuery() {
     if (HardwareKeyboard.instance.isShiftPressed) {
-      widget.controller.previous();
+      (widget.onPrevious ?? widget.controller.previous)();
     } else {
-      widget.controller.next();
+      (widget.onNext ?? widget.controller.next)();
     }
   }
 
@@ -133,7 +145,7 @@ class _NoteFindPanelState extends State<NoteFindPanel> {
         border: Border.all(color: workspaceSoftLineColor),
         borderRadius: workspaceBorderRadius,
       ),
-      onChanged: controller.updateQuery,
+      onChanged: widget.onQueryChanged ?? controller.updateQuery,
       onEditingComplete: () {},
       onSubmitted: (_) => _submitQuery(),
     );
@@ -150,25 +162,29 @@ class _NoteFindPanelState extends State<NoteFindPanel> {
       itemKey: const Key('note-find-case-sensitive'),
       label: 'Aa',
       selected: controller.options.caseSensitive,
-      onPressed: controller.toggleCaseSensitive,
+      onPressed: widget.onToggleCaseSensitive ?? controller.toggleCaseSensitive,
     );
     final wholeWordToggle = _FindToggle(
       itemKey: const Key('note-find-whole-word'),
       label: '全字',
       selected: controller.options.wholeWord,
-      onPressed: controller.toggleWholeWord,
+      onPressed: widget.onToggleWholeWord ?? controller.toggleWholeWord,
     );
     final previous = IconAction(
       key: const Key('note-find-previous'),
       label: '上一处',
       icon: CupertinoIcons.chevron_up,
-      onPressed: controller.hasMatches ? controller.previous : null,
+      onPressed: controller.hasMatches
+          ? widget.onPrevious ?? controller.previous
+          : null,
     );
     final next = IconAction(
       key: const Key('note-find-next'),
       label: '下一处',
       icon: CupertinoIcons.chevron_down,
-      onPressed: controller.hasMatches ? controller.next : null,
+      onPressed: controller.hasMatches
+          ? widget.onNext ?? controller.next
+          : null,
     );
     final close = IconAction(
       key: const Key('note-find-close'),
@@ -189,7 +205,7 @@ class _NoteFindPanelState extends State<NoteFindPanel> {
         border: Border.all(color: workspaceSoftLineColor),
         borderRadius: workspaceBorderRadius,
       ),
-      onChanged: controller.updateReplacement,
+      onChanged: widget.onReplacementChanged ?? controller.updateReplacement,
       onEditingComplete: () {},
       onSubmitted: (_) {
         if (canReplaceCurrent) {

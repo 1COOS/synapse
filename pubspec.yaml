@@ -51,9 +51,12 @@ dependencies:
   package_info_plus: ^10.2.1
   pdf: ^3.13.0
   printing: ^5.15.0
+  webview_flutter: 4.14.1
 
 dev_dependencies:
   flutter_test:
+    sdk: flutter
+  integration_test:
     sdk: flutter
 
   flutter_lints: ^6.0.0
@@ -66,6 +69,7 @@ flutter:
 
   assets:
     - assets/fonts/
+    - assets/editor_web/
 
   # To add assets to your application, add an assets section, like this:
   # assets:

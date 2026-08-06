@@ -178,12 +178,39 @@ void main() {
       vault: vault,
       imageInput: FakeImageInputService(),
     );
+    expect(
+      find.byKey(const Key('markdown-table-block-drag-source-0')),
+      findsNothing,
+    );
     await tester.tap(find.byKey(const Key('table-frame-selection-target-0')));
     await tester.pumpAndSettle();
     expect(
       find.byKey(const Key('live-markdown-table-selection-0')),
       findsOneWidget,
     );
+    final moveHandle = find.byKey(
+      const Key('markdown-table-block-drag-source-0'),
+    );
+    expect(moveHandle, findsOneWidget);
+    expect(find.bySemanticsLabel('拖动整个表格'), findsOneWidget);
+    expect(tester.getSize(moveHandle), const Size.square(28));
+    final selectedTableRect = tester.getRect(
+      find.byKey(const Key('live-markdown-table-selection-0')),
+    );
+    final moveHandleRect = tester.getRect(moveHandle);
+    expect(moveHandleRect.right, closeTo(selectedTableRect.left - 4, 0.1));
+    expect(
+      tester
+          .widget<MouseRegion>(
+            find
+                .ancestor(of: moveHandle, matching: find.byType(MouseRegion))
+                .first,
+          )
+          .cursor,
+      SystemMouseCursors.grab,
+    );
+    expect(find.byKey(const Key('table-row-drag-handle-0')), findsNothing);
+    expect(find.byKey(const Key('table-column-drag-handle-0')), findsNothing);
 
     await tester.tap(find.text('1'));
     await tester.pumpAndSettle();
@@ -195,6 +222,9 @@ void main() {
       find.byKey(const Key('live-markdown-table-editor-0')),
       findsOneWidget,
     );
+    expect(moveHandle, findsNothing);
+    expect(find.byKey(const Key('table-row-drag-handle-0')), findsOneWidget);
+    expect(find.byKey(const Key('table-column-drag-handle-0')), findsOneWidget);
 
     await tester.tap(find.byKey(const Key('live-markdown-end-edit-target')));
     await tester.pumpAndSettle();
@@ -519,6 +549,7 @@ void main() {
     );
     await gesture.moveBy(const Offset(0, -12));
     await tester.pump();
+    expect(find.text('1 列 · 2 行'), findsOneWidget);
     final targetRect = tester.getRect(target);
     await gesture.moveTo(Offset(targetRect.center.dx, targetRect.top + 2));
     await tester.pump();
@@ -548,6 +579,87 @@ void main() {
       liveMarkdownDocumentController(tester, paneId: 1).text,
       '$table\n# Title\n\nBefore\n\n![image](a.png)\n',
     );
+  });
+
+  testWidgets('selected table drag starts after its move tooltip is visible', (
+    tester,
+  ) async {
+    const table = '| A |\n|---|\n| 1 |\n';
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(
+      parentPath: '',
+      title: 'Table Drag Tooltip',
+    );
+    await vault.updateMarkdown(noteId: note.id, markdown: table);
+
+    await pumpWorkspace(tester, vault: vault);
+    await tester.tap(find.byKey(const Key('table-frame-selection-target-0')));
+    await tester.pumpAndSettle();
+    final source = find.byKey(const Key('markdown-table-block-drag-source-0'));
+    final sourcePosition = tester.getCenter(source);
+    final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+    await mouse.addPointer(location: sourcePosition);
+    await tester.pump();
+    await mouse.moveTo(sourcePosition);
+    await tester.pump();
+    expect(find.byKey(const Key('markdown-table-move-hint')), findsOneWidget);
+
+    await mouse.down(sourcePosition);
+    await mouse.moveBy(const Offset(0, 12));
+    await tester.pump();
+    expect(find.text('1 列 · 2 行'), findsOneWidget);
+
+    await mouse.cancel();
+    await tester.pumpAndSettle();
+    await mouse.removePointer();
+  });
+
+  testWidgets('selected table body does not start whole table drag', (
+    tester,
+  ) async {
+    const table = '| A |\n|---|\n| 1 |\n';
+    const markdown = '# Title\n\n$table\nAfter\n';
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(
+      parentPath: '',
+      title: 'Table Drag Handle',
+    );
+    await vault.updateMarkdown(noteId: note.id, markdown: markdown);
+
+    await pumpWorkspace(tester, vault: vault);
+    await tester.tap(find.byKey(const Key('table-frame-selection-target-2')));
+    await tester.pumpAndSettle();
+
+    final selectedTable = find.byKey(
+      const Key('live-markdown-table-selection-2'),
+    );
+    final tableBody = find.descendant(
+      of: selectedTable,
+      matching: find.byType(Table),
+    );
+    final target = find.byKey(const Key('markdown-table-block-drop-target-0'));
+    final gesture = await tester.startGesture(
+      tester.getCenter(tableBody),
+      kind: PointerDeviceKind.mouse,
+    );
+    await gesture.moveBy(const Offset(0, -12));
+    await tester.pump();
+    final targetRect = tester.getRect(target);
+    await gesture.moveTo(Offset(targetRect.center.dx, targetRect.top + 2));
+    await tester.pump();
+
+    expect(
+      find.byWidgetPredicate(
+        (widget) =>
+            widget.key.toString().contains('markdown-table-block-drop-line'),
+      ),
+      findsNothing,
+    );
+    await gesture.up();
+    await tester.pumpAndSettle();
+
+    expect(liveMarkdownDocumentController(tester, paneId: 1).text, markdown);
+    expect(selectedTable, findsOneWidget);
   });
 
   testWidgets(
@@ -611,6 +723,7 @@ void main() {
               state.position.maxScrollExtent > 0,
         );
     final source = find.byKey(const Key('markdown-table-block-drag-source-0'));
+    final sourceX = tester.getCenter(source).dx;
     final gesture = await tester.startGesture(
       tester.getCenter(source),
       kind: PointerDeviceKind.mouse,
@@ -618,9 +731,7 @@ void main() {
     await gesture.moveBy(const Offset(0, 12));
     await tester.pump();
     final viewportRect = tester.getRect(find.byWidget(vertical.widget));
-    await gesture.moveTo(
-      Offset(tester.getCenter(source).dx, viewportRect.bottom - 2),
-    );
+    await gesture.moveTo(Offset(sourceX, viewportRect.bottom - 2));
     await tester.pump(const Duration(milliseconds: 180));
     expect(vertical.position.pixels, greaterThan(0));
     await gesture.cancel();
@@ -714,6 +825,10 @@ void main() {
     expect(find.textContaining('| A | B |'), findsNothing);
     expect(find.byKey(const Key('table-row-drag-handle-0')), findsNothing);
     expect(find.byKey(const Key('table-column-drag-handle-0')), findsNothing);
+    expect(
+      find.byKey(const Key('markdown-table-block-drag-source-2')),
+      findsNothing,
+    );
     expect(find.byKey(const Key('table-append-row-hover-zone')), findsNothing);
     expect(
       find.byKey(const Key('table-append-column-hover-zone')),
@@ -1870,6 +1985,10 @@ void main() {
     );
     expect(find.byKey(const Key('table-row-drag-handle-0')), findsNothing);
     expect(find.byKey(const Key('table-column-drag-handle-0')), findsNothing);
+    expect(
+      find.byKey(const Key('markdown-table-block-drag-source-2')),
+      findsNothing,
+    );
     expect(find.byKey(const Key('table-append-row-hover-zone')), findsNothing);
     expect(
       find.byKey(const Key('table-append-column-hover-zone')),

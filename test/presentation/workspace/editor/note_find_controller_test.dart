@@ -121,5 +121,53 @@ void main() {
       first.dispose();
       second.dispose();
     });
+
+    test(
+      'external search accepts CodeMirror ranges without rescanning Dart',
+      () {
+        final document = TextEditingController(text: 'Alpha alpha');
+        final controller = NoteFindController()
+          ..bind(noteId: 'note', document: document)
+          ..setExternalSearch(true)
+          ..openFind(seed: 'Alpha', anchorOffset: 0);
+
+        expect(controller.matches, isEmpty);
+        controller.applyExternalSearchState(
+          query: 'Alpha',
+          caseSensitive: false,
+          wholeWord: false,
+          currentIndex: 1,
+          matches: const [
+            NoteFindMatch(start: 0, end: 5),
+            NoteFindMatch(start: 6, end: 11),
+          ],
+        );
+        expect(controller.matchLabel, '2/2');
+
+        document.text = 'Changed completely';
+        expect(controller.matchLabel, '2/2');
+
+        controller.dispose();
+        document.dispose();
+      },
+    );
+
+    test('leaving external search restores Flutter fallback matches', () {
+      final document = TextEditingController(text: 'Alpha alpha');
+      final controller = NoteFindController()
+        ..bind(noteId: 'note', document: document)
+        ..setExternalSearch(true)
+        ..openFind(seed: 'Alpha', anchorOffset: 0)
+        ..setExternalSearch(false, notify: false);
+
+      expect(controller.externalSearch, isFalse);
+      expect(controller.matches, const [
+        NoteFindMatch(start: 0, end: 5),
+        NoteFindMatch(start: 6, end: 11),
+      ]);
+
+      controller.dispose();
+      document.dispose();
+    });
   });
 }

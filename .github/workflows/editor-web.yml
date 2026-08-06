@@ -1,0 +1,36 @@
+name: Editor Web Assets
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/editor-web.yml'
+      - 'tool/editor_web/**'
+      - 'assets/editor_web/**'
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/editor-web.yml'
+      - 'tool/editor_web/**'
+      - 'assets/editor_web/**'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tool/editor_web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: tool/editor_web/package-lock.json
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+      - run: npm run check:generated
