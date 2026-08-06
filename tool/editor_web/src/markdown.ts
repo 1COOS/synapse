@@ -170,7 +170,9 @@ export function splitMarkdownBlocks(markdown: string): MarkdownBlock[] {
 
 export function activeBlockForSelection(blocks: MarkdownBlock[], selection: EditorSelection): MarkdownBlock | undefined {
   const offset = selection.head;
-  return blocks.find((candidate) => offset >= candidate.from && offset <= candidate.to);
+  return blocks.find((candidate, index) =>
+    offset >= candidate.from &&
+    (offset < candidate.to || (index === blocks.length - 1 && offset === candidate.to)));
 }
 
 export function markdownImageSource(text: string): string | undefined {

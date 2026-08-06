@@ -38,6 +38,17 @@ describe('splitMarkdownBlocks', () => {
     expect(activeBlockForSelection(blocks, { anchor: markdown.length, head: markdown.length })?.text).toContain('Second');
   });
 
+  it('selects the next block when the caret is exactly on a shared boundary', () => {
+    const markdown = 'Paragraph\n![image](image.png)';
+    const blocks = splitMarkdownBlocks(markdown);
+    const image = blocks.find((block) => block.kind === 'image')!;
+
+    expect(activeBlockForSelection(
+      blocks,
+      { anchor: image.from, head: image.from },
+    )).toBe(image);
+  });
+
   it('keeps table width metadata inside the table source block', () => {
     const markdown = [
       '<!-- synapse-table width="720" -->',

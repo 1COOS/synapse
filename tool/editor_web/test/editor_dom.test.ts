@@ -91,6 +91,73 @@ describe('CodeMirror live preview', () => {
     expect(window.synapseTest!.getMode()).toBe('reading');
   });
 
+  it('reactivates unfocused plain and column editors on their first pointer interaction', async () => {
+    window.synapseHost!.receive(initialize('Alpha', 'editing', false));
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+
+    let content = document.querySelector<HTMLElement>('.cm-content')!;
+    expect(content.getAttribute('contenteditable')).not.toBe('true');
+    content.dispatchEvent(new MouseEvent('pointerdown', {
+      bubbles: true,
+      cancelable: true,
+      clientX: 10,
+      clientY: 10,
+    }));
+    expect(messages.some(
+      (message) => message.type === 'focusChanged' && message.focused === true,
+    )).toBe(true);
+    window.synapseHost!.receive({
+      protocolVersion: 1,
+      type: 'setMode',
+      mode: 'editing',
+      editable: true,
+      focused: true,
+    });
+    await new Promise((resolve) => window.setTimeout(resolve, 0));
+    content = document.querySelector<HTMLElement>('.cm-content')!;
+    expect(content.getAttribute('contenteditable')).toBe('true');
+    expect(document.activeElement).toBe(content);
+
+    messages.length = 0;
+    const markdown = [
+      '<!-- synapse:columns ratio="50:50" -->',
+      'Left',
+      '<!-- synapse:column -->',
+      'Right',
+      '<!-- synapse:columns-end -->',
+      '',
+    ].join('\n');
+    window.synapseHost!.receive(initialize(markdown, 'editing', false));
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+    const leftColumn = document.querySelectorAll<HTMLElement>(
+      '.synapse-column .cm-content',
+    )[0];
+    expect(leftColumn.getAttribute('contenteditable')).not.toBe('true');
+    leftColumn.dispatchEvent(new MouseEvent('pointerdown', {
+      bubbles: true,
+      cancelable: true,
+      clientX: 10,
+      clientY: 10,
+    }));
+    expect(messages.some(
+      (message) => message.type === 'focusChanged' && message.focused === true,
+    )).toBe(true);
+    window.synapseHost!.receive({
+      protocolVersion: 1,
+      type: 'setMode',
+      mode: 'editing',
+      editable: true,
+      focused: true,
+    });
+    await new Promise((resolve) => window.setTimeout(resolve, 0));
+    expect(window.synapseTest!.columnHasFocus('left')).toBe(true);
+    expect(document.activeElement).toBe(
+      document.querySelectorAll<HTMLElement>(
+        '.synapse-column .cm-content',
+      )[0],
+    );
+  });
+
   it('commits table cells and column source through parent transactions', async () => {
     const markdown = [
       '| A | B |',
@@ -298,10 +365,12 @@ describe('CodeMirror live preview', () => {
     const table = document.querySelector<HTMLTableElement>(
       '.synapse-column .synapse-table-frame table',
     )!;
+    const columns = document.querySelector<HTMLElement>('.synapse-columns')!;
     const cells = table.querySelectorAll<HTMLElement>(
       'td .synapse-table-cell-editor',
     );
     cells[0].focus();
+    expect(columns.classList.contains('synapse-columns-focused')).toBe(true);
     cells[0].textContent = 'Nested';
     cells[0].dispatchEvent(new InputEvent('input', { bubbles: true }));
     cells[1].focus();
@@ -310,7 +379,98 @@ describe('CodeMirror live preview', () => {
     expect(document.querySelector('.synapse-column .synapse-table-frame table'))
       .toBe(table);
     expect(document.activeElement).toBe(cells[1]);
+    expect(columns.classList.contains('synapse-columns-focused')).toBe(true);
     expect(window.synapseTest!.getText()).toContain('| Nested | 2 |');
+  });
+
+  it('shows the columns frame only while focus remains inside the editable region', async () => {
+    const markdown = [
+      '<!-- synapse:columns ratio="50:50" -->',
+      'Left',
+      '<!-- synapse:column -->',
+      'Right',
+      '<!-- synapse:columns-end -->',
+      '',
+    ].join('\n');
+    window.synapseHost!.receive(initialize(markdown, 'editing'));
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+
+    let columns = document.querySelector<HTMLElement>('.synapse-columns')!;
+    const content = columns.querySelector<HTMLElement>(
+      '.synapse-columns-content',
+    )!;
+    const controls = columns.querySelector<HTMLElement>(
+      '.synapse-columns-controls',
+    )!;
+    const divider = columns.querySelector<HTMLElement>(
+      '.synapse-columns-divider',
+    )!;
+    const columnRegions = columns.querySelectorAll<HTMLElement>(
+      '.synapse-column',
+    );
+    const contents = columns.querySelectorAll<HTMLElement>('.cm-content');
+    expect(columns.classList.contains('synapse-columns-editable')).toBe(true);
+    expect(columns.classList.contains('synapse-columns-focused')).toBe(false);
+    expect(content.style.gridTemplateColumns).toBe('50fr 0px 50fr');
+    expect(controls.hidden).toBe(false);
+    expect(getComputedStyle(controls).visibility).toBe('hidden');
+    expect(getComputedStyle(columnRegions[0]).padding).toBe('0px');
+    expect(getComputedStyle(columnRegions[1]).padding).toBe('0px');
+    expect(getComputedStyle(divider).pointerEvents).toBe('none');
+
+    contents[0].focus();
+    expect(columns.classList.contains('synapse-columns-focused')).toBe(true);
+    expect(getComputedStyle(controls).visibility).toBe('visible');
+    expect(getComputedStyle(divider).pointerEvents).toBe('auto');
+    expect(content.style.gridTemplateColumns).toBe('50fr 0px 50fr');
+
+    contents[1].focus();
+    await Promise.resolve();
+    expect(columns.classList.contains('synapse-columns-focused')).toBe(true);
+    expect(document.querySelector('.synapse-columns')).toBe(columns);
+    expect(columns.querySelector('.synapse-columns-controls')).toBe(controls);
+    expect(columns.querySelector('.synapse-columns-divider')).toBe(divider);
+    expect(content.style.gridTemplateColumns).toBe('50fr 0px 50fr');
+
+    const outside = document.createElement('button');
+    document.body.append(outside);
+    outside.focus();
+    await Promise.resolve();
+    expect(columns.classList.contains('synapse-columns-focused')).toBe(false);
+    expect(getComputedStyle(controls).visibility).toBe('hidden');
+    expect(getComputedStyle(divider).pointerEvents).toBe('none');
+    expect(content.style.gridTemplateColumns).toBe('50fr 0px 50fr');
+    expect(getComputedStyle(columnRegions[0]).padding).toBe('0px');
+    expect(getComputedStyle(columnRegions[1]).padding).toBe('0px');
+
+    contents[0].focus();
+    expect(columns.classList.contains('synapse-columns-focused')).toBe(true);
+    window.synapseHost!.receive({
+      protocolVersion: 1,
+      type: 'setMode',
+      mode: 'reading',
+      editable: false,
+      focused: true,
+    });
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+
+    columns = document.querySelector<HTMLElement>('.synapse-columns')!;
+    expect(columns.classList.contains('synapse-columns-editable')).toBe(false);
+    expect(columns.classList.contains('synapse-columns-focused')).toBe(false);
+    const readingControls = columns.querySelector<HTMLElement>(
+      '.synapse-columns-controls',
+    )!;
+    expect(readingControls.hidden).toBe(true);
+    expect(getComputedStyle(readingControls).display).toBe('none');
+    expect(
+      columns.querySelector<HTMLElement>('.synapse-columns-content')!.style
+        .gridTemplateColumns,
+    ).toBe('50fr 0px 50fr');
+    for (const column of columns.querySelectorAll<HTMLElement>(
+      '.synapse-column',
+    )) {
+      expect(getComputedStyle(column).padding).toBe('0px');
+    }
   });
 
   it('updates and flattens columns through parent transactions', async () => {
@@ -401,6 +561,201 @@ describe('CodeMirror live preview', () => {
         head: rightStart + offset,
       });
     }
+  });
+
+  it('protects column markers when backspace removes the last editable blank line', async () => {
+    const left = '戒禁取见：非道谓道,非因计因。';
+    const markdown = [
+      '<!-- synapse:columns ratio="50:50" -->',
+      left,
+      '',
+      '<!-- synapse:column -->',
+      'Right',
+      '<!-- synapse:columns-end -->',
+      '',
+    ].join('\n');
+    window.synapseHost!.receive(initialize(markdown, 'editing'));
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+
+    const leftContent = document.querySelectorAll<HTMLElement>(
+      '.synapse-column .cm-content',
+    )[0];
+    leftContent.focus();
+    window.synapseTest!.selectColumn('left', left.length + 1, left.length + 1);
+    leftContent.dispatchEvent(new KeyboardEvent('keydown', {
+      key: 'Backspace',
+      code: 'Backspace',
+      bubbles: true,
+      cancelable: true,
+    }));
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+
+    expect(window.synapseTest!.getText()).toContain(
+      `${left}\n<!-- synapse:column -->`,
+    );
+    expect(window.synapseTest!.getText()).not.toContain(
+      `${left}<!-- synapse:column -->`,
+    );
+    expect(document.querySelector('.synapse-columns')).not.toBeNull();
+    expect(leftContent.textContent).not.toContain('synapse:column');
+  });
+
+  it('clears a selected column image when focus leaves its column region', async () => {
+    const markdown = [
+      '<!-- synapse:columns ratio="50:50" -->',
+      'Left',
+      '<!-- synapse:column -->',
+      '![image](Note.assets/attachments/selected.png)',
+      '<!-- synapse:columns-end -->',
+      '',
+    ].join('\n');
+    window.synapseHost!.receive(initialize(markdown, 'editing'));
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+
+    const contents = document.querySelectorAll<HTMLElement>(
+      '.synapse-column .cm-content',
+    );
+    contents[1].focus();
+    await Promise.resolve();
+    expect(document.querySelector('.synapse-image-selected')).not.toBeNull();
+    expect(document.querySelector('.synapse-image-source')).not.toBeNull();
+
+    const outside = document.createElement('button');
+    document.body.append(outside);
+    outside.focus();
+    await Promise.resolve();
+    expect(document.querySelector('.synapse-image-selected')).toBeNull();
+    expect(document.querySelector('.synapse-image-source')).toBeNull();
+
+    contents[0].focus();
+    await Promise.resolve();
+    expect(
+      document.querySelector('.synapse-columns')!.classList.contains(
+        'synapse-columns-focused',
+      ),
+    ).toBe(true);
+    expect(document.querySelector('.synapse-image-selected')).toBeNull();
+  });
+
+  it('drags an image between column editors without replacing the drag source', async () => {
+    const src = 'Note.assets/attachments/drag.png';
+    const imageMarkdown = `![drag](${src})`;
+    const markdown = [
+      '<!-- synapse:columns ratio="50:50" -->',
+      imageMarkdown,
+      '<!-- synapse:column -->',
+      'Right',
+      '<!-- synapse:columns-end -->',
+      '',
+    ].join('\n');
+    window.synapseHost!.receive(initialize(markdown, 'editing'));
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+
+    const attachmentRequest = messages.find(
+      (message) => message.type === 'attachmentRequest' && message.src === src,
+    )!;
+    window.synapseHost!.receive({
+      protocolVersion: 1,
+      type: 'attachmentChunk',
+      requestId: attachmentRequest.requestId as string,
+      chunkIndex: 0,
+      chunkCount: 1,
+      mimeType: 'image/png',
+      data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M/wHwAF/gL+Xw3vWQAAAABJRU5ErkJggg==',
+    });
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+
+    const columns = document.querySelector<HTMLElement>('.synapse-columns')!;
+    const contents = columns.querySelectorAll<HTMLElement>('.cm-content');
+    contents[0].focus();
+    await Promise.resolve();
+    const sourceImage = columns.querySelector<HTMLElement>(
+      '.synapse-column .synapse-image-block',
+    )!;
+    const renderedImage = sourceImage.querySelector<HTMLImageElement>('img')!;
+    expect(renderedImage).not.toBeNull();
+    expect(getComputedStyle(renderedImage).pointerEvents).toBe('none');
+    expect(sourceImage.draggable).toBe(false);
+    sourceImage.dispatchEvent(new MouseEvent('pointerdown', {
+      bubbles: true,
+      cancelable: true,
+      button: 0,
+      clientX: 10,
+      clientY: 10,
+    }));
+    window.dispatchEvent(new MouseEvent('pointermove', {
+      bubbles: true,
+      cancelable: true,
+      buttons: 1,
+      clientX: 20,
+      clientY: 10,
+    }));
+    expect(sourceImage.classList.contains('synapse-image-dragging')).toBe(true);
+    window.dispatchEvent(new MouseEvent('pointercancel', {
+      bubbles: true,
+      cancelable: true,
+    }));
+    expect(sourceImage.classList.contains('synapse-image-dragging')).toBe(false);
+    sourceImage.dispatchEvent(new MouseEvent('mousedown', {
+      bubbles: true,
+      cancelable: true,
+    }));
+    expect(columns.querySelector('.synapse-image-block')).toBe(sourceImage);
+    expect(window.synapseTest!.columnHasFocus('left')).toBe(true);
+
+    const values = new Map<string, string>();
+    const dataTransfer = {
+      effectAllowed: 'none',
+      get types() {
+        return [...values.keys()];
+      },
+      setData(type: string, value: string) {
+        values.set(type, value);
+      },
+      getData(type: string) {
+        return values.get(type) ?? '';
+      },
+    } as unknown as DataTransfer;
+    const dragEvent = (type: string) => {
+      const event = new Event(type, {
+        bubbles: true,
+        cancelable: true,
+      }) as DragEvent;
+      Object.defineProperties(event, {
+        dataTransfer: { value: dataTransfer },
+        clientX: { value: 10 },
+        clientY: { value: 10 },
+      });
+      return event;
+    };
+
+    sourceImage.dispatchEvent(dragEvent('dragstart'));
+    expect(dataTransfer.types).toContain(
+      'application/x-synapse-markdown-range',
+    );
+    contents[1].dispatchEvent(dragEvent('drop'));
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+
+    const updated = window.synapseTest!.getText();
+    const separator = updated.indexOf('<!-- synapse:column -->');
+    const image = updated.indexOf(imageMarkdown);
+    const end = updated.indexOf('<!-- synapse:columns-end -->');
+    expect(image).toBeGreaterThan(separator);
+    expect(image).toBeLessThan(end);
+    const movedImage = document.querySelectorAll('.synapse-column')[1]
+      .querySelector<HTMLElement>('.synapse-image-block')!;
+    expect(movedImage).not.toBeNull();
+    movedImage.click();
+    await Promise.resolve();
+    expect(document.querySelector('.synapse-image-selected')).not.toBeNull();
+    expect(document.querySelector('.synapse-image-source')).not.toBeNull();
+
+    document.querySelectorAll<HTMLElement>(
+      '.synapse-column .cm-content',
+    )[0].focus();
+    await Promise.resolve();
+    expect(document.querySelector('.synapse-image-selected')).toBeNull();
+    expect(document.querySelector('.synapse-image-source')).toBeNull();
   });
 
   it('keeps table composition focused and reports it as composing', async () => {
@@ -677,6 +1032,7 @@ describe('CodeMirror live preview', () => {
 function initialize(
   markdown: string,
   mode: 'editing' | 'reading',
+  focused = true,
 ): InitializeCommand {
   return {
     protocolVersion: 1,
@@ -688,8 +1044,8 @@ function initialize(
     markdown,
     selection: { anchor: markdown.length, head: markdown.length },
     mode,
-    editable: mode === 'editing',
-    focused: true,
+    editable: mode === 'editing' && focused,
+    focused,
     theme: {
       background: '#ffffff',
       surface: '#f7f7f7',
