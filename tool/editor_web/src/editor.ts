@@ -113,7 +113,13 @@ let pendingNestedComposition = false;
 let attachmentCounter = 0;
 const attachmentCacheLimit = 24;
 
-function post(event: Omit<EditorEvent, 'protocolVersion' | 'paneId' | 'noteId' | 'generation'> & { type: EditorEvent['type'] }): void {
+type EditorEventPayload = EditorEvent extends infer Event
+  ? Event extends EditorEvent
+    ? Omit<Event, 'protocolVersion' | 'paneId' | 'noteId' | 'generation'>
+    : never
+  : never;
+
+function post(event: EditorEventPayload): void {
   if (!runtime || !window.SynapseBridge) return;
   window.SynapseBridge.postMessage(JSON.stringify({
     protocolVersion,
@@ -289,7 +295,9 @@ class ImageWidget extends WidgetType {
   }
 
   toDOM(): HTMLElement {
-    const root = document.createElement(this.block ? 'div' : 'span');
+    const root: HTMLElement = document.createElement(
+      this.block ? 'div' : 'span',
+    );
     root.className = this.block ? 'synapse-image-block' : 'synapse-inline-image';
     if (this.selected) root.classList.add('synapse-image-selected');
     root.dataset.src = this.src;
@@ -342,15 +350,15 @@ class ImageWidget extends WidgetType {
       event.preventDefault();
       safeDispatchSelection(this.from);
     });
-    root.addEventListener('contextmenu', (event) => {
+    root.addEventListener('contextmenu', (event: MouseEvent) => {
       event.preventDefault();
       showContextMenu(event.clientX, event.clientY, this.from, this.to, this.src);
     });
-    root.addEventListener('dragstart', (event) => {
+    root.addEventListener('dragstart', (event: DragEvent) => {
       event.dataTransfer?.setData('application/x-synapse-image-src', this.src);
       writeDraggedMarkdownRange(event, this.from, this.to);
     });
-    root.addEventListener('dragover', (event) => {
+    root.addEventListener('dragover', (event: DragEvent) => {
       if (!runtime?.editable) return;
       const dragged = event.dataTransfer?.types.includes('application/x-synapse-image-src') ||
         event.dataTransfer?.types.includes(markdownRangeDragType);
@@ -359,7 +367,7 @@ class ImageWidget extends WidgetType {
       root.classList.add('synapse-image-drop-target');
     });
     root.addEventListener('dragleave', () => root.classList.remove('synapse-image-drop-target'));
-    root.addEventListener('drop', (event) => {
+    root.addEventListener('drop', (event: DragEvent) => {
       root.classList.remove('synapse-image-drop-target');
       const draggedRange = readDraggedMarkdownRange(event);
       if (draggedRange) {
@@ -491,8 +499,578 @@ function moveItem<T>(items: T[], from: number, to: number): T[] {
   return result;
 }
 
+interface TableDomState {
+  widget: TableWidget;
+  frame: HTMLElement;
+  table: HTMLTableElement;
+  model: TableModel;
+  cells: HTMLElement[][];
+  selectedRow: number;
+  selectedColumn: number;
+  draggedRow?: number;
+  draggedColumn?: number;
+  pendingFrame: number;
+  focusRestoreFrame: number;
+  composing: boolean;
+  focusedCell?: HTMLElement;
+  committingMarkdown?: string;
+}
+
+interface CellSelectionSnapshot {
+  anchor: number;
+  head: number;
+}
+
+const tableDomStates = new WeakMap<HTMLElement, TableDomState>();
+const mountedTableStates = new Set<TableDomState>();
+
+function cloneTableModel(model: TableModel): TableModel {
+  return {
+    ...model,
+    header: [...model.header],
+    alignments: [...model.alignments],
+    rows: model.rows.map((row) => [...row]),
+  };
+}
+
+function tableModelsHaveSameShape(left: TableModel, right: TableModel): boolean {
+  return left.header.length === right.header.length &&
+    left.rows.length === right.rows.length;
+}
+
+function tableCellValue(model: TableModel, rowIndex: number, columnIndex: number): string {
+  return rowIndex === 0
+    ? model.header[columnIndex]
+    : model.rows[rowIndex - 1][columnIndex];
+}
+
+function withTableCellValue(
+  model: TableModel,
+  rowIndex: number,
+  columnIndex: number,
+  value: string,
+): TableModel {
+  const updated = cloneTableModel(model);
+  if (rowIndex === 0) updated.header[columnIndex] = value;
+  else updated.rows[rowIndex - 1][columnIndex] = value;
+  return updated;
+}
+
+function displayTableCell(value: string): string {
+  return value.replace(/\\\|/g, '|');
+}
+
+function editorTableCellValue(editor: HTMLElement): string {
+  return (editor.textContent ?? '')
+    .replace(/\r?\n/g, ' ')
+    .replace(/\|/g, '\\|');
+}
+
+function cellTextOffset(
+  editor: HTMLElement,
+  node: Node | null,
+  offset: number,
+): number | undefined {
+  if (!node || !editor.contains(node)) return undefined;
+  const range = document.createRange();
+  range.selectNodeContents(editor);
+  range.setEnd(node, offset);
+  return range.toString().length;
+}
+
+function captureCellSelection(
+  editor: HTMLElement,
+): CellSelectionSnapshot | undefined {
+  const selection = window.getSelection();
+  if (!selection || selection.rangeCount === 0) return undefined;
+  const anchor = cellTextOffset(
+    editor,
+    selection.anchorNode,
+    selection.anchorOffset,
+  );
+  const head = cellTextOffset(
+    editor,
+    selection.focusNode,
+    selection.focusOffset,
+  );
+  return anchor == null || head == null ? undefined : { anchor, head };
+}
+
+function cellTextPoint(editor: HTMLElement, offset: number): [Node, number] {
+  const walker = document.createTreeWalker(editor, NodeFilter.SHOW_TEXT);
+  let remaining = Math.max(0, offset);
+  let node = walker.nextNode();
+  while (node) {
+    const length = node.textContent?.length ?? 0;
+    if (remaining <= length) return [node, remaining];
+    remaining -= length;
+    node = walker.nextNode();
+  }
+  const text = editor.appendChild(document.createTextNode(''));
+  return [text, 0];
+}
+
+function restoreCellSelection(
+  editor: HTMLElement,
+  snapshot: CellSelectionSnapshot | undefined,
+  focus = false,
+): void {
+  if (focus) editor.focus({ preventScroll: true });
+  if (!snapshot) return;
+  if (document.activeElement !== editor) return;
+  const [anchorNode, anchorOffset] = cellTextPoint(editor, snapshot.anchor);
+  const [headNode, headOffset] = cellTextPoint(editor, snapshot.head);
+  const selection = window.getSelection();
+  selection?.setBaseAndExtent(
+    anchorNode,
+    anchorOffset,
+    headNode,
+    headOffset,
+  );
+}
+
+function commitTableModel(
+  state: TableDomState,
+  next: TableModel = state.model,
+  userEvent = 'input.table',
+): boolean {
+  if (!view || !state.widget.editable) return false;
+  if (state.pendingFrame) cancelAnimationFrame(state.pendingFrame);
+  state.pendingFrame = 0;
+  state.model = cloneTableModel(next);
+  const markdown = serializeTableModel(state.model);
+  if (markdown === state.widget.block.text) return false;
+  const activeElement = document.activeElement;
+  const parentRecoveredFocus = activeElement instanceof HTMLElement &&
+    activeElement.classList.contains('cm-content') &&
+    view.dom.contains(activeElement);
+  const focusedCell = state.focusedCell?.isConnected &&
+      (activeElement === state.focusedCell || parentRecoveredFocus)
+    ? state.focusedCell
+    : undefined;
+  const cellSelection = focusedCell
+    ? captureCellSelection(focusedCell)
+    : undefined;
+  const editorScrollTop = view.scrollDOM.scrollTop;
+  const editorScrollLeft = view.scrollDOM.scrollLeft;
+  const tableScrollLeft = state.frame.scrollLeft;
+  state.committingMarkdown = markdown;
+  view.dispatch({
+    changes: {
+      from: state.widget.block.from,
+      to: state.widget.block.to,
+      insert: markdown,
+    },
+    annotations: Transaction.userEvent.of(userEvent),
+  });
+  if (focusedCell?.isConnected && state.frame.contains(focusedCell)) {
+    restoreCellSelection(focusedCell, cellSelection, true);
+    view.scrollDOM.scrollTop = editorScrollTop;
+    view.scrollDOM.scrollLeft = editorScrollLeft;
+    state.frame.scrollLeft = tableScrollLeft;
+    if (state.focusRestoreFrame) cancelAnimationFrame(state.focusRestoreFrame);
+    state.focusRestoreFrame = requestAnimationFrame(() => {
+      state.focusRestoreFrame = 0;
+      const active = document.activeElement;
+      const editorRecoveredFocus = active instanceof HTMLElement &&
+        active.classList.contains('cm-content') &&
+        view?.dom.contains(active);
+      if (
+        state.focusedCell !== focusedCell ||
+        (!editorRecoveredFocus && active !== focusedCell)
+      ) return;
+      restoreCellSelection(focusedCell, cellSelection, true);
+      if (view) {
+        view.scrollDOM.scrollTop = editorScrollTop;
+        view.scrollDOM.scrollLeft = editorScrollLeft;
+      }
+      state.frame.scrollLeft = tableScrollLeft;
+    });
+  }
+  return true;
+}
+
+function scheduleTableCommit(state: TableDomState): void {
+  if (state.pendingFrame) return;
+  state.pendingFrame = requestAnimationFrame(() => {
+    state.pendingFrame = 0;
+    commitTableModel(state);
+  });
+}
+
+function flushPendingTableEdits(): void {
+  for (const state of [...mountedTableStates]) {
+    if (state.pendingFrame) commitTableModel(state);
+  }
+}
+
+function buildTableDom(state: TableDomState): void {
+  const { frame } = state;
+  const editable = state.widget.editable;
+  if (editable) {
+    const controls = document.createElement('div');
+    controls.className = 'synapse-table-controls';
+    const moveHandle = document.createElement('span');
+    moveHandle.className = 'synapse-table-move-handle';
+    moveHandle.title = '拖动整张表格';
+    moveHandle.draggable = true;
+    moveHandle.addEventListener('dragstart', (event) => {
+      writeDraggedMarkdownRange(
+        event,
+        state.widget.block.from,
+        state.widget.block.to,
+      );
+    });
+    controls.append(moveHandle);
+    const action = (label: string, title: string, invoke: () => void) => {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.textContent = label;
+      button.title = title;
+      button.addEventListener('mousedown', (event) => event.preventDefault());
+      button.addEventListener('click', invoke);
+      controls.append(button);
+    };
+    action('+ 行', '在当前行下方插入', () => {
+      const model = state.model;
+      const rows = model.rows.map((row) => [...row]);
+      rows.splice(
+        Math.max(0, state.selectedRow),
+        0,
+        Array.from({ length: model.header.length }, () => ''),
+      );
+      commitTableModel(state, { ...model, rows }, 'input.table.structure');
+    });
+    action('− 行', '删除当前行', () => {
+      if (state.selectedRow <= 0) return;
+      const model = state.model;
+      commitTableModel(
+        state,
+        {
+          ...model,
+          rows: model.rows.filter(
+            (_, index) => index !== state.selectedRow - 1,
+          ),
+        },
+        'input.table.structure',
+      );
+    });
+    action('+ 列', '在当前列右侧插入', () => {
+      const model = state.model;
+      const insertAt = Math.min(
+        model.header.length,
+        state.selectedColumn + 1,
+      );
+      const insert = (row: string[]) => [
+        ...row.slice(0, insertAt),
+        '',
+        ...row.slice(insertAt),
+      ];
+      commitTableModel(
+        state,
+        {
+          ...model,
+          width: model.width == null
+            ? undefined
+            : clampTableWidth(
+                model.width + 64,
+                model.header.length + 1,
+              ),
+          header: insert(model.header),
+          alignments: insert(model.alignments),
+          rows: model.rows.map(insert),
+        },
+        'input.table.structure',
+      );
+    });
+    action('− 列', '删除当前列', () => {
+      const model = state.model;
+      if (model.header.length <= 1) return;
+      const remove = (row: string[]) =>
+        row.filter((_, index) => index !== state.selectedColumn);
+      commitTableModel(
+        state,
+        {
+          ...model,
+          header: remove(model.header),
+          alignments: remove(model.alignments),
+          rows: model.rows.map(remove),
+        },
+        'input.table.structure',
+      );
+    });
+    action('↑ 行', '上移当前行', () => {
+      const model = state.model;
+      if (state.selectedRow <= 1) return;
+      commitTableModel(
+        state,
+        {
+          ...model,
+          rows: moveItem(
+            model.rows,
+            state.selectedRow - 1,
+            state.selectedRow - 2,
+          ),
+        },
+        'input.table.structure',
+      );
+    });
+    action('↓ 行', '下移当前行', () => {
+      const model = state.model;
+      if (state.selectedRow <= 0 || state.selectedRow >= model.rows.length) {
+        return;
+      }
+      commitTableModel(
+        state,
+        {
+          ...model,
+          rows: moveItem(
+            model.rows,
+            state.selectedRow - 1,
+            state.selectedRow,
+          ),
+        },
+        'input.table.structure',
+      );
+    });
+    action('← 列', '左移当前列', () => {
+      const model = state.model;
+      if (state.selectedColumn <= 0) return;
+      const move = (row: string[]) =>
+        moveItem(row, state.selectedColumn, state.selectedColumn - 1);
+      commitTableModel(
+        state,
+        {
+          ...model,
+          header: move(model.header),
+          alignments: move(model.alignments),
+          rows: model.rows.map(move),
+        },
+        'input.table.structure',
+      );
+    });
+    action('→ 列', '右移当前列', () => {
+      const model = state.model;
+      if (state.selectedColumn >= model.header.length - 1) return;
+      const move = (row: string[]) =>
+        moveItem(row, state.selectedColumn, state.selectedColumn + 1);
+      commitTableModel(
+        state,
+        {
+          ...model,
+          header: move(model.header),
+          alignments: move(model.alignments),
+          rows: model.rows.map(move),
+        },
+        'input.table.structure',
+      );
+    });
+    frame.append(controls);
+  }
+
+  const table = state.table;
+  if (state.model.width != null) table.style.width = `${state.model.width}px`;
+  const rows = [state.model.header, ...state.model.rows];
+  state.cells = [];
+  rows.forEach((row, rowIndex) => {
+    const tr = document.createElement('tr');
+    if (editable) {
+      const rowHandle = document.createElement('th');
+      rowHandle.className = 'synapse-table-row-handle';
+      rowHandle.title = rowIndex === 0 ? '表头' : '拖动调整行顺序';
+      if (rowIndex > 0) {
+        rowHandle.draggable = true;
+        rowHandle.addEventListener('dragstart', (event) => {
+          state.draggedRow = rowIndex - 1;
+          if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move';
+        });
+        rowHandle.addEventListener('dragover', (event) => event.preventDefault());
+        rowHandle.addEventListener('drop', (event) => {
+          event.preventDefault();
+          const target = rowIndex - 1;
+          if (state.draggedRow == null || state.draggedRow === target) return;
+          commitTableModel(
+            state,
+            {
+              ...state.model,
+              rows: moveItem(state.model.rows, state.draggedRow, target),
+            },
+            'input.table.structure',
+          );
+        });
+      }
+      tr.append(rowHandle);
+    }
+    const cellEditors: HTMLElement[] = [];
+    row.forEach((value, columnIndex) => {
+      const cell = document.createElement(rowIndex === 0 ? 'th' : 'td');
+      const editor = document.createElement('span');
+      editor.className = 'synapse-table-cell-editor';
+      editor.textContent = displayTableCell(value);
+      editor.contentEditable = editable ? 'true' : 'false';
+      editor.tabIndex = editable ? 0 : -1;
+      editor.spellcheck = false;
+      if (editable) {
+        editor.addEventListener('mousedown', (event) => {
+          event.stopPropagation();
+          state.selectedRow = rowIndex;
+          state.selectedColumn = columnIndex;
+        });
+        editor.addEventListener('focus', () => {
+          state.selectedRow = rowIndex;
+          state.selectedColumn = columnIndex;
+          state.focusedCell = editor;
+        });
+        editor.addEventListener('input', () => {
+          state.model = withTableCellValue(
+            state.model,
+            rowIndex,
+            columnIndex,
+            editorTableCellValue(editor),
+          );
+          pendingNestedComposition = pendingNestedComposition || state.composing;
+          scheduleTableCommit(state);
+        });
+        editor.addEventListener('compositionstart', () => {
+          state.composing = true;
+          pendingNestedComposition = true;
+        });
+        editor.addEventListener('compositionend', () => {
+          state.composing = false;
+          scheduleTableCommit(state);
+        });
+        editor.addEventListener('keydown', (event) => {
+          const modifier = event.metaKey || event.ctrlKey;
+          if (modifier && event.key.toLowerCase() === 'z') {
+            event.preventDefault();
+            commitTableModel(state);
+            if (view) (event.shiftKey ? redo : undo)(view);
+            return;
+          }
+          if (modifier && event.key.toLowerCase() === 'y') {
+            event.preventDefault();
+            commitTableModel(state);
+            if (view) redo(view);
+            return;
+          }
+          if (event.key === 'Enter' && !event.shiftKey) {
+            event.preventDefault();
+            commitTableModel(state);
+            editor.blur();
+          }
+        });
+      }
+      cell.append(editor);
+      if (editable && rowIndex === 0) {
+        const columnHandle = document.createElement('span');
+        columnHandle.className = 'synapse-table-column-handle';
+        columnHandle.title = '拖动调整列顺序';
+        columnHandle.draggable = true;
+        columnHandle.contentEditable = 'false';
+        columnHandle.addEventListener('mousedown', (event) =>
+          event.stopPropagation());
+        columnHandle.addEventListener('dragstart', (event) => {
+          event.stopPropagation();
+          state.draggedColumn = columnIndex;
+          if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move';
+        });
+        columnHandle.addEventListener('dragover', (event) =>
+          event.preventDefault());
+        columnHandle.addEventListener('drop', (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          if (
+            state.draggedColumn == null ||
+            state.draggedColumn === columnIndex
+          ) return;
+          const move = (source: string[]) =>
+            moveItem(source, state.draggedColumn!, columnIndex);
+          commitTableModel(
+            state,
+            {
+              ...state.model,
+              header: move(state.model.header),
+              alignments: move(state.model.alignments),
+              rows: state.model.rows.map(move),
+            },
+            'input.table.structure',
+          );
+        });
+        cell.append(columnHandle);
+      }
+      tr.append(cell);
+      cellEditors.push(editor);
+    });
+    state.cells.push(cellEditors);
+    table.append(tr);
+  });
+  frame.append(table);
+
+  if (editable) {
+    const resize = document.createElement('span');
+    resize.className = 'synapse-table-resize';
+    resize.addEventListener('pointerdown', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const startX = event.clientX;
+      const startWidth = table.getBoundingClientRect().width;
+      const move = (next: PointerEvent) => {
+        table.style.width = `${clampTableWidth(
+          startWidth + next.clientX - startX,
+          state.model.header.length,
+        )}px`;
+      };
+      const end = () => {
+        window.removeEventListener('pointermove', move);
+        window.removeEventListener('pointerup', end);
+        commitTableModel(
+          state,
+          {
+            ...state.model,
+            width: clampTableWidth(
+              table.getBoundingClientRect().width,
+              state.model.header.length,
+            ),
+          },
+          'input.table.structure',
+        );
+      };
+      window.addEventListener('pointermove', move);
+      window.addEventListener('pointerup', end, { once: true });
+    });
+    frame.append(resize);
+  }
+
+  frame.addEventListener('mousedown', (event) => {
+    const target = event.target instanceof Element ? event.target : null;
+    if (target?.closest(
+      '.synapse-table-cell-editor, .synapse-table-controls, '
+        + '.synapse-table-row-handle, .synapse-table-column-handle, '
+        + '.synapse-table-resize, td, th',
+    )) return;
+    event.preventDefault();
+    safeDispatchSelection(state.widget.block.from);
+  });
+  frame.addEventListener('focusout', () => {
+    window.setTimeout(() => {
+      if (!frame.contains(document.activeElement)) commitTableModel(state);
+    }, 0);
+  });
+  frame.addEventListener('contextmenu', (event) => {
+    event.preventDefault();
+    showContextMenu(
+      event.clientX,
+      event.clientY,
+      state.widget.block.from,
+      state.widget.block.to,
+    );
+  });
+}
+
 class TableWidget extends WidgetType {
-  constructor(readonly block: MarkdownBlock, readonly editable: boolean) { super(); }
+  constructor(readonly block: MarkdownBlock, readonly editable: boolean) {
+    super();
+  }
 
   eq(other: TableWidget): boolean {
     return other.block.from === this.block.from &&
@@ -503,221 +1081,77 @@ class TableWidget extends WidgetType {
   toDOM(): HTMLElement {
     const frame = document.createElement('div');
     frame.className = 'synapse-table-frame';
-    frame.draggable = this.editable;
-    frame.addEventListener('dragstart', (event) => {
-      if ((event.target as Element).closest('.synapse-table-row-handle, .synapse-table-column-handle')) return;
-      writeDraggedMarkdownRange(event, this.block.from, this.block.to);
-    });
+    frame.contentEditable = 'false';
     const model = parseTableModel(this.block.text);
     if (!model) {
       frame.textContent = this.block.text;
       return frame;
     }
-    let selectedRow = 0;
-    let selectedColumn = 0;
-    const commit = (next: TableModel) => {
-      if (!view || !this.editable) return;
-      const markdown = serializeTableModel(next);
-      const previousHead = view.state.selection.main.head;
-      const delta = markdown.length - (this.block.to - this.block.from);
-      const anchor = previousHead <= this.block.from
-        ? previousHead
-        : previousHead >= this.block.to
-          ? previousHead + delta
-          : Math.min(
-              view.state.doc.length + delta,
-              this.block.from + markdown.length + 1,
-            );
-      view.dispatch({
-        changes: { from: this.block.from, to: this.block.to, insert: markdown },
-        selection: { anchor },
-      });
+    const state: TableDomState = {
+      widget: this,
+      frame,
+      table: document.createElement('table'),
+      model: cloneTableModel(model),
+      cells: [],
+      selectedRow: 0,
+      selectedColumn: 0,
+      pendingFrame: 0,
+      focusRestoreFrame: 0,
+      composing: false,
     };
-    if (this.editable) {
-      const controls = document.createElement('div');
-      controls.className = 'synapse-table-controls';
-      const action = (label: string, title: string, invoke: () => void) => {
-        const button = document.createElement('button');
-        button.type = 'button';
-        button.textContent = label;
-        button.title = title;
-        button.addEventListener('mousedown', (event) => event.preventDefault());
-        button.addEventListener('click', invoke);
-        controls.append(button);
-      };
-      action('+ 行', '在当前行下方插入', () => {
-        const rows = [...model.rows];
-        rows.splice(Math.max(0, selectedRow), 0, Array.from({ length: model.header.length }, () => ''));
-        commit({ ...model, rows });
-      });
-      action('− 行', '删除当前行', () => {
-        if (selectedRow <= 0) return;
-        commit({ ...model, rows: model.rows.filter((_, index) => index !== selectedRow - 1) });
-      });
-      action('+ 列', '在当前列右侧插入', () => {
-        const insertAt = Math.min(model.header.length, selectedColumn + 1);
-        const insert = (row: string[]) => [...row.slice(0, insertAt), '', ...row.slice(insertAt)];
-        commit({
-          ...model,
-          width: model.width == null ? undefined : clampTableWidth(model.width + 64, model.header.length + 1),
-          header: insert(model.header),
-          alignments: insert(model.alignments),
-          rows: model.rows.map(insert),
-        });
-      });
-      action('− 列', '删除当前列', () => {
-        if (model.header.length <= 1) return;
-        const remove = (row: string[]) => row.filter((_, index) => index !== selectedColumn);
-        commit({
-          ...model,
-          header: remove(model.header),
-          alignments: remove(model.alignments),
-          rows: model.rows.map(remove),
-        });
-      });
-      action('↑ 行', '上移当前行', () => {
-        if (selectedRow <= 1) return;
-        commit({ ...model, rows: moveItem(model.rows, selectedRow - 1, selectedRow - 2) });
-      });
-      action('↓ 行', '下移当前行', () => {
-        if (selectedRow <= 0 || selectedRow >= model.rows.length) return;
-        commit({ ...model, rows: moveItem(model.rows, selectedRow - 1, selectedRow) });
-      });
-      action('← 列', '左移当前列', () => {
-        if (selectedColumn <= 0) return;
-        const move = (row: string[]) => moveItem(row, selectedColumn, selectedColumn - 1);
-        commit({ ...model, header: move(model.header), alignments: move(model.alignments), rows: model.rows.map(move) });
-      });
-      action('→ 列', '右移当前列', () => {
-        if (selectedColumn >= model.header.length - 1) return;
-        const move = (row: string[]) => moveItem(row, selectedColumn, selectedColumn + 1);
-        commit({ ...model, header: move(model.header), alignments: move(model.alignments), rows: model.rows.map(move) });
-      });
-      frame.append(controls);
-    }
-    const table = document.createElement('table');
-    if (model.width != null) table.style.width = `${model.width}px`;
-    const rows = [model.header, ...model.rows];
-    let draggedRow: number | undefined;
-    let draggedColumn: number | undefined;
-    rows.forEach((row, rowIndex) => {
-      const tr = document.createElement('tr');
-      if (this.editable) {
-        const rowHandle = document.createElement('th');
-        rowHandle.className = 'synapse-table-row-handle';
-        rowHandle.title = rowIndex === 0 ? '表头' : '拖动调整行顺序';
-        if (rowIndex > 0) {
-          rowHandle.draggable = true;
-          rowHandle.addEventListener('dragstart', (event) => {
-            draggedRow = rowIndex - 1;
-            if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move';
-          });
-          rowHandle.addEventListener('dragover', (event) => event.preventDefault());
-          rowHandle.addEventListener('drop', (event) => {
-            event.preventDefault();
-            const target = rowIndex - 1;
-            if (draggedRow == null || draggedRow === target) return;
-            commit({ ...model, rows: moveItem(model.rows, draggedRow, target) });
-          });
-        }
-        tr.append(rowHandle);
-      }
-      row.forEach((value, columnIndex) => {
-        const cell = document.createElement(rowIndex === 0 ? 'th' : 'td');
-        cell.textContent = value.replace(/\\\|/g, '|');
-        if (this.editable) {
-          if (rowIndex === 0) {
-            const columnHandle = document.createElement('span');
-            columnHandle.className = 'synapse-table-column-handle';
-            columnHandle.title = '拖动调整列顺序';
-            columnHandle.draggable = true;
-            columnHandle.addEventListener('mousedown', (event) => event.stopPropagation());
-            columnHandle.addEventListener('dragstart', (event) => {
-              event.stopPropagation();
-              draggedColumn = columnIndex;
-              if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move';
-            });
-            columnHandle.addEventListener('dragover', (event) => event.preventDefault());
-            columnHandle.addEventListener('drop', (event) => {
-              event.preventDefault();
-              event.stopPropagation();
-              if (draggedColumn == null || draggedColumn === columnIndex) return;
-              const move = (source: string[]) => moveItem(source, draggedColumn!, columnIndex);
-              commit({
-                ...model,
-                header: move(model.header),
-                alignments: move(model.alignments),
-                rows: model.rows.map(move),
-              });
-            });
-            cell.append(columnHandle);
-          }
-          cell.contentEditable = 'true';
-          cell.spellcheck = false;
-          cell.addEventListener('mousedown', (event) => {
-            event.stopPropagation();
-            selectedRow = rowIndex;
-            selectedColumn = columnIndex;
-          });
-          cell.addEventListener('keydown', (event) => {
-            if (event.key === 'Enter' && !event.shiftKey) {
-              event.preventDefault();
-              cell.blur();
-            }
-          });
-          cell.addEventListener('blur', () => {
-            const next = cell.textContent?.replace(/\r?\n/g, ' ') ?? '';
-            const escaped = next.replace(/\|/g, '\\|');
-            if (escaped === value) return;
-            const updated: TableModel = {
-              ...model,
-              header: [...model.header],
-              rows: model.rows.map((row) => [...row]),
-            };
-            if (rowIndex === 0) updated.header[columnIndex] = escaped;
-            else updated.rows[rowIndex - 1][columnIndex] = escaped;
-            commit(updated);
-          });
-        }
-        tr.append(cell);
-      });
-      table.append(tr);
-    });
-    frame.append(table);
-    if (this.editable) {
-      const resize = document.createElement('span');
-      resize.className = 'synapse-table-resize';
-      resize.addEventListener('pointerdown', (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        const startX = event.clientX;
-        const startWidth = table.getBoundingClientRect().width;
-        const move = (next: PointerEvent) => {
-          table.style.width = `${clampTableWidth(startWidth + next.clientX - startX, model.header.length)}px`;
-        };
-        const end = () => {
-          window.removeEventListener('pointermove', move);
-          window.removeEventListener('pointerup', end);
-          commit({ ...model, width: clampTableWidth(table.getBoundingClientRect().width, model.header.length) });
-        };
-        window.addEventListener('pointermove', move);
-        window.addEventListener('pointerup', end, { once: true });
-      });
-      frame.append(resize);
-    }
-    frame.addEventListener('mousedown', (event) => {
-      if ((event.target as HTMLElement).isContentEditable) return;
-      event.preventDefault();
-      safeDispatchSelection(this.block.from);
-    });
-    frame.addEventListener('contextmenu', (event) => {
-      event.preventDefault();
-      showContextMenu(event.clientX, event.clientY, this.block.from, this.block.to);
-    });
+    tableDomStates.set(frame, state);
+    mountedTableStates.add(state);
+    buildTableDom(state);
     return frame;
   }
 
-  ignoreEvent(): boolean { return false; }
+  ignoreEvent(): boolean {
+    return true;
+  }
+
+  updateDOM(dom: HTMLElement): boolean {
+    const state = tableDomStates.get(dom);
+    const next = parseTableModel(this.block.text);
+    if (
+      !state ||
+      !next ||
+      state.widget.editable !== this.editable ||
+      !tableModelsHaveSameShape(state.model, next)
+    ) return false;
+    const selfCommit = state.committingMarkdown === this.block.text;
+    state.widget = this;
+    state.model = cloneTableModel(next);
+    if (next.width == null) state.table.style.removeProperty('width');
+    else state.table.style.width = `${next.width}px`;
+    for (let rowIndex = 0; rowIndex < state.cells.length; rowIndex += 1) {
+      for (
+        let columnIndex = 0;
+        columnIndex < state.cells[rowIndex].length;
+        columnIndex += 1
+      ) {
+        const editor = state.cells[rowIndex][columnIndex];
+        if (selfCommit && document.activeElement === editor) continue;
+        const value = displayTableCell(
+          tableCellValue(next, rowIndex, columnIndex),
+        );
+        if (editor.textContent === value) continue;
+        const selection = captureCellSelection(editor);
+        editor.textContent = value;
+        restoreCellSelection(editor, selection);
+      }
+    }
+    state.committingMarkdown = undefined;
+    return true;
+  }
+
+  destroy(dom: HTMLElement): void {
+    const state = tableDomStates.get(dom);
+    if (!state) return;
+    if (state.pendingFrame) cancelAnimationFrame(state.pendingFrame);
+    if (state.focusRestoreFrame) cancelAnimationFrame(state.focusRestoreFrame);
+    mountedTableStates.delete(state);
+    tableDomStates.delete(dom);
+  }
 }
 
 const refreshColumnPreview = StateEffect.define<null>();
@@ -733,6 +1167,9 @@ interface ColumnSideRuntime {
   themeCompartment: Compartment;
   host: HTMLElement;
   columnsState?: ColumnsDomState;
+  themeKey: string;
+  searchKey: string;
+  focusRestoreFrame: number;
 }
 
 interface ColumnsDomState {
@@ -791,7 +1228,7 @@ function buildColumnDecorations(state: EditorState, runtimeState: ColumnSideRunt
       }
       continue;
     }
-    if (block.kind === 'table' && !activeBlock) {
+    if (block.kind === 'table') {
       ranges.push(Decoration.replace({ widget: new TableWidget(absolute, runtimeState.editable), block: true }).range(block.from, block.to));
       continue;
     }
@@ -862,6 +1299,54 @@ function sideSelection(
   return { anchor: clamp(selection.anchor), head: clamp(selection.head) };
 }
 
+function columnThemeKey(theme: EditorTheme): string {
+  return JSON.stringify(theme);
+}
+
+function columnSearchKey(query: SearchQuery, visible: boolean): string {
+  return JSON.stringify({
+    search: query.search,
+    replace: query.replace,
+    caseSensitive: query.caseSensitive,
+    wholeWord: query.wholeWord,
+    visible,
+  });
+}
+
+function dispatchParentFromColumn(
+  runtimeState: ColumnSideRuntime,
+  transaction: Parameters<EditorView['dispatch']>[0],
+): void {
+  const hadFocus = runtimeState.editorView.hasFocus;
+  const parentScrollTop = runtimeState.parentView.scrollDOM.scrollTop;
+  const parentScrollLeft = runtimeState.parentView.scrollDOM.scrollLeft;
+  const childScrollTop = runtimeState.editorView.scrollDOM.scrollTop;
+  const childScrollLeft = runtimeState.editorView.scrollDOM.scrollLeft;
+  runtimeState.parentView.dispatch(transaction);
+  if (!hadFocus) return;
+  const restore = () => {
+    runtimeState.editorView.focus();
+    runtimeState.parentView.scrollDOM.scrollTop = parentScrollTop;
+    runtimeState.parentView.scrollDOM.scrollLeft = parentScrollLeft;
+    runtimeState.editorView.scrollDOM.scrollTop = childScrollTop;
+    runtimeState.editorView.scrollDOM.scrollLeft = childScrollLeft;
+  };
+  restore();
+  if (runtimeState.focusRestoreFrame) {
+    cancelAnimationFrame(runtimeState.focusRestoreFrame);
+  }
+  runtimeState.focusRestoreFrame = requestAnimationFrame(() => {
+    runtimeState.focusRestoreFrame = 0;
+    if (runtimeState.editorView.hasFocus) return;
+    const active = document.activeElement;
+    const parentRecoveredFocus = active instanceof HTMLElement &&
+      active.classList.contains('cm-content') &&
+      runtimeState.parentView.dom.contains(active) &&
+      !runtimeState.host.contains(active);
+    if (parentRecoveredFocus) restore();
+  });
+}
+
 function syncColumnRuntime(
   runtimeState: ColumnSideRuntime,
   source: string,
@@ -870,10 +1355,12 @@ function syncColumnRuntime(
   editable: boolean,
   parentSelection: EditorSelection,
 ): void {
+  const previousBaseOffset = runtimeState.baseOffset;
   const previousEditable = runtimeState.editable;
   runtimeState.baseOffset = from;
   runtimeState.toOffset = to;
   runtimeState.editable = editable;
+  runtimeState.editorView.contentDOM.tabIndex = editable ? 0 : -1;
   const sourceMatches = runtimeState.editorView.state.doc.toString() === source;
   if (runtimeState.editorView.composing && sourceMatches && previousEditable === editable) {
     return;
@@ -883,21 +1370,45 @@ function syncColumnRuntime(
     const childSelection = sideSelection(parentSelection, from, to);
     const query = getSearchQuery(runtimeState.parentView.state);
     const visible = runtimeState.parentView.state.field(searchVisibilityField);
-    runtimeState.editorView.dispatch({
-      changes: sourceMatches
-        ? undefined
-        : { from: 0, to: runtimeState.editorView.state.doc.length, insert: source },
-      selection: childSelection,
-      effects: [
+    const nextThemeKey = columnThemeKey(runtime!.theme);
+    const nextSearchKey = columnSearchKey(query, visible);
+    const selection = selectionOf(runtimeState.editorView.state);
+    const effects: StateEffect<unknown>[] = [];
+    if (previousEditable !== editable) {
+      effects.push(
         runtimeState.editableCompartment.reconfigure([
           EditorView.editable.of(editable),
           EditorState.readOnly.of(!editable),
         ]),
-        runtimeState.themeCompartment.reconfigure(columnEditorTheme(runtime!.theme)),
-        setSearchQuery.of(query),
-        setSearchVisibility.of(visible),
-        refreshColumnPreview.of(null),
-      ],
+      );
+    }
+    if (runtimeState.themeKey !== nextThemeKey) {
+      runtimeState.themeKey = nextThemeKey;
+      effects.push(
+        runtimeState.themeCompartment.reconfigure(
+          columnEditorTheme(runtime!.theme),
+        ),
+      );
+    }
+    if (runtimeState.searchKey !== nextSearchKey) {
+      runtimeState.searchKey = nextSearchKey;
+      effects.push(setSearchQuery.of(query), setSearchVisibility.of(visible));
+    }
+    if (previousBaseOffset !== from || previousEditable !== editable) {
+      effects.push(refreshColumnPreview.of(null));
+    }
+    const selectionMatches =
+      selection.anchor === childSelection.anchor &&
+      selection.head === childSelection.head;
+    if (sourceMatches && selectionMatches && effects.length === 0) {
+      return;
+    }
+    runtimeState.editorView.dispatch({
+      changes: sourceMatches
+        ? undefined
+        : { from: 0, to: runtimeState.editorView.state.doc.length, insert: source },
+      selection: selectionMatches ? undefined : childSelection,
+      effects,
       annotations: hostChange.of(true),
     });
   } finally {
@@ -913,7 +1424,8 @@ function createColumnEditor(
   to: number,
   editable: boolean,
 ): ColumnSideRuntime {
-  const runtimeState = {
+  const query = getSearchQuery(parentView.state);
+  const runtimeState: ColumnSideRuntime = {
     parentView,
     editorView: undefined as unknown as EditorView,
     baseOffset: from,
@@ -923,8 +1435,13 @@ function createColumnEditor(
     editableCompartment: new Compartment(),
     themeCompartment: new Compartment(),
     host,
-  } satisfies ColumnSideRuntime;
-  const query = getSearchQuery(parentView.state);
+    themeKey: columnThemeKey(runtime!.theme),
+    searchKey: columnSearchKey(
+      query,
+      parentView.state.field(searchVisibilityField),
+    ),
+    focusRestoreFrame: 0,
+  };
   runtimeState.editorView = new EditorView({
     parent: host,
     state: EditorState.create({
@@ -966,7 +1483,7 @@ function createColumnEditor(
               });
             });
             pendingNestedComposition = pendingNestedComposition || update.view.composing;
-            parentView.dispatch({
+            dispatchParentFromColumn(runtimeState, {
               changes,
               selection: {
                 anchor: runtimeState.baseOffset + update.state.selection.main.anchor,
@@ -977,7 +1494,7 @@ function createColumnEditor(
           }
           if (update.selectionSet && !external) {
             if (runtimeState.columnsState?.crossSelecting) return;
-            parentView.dispatch({
+            dispatchParentFromColumn(runtimeState, {
               selection: {
                 anchor: runtimeState.baseOffset + update.state.selection.main.anchor,
                 head: runtimeState.baseOffset + update.state.selection.main.head,
@@ -1049,6 +1566,7 @@ function createColumnEditor(
       ],
     }),
   });
+  runtimeState.editorView.contentDOM.tabIndex = editable ? 0 : -1;
   runtimeState.syncing = true;
   runtimeState.editorView.dispatch({
     effects: setSearchQuery.of(query),
@@ -1095,6 +1613,7 @@ class ColumnsWidget extends WidgetType {
   toDOM(parentView: EditorView): HTMLElement {
     const root = document.createElement('div');
     root.className = 'synapse-columns';
+    root.contentEditable = 'false';
     const content = document.createElement('div');
     content.className = 'synapse-columns-content';
     content.style.gridTemplateColumns = `${this.ratio}fr 10px ${100 - this.ratio}fr`;
@@ -1112,7 +1631,7 @@ class ColumnsWidget extends WidgetType {
     divider.className = 'synapse-columns-divider';
     content.append(left, divider, right);
     root.append(controls, content);
-    const state = {
+    const state: ColumnsDomState = {
       widget: this,
       parentView,
       root,
@@ -1124,7 +1643,7 @@ class ColumnsWidget extends WidgetType {
       pointerMove: (_event: PointerEvent) => {},
       pointerUp: () => {},
       crossSelecting: false,
-    } satisfies ColumnsDomState;
+    };
     leftRuntime.columnsState = state;
     rightRuntime.columnsState = state;
     columnsDomStates.set(root, state);
@@ -1218,7 +1737,7 @@ class ColumnsWidget extends WidgetType {
     return root;
   }
 
-  ignoreEvent(): boolean { return false; }
+  ignoreEvent(): boolean { return true; }
 
   updateDOM(dom: HTMLElement, parentView: EditorView): boolean {
     const state = columnsDomStates.get(dom);
@@ -1238,6 +1757,12 @@ class ColumnsWidget extends WidgetType {
     if (!state) return;
     window.removeEventListener('pointermove', state.pointerMove);
     window.removeEventListener('pointerup', state.pointerUp);
+    if (state.left.focusRestoreFrame) {
+      cancelAnimationFrame(state.left.focusRestoreFrame);
+    }
+    if (state.right.focusRestoreFrame) {
+      cancelAnimationFrame(state.right.focusRestoreFrame);
+    }
     state.left.editorView.destroy();
     state.right.editorView.destroy();
     columnsDomStates.delete(dom);
@@ -1396,7 +1921,7 @@ function buildDecorations(state: EditorState): DecorationSet {
       if (src) ranges.push(Decoration.replace({ widget: new ImageWidget(block.from, block.to, src, markdownImageWidth(block.text), true, block.text, activeBlock, editable), block: true }).range(block.from, block.to));
       continue;
     }
-    if (block.kind === 'table' && !activeBlock) {
+    if (block.kind === 'table') {
       ranges.push(Decoration.replace({ widget: new TableWidget(block, editable), block: true }).range(block.from, block.to));
       continue;
     }
@@ -1552,14 +2077,18 @@ function editorTheme(theme: EditorTheme) {
     '.synapse-search-current': { outline: `1px solid ${theme.accent}`, backgroundColor: `${theme.accent}2e` },
     '.synapse-link': { color: theme.accent, textDecoration: 'underline', cursor: 'pointer' },
     '.synapse-table-frame': { position: 'relative', overflowX: 'auto', border: `1px solid ${theme.line}`, borderRadius: '7px', margin: '4px 0' },
-    '.synapse-table-controls': { position: 'sticky', left: '0', display: 'flex', gap: '3px', padding: '4px 6px', borderBottom: `1px solid ${theme.line}`, backgroundColor: theme.surface },
+    '.synapse-table-controls': { position: 'sticky', left: '0', display: 'flex', gap: '3px', alignItems: 'center', padding: '4px 6px', borderBottom: `1px solid ${theme.line}`, backgroundColor: theme.surface },
+    '.synapse-table-move-handle': { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: '20px', height: '20px', borderRadius: '4px', color: theme.muted, cursor: 'grab', userSelect: 'none' },
+    '.synapse-table-move-handle::before': { content: '"⠿"', fontSize: '14px' },
     '.synapse-table-controls button': { border: `1px solid ${theme.line}`, borderRadius: '4px', padding: '2px 6px', color: theme.text, backgroundColor: theme.background, font: '11px/1.4 inherit' },
     '.synapse-table-frame table': { minWidth: '100%', borderCollapse: 'collapse' },
-    '.synapse-table-frame th, .synapse-table-frame td': { borderRight: `1px solid ${theme.line}`, borderBottom: `1px solid ${theme.line}`, padding: '8px 10px', textAlign: 'left' },
+    '.synapse-table-frame th, .synapse-table-frame td': { position: 'relative', borderRight: `1px solid ${theme.line}`, borderBottom: `1px solid ${theme.line}`, padding: '0', textAlign: 'left', verticalAlign: 'top' },
     '.synapse-table-frame th': { backgroundColor: theme.surface, fontWeight: '650' },
+    '.synapse-table-cell-editor': { display: 'block', boxSizing: 'border-box', width: '100%', minWidth: '64px', minHeight: '2.55em', padding: '8px 10px', outline: 'none', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', cursor: 'text' },
+    '.synapse-table-cell-editor:focus': { boxShadow: `inset 0 0 0 1px ${theme.accent}` },
     '.synapse-table-row-handle': { width: '22px', minWidth: '22px', padding: '0 !important', cursor: 'grab' },
     '.synapse-table-row-handle::before': { content: '"⋮⋮"', color: theme.muted, fontSize: '10px' },
-    '.synapse-table-column-handle': { float: 'right', width: '16px', height: '16px', cursor: 'grab' },
+    '.synapse-table-column-handle': { position: 'absolute', top: '3px', right: '3px', width: '16px', height: '16px', cursor: 'grab', zIndex: '1' },
     '.synapse-table-column-handle::before': { content: '"⋮"', color: theme.muted, fontSize: '11px' },
     '.synapse-table-resize': { position: 'absolute', top: '0', right: '0', bottom: '0', width: '8px', cursor: 'col-resize', backgroundColor: 'transparent' },
     '.synapse-columns': { border: '1px solid transparent', borderRadius: '7px', overflowX: 'auto' },
@@ -1611,6 +2140,7 @@ function scheduleTransaction(): void {
 }
 
 function flushPendingTransaction(): void {
+  flushPendingTableEdits();
   if (!runtime || !view || !pendingChanges) return;
   const changes: EditorChange[] = [];
   pendingChanges.iterChanges((fromA, toA, _fromB, _toB, inserted) => {
@@ -1805,6 +2335,7 @@ function initialize(command: InitializeCommand): void {
 
 function applyChanges(command: Extract<HostCommand, { type: 'applyChanges' }>): void {
   if (!view || !runtime || command.generation !== runtime.generation) return;
+  flushPendingTransaction();
   if (command.baseRevision !== runtime.revision) {
     post({ type: 'error', message: `Revision mismatch: expected ${runtime.revision}, received ${command.baseRevision}` });
     return;
@@ -1942,6 +2473,7 @@ function receive(command: HostCommand): void {
       case 'attachmentChunk': receiveAttachmentChunk(command); break;
       case 'attachmentError': receiveAttachmentError(command.requestId); break;
       case 'dispose':
+        flushPendingTransaction();
         view?.destroy();
         clearAttachmentState();
         if (pendingFrame) cancelAnimationFrame(pendingFrame);
@@ -2243,6 +2775,7 @@ window.synapseTest = {
     return performance.now() - startedAt;
   },
   undo: () => view ? undo(view) : false,
+  redo: () => view ? redo(view) : false,
   setSelection: (anchor: number, head: number) => {
     if (!view) return;
     view.dispatch({ selection: { anchor, head }, scrollIntoView: true });
@@ -2256,6 +2789,16 @@ window.synapseTest = {
       changes: { from: 0, to: target.editorView.state.doc.length, insert: text },
       selection: { anchor: text.length },
     });
+  },
+  focusColumn: (side: 'left' | 'right') => {
+    const root = document.querySelector<HTMLElement>('.synapse-columns');
+    const state = root ? columnsDomStates.get(root) : undefined;
+    state?.[side].editorView.focus();
+  },
+  columnHasFocus: (side: 'left' | 'right') => {
+    const root = document.querySelector<HTMLElement>('.synapse-columns');
+    const state = root ? columnsDomStates.get(root) : undefined;
+    return state?.[side].editorView.hasFocus ?? false;
   },
   selectColumn: (side: 'left' | 'right', anchor: number, head: number) => {
     const root = document.querySelector<HTMLElement>('.synapse-columns');

@@ -301,6 +301,28 @@ void main() {
       ),
       2,
     );
+    expect(
+      await surface!.debugRunJavaScriptReturningResult('''
+        (() => {
+          const column = document.querySelector('.synapse-column');
+          const content = column.querySelector('.cm-content');
+          const bounds = content.getBoundingClientRect();
+          const options = {
+            bubbles: true,
+            cancelable: true,
+            clientX: bounds.left + Math.max(1, bounds.width / 2),
+            clientY: bounds.top + Math.max(1, bounds.height / 2),
+          };
+          content.dispatchEvent(new MouseEvent('mousedown', options));
+          window.synapseTest.focusColumn('left');
+          window.synapseTest.selectColumn('left', 0, 0);
+          content.dispatchEvent(new MouseEvent('mouseup', options));
+          content.dispatchEvent(new MouseEvent('click', options));
+          return column.contains(document.activeElement);
+        })()
+      '''),
+      isTrue,
+    );
     await surface!.debugRunJavaScriptReturningResult(
       'window.synapseTest.editColumn("left", "\\nLeft edited\\n"); true',
     );
@@ -308,6 +330,12 @@ void main() {
     await _pumpUntil(
       tester,
       () => session.controller.text.contains('Left edited'),
+    );
+    expect(
+      await surface!.debugRunJavaScriptReturningResult(
+        'document.querySelector(".synapse-column").contains(document.activeElement)',
+      ),
+      isTrue,
     );
     await surface!.debugRunJavaScriptReturningResult(
       'window.synapseTest.selectAcrossColumns("left", 6, "right", 5); true',
@@ -333,9 +361,25 @@ void main() {
 
     await surface!.debugRunJavaScriptReturningResult('''
       (() => {
-        const cell = document.querySelector('.synapse-table-frame td');
-        cell.textContent = 'Edited';
-        cell.dispatchEvent(new FocusEvent('blur'));
+        const table = document.querySelector('.synapse-table-frame table');
+        const cells = table.querySelectorAll('td .synapse-table-cell-editor');
+        const first = cells[0];
+        const second = cells[1];
+        window.__synapseTableBeforeCellCommit = table;
+        first.focus({ preventScroll: true });
+        first.textContent = 'Edited';
+        first.dispatchEvent(new InputEvent('input', { bubbles: true }));
+        const bounds = second.getBoundingClientRect();
+        const options = {
+          bubbles: true,
+          cancelable: true,
+          clientX: bounds.left + Math.max(1, bounds.width / 2),
+          clientY: bounds.top + Math.max(1, bounds.height / 2),
+        };
+        second.dispatchEvent(new MouseEvent('mousedown', options));
+        second.focus({ preventScroll: true });
+        second.dispatchEvent(new MouseEvent('mouseup', options));
+        second.dispatchEvent(new MouseEvent('click', options));
         return true;
       })()
     ''');
@@ -343,6 +387,17 @@ void main() {
     await _pumpUntil(
       tester,
       () => session.controller.text.contains('| Edited | 2 |'),
+    );
+    expect(
+      await surface!.debugRunJavaScriptReturningResult('''
+        (() => {
+          const table = document.querySelector('.synapse-table-frame table');
+          const second = table.querySelectorAll('td .synapse-table-cell-editor')[1];
+          return table === window.__synapseTableBeforeCellCommit &&
+            document.activeElement === second;
+        })()
+      '''),
+      isTrue,
     );
     expect(session.controller.text, contains('synapse-table width="720"'));
     expect(session.controller.text, contains('| :--- | ---: |'));
@@ -371,6 +426,10 @@ void main() {
     await _pumpUntil(
       tester,
       () => session.controller.text.contains('ratio="50:50"'),
+    );
+
+    await surface!.debugRunJavaScriptReturningResult(
+      'document.activeElement?.blur(); true',
     );
 
     await tester.pumpWidget(const SizedBox.shrink());

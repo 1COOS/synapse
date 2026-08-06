@@ -107,10 +107,12 @@ describe('CodeMirror live preview', () => {
     window.synapseHost!.receive(initialize(markdown, 'editing'));
     await new Promise((resolve) => window.setTimeout(resolve, 20));
 
-    const cell = document.querySelector<HTMLElement>('.synapse-table-frame td');
+    const cell = document.querySelector<HTMLElement>(
+      '.synapse-table-frame td .synapse-table-cell-editor',
+    );
     expect(cell).not.toBeNull();
     cell!.textContent = 'Edited';
-    cell!.dispatchEvent(new FocusEvent('blur'));
+    cell!.dispatchEvent(new InputEvent('input', { bubbles: true }));
 
     expect(document.querySelector('.synapse-column .cm-editor')).not.toBeNull();
     window.synapseTest!.editColumn('left', '\nLeft edited\n');
@@ -133,10 +135,12 @@ describe('CodeMirror live preview', () => {
     await new Promise((resolve) => window.setTimeout(resolve, 20));
 
     const table = document.querySelector<HTMLTableElement>('.synapse-table-frame table');
-    const cell = document.querySelector<HTMLElement>('.synapse-table-frame td');
+    const cell = document.querySelector<HTMLElement>(
+      '.synapse-table-frame td .synapse-table-cell-editor',
+    );
     expect(table?.style.width).toBe('720px');
     cell!.textContent = 'Edited';
-    cell!.dispatchEvent(new FocusEvent('blur'));
+    cell!.dispatchEvent(new InputEvent('input', { bubbles: true }));
     await new Promise((resolve) => window.setTimeout(resolve, 20));
 
     expect(window.synapseTest!.getText()).toContain('<!-- synapse-table width="720" -->');
@@ -148,7 +152,10 @@ describe('CodeMirror live preview', () => {
     const markdown = '| A | B |\n| --- | --- |\n| 1 | 2 |\n\nAfter';
     window.synapseHost!.receive(initialize(markdown, 'editing'));
     await new Promise((resolve) => window.setTimeout(resolve, 20));
-    expect(document.querySelector<HTMLElement>('.synapse-table-frame td')!.contentEditable).toBe('true');
+    expect(
+      document.querySelector<HTMLElement>('.synapse-table-cell-editor')!
+        .contentEditable,
+    ).toBe('true');
 
     window.synapseHost!.receive({
       protocolVersion: 1,
@@ -159,7 +166,151 @@ describe('CodeMirror live preview', () => {
     });
     await new Promise((resolve) => window.setTimeout(resolve, 20));
 
-    expect(document.querySelector<HTMLElement>('.synapse-table-frame td')!.contentEditable).not.toBe('true');
+    expect(
+      document.querySelector<HTMLElement>('.synapse-table-cell-editor')!
+        .contentEditable,
+    ).not.toBe('true');
+  });
+
+  it('keeps table DOM and the next cell caret stable across incremental commits', async () => {
+    const markdown = '| A | B |\n| --- | --- |\n| 1 | 2 |\n\nAfter';
+    window.synapseHost!.receive(initialize(markdown, 'editing'));
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+
+    const table = document.querySelector<HTMLTableElement>(
+      '.synapse-table-frame table',
+    )!;
+    const cells = document.querySelectorAll<HTMLElement>(
+      '.synapse-table-frame td .synapse-table-cell-editor',
+    );
+    const first = cells[0];
+    const second = cells[1];
+    first.focus();
+    first.textContent = 'Edited';
+    first.dispatchEvent(new InputEvent('input', { bubbles: true }));
+    const click = new MouseEvent('mousedown', {
+      bubbles: true,
+      cancelable: true,
+      clientX: 20,
+      clientY: 20,
+    });
+    expect(second.dispatchEvent(click)).toBe(true);
+    second.focus();
+    const range = document.createRange();
+    range.selectNodeContents(second);
+    range.collapse(false);
+    window.getSelection()!.removeAllRanges();
+    window.getSelection()!.addRange(range);
+
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+
+    expect(document.querySelector('.synapse-table-frame table')).toBe(table);
+    expect(document.activeElement).toBe(second);
+    expect(window.getSelection()!.focusNode).toBe(second.firstChild);
+    expect(first.textContent).toBe('Edited');
+    expect(window.synapseTest!.getText()).toContain('| Edited | 2 |');
+  });
+
+  it('flushes pending cell drafts before mode changes and structure commands', async () => {
+    const markdown = '| A | B |\n| --- | --- |\n| 1 | 2 |\n\nAfter';
+    window.synapseHost!.receive(initialize(markdown, 'editing'));
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+
+    const first = document.querySelector<HTMLElement>(
+      '.synapse-table-frame td .synapse-table-cell-editor',
+    )!;
+    first.textContent = 'Draft';
+    first.dispatchEvent(new InputEvent('input', { bubbles: true }));
+    const addRow = Array.from(
+      document.querySelectorAll<HTMLButtonElement>('.synapse-table-controls button'),
+    ).find((button) => button.textContent === '+ 行')!;
+    addRow.click();
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+
+    expect(window.synapseTest!.getText()).toContain('| Draft | 2 |');
+    expect(window.synapseTest!.getText()).toContain('|  |  |');
+    expect(window.synapseTest!.undo()).toBe(true);
+    expect(window.synapseTest!.getText()).toBe(markdown);
+
+    const restored = document.querySelector<HTMLElement>(
+      '.synapse-table-frame td .synapse-table-cell-editor',
+    )!;
+    restored.textContent = 'Before mode';
+    restored.dispatchEvent(new InputEvent('input', { bubbles: true }));
+    window.synapseHost!.receive({
+      protocolVersion: 1,
+      type: 'setMode',
+      mode: 'reading',
+      editable: false,
+      focused: true,
+    });
+    expect(window.synapseTest!.getText()).toContain('| Before mode | 2 |');
+  });
+
+  it('keeps the visual table DOM synchronized through parent undo and redo', async () => {
+    const markdown = '| A | B |\n| --- | --- |\n| 1 | 2 |\n\nAfter';
+    window.synapseHost!.receive(initialize(markdown, 'editing'));
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+
+    const table = document.querySelector<HTMLTableElement>(
+      '.synapse-table-frame table',
+    )!;
+    const cell = table.querySelector<HTMLElement>(
+      'td .synapse-table-cell-editor',
+    )!;
+    cell.focus();
+    cell.textContent = 'Edited';
+    cell.dispatchEvent(new InputEvent('input', { bubbles: true }));
+    window.synapseHost!.receive({
+      protocolVersion: 1,
+      type: 'flush',
+      requestId: 2,
+    });
+    expect(window.synapseTest!.getText()).toContain('| Edited | 2 |');
+
+    expect(window.synapseTest!.undo()).toBe(true);
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+    expect(document.querySelector('.synapse-table-frame table')).toBe(table);
+    expect(cell.textContent).toBe('1');
+    expect(window.synapseTest!.getText()).toBe(markdown);
+
+    expect(window.synapseTest!.redo()).toBe(true);
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+    expect(document.querySelector('.synapse-table-frame table')).toBe(table);
+    expect(cell.textContent).toBe('Edited');
+    expect(window.synapseTest!.getText()).toContain('| Edited | 2 |');
+  });
+
+  it('edits a visual table inside columns without handing focus to the parent', async () => {
+    const markdown = [
+      '<!-- synapse:columns ratio="50:50" -->',
+      '| A | B |',
+      '| --- | --- |',
+      '| 1 | 2 |',
+      '<!-- synapse:column -->',
+      'Right',
+      '<!-- synapse:columns-end -->',
+      '',
+    ].join('\n');
+    window.synapseHost!.receive(initialize(markdown, 'editing'));
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+
+    const table = document.querySelector<HTMLTableElement>(
+      '.synapse-column .synapse-table-frame table',
+    )!;
+    const cells = table.querySelectorAll<HTMLElement>(
+      'td .synapse-table-cell-editor',
+    );
+    cells[0].focus();
+    cells[0].textContent = 'Nested';
+    cells[0].dispatchEvent(new InputEvent('input', { bubbles: true }));
+    cells[1].focus();
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+
+    expect(document.querySelector('.synapse-column .synapse-table-frame table'))
+      .toBe(table);
+    expect(document.activeElement).toBe(cells[1]);
+    expect(window.synapseTest!.getText()).toContain('| Nested | 2 |');
   });
 
   it('updates and flattens columns through parent transactions', async () => {
@@ -210,6 +361,88 @@ describe('CodeMirror live preview', () => {
     selection = window.synapseTest!.getSelection();
     expect(selection.anchor).toBeGreaterThan(selection.head);
     expect(window.synapseTest!.getSelectedSource()).toContain('B\n<!-- synapse:column -->\nRight');
+  });
+
+  it('keeps both column editors focused while mapping start middle and end carets', async () => {
+    const markdown = [
+      '<!-- synapse:columns ratio="50:50" -->',
+      'Left AB',
+      '<!-- synapse:column -->',
+      'Right CD',
+      '<!-- synapse:columns-end -->',
+      '',
+    ].join('\n');
+    window.synapseHost!.receive(initialize(markdown, 'editing'));
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+
+    const contents = document.querySelectorAll<HTMLElement>(
+      '.synapse-column .cm-content',
+    );
+    const leftStart = markdown.indexOf('\n') + 1;
+    const rightMarker = '<!-- synapse:column -->\n';
+    const rightStart = markdown.indexOf(rightMarker) + rightMarker.length;
+    for (const offset of [0, 4, 7]) {
+      contents[0].focus();
+      window.synapseTest!.selectColumn('left', offset, offset);
+      await new Promise((resolve) => window.setTimeout(resolve, 0));
+      expect(document.activeElement).toBe(contents[0]);
+      expect(window.synapseTest!.getSelection()).toEqual({
+        anchor: leftStart + offset,
+        head: leftStart + offset,
+      });
+    }
+    for (const offset of [0, 5, 8]) {
+      contents[1].focus();
+      window.synapseTest!.selectColumn('right', offset, offset);
+      await new Promise((resolve) => window.setTimeout(resolve, 0));
+      expect(document.activeElement).toBe(contents[1]);
+      expect(window.synapseTest!.getSelection()).toEqual({
+        anchor: rightStart + offset,
+        head: rightStart + offset,
+      });
+    }
+  });
+
+  it('keeps table composition focused and reports it as composing', async () => {
+    const markdown = '| A | B |\n| --- | --- |\n| 1 | 2 |\n\nAfter';
+    window.synapseHost!.receive(initialize(markdown, 'editing'));
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+
+    const table = document.querySelector<HTMLTableElement>(
+      '.synapse-table-frame table',
+    )!;
+    const cell = table.querySelector<HTMLElement>(
+      'td .synapse-table-cell-editor',
+    )!;
+    cell.focus();
+    cell.dispatchEvent(new CompositionEvent('compositionstart', {
+      bubbles: true,
+      data: '',
+    }));
+    cell.textContent = '中文输入';
+    cell.dispatchEvent(new InputEvent('input', {
+      bubbles: true,
+      inputType: 'insertCompositionText',
+      data: '中文输入',
+    }));
+    cell.dispatchEvent(new CompositionEvent('compositionend', {
+      bubbles: true,
+      data: '中文输入',
+    }));
+    window.synapseHost!.receive({
+      protocolVersion: 1,
+      type: 'flush',
+      requestId: 1,
+    });
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+
+    expect(document.querySelector('.synapse-table-frame table')).toBe(table);
+    expect(document.activeElement).toBe(cell);
+    expect(window.synapseTest!.getText()).toContain('| 中文输入 | 2 |');
+    expect(
+      messages.filter((message) => message.type === 'transaction').at(-1)!
+        .composing,
+    ).toBe(true);
   });
 
   it('batches column IME composition through the parent transaction', async () => {

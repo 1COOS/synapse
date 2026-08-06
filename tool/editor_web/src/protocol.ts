@@ -211,8 +211,11 @@ declare global {
       insertText(text: string): void;
       measureInsert(text: string): number;
       undo(): boolean;
+      redo(): boolean;
       setSelection(anchor: number, head: number): void;
       editColumn(side: 'left' | 'right', text: string): void;
+      focusColumn(side: 'left' | 'right'): void;
+      columnHasFocus(side: 'left' | 'right'): boolean;
       selectColumn(side: 'left' | 'right', anchor: number, head: number): void;
       selectAcrossColumns(
         anchorSide: 'left' | 'right',
