@@ -1,4 +1,4 @@
-export const protocolVersion = 1;
+export const protocolVersion = 2;
 
 export type EditorMode = 'editing' | 'reading';
 
@@ -68,6 +68,14 @@ export interface EditorTheme {
   highlight: string;
   fontSize: number;
   fontFamily: string;
+  contextMenu: {
+    background: string;
+    text: string;
+    disabledText: string;
+    divider: string;
+    border: string;
+    danger: string;
+  };
 }
 
 export type HostCommand =
@@ -97,6 +105,7 @@ export type HostCommand =
     }
   | { protocolVersion: number; type: 'replaceSearch'; all: boolean }
   | { protocolVersion: number; type: 'closeSearch' }
+  | { protocolVersion: number; type: 'dismissContextMenu' }
   | { protocolVersion: number; type: 'flush'; requestId: number }
   | {
       protocolVersion: number;
@@ -112,6 +121,17 @@ export type HostCommand =
       type: 'attachmentError';
       requestId: string;
       message: string;
+    }
+  | {
+      protocolVersion: number;
+      type: 'clipboardResult';
+      requestId: number;
+      revision: number;
+      generation: number;
+      outcome: 'success' | 'unavailable' | 'stale' | 'failure';
+      hasText: boolean;
+      hasImage: boolean;
+      text?: string;
     }
   | { protocolVersion: number; type: 'dispose' };
 
@@ -140,6 +160,7 @@ export type EditorEvent =
       selection: EditorSelection;
     })
   | (EditorEventBase & { type: 'focusChanged'; focused: boolean })
+  | (EditorEventBase & { type: 'pointerInteraction' })
   | (EditorEventBase & {
       type: 'outlineChanged';
       revision: number;
@@ -166,6 +187,8 @@ export type EditorEvent =
       action: 'copy' | 'cut' | 'resize' | 'move';
       src: string;
       revision: number;
+      from?: number;
+      to?: number;
       targetSrc?: string;
       beforeTarget?: boolean;
       width?: number;
@@ -177,7 +200,21 @@ export type EditorEvent =
       revision: number;
       selection: EditorSelection;
     })
-  | (EditorEventBase & { type: 'findRequest'; replace: boolean })
+  | (EditorEventBase & {
+      type: 'clipboardRequest';
+      requestId: number;
+      action: 'availability' | 'copy' | 'cut' | 'paste' | 'pastePlain';
+      target: 'document' | 'tableCell';
+      revision: number;
+      selection?: EditorSelection;
+      text?: string;
+    })
+  | (EditorEventBase & {
+      type: 'findRequest';
+      replace: boolean;
+      selectionText?: string;
+      anchorOffset?: number;
+    })
   | (EditorEventBase & {
       type: 'pasteImage';
       filename: string;
@@ -207,6 +244,8 @@ declare global {
     synapseTest?: {
       getText(): string;
       getMode(): EditorMode;
+      getRevision(): number;
+      getPendingClipboardCount(): number;
       getSelection(): EditorSelection;
       insertText(text: string): void;
       measureInsert(text: string): number;

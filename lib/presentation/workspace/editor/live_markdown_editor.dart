@@ -2695,6 +2695,7 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
                       itemKey: const Key('note-menu-delete-table'),
                       label: '删除表格',
                       enabled: canEdit,
+                      destructive: true,
                       onPressed: () => _deleteTableBlock(block),
                     ),
                   ],

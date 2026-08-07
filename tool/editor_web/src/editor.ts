@@ -109,10 +109,17 @@ let outlineTimer = 0;
 let commandStateFrame = 0;
 let inputStartedAt: number | undefined;
 let pointerStartedAt: number | undefined;
+let pointerInteractionHost: HTMLElement | undefined;
 let pendingNestedComposition = false;
 let pendingColumnFocus: {
   layoutFrom: number;
   side: 'left' | 'right';
+} | undefined;
+let pendingTableFocus: {
+  blockFrom: number;
+  row: number;
+  column: number;
+  openContextMenu?: { x: number; y: number };
 } | undefined;
 let attachmentCounter = 0;
 const attachmentCacheLimit = 24;
@@ -132,6 +139,14 @@ function post(event: EditorEventPayload): void {
     generation: runtime.generation,
     ...event,
   }));
+}
+
+function handleSurfacePointerInteraction(event: PointerEvent): void {
+  if (
+    event.target instanceof Element &&
+    event.target.closest('.synapse-context-menu')
+  ) return;
+  post({ type: 'pointerInteraction' });
 }
 
 function selectionOf(state: EditorState): EditorSelection {
@@ -435,7 +450,13 @@ class ImageWidget extends WidgetType {
     });
     root.addEventListener('contextmenu', (event: MouseEvent) => {
       event.preventDefault();
-      showContextMenu(event.clientX, event.clientY, this.from, this.to, this.src);
+      showContextMenu(event.clientX, event.clientY, {
+        kind: 'image',
+        from: this.from,
+        to: this.to,
+        src: this.src,
+        pasteSelection: rememberedTextSelection,
+      });
     });
     root.addEventListener('dragstart', (event: DragEvent) => {
       event.dataTransfer?.setData('application/x-synapse-image-src', this.src);
@@ -501,6 +522,8 @@ class ImageWidget extends WidgetType {
         action: 'resize',
         src: this.src,
         revision: runtime!.revision,
+        from: this.from,
+        to: this.to,
         width,
       });
     };
@@ -590,13 +613,35 @@ interface TableDomState {
   cells: HTMLElement[][];
   selectedRow: number;
   selectedColumn: number;
-  draggedRow?: number;
-  draggedColumn?: number;
   pendingFrame: number;
   focusRestoreFrame: number;
   composing: boolean;
+  contextMenuOpen: boolean;
   focusedCell?: HTMLElement;
   committingMarkdown?: string;
+  drag?: TablePointerDrag;
+}
+
+type TableDragKind = 'row' | 'column' | 'table';
+
+interface TablePointerDrag {
+  kind: TableDragKind;
+  pointerId: number;
+  source: number;
+  startX: number;
+  startY: number;
+  clientX: number;
+  clientY: number;
+  active: boolean;
+  insertionSlot: number;
+  targetOffset?: number;
+  handle: HTMLElement;
+  blockIndicator?: HTMLElement;
+  autoScrollFrame: number;
+  move: (event: PointerEvent) => void;
+  finish: (event?: PointerEvent) => void;
+  cancel: () => void;
+  keydown: (event: KeyboardEvent) => void;
 }
 
 interface CellSelectionSnapshot {
@@ -616,9 +661,12 @@ function cloneTableModel(model: TableModel): TableModel {
   };
 }
 
-function tableModelsHaveSameShape(left: TableModel, right: TableModel): boolean {
-  return left.header.length === right.header.length &&
-    left.rows.length === right.rows.length;
+function tableDomHasSameShape(
+  state: TableDomState,
+  model: TableModel,
+): boolean {
+  return state.cells.length === model.rows.length + 1 &&
+    state.cells.every((row) => row.length === model.header.length);
 }
 
 function tableCellValue(model: TableModel, rowIndex: number, columnIndex: number): string {
@@ -722,7 +770,10 @@ function commitTableModel(
   state.pendingFrame = 0;
   state.model = cloneTableModel(next);
   const markdown = serializeTableModel(state.model);
-  if (markdown === state.widget.block.text) return false;
+  if (
+    markdown === state.widget.block.text ||
+    markdown === state.committingMarkdown
+  ) return false;
   const activeElement = document.activeElement;
   const parentRecoveredFocus = activeElement instanceof HTMLElement &&
     activeElement.classList.contains('cm-content') &&
@@ -787,171 +838,461 @@ function flushPendingTableEdits(): void {
   }
 }
 
+function tableCellPosition(
+  state: TableDomState,
+  target: EventTarget | null,
+): { row: number; column: number } {
+  const element = target instanceof Element ? target : null;
+  const indexed = element?.closest<HTMLElement>('[data-table-row]');
+  const row = Number(indexed?.dataset.tableRow ?? state.selectedRow);
+  const column = Number(indexed?.dataset.tableColumn ?? state.selectedColumn);
+  return {
+    row: Number.isInteger(row) ? row : state.selectedRow,
+    column: Number.isInteger(column) ? column : state.selectedColumn,
+  };
+}
+
+function queueTableFocus(
+  state: TableDomState,
+  row: number,
+  column: number,
+  openContextMenu?: { x: number; y: number },
+): void {
+  pendingColumnFocus = undefined;
+  pendingTableFocus = {
+    blockFrom: state.widget.block.from,
+    row,
+    column,
+    openContextMenu,
+  };
+}
+
+function focusPendingTable(): boolean {
+  const pending = pendingTableFocus;
+  if (!pending) return false;
+  for (const state of mountedTableStates) {
+    if (
+      !state.frame.isConnected ||
+      !state.widget.editable ||
+      state.widget.block.from !== pending.blockFrom
+    ) continue;
+    pendingTableFocus = undefined;
+    state.selectedRow = Math.max(
+      0,
+      Math.min(pending.row, state.model.rows.length),
+    );
+    state.selectedColumn = Math.max(
+      0,
+      Math.min(pending.column, state.model.header.length - 1),
+    );
+    const cell = state.cells[state.selectedRow]?.[state.selectedColumn];
+    if (cell) {
+      state.focusedCell = cell;
+      cell.focus({ preventScroll: true });
+    } else {
+      safeDispatchSelection(state.widget.block.from);
+    }
+    if (pending.openContextMenu) {
+      const editor = state.cells[state.selectedRow]?.[state.selectedColumn];
+      if (!editor) return true;
+      showContextMenu(
+        pending.openContextMenu.x,
+        pending.openContextMenu.y,
+        tableCellContextTarget(state, state.selectedRow, state.selectedColumn, editor),
+      );
+    }
+    return true;
+  }
+  return false;
+}
+
+function requestTableActivation(
+  state: TableDomState,
+  row: number,
+  column: number,
+  openContextMenu?: { x: number; y: number },
+): void {
+  queueTableFocus(state, row, column, openContextMenu);
+  safeDispatchSelection(state.widget.block.from);
+  post({ type: 'focusChanged', focused: true });
+}
+
+function commitTableStructure(
+  state: TableDomState,
+  next: TableModel,
+  row: number,
+  column: number,
+): boolean {
+  queueTableFocus(state, row, column);
+  const changed = commitTableModel(state, next, 'input.table.structure');
+  if (!changed) {
+    pendingTableFocus = undefined;
+    return false;
+  }
+  if (!focusPendingTable()) {
+    requestAnimationFrame(() => focusPendingTable());
+  }
+  return true;
+}
+
+function insertTableRow(state: TableDomState, after: boolean): void {
+  const model = state.model;
+  const selected = state.selectedRow;
+  const insertAt = selected === 0
+    ? 0
+    : Math.max(0, Math.min(
+        model.rows.length,
+        selected - 1 + (after ? 1 : 0),
+      ));
+  const rows = model.rows.map((row) => [...row]);
+  rows.splice(
+    insertAt,
+    0,
+    Array.from({ length: model.header.length }, () => ''),
+  );
+  commitTableStructure(
+    state,
+    { ...model, rows },
+    insertAt + 1,
+    state.selectedColumn,
+  );
+}
+
+function deleteTableRow(state: TableDomState): void {
+  if (state.selectedRow <= 0 || state.model.rows.length === 0) return;
+  const removeAt = state.selectedRow - 1;
+  const rows = state.model.rows.filter((_, index) => index !== removeAt);
+  commitTableStructure(
+    state,
+    { ...state.model, rows },
+    Math.min(state.selectedRow, rows.length),
+    state.selectedColumn,
+  );
+}
+
+function insertTableColumn(state: TableDomState, after: boolean): void {
+  const model = state.model;
+  const insertAt = Math.max(
+    0,
+    Math.min(
+      model.header.length,
+      state.selectedColumn + (after ? 1 : 0),
+    ),
+  );
+  const insert = (row: string[]) => [
+    ...row.slice(0, insertAt),
+    '',
+    ...row.slice(insertAt),
+  ];
+  commitTableStructure(
+    state,
+    {
+      ...model,
+      width: model.width == null
+        ? undefined
+        : clampTableWidth(model.width + 64, model.header.length + 1),
+      header: insert(model.header),
+      alignments: insert(model.alignments),
+      rows: model.rows.map(insert),
+    },
+    state.selectedRow,
+    insertAt,
+  );
+}
+
+function deleteTableColumn(state: TableDomState): void {
+  const model = state.model;
+  if (model.header.length <= 1) return;
+  const removeAt = Math.max(
+    0,
+    Math.min(state.selectedColumn, model.header.length - 1),
+  );
+  const remove = (row: string[]) =>
+    row.filter((_, index) => index !== removeAt);
+  commitTableStructure(
+    state,
+    {
+      ...model,
+      header: remove(model.header),
+      alignments: remove(model.alignments),
+      rows: model.rows.map(remove),
+    },
+    state.selectedRow,
+    Math.min(removeAt, model.header.length - 2),
+  );
+}
+
+function clearTableDropFeedback(state: TableDomState): void {
+  for (const element of state.frame.querySelectorAll<HTMLElement>(
+    '.synapse-table-row-drop-before, .synapse-table-row-drop-after, '
+      + '.synapse-table-column-drop-before, '
+      + '.synapse-table-column-drop-after',
+  )) {
+    element.classList.remove(
+      'synapse-table-row-drop-before',
+      'synapse-table-row-drop-after',
+      'synapse-table-column-drop-before',
+      'synapse-table-column-drop-after',
+    );
+  }
+}
+
+function insertionSlot(
+  elements: HTMLElement[],
+  coordinate: number,
+  horizontal: boolean,
+): number {
+  for (let index = 0; index < elements.length; index += 1) {
+    const bounds = elements[index].getBoundingClientRect();
+    const midpoint = horizontal
+      ? bounds.left + bounds.width / 2
+      : bounds.top + bounds.height / 2;
+    if (coordinate < midpoint) return index;
+  }
+  return elements.length;
+}
+
+function markTableInsertion(
+  state: TableDomState,
+  elements: HTMLElement[],
+  slot: number,
+  kind: 'row' | 'column',
+): void {
+  clearTableDropFeedback(state);
+  if (elements.length === 0) return;
+  const targetIndex = slot >= elements.length ? elements.length - 1 : slot;
+  const suffix = slot >= elements.length ? 'after' : 'before';
+  if (kind === 'row') {
+    elements[targetIndex].classList.add(`synapse-table-row-drop-${suffix}`);
+    return;
+  }
+  for (const row of state.cells) {
+    row[targetIndex]?.parentElement?.classList.add(
+      `synapse-table-column-drop-${suffix}`,
+    );
+  }
+}
+
+function tableRowElements(state: TableDomState): HTMLElement[] {
+  return Array.from(state.table.rows)
+    .slice(1)
+    .map((row) => row as HTMLElement);
+}
+
+function tableColumnElements(state: TableDomState): HTMLElement[] {
+  return state.cells[0]?.map(
+    (editor) => editor.parentElement as HTMLElement,
+  ) ?? [];
+}
+
+function updateBlockDropIndicator(drag: TablePointerDrag): void {
+  if (!view || drag.targetOffset == null) return;
+  const coordinates = view.coordsAtPos(drag.targetOffset);
+  const indicator = drag.blockIndicator ?? document.createElement('span');
+  indicator.className = 'synapse-table-block-drop-indicator';
+  const editorBounds = view.dom.getBoundingClientRect();
+  indicator.style.left = `${editorBounds.left}px`;
+  indicator.style.top = `${coordinates?.top ?? drag.clientY}px`;
+  indicator.style.width = `${editorBounds.width}px`;
+  if (!drag.blockIndicator) document.body.append(indicator);
+  drag.blockIndicator = indicator;
+}
+
+function updateTableDragTarget(
+  state: TableDomState,
+  drag: TablePointerDrag,
+): void {
+  if (drag.kind === 'row') {
+    const elements = tableRowElements(state);
+    drag.insertionSlot = insertionSlot(elements, drag.clientY, false);
+    markTableInsertion(state, elements, drag.insertionSlot, 'row');
+    return;
+  }
+  if (drag.kind === 'column') {
+    const elements = tableColumnElements(state);
+    drag.insertionSlot = insertionSlot(elements, drag.clientX, true);
+    markTableInsertion(state, elements, drag.insertionSlot, 'column');
+    return;
+  }
+  drag.targetOffset = markdownOffsetAtCoords(drag.clientX, drag.clientY);
+  updateBlockDropIndicator(drag);
+}
+
+function scheduleTableAutoScroll(
+  state: TableDomState,
+  drag: TablePointerDrag,
+): void {
+  if (drag.autoScrollFrame) return;
+  const tick = () => {
+    drag.autoScrollFrame = 0;
+    if (state.drag !== drag || !drag.active || !view) return;
+    let changed = false;
+    const editorBounds = view.scrollDOM.getBoundingClientRect();
+    if (drag.clientY < editorBounds.top + 32) {
+      view.scrollDOM.scrollTop -= 14;
+      changed = true;
+    } else if (drag.clientY > editorBounds.bottom - 32) {
+      view.scrollDOM.scrollTop += 14;
+      changed = true;
+    }
+    if (drag.kind !== 'row') {
+      const frameBounds = state.frame.getBoundingClientRect();
+      if (drag.clientX < frameBounds.left + 28) {
+        state.frame.scrollLeft -= 14;
+        changed = true;
+      } else if (drag.clientX > frameBounds.right - 28) {
+        state.frame.scrollLeft += 14;
+        changed = true;
+      }
+    }
+    if (!changed) return;
+    updateTableDragTarget(state, drag);
+    drag.autoScrollFrame = requestAnimationFrame(tick);
+  };
+  drag.autoScrollFrame = requestAnimationFrame(tick);
+}
+
+function cleanupTableDrag(state: TableDomState, drag: TablePointerDrag): void {
+  if (drag.autoScrollFrame) cancelAnimationFrame(drag.autoScrollFrame);
+  window.removeEventListener('pointermove', drag.move);
+  window.removeEventListener('pointerup', drag.finish);
+  window.removeEventListener('pointercancel', drag.cancel);
+  window.removeEventListener('keydown', drag.keydown, true);
+  clearTableDropFeedback(state);
+  drag.blockIndicator?.remove();
+  drag.handle.classList.remove('synapse-table-dragging');
+  try {
+    if (drag.handle.hasPointerCapture?.(drag.pointerId)) {
+      drag.handle.releasePointerCapture(drag.pointerId);
+    }
+  } catch (_) {
+    // The WebView may already have released capture during cancellation.
+  }
+  if (state.drag === drag) state.drag = undefined;
+}
+
+function beginTableDrag(
+  state: TableDomState,
+  event: PointerEvent,
+  kind: TableDragKind,
+  source: number,
+  handle: HTMLElement,
+): void {
+  if (!state.widget.editable || event.button !== 0) return;
+  event.preventDefault();
+  event.stopPropagation();
+  state.drag?.cancel();
+  const pointerId = Number.isInteger(event.pointerId) ? event.pointerId : 1;
+  const drag = {} as TablePointerDrag;
+  drag.kind = kind;
+  drag.pointerId = pointerId;
+  drag.source = source;
+  drag.startX = event.clientX;
+  drag.startY = event.clientY;
+  drag.clientX = event.clientX;
+  drag.clientY = event.clientY;
+  drag.active = false;
+  drag.insertionSlot = source;
+  drag.handle = handle;
+  drag.autoScrollFrame = 0;
+  drag.move = (next) => {
+    drag.clientX = next.clientX;
+    drag.clientY = next.clientY;
+    if (!drag.active) {
+      const distance = Math.hypot(
+        drag.clientX - drag.startX,
+        drag.clientY - drag.startY,
+      );
+      if (distance < 4) return;
+      drag.active = true;
+      handle.classList.add('synapse-table-dragging');
+      commitTableModel(state);
+    }
+    next.preventDefault();
+    updateTableDragTarget(state, drag);
+    scheduleTableAutoScroll(state, drag);
+  };
+  drag.finish = () => {
+    const active = drag.active;
+    const slot = drag.insertionSlot;
+    const targetOffset = drag.targetOffset;
+    cleanupTableDrag(state, drag);
+    if (!active) {
+      if (kind === 'table') safeDispatchSelection(state.widget.block.from);
+      return;
+    }
+    if (kind === 'row') {
+      const target = Math.max(
+        0,
+        Math.min(
+          state.model.rows.length - 1,
+          slot > source ? slot - 1 : slot,
+        ),
+      );
+      if (target === source) return;
+      commitTableStructure(
+        state,
+        { ...state.model, rows: moveItem(state.model.rows, source, target) },
+        target + 1,
+        state.selectedColumn,
+      );
+      return;
+    }
+    if (kind === 'column') {
+      const target = Math.max(
+        0,
+        Math.min(
+          state.model.header.length - 1,
+          slot > source ? slot - 1 : slot,
+        ),
+      );
+      if (target === source) return;
+      const move = (row: string[]) => moveItem(row, source, target);
+      commitTableStructure(
+        state,
+        {
+          ...state.model,
+          header: move(state.model.header),
+          alignments: move(state.model.alignments),
+          rows: state.model.rows.map(move),
+        },
+        state.selectedRow,
+        target,
+      );
+      return;
+    }
+    if (targetOffset != null) {
+      moveMarkdownRange(
+        {
+          from: state.widget.block.from,
+          to: state.widget.block.to,
+          block: true,
+        },
+        targetOffset,
+      );
+    }
+  };
+  drag.cancel = () => cleanupTableDrag(state, drag);
+  drag.keydown = (keyEvent) => {
+    if (keyEvent.key !== 'Escape') return;
+    keyEvent.preventDefault();
+    drag.cancel();
+  };
+  state.drag = drag;
+  window.addEventListener('pointermove', drag.move);
+  window.addEventListener('pointerup', drag.finish);
+  window.addEventListener('pointercancel', drag.cancel);
+  window.addEventListener('keydown', drag.keydown, true);
+  try {
+    handle.setPointerCapture?.(pointerId);
+  } catch (_) {
+    // Global pointer listeners remain the fallback in WebKit.
+  }
+}
+
 function buildTableDom(state: TableDomState): void {
   const { frame } = state;
   const editable = state.widget.editable;
-  if (editable) {
-    const controls = document.createElement('div');
-    controls.className = 'synapse-table-controls';
-    const moveHandle = document.createElement('span');
-    moveHandle.className = 'synapse-table-move-handle';
-    moveHandle.title = '拖动整张表格';
-    moveHandle.draggable = true;
-    moveHandle.addEventListener('dragstart', (event) => {
-      writeDraggedMarkdownRange(
-        event,
-        state.widget.block.from,
-        state.widget.block.to,
-        true,
-      );
-    });
-    controls.append(moveHandle);
-    const action = (label: string, title: string, invoke: () => void) => {
-      const button = document.createElement('button');
-      button.type = 'button';
-      button.textContent = label;
-      button.title = title;
-      button.addEventListener('mousedown', (event) => event.preventDefault());
-      button.addEventListener('click', invoke);
-      controls.append(button);
-    };
-    action('+ 行', '在当前行下方插入', () => {
-      const model = state.model;
-      const rows = model.rows.map((row) => [...row]);
-      rows.splice(
-        Math.max(0, state.selectedRow),
-        0,
-        Array.from({ length: model.header.length }, () => ''),
-      );
-      commitTableModel(state, { ...model, rows }, 'input.table.structure');
-    });
-    action('− 行', '删除当前行', () => {
-      if (state.selectedRow <= 0) return;
-      const model = state.model;
-      commitTableModel(
-        state,
-        {
-          ...model,
-          rows: model.rows.filter(
-            (_, index) => index !== state.selectedRow - 1,
-          ),
-        },
-        'input.table.structure',
-      );
-    });
-    action('+ 列', '在当前列右侧插入', () => {
-      const model = state.model;
-      const insertAt = Math.min(
-        model.header.length,
-        state.selectedColumn + 1,
-      );
-      const insert = (row: string[]) => [
-        ...row.slice(0, insertAt),
-        '',
-        ...row.slice(insertAt),
-      ];
-      commitTableModel(
-        state,
-        {
-          ...model,
-          width: model.width == null
-            ? undefined
-            : clampTableWidth(
-                model.width + 64,
-                model.header.length + 1,
-              ),
-          header: insert(model.header),
-          alignments: insert(model.alignments),
-          rows: model.rows.map(insert),
-        },
-        'input.table.structure',
-      );
-    });
-    action('− 列', '删除当前列', () => {
-      const model = state.model;
-      if (model.header.length <= 1) return;
-      const remove = (row: string[]) =>
-        row.filter((_, index) => index !== state.selectedColumn);
-      commitTableModel(
-        state,
-        {
-          ...model,
-          header: remove(model.header),
-          alignments: remove(model.alignments),
-          rows: model.rows.map(remove),
-        },
-        'input.table.structure',
-      );
-    });
-    action('↑ 行', '上移当前行', () => {
-      const model = state.model;
-      if (state.selectedRow <= 1) return;
-      commitTableModel(
-        state,
-        {
-          ...model,
-          rows: moveItem(
-            model.rows,
-            state.selectedRow - 1,
-            state.selectedRow - 2,
-          ),
-        },
-        'input.table.structure',
-      );
-    });
-    action('↓ 行', '下移当前行', () => {
-      const model = state.model;
-      if (state.selectedRow <= 0 || state.selectedRow >= model.rows.length) {
-        return;
-      }
-      commitTableModel(
-        state,
-        {
-          ...model,
-          rows: moveItem(
-            model.rows,
-            state.selectedRow - 1,
-            state.selectedRow,
-          ),
-        },
-        'input.table.structure',
-      );
-    });
-    action('← 列', '左移当前列', () => {
-      const model = state.model;
-      if (state.selectedColumn <= 0) return;
-      const move = (row: string[]) =>
-        moveItem(row, state.selectedColumn, state.selectedColumn - 1);
-      commitTableModel(
-        state,
-        {
-          ...model,
-          header: move(model.header),
-          alignments: move(model.alignments),
-          rows: model.rows.map(move),
-        },
-        'input.table.structure',
-      );
-    });
-    action('→ 列', '右移当前列', () => {
-      const model = state.model;
-      if (state.selectedColumn >= model.header.length - 1) return;
-      const move = (row: string[]) =>
-        moveItem(row, state.selectedColumn, state.selectedColumn + 1);
-      commitTableModel(
-        state,
-        {
-          ...model,
-          header: move(model.header),
-          alignments: move(model.alignments),
-          rows: model.rows.map(move),
-        },
-        'input.table.structure',
-      );
-    });
-    frame.append(controls);
-  }
-
   const table = state.table;
   if (state.model.width != null) table.style.width = `${state.model.width}px`;
   const rows = [state.model.header, ...state.model.rows];
@@ -961,26 +1302,13 @@ function buildTableDom(state: TableDomState): void {
     if (editable) {
       const rowHandle = document.createElement('th');
       rowHandle.className = 'synapse-table-row-handle';
-      rowHandle.title = rowIndex === 0 ? '表头' : '拖动调整行顺序';
+      rowHandle.title = rowIndex === 0 ? '表头固定' : '拖动调整行顺序';
+      rowHandle.dataset.tableRow = String(rowIndex);
+      rowHandle.dataset.tableColumn = String(state.selectedColumn);
       if (rowIndex > 0) {
-        rowHandle.draggable = true;
-        rowHandle.addEventListener('dragstart', (event) => {
-          state.draggedRow = rowIndex - 1;
-          if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move';
-        });
-        rowHandle.addEventListener('dragover', (event) => event.preventDefault());
-        rowHandle.addEventListener('drop', (event) => {
-          event.preventDefault();
-          const target = rowIndex - 1;
-          if (state.draggedRow == null || state.draggedRow === target) return;
-          commitTableModel(
-            state,
-            {
-              ...state.model,
-              rows: moveItem(state.model.rows, state.draggedRow, target),
-            },
-            'input.table.structure',
-          );
+        rowHandle.addEventListener('pointerdown', (event) => {
+          state.selectedRow = rowIndex;
+          beginTableDrag(state, event, 'row', rowIndex - 1, rowHandle);
         });
       }
       tr.append(rowHandle);
@@ -988,8 +1316,12 @@ function buildTableDom(state: TableDomState): void {
     const cellEditors: HTMLElement[] = [];
     row.forEach((value, columnIndex) => {
       const cell = document.createElement(rowIndex === 0 ? 'th' : 'td');
+      cell.dataset.tableRow = String(rowIndex);
+      cell.dataset.tableColumn = String(columnIndex);
       const editor = document.createElement('span');
       editor.className = 'synapse-table-cell-editor';
+      editor.dataset.tableRow = String(rowIndex);
+      editor.dataset.tableColumn = String(columnIndex);
       editor.textContent = displayTableCell(value);
       editor.contentEditable = editable ? 'true' : 'false';
       editor.tabIndex = editable ? 0 : -1;
@@ -1049,35 +1381,18 @@ function buildTableDom(state: TableDomState): void {
         const columnHandle = document.createElement('span');
         columnHandle.className = 'synapse-table-column-handle';
         columnHandle.title = '拖动调整列顺序';
-        columnHandle.draggable = true;
         columnHandle.contentEditable = 'false';
-        columnHandle.addEventListener('mousedown', (event) =>
-          event.stopPropagation());
-        columnHandle.addEventListener('dragstart', (event) => {
-          event.stopPropagation();
-          state.draggedColumn = columnIndex;
-          if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move';
-        });
-        columnHandle.addEventListener('dragover', (event) =>
-          event.preventDefault());
-        columnHandle.addEventListener('drop', (event) => {
-          event.preventDefault();
-          event.stopPropagation();
-          if (
-            state.draggedColumn == null ||
-            state.draggedColumn === columnIndex
-          ) return;
-          const move = (source: string[]) =>
-            moveItem(source, state.draggedColumn!, columnIndex);
-          commitTableModel(
+        columnHandle.dataset.tableRow = '0';
+        columnHandle.dataset.tableColumn = String(columnIndex);
+        columnHandle.addEventListener('pointerdown', (event) => {
+          state.selectedRow = 0;
+          state.selectedColumn = columnIndex;
+          beginTableDrag(
             state,
-            {
-              ...state.model,
-              header: move(state.model.header),
-              alignments: move(state.model.alignments),
-              rows: state.model.rows.map(move),
-            },
-            'input.table.structure',
+            event,
+            'column',
+            columnIndex,
+            columnHandle,
           );
         });
         cell.append(columnHandle);
@@ -1091,6 +1406,14 @@ function buildTableDom(state: TableDomState): void {
   frame.append(table);
 
   if (editable) {
+    const blockHandle = document.createElement('span');
+    blockHandle.className = 'synapse-table-block-handle';
+    blockHandle.title = '拖动整张表格';
+    blockHandle.setAttribute('aria-label', '拖动整张表格');
+    blockHandle.addEventListener('pointerdown', (event) =>
+      beginTableDrag(state, event, 'table', -1, blockHandle));
+    frame.append(blockHandle);
+
     const resize = document.createElement('span');
     resize.className = 'synapse-table-resize';
     resize.addEventListener('pointerdown', (event) => {
@@ -1104,9 +1427,13 @@ function buildTableDom(state: TableDomState): void {
           state.model.header.length,
         )}px`;
       };
-      const end = () => {
+      const cleanup = () => {
         window.removeEventListener('pointermove', move);
         window.removeEventListener('pointerup', end);
+        window.removeEventListener('pointercancel', cancel);
+      };
+      const end = () => {
+        cleanup();
         commitTableModel(
           state,
           {
@@ -1119,16 +1446,32 @@ function buildTableDom(state: TableDomState): void {
           'input.table.structure',
         );
       };
+      const cancel = () => {
+        cleanup();
+        if (state.model.width == null) table.style.removeProperty('width');
+        else table.style.width = `${state.model.width}px`;
+      };
       window.addEventListener('pointermove', move);
       window.addEventListener('pointerup', end, { once: true });
+      window.addEventListener('pointercancel', cancel, { once: true });
     });
     frame.append(resize);
   }
 
+  frame.addEventListener('pointerdown', (event) => {
+    if (event.button !== 0 || runtime?.mode !== 'editing') return;
+    const position = tableCellPosition(state, event.target);
+    state.selectedRow = position.row;
+    state.selectedColumn = position.column;
+    if (state.widget.editable && runtime.focused) return;
+    requestTableActivation(state, position.row, position.column);
+    event.preventDefault();
+    event.stopPropagation();
+  }, true);
   frame.addEventListener('mousedown', (event) => {
     const target = event.target instanceof Element ? event.target : null;
     if (target?.closest(
-      '.synapse-table-cell-editor, .synapse-table-controls, '
+      '.synapse-table-cell-editor, .synapse-table-block-handle, '
         + '.synapse-table-row-handle, .synapse-table-column-handle, '
         + '.synapse-table-resize, td, th',
     )) return;
@@ -1137,18 +1480,50 @@ function buildTableDom(state: TableDomState): void {
   });
   frame.addEventListener('focusout', () => {
     window.setTimeout(() => {
-      if (!frame.contains(document.activeElement)) commitTableModel(state);
+      if (
+        !state.contextMenuOpen &&
+        !frame.contains(document.activeElement)
+      ) commitTableModel(state);
     }, 0);
   });
   frame.addEventListener('contextmenu', (event) => {
     event.preventDefault();
-    showContextMenu(
-      event.clientX,
-      event.clientY,
-      state.widget.block.from,
-      state.widget.block.to,
-    );
+    const position = tableCellPosition(state, event.target);
+    state.selectedRow = position.row;
+    state.selectedColumn = position.column;
+    if (runtime?.mode === 'editing' && !state.widget.editable) {
+      requestTableActivation(
+        state,
+        position.row,
+        position.column,
+        { x: event.clientX, y: event.clientY },
+      );
+      return;
+    }
+    if (state.pendingFrame) cancelAnimationFrame(state.pendingFrame);
+    state.pendingFrame = 0;
+    const editor = state.cells[position.row]?.[position.column];
+    if (editor) {
+      showContextMenu(
+        event.clientX,
+        event.clientY,
+        tableCellContextTarget(state, position.row, position.column, editor),
+      );
+    }
   });
+}
+
+function tableCellContextTarget(
+  state: TableDomState,
+  row: number,
+  column: number,
+  editor: HTMLElement,
+): TableCellContextTarget {
+  const selection = captureCellSelection(editor) ?? {
+    anchor: editor.textContent?.length ?? 0,
+    head: editor.textContent?.length ?? 0,
+  };
+  return { kind: 'tableCell', state, row, column, editor, selection };
 }
 
 class TableWidget extends WidgetType {
@@ -1182,6 +1557,7 @@ class TableWidget extends WidgetType {
       pendingFrame: 0,
       focusRestoreFrame: 0,
       composing: false,
+      contextMenuOpen: false,
     };
     tableDomStates.set(frame, state);
     mountedTableStates.add(state);
@@ -1200,7 +1576,7 @@ class TableWidget extends WidgetType {
       !state ||
       !next ||
       state.widget.editable !== this.editable ||
-      !tableModelsHaveSameShape(state.model, next)
+      !tableDomHasSameShape(state, next)
     ) return false;
     const selfCommit = state.committingMarkdown === this.block.text;
     state.widget = this;
@@ -1231,6 +1607,7 @@ class TableWidget extends WidgetType {
   destroy(dom: HTMLElement): void {
     const state = tableDomStates.get(dom);
     if (!state) return;
+    state.drag?.cancel();
     if (state.pendingFrame) cancelAnimationFrame(state.pendingFrame);
     if (state.focusRestoreFrame) cancelAnimationFrame(state.focusRestoreFrame);
     mountedTableStates.delete(state);
@@ -1623,10 +2000,32 @@ function createColumnEditor(
             post({ type: 'focusChanged', focused: true });
             return false;
           },
+          pointerdown(event, editorView) {
+            if (event.button !== 2) return false;
+            const position = editorView.posAtCoords({
+              x: event.clientX,
+              y: event.clientY,
+            });
+            const selection = editorView.state.selection.main;
+            if (
+              position != null &&
+              !selection.empty &&
+              position >= selection.from &&
+              position <= selection.to
+            ) {
+              event.preventDefault();
+              return true;
+            }
+            return false;
+          },
           contextmenu(event, editorView) {
             event.preventDefault();
             const local = editorView.posAtCoords({ x: event.clientX, y: event.clientY }) ?? editorView.state.selection.main.head;
-            showContextMenu(event.clientX, event.clientY, runtimeState.baseOffset + local, runtimeState.baseOffset + local);
+            showContextMenu(
+              event.clientX,
+              event.clientY,
+              documentContextTarget(editorView, local, runtimeState.baseOffset),
+            );
             return true;
           },
           paste(event, editorView) {
@@ -1718,7 +2117,21 @@ function markdownOffsetAtCoords(x: number, y: number): number | undefined {
     const state = columnsDomStates.get(root);
     if (state) return absolutePosAtCoords(state, x, y);
   }
-  return view?.posAtCoords({ x, y }) ?? undefined;
+  const resolved = view?.posAtCoords({ x, y });
+  if (resolved != null) return resolved;
+  if (!view || typeof document.elementFromPoint !== 'function') return undefined;
+  const pointed = document.elementFromPoint(x, y);
+  const line = pointed?.closest<HTMLElement>('.cm-line');
+  if (!line || !view.dom.contains(line)) return undefined;
+  const bounds = line.getBoundingClientRect();
+  const offset = x < bounds.left + bounds.width / 2
+    ? 0
+    : line.childNodes.length;
+  try {
+    return view.posAtDOM(line, offset);
+  } catch (_) {
+    return undefined;
+  }
 }
 
 class ColumnsWidget extends WidgetType {
@@ -1832,6 +2245,10 @@ class ColumnsWidget extends WidgetType {
     for (const side of [leftRuntime, rightRuntime]) {
       side.host.addEventListener('pointerdown', (event) => {
         if (event.button !== 0) return;
+        if (
+          event.target instanceof Element &&
+          event.target.closest('.synapse-table-frame')
+        ) return;
         const local = side.editorView.posAtCoords({ x: event.clientX, y: event.clientY });
         if (!state.widget.editable || !runtime?.focused) {
           pendingColumnFocus = {
@@ -2252,10 +2669,6 @@ function editorTheme(theme: EditorTheme) {
     '.synapse-search-current': { outline: `1px solid ${theme.accent}`, backgroundColor: `${theme.accent}2e` },
     '.synapse-link': { color: theme.accent, textDecoration: 'underline', cursor: 'pointer' },
     '.synapse-table-frame': { position: 'relative', overflowX: 'auto', border: `1px solid ${theme.line}`, borderRadius: '7px', margin: '4px 0' },
-    '.synapse-table-controls': { position: 'sticky', left: '0', display: 'flex', gap: '3px', alignItems: 'center', padding: '4px 6px', borderBottom: `1px solid ${theme.line}`, backgroundColor: theme.surface },
-    '.synapse-table-move-handle': { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: '20px', height: '20px', borderRadius: '4px', color: theme.muted, cursor: 'grab', userSelect: 'none' },
-    '.synapse-table-move-handle::before': { content: '"⠿"', fontSize: '14px' },
-    '.synapse-table-controls button': { border: `1px solid ${theme.line}`, borderRadius: '4px', padding: '2px 6px', color: theme.text, backgroundColor: theme.background, font: '11px/1.4 inherit' },
     '.synapse-table-frame table': { minWidth: '100%', borderCollapse: 'collapse' },
     '.synapse-table-frame th, .synapse-table-frame td': { position: 'relative', borderRight: `1px solid ${theme.line}`, borderBottom: `1px solid ${theme.line}`, padding: '0', textAlign: 'left', verticalAlign: 'top' },
     '.synapse-table-frame th': { backgroundColor: theme.surface, fontWeight: '650' },
@@ -2263,8 +2676,16 @@ function editorTheme(theme: EditorTheme) {
     '.synapse-table-cell-editor:focus': { boxShadow: `inset 0 0 0 1px ${theme.accent}` },
     '.synapse-table-row-handle': { width: '22px', minWidth: '22px', padding: '0 !important', cursor: 'grab' },
     '.synapse-table-row-handle::before': { content: '"⋮⋮"', color: theme.muted, fontSize: '10px' },
-    '.synapse-table-column-handle': { position: 'absolute', top: '3px', right: '3px', width: '16px', height: '16px', cursor: 'grab', zIndex: '1' },
-    '.synapse-table-column-handle::before': { content: '"⋮"', color: theme.muted, fontSize: '11px' },
+    '.synapse-table-column-handle': { position: 'absolute', top: '0', left: '0', right: '0', height: '8px', cursor: 'grab', zIndex: '2' },
+    '.synapse-table-block-handle': { position: 'absolute', top: '3px', left: '3px', zIndex: '3', width: '18px', height: '18px', borderRadius: '4px', opacity: '0', color: theme.muted, backgroundColor: theme.surface, cursor: 'grab', userSelect: 'none', transition: 'opacity 80ms ease' },
+    '.synapse-table-block-handle::before': { content: '"⠿"', display: 'block', fontSize: '13px', lineHeight: '18px', textAlign: 'center' },
+    '.synapse-table-frame:hover .synapse-table-block-handle, .synapse-table-frame:focus-within .synapse-table-block-handle': { opacity: '1' },
+    '.synapse-table-dragging': { cursor: 'grabbing !important', opacity: '1 !important' },
+    '.synapse-table-row-drop-before > *': { boxShadow: `inset 0 2px 0 ${theme.accent}` },
+    '.synapse-table-row-drop-after > *': { boxShadow: `inset 0 -2px 0 ${theme.accent}` },
+    '.synapse-table-column-drop-before': { boxShadow: `inset 2px 0 0 ${theme.accent}` },
+    '.synapse-table-column-drop-after': { boxShadow: `inset -2px 0 0 ${theme.accent}` },
+    '.synapse-table-block-drop-indicator': { position: 'fixed', zIndex: '2147483646', height: '2px', backgroundColor: theme.accent, pointerEvents: 'none' },
     '.synapse-table-resize': { position: 'absolute', top: '0', right: '0', bottom: '0', width: '8px', cursor: 'col-resize', backgroundColor: 'transparent' },
     '.synapse-columns': { border: '1px solid transparent', borderRadius: '7px', overflowX: 'auto' },
     '.synapse-columns-editable.synapse-columns-focused': { borderColor: theme.line },
@@ -2273,18 +2694,26 @@ function editorTheme(theme: EditorTheme) {
     '.synapse-columns-editable.synapse-columns-focused .synapse-columns-controls': { visibility: 'visible' },
     '.synapse-columns-controls button': { border: '0', borderRadius: '4px', padding: '3px 6px', color: theme.text, backgroundColor: 'transparent', font: '11px/1.4 inherit' },
     '.synapse-columns-content': { display: 'grid', alignItems: 'stretch' },
-    '.synapse-column': { minWidth: '240px', padding: '0', overflow: 'visible' },
+    '.synapse-column': { minWidth: '240px', padding: '0 12px', overflow: 'visible' },
     '.synapse-column > .cm-editor': { height: 'auto' },
     '.synapse-columns-divider': { position: 'relative', zIndex: '2', width: '10px', marginLeft: '-5px', pointerEvents: 'none' },
     '.synapse-columns-divider::after': { content: '""', position: 'absolute', top: '0', bottom: '0', left: '50%', width: '1px', transform: 'translateX(-0.5px)', backgroundColor: 'transparent' },
     '.synapse-columns-editable.synapse-columns-focused .synapse-columns-divider': { cursor: 'col-resize', pointerEvents: 'auto' },
     '.synapse-columns-editable.synapse-columns-focused .synapse-columns-divider::after': { backgroundColor: theme.line },
     '.synapse-projected-line': { minHeight: '1.55em', whiteSpace: 'pre-wrap' },
-    '.synapse-context-menu': { position: 'fixed', zIndex: '2147483647', minWidth: '190px', padding: '6px', borderRadius: '8px', border: `1px solid ${theme.line}`, backgroundColor: theme.surface, boxShadow: '0 12px 34px rgba(0,0,0,.18)' },
-    '.synapse-context-menu button': { display: 'block', width: '100%', border: '0', borderRadius: '5px', padding: '7px 9px', textAlign: 'left', color: theme.text, background: 'transparent', font: 'inherit' },
-    '.synapse-context-menu button:hover': { backgroundColor: `${theme.accent}18` },
+    '.synapse-context-menu': { position: 'fixed', zIndex: '2147483647', minWidth: '204px', maxHeight: 'calc(100vh - 16px)', overflow: 'visible', padding: '6px', borderRadius: '12px', border: `1px solid ${theme.contextMenu.border}`, color: theme.contextMenu.text, backgroundColor: theme.contextMenu.background, backdropFilter: 'blur(24px)', WebkitBackdropFilter: 'blur(24px)', boxShadow: '0 14px 32px rgba(0,0,0,.28)', font: '400 13px/1.15 -apple-system, BlinkMacSystemFont, sans-serif', boxSizing: 'border-box' },
+    '.synapse-context-menu button': { display: 'flex', alignItems: 'center', width: '100%', height: '30px', border: '0', borderRadius: '7px', padding: '0 10px 0 6px', gap: '2px', textAlign: 'left', color: theme.contextMenu.text, background: 'transparent', font: 'inherit', whiteSpace: 'nowrap', outline: 'none' },
+    '.synapse-context-menu button:hover, .synapse-context-menu button:focus-visible, .synapse-context-menu button[data-active="true"]': { color: theme.contextMenu.text, backgroundColor: theme.accent },
+    '.synapse-context-menu button:disabled': { color: theme.contextMenu.disabledText, background: 'transparent' },
+    '.synapse-context-menu button[data-destructive="true"]:not(:hover):not(:focus-visible)': { color: theme.contextMenu.danger },
+    '.synapse-context-menu button[data-destructive="true"]:hover, .synapse-context-menu button[data-destructive="true"]:focus-visible': { color: theme.contextMenu.text, backgroundColor: theme.contextMenu.danger },
+    '.synapse-context-check': { width: '12px', flex: '0 0 12px', textAlign: 'center' },
+    '.synapse-context-label': { flex: '1 1 auto', overflow: 'hidden', textOverflow: 'ellipsis' },
+    '.synapse-context-shortcut': { flex: '0 0 auto', marginLeft: '14px', color: 'inherit', opacity: '.72' },
+    '.synapse-context-chevron': { flex: '0 0 auto', marginLeft: '10px', fontSize: '16px', lineHeight: '1' },
+    '.synapse-context-separator': { height: '1px', margin: '4px 8px', backgroundColor: theme.contextMenu.divider },
     '.synapse-context-submenu-group': { position: 'relative' },
-    '.synapse-context-submenu': { position: 'absolute', left: 'calc(100% - 2px)', top: '-6px', minWidth: '170px', padding: '6px', borderRadius: '8px', border: `1px solid ${theme.line}`, backgroundColor: theme.surface, boxShadow: '0 12px 34px rgba(0,0,0,.18)' },
+    '.synapse-context-submenu': { position: 'absolute', left: 'calc(100% + 6px)', top: '-6px', minWidth: '170px', padding: '6px', borderRadius: '12px', border: `1px solid ${theme.contextMenu.border}`, backgroundColor: theme.contextMenu.background, backdropFilter: 'blur(24px)', WebkitBackdropFilter: 'blur(24px)', boxShadow: '0 14px 32px rgba(0,0,0,.28)', boxSizing: 'border-box' },
     '.synapse-context-submenu[hidden]': { display: 'none' },
   });
 }
@@ -2302,7 +2731,9 @@ function updateListener(update: ViewUpdate): void {
     inputStartedAt = undefined;
   }
   if (update.selectionSet) {
-    post({ type: 'selectionChanged', revision: runtime.revision, selection: selectionOf(update.state) });
+    const selection = selectionOf(update.state);
+    rememberTextSelection(selection);
+    post({ type: 'selectionChanged', revision: runtime.revision, selection });
     schedulePerformanceSample('pointerToSelectionPaint', pointerStartedAt);
     pointerStartedAt = undefined;
   }
@@ -2381,7 +2812,7 @@ function extensions(command: InitializeCommand) {
         key: 'Mod-f',
         preventDefault: true,
         run: () => {
-          post({ type: 'findRequest', replace: false });
+          if (view) requestFind(false, selectionOf(view.state));
           return true;
         },
       },
@@ -2389,7 +2820,7 @@ function extensions(command: InitializeCommand) {
         key: 'Alt-Mod-f',
         preventDefault: true,
         run: () => {
-          post({ type: 'findRequest', replace: true });
+          if (view) requestFind(true, selectionOf(view.state));
           return true;
         },
       },
@@ -2397,7 +2828,7 @@ function extensions(command: InitializeCommand) {
         key: 'Ctrl-h',
         preventDefault: true,
         run: () => {
-          post({ type: 'findRequest', replace: true });
+          if (view) requestFind(true, selectionOf(view.state));
           return true;
         },
       },
@@ -2409,7 +2840,25 @@ function extensions(command: InitializeCommand) {
         run: (editorView) => {
           const head = editorView.state.selection.main.head;
           const coordinates = editorView.coordsAtPos(head);
-          showContextMenu(coordinates?.left ?? 20, coordinates?.bottom ?? 20, head, head);
+          showContextMenu(
+            coordinates?.left ?? 20,
+            coordinates?.bottom ?? 20,
+            documentContextTarget(editorView, head),
+          );
+          return true;
+        },
+      },
+      {
+        key: 'ContextMenu',
+        preventDefault: true,
+        run: (editorView) => {
+          const head = editorView.state.selection.main.head;
+          const coordinates = editorView.coordsAtPos(head);
+          showContextMenu(
+            coordinates?.left ?? 20,
+            coordinates?.bottom ?? 20,
+            documentContextTarget(editorView, head),
+          );
           return true;
         },
       },
@@ -2433,6 +2882,22 @@ function extensions(command: InitializeCommand) {
       },
       pointerdown(event, editorView) {
         pointerStartedAt = performance.now();
+        if (event.button === 2) {
+          const position = editorView.posAtCoords({
+            x: event.clientX,
+            y: event.clientY,
+          });
+          const selection = editorView.state.selection.main;
+          if (
+            position != null &&
+            !selection.empty &&
+            position >= selection.from &&
+            position <= selection.to
+          ) {
+            event.preventDefault();
+            return true;
+          }
+        }
         if (!runtime?.focused || !runtime.editable) {
           if (
             event.target instanceof Element &&
@@ -2462,7 +2927,11 @@ function extensions(command: InitializeCommand) {
       contextmenu(event, editorView) {
         event.preventDefault();
         const position = editorView.posAtCoords({ x: event.clientX, y: event.clientY }) ?? editorView.state.selection.main.head;
-        showContextMenu(event.clientX, event.clientY, position, position);
+        showContextMenu(
+          event.clientX,
+          event.clientY,
+          documentContextTarget(editorView, position),
+        );
         return true;
       },
       click(event) {
@@ -2497,7 +2966,10 @@ function extensions(command: InitializeCommand) {
 function initialize(command: InitializeCommand): void {
   view?.destroy();
   clearAttachmentState();
+  clearClipboardRequests();
   pendingChanges = undefined;
+  pendingColumnFocus = undefined;
+  pendingTableFocus = undefined;
   if (pendingFrame) cancelAnimationFrame(pendingFrame);
   if (commandStateFrame) window.clearTimeout(commandStateFrame);
   pendingFrame = 0;
@@ -2515,6 +2987,15 @@ function initialize(command: InitializeCommand): void {
   };
   const parent = document.querySelector<HTMLElement>('#editor');
   if (!parent) throw new Error('Missing #editor host.');
+  if (pointerInteractionHost !== parent) {
+    pointerInteractionHost?.removeEventListener(
+      'pointerdown',
+      handleSurfacePointerInteraction,
+      true,
+    );
+    parent.addEventListener('pointerdown', handleSurfacePointerInteraction, true);
+    pointerInteractionHost = parent;
+  }
   parent.replaceChildren();
   view = new EditorView({
     parent,
@@ -2525,6 +3006,7 @@ function initialize(command: InitializeCommand): void {
     }),
   });
   if (command.focused && command.editable) view.focus();
+  rememberTextSelection(command.selection);
   post({ type: 'ready', revision: runtime.revision });
   scheduleOutline();
   scheduleCommandState();
@@ -2650,9 +3132,14 @@ function receive(command: HostCommand): void {
           const activeInsideColumns =
             document.activeElement instanceof Element &&
             document.activeElement.closest('.synapse-columns') != null;
-          if (!focusPendingColumn() && !activeInsideColumns) view.focus();
+          if (
+            !focusPendingTable() &&
+            !focusPendingColumn() &&
+            !activeInsideColumns
+          ) view.focus();
         } else {
           pendingColumnFocus = undefined;
+          pendingTableFocus = undefined;
         }
         break;
       case 'setTheme':
@@ -2670,17 +3157,21 @@ function receive(command: HostCommand): void {
       case 'navigateSearch': navigateSearch(command.direction); break;
       case 'replaceSearch': replaceSearch(command.all); break;
       case 'closeSearch': closeSearch(); break;
+      case 'dismissContextMenu': contextMenuDismiss?.(); break;
       case 'flush':
         flushPendingTransaction();
         if (runtime) post({ type: 'flushAck', requestId: command.requestId, revision: runtime.revision, clientSeq: runtime.clientSeq });
         break;
       case 'attachmentChunk': receiveAttachmentChunk(command); break;
       case 'attachmentError': receiveAttachmentError(command.requestId); break;
+      case 'clipboardResult': receiveClipboardResult(command); break;
       case 'dispose':
         flushPendingTransaction();
         view?.destroy();
         clearAttachmentState();
+        clearClipboardRequests();
         pendingColumnFocus = undefined;
+        pendingTableFocus = undefined;
         if (pendingFrame) cancelAnimationFrame(pendingFrame);
         if (commandStateFrame) window.clearTimeout(commandStateFrame);
         pendingFrame = 0;
@@ -2698,6 +3189,7 @@ function receive(command: HostCommand): void {
 function requestCommand(
   group: 'format' | 'paragraph' | 'list' | 'insert',
   command: string,
+  selection: EditorSelection = view ? selectionOf(view.state) : { anchor: 0, head: 0 },
 ): boolean {
   if (!view || !runtime?.editable) return false;
   flushPendingTransaction();
@@ -2706,47 +3198,460 @@ function requestCommand(
     group,
     command,
     revision: runtime.revision,
-    selection: selectionOf(view.state),
+    selection,
   });
   return true;
 }
 
-let contextMenu: HTMLElement | undefined;
+type ClipboardResultCommand = Extract<HostCommand, { type: 'clipboardResult' }>;
 
-function showContextMenu(x: number, y: number, from: number, to: number, imageSrc?: string): void {
-  contextMenu?.remove();
+interface DocumentContextTarget {
+  kind: 'document';
+  editorView: EditorView;
+  baseOffset: number;
+  selection: EditorSelection;
+}
+
+interface ImageContextTarget {
+  kind: 'image';
+  from: number;
+  to: number;
+  src: string;
+  pasteSelection?: EditorSelection;
+}
+
+interface TableCellContextTarget {
+  kind: 'tableCell';
+  state: TableDomState;
+  row: number;
+  column: number;
+  editor: HTMLElement;
+  selection: CellSelectionSnapshot;
+}
+
+type ContextMenuTarget =
+  | DocumentContextTarget
+  | ImageContextTarget
+  | TableCellContextTarget;
+
+interface DocumentMenuState {
+  hasSelection: boolean;
+  canFormat: boolean;
+  canUseStructure: boolean;
+  insideColumns: boolean;
+  inlineFormats: Set<'highlight' | 'bold' | 'italic' | 'strikethrough'>;
+  paragraph: 'heading1' | 'heading2' | 'heading3' | 'heading4' | 'body' | 'blockquote';
+  list?: 'unordered' | 'ordered' | 'task';
+}
+
+interface MenuActionOptions {
+  enabled?: boolean;
+  checked?: boolean;
+  shortcut?: string;
+  destructive?: boolean;
+}
+
+let rememberedTextSelection: EditorSelection | undefined;
+let clipboardRequestCounter = 0;
+const clipboardRequests = new Map<
+  number,
+  {
+    resolve: (result: ClipboardResultCommand) => void;
+    timeout: number;
+    revision: number;
+    generation: number;
+  }
+>();
+
+function requestClipboard(
+  action: 'availability' | 'copy' | 'cut' | 'paste' | 'pastePlain',
+  target: 'document' | 'tableCell',
+  options: { selection?: EditorSelection; text?: string } = {},
+): Promise<ClipboardResultCommand> {
+  if (!runtime) {
+    return Promise.resolve({
+      protocolVersion,
+      type: 'clipboardResult',
+      requestId: -1,
+      revision: -1,
+      generation: -1,
+      outcome: 'stale',
+      hasText: false,
+      hasImage: false,
+    });
+  }
+  const requestId = ++clipboardRequestCounter;
+  const revision = runtime.revision;
+  const generation = runtime.generation;
+  return new Promise((resolve) => {
+    const timeout = window.setTimeout(() => {
+      clipboardRequests.delete(requestId);
+      resolve({
+        protocolVersion,
+        type: 'clipboardResult',
+        requestId,
+        revision,
+        generation,
+        outcome: 'failure',
+        hasText: false,
+        hasImage: false,
+      });
+    }, 5000);
+    clipboardRequests.set(requestId, {
+      resolve,
+      timeout,
+      revision,
+      generation,
+    });
+    post({
+      type: 'clipboardRequest',
+      requestId,
+      action,
+      target,
+      revision,
+      selection: options.selection,
+      text: options.text,
+    });
+  });
+}
+
+function receiveClipboardResult(command: ClipboardResultCommand): void {
+  const pending = clipboardRequests.get(command.requestId);
+  if (!pending) return;
+  clipboardRequests.delete(command.requestId);
+  window.clearTimeout(pending.timeout);
+  if (
+    runtime == null ||
+    command.revision !== pending.revision ||
+    command.generation !== pending.generation ||
+    runtime.revision !== pending.revision ||
+    runtime.generation !== pending.generation
+  ) {
+    pending.resolve({
+      ...command,
+      outcome: 'stale',
+      hasText: false,
+      hasImage: false,
+      text: undefined,
+    });
+    return;
+  }
+  pending.resolve(command);
+}
+
+function clearClipboardRequests(): void {
+  for (const [requestId, pending] of clipboardRequests) {
+    window.clearTimeout(pending.timeout);
+    pending.resolve({
+      protocolVersion,
+      type: 'clipboardResult',
+      requestId,
+      revision: pending.revision,
+      generation: pending.generation,
+      outcome: 'stale',
+      hasText: false,
+      hasImage: false,
+    });
+  }
+  clipboardRequests.clear();
+}
+
+function orderedSelection(selection: EditorSelection): { from: number; to: number } {
+  return selection.anchor <= selection.head
+    ? { from: selection.anchor, to: selection.head }
+    : { from: selection.head, to: selection.anchor };
+}
+
+function documentContextTarget(
+  editorView: EditorView,
+  localPosition: number,
+  baseOffset = 0,
+): DocumentContextTarget {
+  const current = editorView.state.selection.main;
+  const preserve = !current.empty &&
+    localPosition >= current.from &&
+    localPosition <= current.to;
+  if (!preserve) {
+    editorView.dispatch({ selection: { anchor: localPosition } });
+  }
+  const selection = preserve ? current : editorView.state.selection.main;
+  const target = {
+    kind: 'document' as const,
+    editorView,
+    baseOffset,
+    selection: {
+      anchor: baseOffset + selection.anchor,
+      head: baseOffset + selection.head,
+    },
+  };
+  rememberTextSelection(target.selection);
+  return target;
+}
+
+function rememberTextSelection(selection: EditorSelection): void {
+  if (!view) return;
+  const blocks = splitMarkdownBlocks(view.state.doc.toString());
+  const block = activeBlockForSelection(blocks, selection);
+  if (
+    block == null ||
+    block.kind === 'table' ||
+    block.kind === 'image' ||
+    block.kind === 'pageBreak' ||
+    block.kind === 'columnsStart' ||
+    block.kind === 'columnsSeparator' ||
+    block.kind === 'columnsEnd'
+  ) return;
+  rememberedTextSelection = { ...selection };
+}
+
+function lineBounds(markdown: string, offset: number): { from: number; to: number; text: string } {
+  const resolved = Math.max(0, Math.min(offset, markdown.length));
+  const from = markdown.lastIndexOf('\n', Math.max(0, resolved - 1)) + 1;
+  const newline = markdown.indexOf('\n', resolved);
+  const to = newline < 0 ? markdown.length : newline;
+  return { from, to, text: markdown.slice(from, to) };
+}
+
+function selectionInsideColumns(markdown: string, offset: number): boolean {
+  let inside = false;
+  for (const block of splitMarkdownBlocks(markdown)) {
+    if (block.from > offset) break;
+    if (block.kind === 'columnsStart') inside = true;
+    if (block.kind === 'columnsEnd') inside = false;
+  }
+  return inside;
+}
+
+function selectionIntersectsProtectedStructure(
+  markdown: string,
+  selection: EditorSelection,
+): boolean {
+  const range = orderedSelection(selection);
+  return splitMarkdownBlocks(markdown).some((block) => {
+    const protectedBlock =
+      block.kind === 'code' ||
+      block.kind === 'table' ||
+      block.kind === 'pageBreak' ||
+      block.kind === 'columnsStart' ||
+      block.kind === 'columnsSeparator' ||
+      block.kind === 'columnsEnd';
+    if (!protectedBlock) return false;
+    if (range.from === range.to) {
+      return range.from >= block.from && range.from < block.to;
+    }
+    return range.from < block.to && range.to > block.from;
+  });
+}
+
+function selectionHasDelimiter(
+  markdown: string,
+  selection: EditorSelection,
+  open: string,
+  close = open,
+): boolean {
+  const range = orderedSelection(selection);
+  if (range.from !== range.to) {
+    return markdown.slice(Math.max(0, range.from - open.length), range.from) === open &&
+      markdown.slice(range.to, range.to + close.length) === close;
+  }
+  const line = lineBounds(markdown, range.from);
+  const local = range.from - line.from;
+  const before = line.text.slice(0, local);
+  const after = line.text.slice(local);
+  const opening = before.lastIndexOf(open);
+  return opening >= 0 && after.indexOf(close) >= 0;
+}
+
+function selectionHasSingleDelimiter(
+  markdown: string,
+  selection: EditorSelection,
+  marker: '*' | '_',
+): boolean {
+  const range = orderedSelection(selection);
+  if (range.from !== range.to) {
+    return markdown.slice(range.from - 1, range.from) === marker &&
+      markdown.slice(range.from - 2, range.from - 1) !== marker &&
+      markdown.slice(range.to, range.to + 1) === marker &&
+      markdown.slice(range.to + 1, range.to + 2) !== marker;
+  }
+  const line = lineBounds(markdown, range.from);
+  const local = range.from - line.from;
+  const before = line.text.slice(0, local);
+  const after = line.text.slice(local);
+  for (let index = before.length - 1; index >= 0; index -= 1) {
+    if (before[index] !== marker) continue;
+    if (before[index - 1] === marker || before[index + 1] === marker) continue;
+    const closing = after.indexOf(marker);
+    if (closing >= 0 && after[closing - 1] !== marker && after[closing + 1] !== marker) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function documentMenuState(target: DocumentContextTarget): DocumentMenuState {
+  const markdown = view?.state.doc.toString() ?? '';
+  const range = orderedSelection(target.selection);
+  const hasSelection = range.from !== range.to;
+  const protectedSelection = selectionIntersectsProtectedStructure(
+    markdown,
+    target.selection,
+  );
+  const line = lineBounds(markdown, target.selection.head);
+  const trimmed = line.text.trimStart();
+  const heading = /^(#{1,4})\s+/.exec(trimmed);
+  const paragraph = heading
+    ? (`heading${heading[1].length}` as DocumentMenuState['paragraph'])
+    : /^>\s?/.test(trimmed)
+      ? 'blockquote'
+      : 'body';
+  const list = /^\s*[-*+]\s+\[[ xX]\]\s+/.test(line.text)
+    ? 'task'
+    : /^\s*[-*+]\s+/.test(line.text)
+      ? 'unordered'
+      : /^\s*\d+[.)]\s+/.test(line.text)
+        ? 'ordered'
+        : undefined;
+  const inlineFormats = new Set<DocumentMenuState['inlineFormats'] extends Set<infer T> ? T : never>();
+  if (selectionHasDelimiter(markdown, target.selection, '==')) inlineFormats.add('highlight');
+  if (
+    selectionHasDelimiter(markdown, target.selection, '**') ||
+    selectionHasDelimiter(markdown, target.selection, '__')
+  ) inlineFormats.add('bold');
+  if (
+    selectionHasSingleDelimiter(markdown, target.selection, '*') ||
+    selectionHasSingleDelimiter(markdown, target.selection, '_')
+  ) inlineFormats.add('italic');
+  if (selectionHasDelimiter(markdown, target.selection, '~~')) inlineFormats.add('strikethrough');
+  return {
+    hasSelection,
+    canFormat: Boolean(runtime?.editable) && hasSelection && !protectedSelection,
+    canUseStructure: Boolean(runtime?.editable) && !protectedSelection,
+    insideColumns: selectionInsideColumns(markdown, target.selection.head),
+    inlineFormats,
+    paragraph,
+    list,
+  };
+}
+
+function requestFind(replace: boolean, selection?: EditorSelection): void {
+  if (!view || !runtime) return;
+  const range = selection == null ? undefined : orderedSelection(selection);
+  const selectionText = range == null || range.from === range.to
+    ? undefined
+    : view.state.doc.sliceString(range.from, range.to);
+  post({
+    type: 'findRequest',
+    replace,
+    selectionText,
+    anchorOffset: selection?.head,
+  });
+}
+
+let contextMenu: HTMLElement | undefined;
+let contextMenuDismiss: (() => void) | undefined;
+
+function showContextMenu(
+  x: number,
+  y: number,
+  target: ContextMenuTarget,
+): void {
+  post({ type: 'pointerInteraction' });
+  contextMenuDismiss?.();
   if (!runtime) return;
   const menu = document.createElement('div');
   menu.className = 'synapse-context-menu';
   menu.setAttribute('role', 'menu');
+  if (target.kind === 'tableCell') target.state.contextMenuOpen = true;
   const buttons: HTMLButtonElement[] = [];
   let outsideClose: ((event: Event) => void) | undefined;
-  const dismiss = () => {
+  const restoreTargetFocus = () => {
+    if (target.kind === 'tableCell') {
+      if (target.editor.isConnected) {
+        restoreCellSelection(target.editor, target.selection, true);
+      }
+      return;
+    }
+    const editorView = target.kind === 'document' ? target.editorView : view;
+    editorView?.contentDOM.focus({ preventScroll: true });
+  };
+  const dismiss = (restoreFocus = false) => {
     menu.remove();
     if (outsideClose) window.removeEventListener('pointerdown', outsideClose, true);
-    if (contextMenu === menu) contextMenu = undefined;
+    if (contextMenu === menu) {
+      contextMenu = undefined;
+      contextMenuDismiss = undefined;
+    }
+    if (target.kind === 'tableCell') {
+      target.state.contextMenuOpen = false;
+      if (target.state.frame.isConnected) commitTableModel(target.state);
+    }
+    if (restoreFocus) restoreTargetFocus();
   };
   const action = (
     label: string,
-    invoke: () => void,
-    enabled = true,
+    invoke: () => void | Promise<void>,
+    options: MenuActionOptions = {},
     parent: HTMLElement = menu,
     collection: HTMLButtonElement[] = buttons,
   ) => {
     const button = document.createElement('button');
     button.type = 'button';
-    button.textContent = label;
-    button.disabled = !enabled;
+    button.disabled = options.enabled === false;
     button.tabIndex = -1;
     button.setAttribute('role', 'menuitem');
-    button.addEventListener('click', () => { dismiss(); invoke(); });
+    button.setAttribute('aria-checked', String(options.checked === true));
+    if (options.destructive) button.dataset.destructive = 'true';
+    const check = document.createElement('span');
+    check.className = 'synapse-context-check';
+    check.textContent = options.checked ? '✓' : '';
+    const text = document.createElement('span');
+    text.className = 'synapse-context-label';
+    text.textContent = label;
+    button.append(check, text);
+    if (options.shortcut) {
+      const shortcut = document.createElement('span');
+      shortcut.className = 'synapse-context-shortcut';
+      shortcut.textContent = options.shortcut;
+      button.append(shortcut);
+    }
+    button.addEventListener('pointerdown', (event) => event.preventDefault());
+    button.addEventListener('click', () => {
+      try {
+        const pending = invoke();
+        if (pending instanceof Promise) {
+          void pending.catch((error) => {
+            const resolved = error instanceof Error ? error : new Error(String(error));
+            post({ type: 'error', message: resolved.message, stack: resolved.stack });
+          });
+        }
+      } finally {
+        dismiss(true);
+      }
+    });
     collection.push(button);
     parent.append(button);
     return button;
   };
+  const separator = (parent: HTMLElement = menu) => {
+    const element = document.createElement('div');
+    element.className = 'synapse-context-separator';
+    element.setAttribute('role', 'separator');
+    parent.append(element);
+  };
+  const setEnabled = (button: HTMLButtonElement, enabled: boolean) => {
+    button.disabled = !enabled;
+  };
   const submenu = (
     label: string,
-    build: (add: (label: string, invoke: () => void, enabled?: boolean) => HTMLButtonElement) => void,
+    enabled: boolean,
+    build: (
+      add: (
+        label: string,
+        invoke: () => void | Promise<void>,
+        options?: MenuActionOptions,
+      ) => HTMLButtonElement,
+    ) => void,
   ) => {
     const group = document.createElement('div');
     group.className = 'synapse-context-submenu-group';
@@ -2757,21 +3662,58 @@ function showContextMenu(x: number, y: number, from: number, to: number, imageSr
     const items: HTMLButtonElement[] = [];
     const trigger = document.createElement('button');
     trigger.type = 'button';
-    trigger.textContent = `${label} ›`;
+    trigger.disabled = !enabled;
     trigger.tabIndex = -1;
     trigger.setAttribute('role', 'menuitem');
     trigger.setAttribute('aria-haspopup', 'menu');
     trigger.setAttribute('aria-expanded', 'false');
+    const check = document.createElement('span');
+    check.className = 'synapse-context-check';
+    const text = document.createElement('span');
+    text.className = 'synapse-context-label';
+    text.textContent = label;
+    const chevron = document.createElement('span');
+    chevron.className = 'synapse-context-chevron';
+    chevron.textContent = '›';
+    trigger.append(check, text, chevron);
     buttons.push(trigger);
+    let closeTimer = 0;
+    const positionPanel = () => {
+      panel.style.left = 'calc(100% + 6px)';
+      panel.style.right = 'auto';
+      panel.style.top = '-6px';
+      const bounds = panel.getBoundingClientRect();
+      if (bounds.right > window.innerWidth - 8) {
+        panel.style.left = 'auto';
+        panel.style.right = 'calc(100% + 6px)';
+      }
+      const adjusted = panel.getBoundingClientRect();
+      if (adjusted.bottom > window.innerHeight - 8) {
+        const groupBounds = group.getBoundingClientRect();
+        panel.style.top = `${window.innerHeight - 8 - adjusted.height - groupBounds.top}px`;
+      }
+    };
     const open = () => {
+      if (!enabled) return;
+      window.clearTimeout(closeTimer);
       for (const other of menu.querySelectorAll<HTMLElement>('.synapse-context-submenu')) other.hidden = true;
-      for (const other of menu.querySelectorAll<HTMLElement>('[aria-haspopup="menu"]')) other.setAttribute('aria-expanded', 'false');
+      for (const other of menu.querySelectorAll<HTMLElement>('[aria-haspopup="menu"]')) {
+        other.setAttribute('aria-expanded', 'false');
+        if (other instanceof HTMLButtonElement) other.dataset.active = 'false';
+      }
       panel.hidden = false;
       trigger.setAttribute('aria-expanded', 'true');
+      trigger.dataset.active = 'true';
+      positionPanel();
     };
     const close = () => {
       panel.hidden = true;
       trigger.setAttribute('aria-expanded', 'false');
+      trigger.dataset.active = 'false';
+    };
+    const scheduleClose = () => {
+      window.clearTimeout(closeTimer);
+      closeTimer = window.setTimeout(close, 200);
     };
     trigger.addEventListener('click', () => {
       if (panel.hidden) {
@@ -2782,12 +3724,15 @@ function showContextMenu(x: number, y: number, from: number, to: number, imageSr
       }
     });
     trigger.addEventListener('mouseenter', open);
+    trigger.addEventListener('mouseleave', scheduleClose);
     trigger.addEventListener('keydown', (event) => {
       if (event.key !== 'ArrowRight' && event.key !== 'Enter' && event.key !== ' ') return;
       event.preventDefault();
       open();
       items.find((item) => !item.disabled)?.focus();
     });
+    panel.addEventListener('mouseenter', () => window.clearTimeout(closeTimer));
+    panel.addEventListener('mouseleave', scheduleClose);
     panel.addEventListener('keydown', (event) => {
       const enabled = items.filter((item) => !item.disabled);
       const current = enabled.indexOf(document.activeElement as HTMLButtonElement);
@@ -2806,18 +3751,33 @@ function showContextMenu(x: number, y: number, from: number, to: number, imageSr
       event.preventDefault();
       enabled[next].focus();
     });
-    build((itemLabel, invoke, enabled = true) => action(itemLabel, invoke, enabled, panel, items));
+    build((itemLabel, invoke, options = {}) => action(itemLabel, invoke, options, panel, items));
     group.append(trigger, panel);
     menu.append(group);
   };
-  if (imageSrc) {
+  const clipboardButtons: HTMLButtonElement[] = [];
+  const history = () => {
+    action('撤销', () => { if (view) undo(view); }, {
+      enabled: runtime!.editable && Boolean(view && undoDepth(view.state) > 0),
+      shortcut: '⌘Z',
+    });
+    action('重做', () => { if (view) redo(view); }, {
+      enabled: runtime!.editable && Boolean(view && redoDepth(view.state) > 0),
+      shortcut: '⇧⌘Z',
+    });
+    separator();
+  };
+  if (target.kind === 'image') {
+    history();
     action('复制图片', () => {
       flushPendingTransaction();
       post({
         type: 'imageAction',
         action: 'copy',
-        src: imageSrc,
+        src: target.src,
         revision: runtime!.revision,
+        from: target.from,
+        to: target.to,
       });
     });
     action('剪切图片', () => {
@@ -2825,44 +3785,213 @@ function showContextMenu(x: number, y: number, from: number, to: number, imageSr
       post({
         type: 'imageAction',
         action: 'cut',
-        src: imageSrc,
+        src: target.src,
         revision: runtime!.revision,
+        from: target.from,
+        to: target.to,
       });
-    }, runtime.editable);
+    }, { enabled: runtime.editable });
+    const paste = action('粘贴', async () => {
+      if (!target.pasteSelection) return;
+      await requestClipboard('paste', 'document', { selection: target.pasteSelection });
+    }, { enabled: false });
+    clipboardButtons.push(paste);
+    separator();
+    const imageSelection = { anchor: target.from, head: target.from };
+    action('查找…', () => requestFind(false, imageSelection), { shortcut: '⌘F' });
+    action('替换…', () => requestFind(true, imageSelection), {
+      enabled: runtime.editable,
+      shortcut: '⌥⌘F',
+    });
+  } else if (target.kind === 'tableCell') {
+    history();
+    const cellText = target.editor.textContent ?? '';
+    const cellFrom = Math.min(target.selection.anchor, target.selection.head);
+    const cellTo = Math.max(target.selection.anchor, target.selection.head);
+    const selectedText = cellText.slice(cellFrom, cellTo);
+    action('复制', async () => {
+      await requestClipboard('copy', 'tableCell', { text: selectedText });
+    }, { enabled: selectedText.length > 0 });
+    action('剪切', async () => {
+      const result = await requestClipboard('cut', 'tableCell', { text: selectedText });
+      if (result.outcome === 'success') {
+        replaceTableCellContextSelection(target, '');
+      }
+    }, { enabled: runtime.editable && target.state.widget.editable && selectedText.length > 0 });
+    const paste = action('粘贴', async () => {
+      const result = await requestClipboard('paste', 'tableCell');
+      if (result.outcome === 'success' && result.text != null) {
+        replaceTableCellContextSelection(target, result.text);
+      }
+    }, { enabled: false });
+    clipboardButtons.push(paste);
+    action('全选', () => {
+      target.selection = { anchor: 0, head: cellText.length };
+      restoreCellSelection(target.editor, target.selection, true);
+    }, { enabled: cellText.length > 0, shortcut: '⌘A' });
+    separator();
+    action(selectedText.length > 0 ? '查找所选内容' : '查找…', () => {
+      post({
+        type: 'findRequest',
+        replace: false,
+        selectionText: selectedText || undefined,
+        anchorOffset: target.state.widget.block.from,
+      });
+    }, { shortcut: '⌘F' });
+    action('替换…', () => {
+      post({
+        type: 'findRequest',
+        replace: true,
+        selectionText: selectedText || undefined,
+        anchorOffset: target.state.widget.block.from,
+      });
+    }, { enabled: runtime.editable, shortcut: '⌥⌘F' });
+    separator();
+    const tableEditable = runtime.editable && target.state.widget.editable;
+    submenu('行', tableEditable, (add) => {
+      add('上方插入行', () => insertTableRow(target.state, false), {
+        enabled: tableEditable && target.state.selectedRow > 0,
+      });
+      add('下方插入行', () => insertTableRow(target.state, true), {
+        enabled: tableEditable,
+      });
+      add('末尾新增行', () => appendTableRow(target.state), {
+        enabled: tableEditable,
+      });
+      add('删除行', () => deleteTableRow(target.state), {
+        enabled: tableEditable && target.state.selectedRow > 0,
+        destructive: true,
+      });
+    });
+    submenu('列', tableEditable, (add) => {
+      add('左侧插入列', () => insertTableColumn(target.state, false), {
+        enabled: tableEditable,
+      });
+      add('右侧插入列', () => insertTableColumn(target.state, true), {
+        enabled: tableEditable,
+      });
+      add('末尾新增列', () => appendTableColumn(target.state), {
+        enabled: tableEditable,
+      });
+      add('删除列', () => deleteTableColumn(target.state), {
+        enabled: tableEditable && target.state.model.header.length > 1,
+        destructive: true,
+      });
+    });
+    separator();
+    action('删除表格', () => deleteTableBlock(target.state), {
+      enabled: tableEditable,
+      destructive: true,
+    });
   } else {
-    action('撤销', () => { if (view) undo(view); }, runtime.editable);
-    action('重做', () => { if (view) redo(view); }, runtime.editable);
-    action('复制', () => document.execCommand('copy'), from !== to || view?.state.selection.main.empty === false);
-    action('剪切', () => document.execCommand('cut'), runtime.editable);
-    action('粘贴', () => document.execCommand('paste'), runtime.editable);
-    submenu('格式', (add) => {
-      add('加粗', () => requestCommand('format', 'bold'), runtime!.editable);
-      add('斜体', () => requestCommand('format', 'italic'), runtime!.editable);
-      add('删除线', () => requestCommand('format', 'strikethrough'), runtime!.editable);
-      add('高亮', () => requestCommand('format', 'highlight'), runtime!.editable);
+    history();
+    const state = documentMenuState(target);
+    const range = orderedSelection(target.selection);
+    action('复制', async () => {
+      await requestClipboard('copy', 'document', { selection: target.selection });
+    }, { enabled: state.hasSelection });
+    action('剪切', async () => {
+      await requestClipboard('cut', 'document', { selection: target.selection });
+    }, { enabled: runtime.editable && state.hasSelection });
+    const paste = action('粘贴', async () => {
+      await requestClipboard('paste', 'document', { selection: target.selection });
+    }, { enabled: false });
+    const pastePlain = action('以纯文本粘贴', async () => {
+      await requestClipboard('pastePlain', 'document', { selection: target.selection });
+    }, { enabled: false, shortcut: '⇧⌘V' });
+    clipboardButtons.push(paste, pastePlain);
+    action('全选', () => {
+      target.editorView.dispatch({
+        selection: { anchor: 0, head: target.editorView.state.doc.length },
+      });
+    }, { shortcut: '⌘A' });
+    separator();
+    action(state.hasSelection ? '查找所选内容' : '查找…', () => {
+      requestFind(false, target.selection);
+    }, { shortcut: '⌘F' });
+    action('替换…', () => requestFind(true, target.selection), {
+      enabled: runtime.editable,
+      shortcut: '⌥⌘F',
     });
-    submenu('段落', (add) => {
-      add('一级标题', () => requestCommand('paragraph', 'heading1'), runtime!.editable);
-      add('二级标题', () => requestCommand('paragraph', 'heading2'), runtime!.editable);
-      add('正文', () => requestCommand('paragraph', 'body'), runtime!.editable);
-      add('引用', () => requestCommand('paragraph', 'blockquote'), runtime!.editable);
+    separator();
+    submenu('插入', state.canUseStructure, (add) => {
+      add('表格', () => requestCommand('insert', 'table', target.selection), {
+        enabled: state.canUseStructure,
+      });
+      add('双栏', () => requestCommand('insert', 'columns', target.selection), {
+        enabled: state.canUseStructure && !state.insideColumns,
+      });
+      add('分隔线', () => requestCommand('insert', 'divider', target.selection), {
+        enabled: state.canUseStructure,
+      });
+      add('分页符', () => requestCommand('insert', 'pageBreak', target.selection), {
+        enabled: state.canUseStructure && !state.insideColumns,
+      });
     });
-    submenu('列表', (add) => {
-      add('无序列表', () => requestCommand('list', 'unordered'), runtime!.editable);
-      add('有序列表', () => requestCommand('list', 'ordered'), runtime!.editable);
-      add('任务列表', () => requestCommand('list', 'task'), runtime!.editable);
+    submenu('格式', state.canFormat, (add) => {
+      add('高亮', () => requestCommand('format', 'highlight', target.selection), {
+        enabled: state.canFormat,
+        checked: state.inlineFormats.has('highlight'),
+      });
+      add('加粗', () => requestCommand('format', 'bold', target.selection), {
+        enabled: state.canFormat,
+        checked: state.inlineFormats.has('bold'),
+        shortcut: '⌘B',
+      });
+      add('斜体', () => requestCommand('format', 'italic', target.selection), {
+        enabled: state.canFormat,
+        checked: state.inlineFormats.has('italic'),
+        shortcut: '⌘I',
+      });
+      add('删除线', () => requestCommand('format', 'strikethrough', target.selection), {
+        enabled: state.canFormat,
+        checked: state.inlineFormats.has('strikethrough'),
+      });
     });
-    submenu('插入', (add) => {
-      add('表格', () => requestCommand('insert', 'table'), runtime!.editable);
-      add('双栏', () => requestCommand('insert', 'columns'), runtime!.editable);
-      add('分隔线', () => requestCommand('insert', 'divider'), runtime!.editable);
-      add('分页符', () => requestCommand('insert', 'pageBreak'), runtime!.editable);
+    submenu('段落', state.canUseStructure, (add) => {
+      for (const [label, command] of [
+        ['标题 1', 'heading1'],
+        ['标题 2', 'heading2'],
+        ['标题 3', 'heading3'],
+        ['标题 4', 'heading4'],
+        ['正文', 'body'],
+        ['引用块', 'blockquote'],
+      ] as const) {
+        add(label, () => requestCommand('paragraph', command, target.selection), {
+          enabled: state.canUseStructure,
+          checked: state.paragraph === command,
+        });
+      }
+    });
+    submenu('列表', state.canUseStructure, (add) => {
+      for (const [label, command] of [
+        ['无序列表', 'unordered'],
+        ['有序列表', 'ordered'],
+        ['任务列表', 'task'],
+      ] as const) {
+        add(label, () => requestCommand('list', command, target.selection), {
+          enabled: state.canUseStructure,
+          checked: state.list === command,
+        });
+      }
     });
   }
-  document.body.append(menu);
+  (view?.dom ?? document.body).append(menu);
   menu.style.left = `${Math.max(8, Math.min(x, window.innerWidth - menu.offsetWidth - 8))}px`;
   menu.style.top = `${Math.max(8, Math.min(y, window.innerHeight - menu.offsetHeight - 8))}px`;
   contextMenu = menu;
+  contextMenuDismiss = dismiss;
+  if (clipboardButtons.length > 0 && runtime.editable) {
+    void requestClipboard('availability', target.kind === 'tableCell' ? 'tableCell' : 'document')
+      .then((availability) => {
+        const enabled = target.kind === 'tableCell'
+          ? availability.hasText
+          : availability.hasText || availability.hasImage;
+        clipboardButtons.forEach((button, index) => {
+          setEnabled(button, index === 1 ? availability.hasText : enabled);
+        });
+      });
+  }
   const enabledButtons = () => buttons.filter((button) => !button.disabled);
   menu.addEventListener('keydown', (event) => {
     const items = enabledButtons();
@@ -2870,8 +3999,7 @@ function showContextMenu(x: number, y: number, from: number, to: number, imageSr
     const current = items.indexOf(document.activeElement as HTMLButtonElement);
     if (event.key === 'Escape') {
       event.preventDefault();
-      dismiss();
-      view?.focus();
+      dismiss(true);
       return;
     }
     let next: number | undefined;
@@ -2886,9 +4014,53 @@ function showContextMenu(x: number, y: number, from: number, to: number, imageSr
   enabledButtons()[0]?.focus();
   outsideClose = (event: Event) => {
     if (event.target instanceof Node && menu.contains(event.target)) return;
-    dismiss();
+    dismiss(false);
   };
   window.addEventListener('pointerdown', outsideClose, true);
+}
+
+function replaceTableCellContextSelection(
+  target: TableCellContextTarget,
+  replacement: string,
+): void {
+  if (!target.editor.isConnected || !target.state.widget.editable) return;
+  const current = target.editor.textContent ?? '';
+  const from = Math.min(target.selection.anchor, target.selection.head);
+  const to = Math.max(target.selection.anchor, target.selection.head);
+  const inserted = replacement.replace(/\r?\n/g, ' ');
+  const updated = `${current.slice(0, from)}${inserted}${current.slice(to)}`;
+  target.editor.textContent = updated;
+  const caret = from + inserted.length;
+  target.selection = { anchor: caret, head: caret };
+  target.state.model = withTableCellValue(
+    target.state.model,
+    target.row,
+    target.column,
+    editorTableCellValue(target.editor),
+  );
+  commitTableModel(target.state);
+  restoreCellSelection(target.editor, target.selection, true);
+}
+
+function appendTableRow(state: TableDomState): void {
+  state.selectedRow = state.model.rows.length;
+  insertTableRow(state, true);
+}
+
+function appendTableColumn(state: TableDomState): void {
+  state.selectedColumn = state.model.header.length - 1;
+  insertTableColumn(state, true);
+}
+
+function deleteTableBlock(state: TableDomState): void {
+  if (!view || !state.widget.editable) return;
+  if (state.pendingFrame) commitTableModel(state);
+  const from = state.widget.block.from;
+  view.dispatch({
+    changes: { from, to: state.widget.block.to, insert: '' },
+    selection: { anchor: from },
+    annotations: Transaction.userEvent.of('delete.table'),
+  });
 }
 
 interface PendingAttachment {
@@ -2960,6 +4132,8 @@ window.synapseHost = { receive };
 window.synapseTest = {
   getText: () => view?.state.doc.toString() ?? '',
   getMode: () => runtime?.mode ?? 'reading',
+  getRevision: () => runtime?.revision ?? -1,
+  getPendingClipboardCount: () => clipboardRequests.size,
   getSelection: () => view ? selectionOf(view.state) : { anchor: 0, head: 0 },
   insertText: (text: string) => {
     if (!view || !runtime?.editable) return;

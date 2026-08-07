@@ -701,6 +701,20 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
     );
   }
 
+  Future<editor_context.PaneEditorCommandOutcome> pastePlainTextIntoNote(
+    editor_context.PaneEditorContext? context,
+    TextEditingValue? target,
+  ) {
+    if (context == null || target == null) {
+      _setMessage('请先选择或创建笔记');
+      return Future.value(editor_context.PaneEditorCommandOutcome.unchanged);
+    }
+    return _editorOperations.runOperation(
+      () => _editor.pastePlainTextIntoNote(context, target),
+      context: context,
+    );
+  }
+
   Future<editor_context.PaneEditorCommandOutcome> pasteImportedImage(
     editor_context.PaneEditorContext? context,
     ImportedImage image,

@@ -29,6 +29,7 @@ import '../../workspace/outline_navigation.dart';
 import '../../workspace/state/note_document_session.dart';
 import '../../workspace/state/split_workspace_controller.dart';
 import 'workspace_controls.dart';
+import 'workspace_context_menu.dart';
 import 'workspace_layout.dart';
 import 'workspace_markdown_renderer.dart';
 import 'note_pdf_export_dialog.dart';
@@ -41,12 +42,14 @@ final class WorkspaceNotePane extends ConsumerStatefulWidget {
     required this.workspace,
     required this.controller,
     required this.outlineNavigationController,
+    required this.contextMenuCoordinator,
     this.documentSurfaceFactory = const PlatformDocumentSurfaceFactory(),
   });
 
   final WorkspaceState workspace;
   final WorkspaceController controller;
   final WorkspaceOutlineNavigationController outlineNavigationController;
+  final WorkspaceContextMenuCoordinator contextMenuCoordinator;
   final DocumentSurfaceFactory documentSurfaceFactory;
 
   @override
@@ -106,6 +109,28 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
 
   bool get _codeMirrorEnabled => widget.documentSurfaceFactory.supported;
 
+  @override
+  void initState() {
+    super.initState();
+    widget.contextMenuCoordinator.register(this, _dismissFlutterContextMenus);
+  }
+
+  @override
+  void didUpdateWidget(covariant WorkspaceNotePane oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!identical(
+      oldWidget.contextMenuCoordinator,
+      widget.contextMenuCoordinator,
+    )) {
+      oldWidget.contextMenuCoordinator.unregister(this);
+      widget.contextMenuCoordinator.register(this, _dismissFlutterContextMenus);
+    }
+  }
+
+  void _dismissFlutterContextMenus({required bool restoreFocus}) {
+    dismissAllMacContextMenus();
+  }
+
   EditorDocumentHub _editorDocumentHubFor(NoteDocumentSession session) =>
       _editorDocumentHubs.putIfAbsent(
         session,
@@ -114,6 +139,10 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
 
   @override
   void dispose() {
+    widget.contextMenuCoordinator.unregister(this);
+    for (final surface in _codeMirrorEditorStates.values) {
+      widget.contextMenuCoordinator.unregister(surface);
+    }
     _emptyMarkdownController.dispose();
     _editorPasteFocusNode.dispose();
     for (final controller in _findControllers.values) {
@@ -756,7 +785,10 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
         }
         _findControllers.remove(paneId)?.dispose();
         _editorStates.remove(paneId);
-        _codeMirrorEditorStates.remove(paneId);
+        final surface = _codeMirrorEditorStates.remove(paneId);
+        if (surface != null) {
+          widget.contextMenuCoordinator.unregister(surface);
+        }
         _codeMirrorOutlines.remove(paneId);
         _codeMirrorOutlineSignatures.remove(paneId);
         _codeMirrorFindRevisions.remove(paneId);
@@ -895,73 +927,94 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
                                   focused: focused,
                                   findController: findController,
                                 )
-                              : pane.mode == NoteMode.reading
-                              ? session == null
-                                    ? const EmptyState(
-                                        text: '选择或创建笔记后开始整理 Markdown',
-                                      )
-                                    : Focus(
-                                        focusNode: paneFocusNode,
-                                        child: Listener(
-                                          behavior: HitTestBehavior.translucent,
-                                          onPointerDown: (event) {
-                                            if (event.buttons &
-                                                    kSecondaryMouseButton !=
-                                                0) {
-                                              _showReadingFindMenu(
-                                                pane,
-                                                findController,
-                                                event.position,
-                                              );
-                                            }
-                                          },
-                                          child: GestureDetector(
-                                            behavior:
-                                                HitTestBehavior.translucent,
-                                            onTapDown: (_) {
-                                              if (!paneFocusNode.hasFocus) {
-                                                paneFocusNode.requestFocus();
-                                              }
-                                            },
-                                            child: _markdownRenderer
-                                                .buildReadingPreview(
-                                                  session: session,
-                                                  editorContext: editorContext!,
-                                                  paneId: pane.paneId,
-                                                  focused: focused,
-                                                  outlineNodes: outlineNodes,
-                                                  outlineNavigationController:
-                                                      widget
-                                                          .outlineNavigationController,
-                                                  findController:
-                                                      findController,
-                                                  onFindRequested: () =>
-                                                      _openFind(
-                                                        pane,
-                                                        findController,
-                                                      ),
-                                                  onReplaceRequested: () =>
-                                                      _openReplace(
-                                                        pane,
-                                                        findController,
-                                                      ),
-                                                  canReplace:
-                                                      !_busy &&
-                                                      !_reloadRequired &&
-                                                      !_paneEditorCommandLocks
-                                                          .contains(
-                                                            session.noteId,
-                                                          ),
+                              : Listener(
+                                  behavior: HitTestBehavior.translucent,
+                                  onPointerDown: (_) => widget
+                                      .contextMenuCoordinator
+                                      .dismissAll(except: this),
+                                  child: pane.mode == NoteMode.reading
+                                      ? session == null
+                                            ? const EmptyState(
+                                                text: '选择或创建笔记后开始整理 Markdown',
+                                              )
+                                            : Focus(
+                                                focusNode: paneFocusNode,
+                                                child: Listener(
+                                                  behavior: HitTestBehavior
+                                                      .translucent,
+                                                  onPointerDown: (event) {
+                                                    if (event.buttons &
+                                                            kSecondaryMouseButton !=
+                                                        0) {
+                                                      final position =
+                                                          event.position;
+                                                      WidgetsBinding.instance
+                                                          .addPostFrameCallback((
+                                                            _,
+                                                          ) {
+                                                            if (mounted) {
+                                                              _showReadingFindMenu(
+                                                                pane,
+                                                                findController,
+                                                                position,
+                                                              );
+                                                            }
+                                                          });
+                                                    }
+                                                  },
+                                                  child: GestureDetector(
+                                                    behavior: HitTestBehavior
+                                                        .translucent,
+                                                    onTapDown: (_) {
+                                                      if (!paneFocusNode
+                                                          .hasFocus) {
+                                                        paneFocusNode
+                                                            .requestFocus();
+                                                      }
+                                                    },
+                                                    child: _markdownRenderer
+                                                        .buildReadingPreview(
+                                                          session: session,
+                                                          editorContext:
+                                                              editorContext!,
+                                                          paneId: pane.paneId,
+                                                          focused: focused,
+                                                          outlineNodes:
+                                                              outlineNodes,
+                                                          outlineNavigationController:
+                                                              widget
+                                                                  .outlineNavigationController,
+                                                          findController:
+                                                              findController,
+                                                          onFindRequested: () =>
+                                                              _openFind(
+                                                                pane,
+                                                                findController,
+                                                              ),
+                                                          onReplaceRequested:
+                                                              () => _openReplace(
+                                                                pane,
+                                                                findController,
+                                                              ),
+                                                          canReplace:
+                                                              !_busy &&
+                                                              !_reloadRequired &&
+                                                              !_paneEditorCommandLocks
+                                                                  .contains(
+                                                                    session
+                                                                        .noteId,
+                                                                  ),
+                                                        ),
+                                                  ),
                                                 ),
-                                          ),
+                                              )
+                                      : _buildNoteEditor(
+                                          session: session,
+                                          pane: pane,
+                                          outlineNodes: outlineNodes,
+                                          findController: findController,
+                                          printController: printController,
                                         ),
-                                      )
-                              : _buildNoteEditor(
-                                  session: session,
-                                  pane: pane,
-                                  outlineNodes: outlineNodes,
-                                  findController: findController,
-                                  printController: printController,
                                 ),
                         ),
                         Positioned(
@@ -1244,13 +1297,29 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
           _handleCodeMirrorPastedImage(editorContext, hub, image),
       onCommandRequest: (request) =>
           _handleCodeMirrorCommandRequest(hub, request),
+      onClipboardRequest: (request) =>
+          _handleCodeMirrorClipboardRequest(editorContext, hub, request),
       onOutlineChanged: (outline) =>
           _handleCodeMirrorOutlineChanged(pane.paneId, outline),
       onFocusPane: () => _focusPane(pane.paneId),
+      onPointerInteraction: () {
+        final surface = _codeMirrorEditorStates[pane.paneId];
+        widget.contextMenuCoordinator.dismissAll(except: surface);
+      },
       onCommandState: (state) =>
           _handleCodeMirrorCommandState(pane.paneId, findController, state),
-      onFindRequested: () => _openFind(pane, findController),
-      onReplaceRequested: () => _openReplace(pane, findController),
+      onFindRequested: (seed, anchorOffset) => _openFind(
+        pane,
+        findController,
+        seed: seed,
+        anchorOffset: anchorOffset,
+      ),
+      onReplaceRequested: (seed, anchorOffset) => _openReplace(
+        pane,
+        findController,
+        seed: seed,
+        anchorOffset: anchorOffset,
+      ),
       onOpenLink: _openCodeMirrorLink,
       onError: (error) {
         FlutterError.reportError(
@@ -1266,6 +1335,11 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
       onStateChanged: (state, attached) {
         if (attached) {
           _codeMirrorEditorStates[pane.paneId] = state;
+          widget.contextMenuCoordinator.register(state, ({
+            required bool restoreFocus,
+          }) {
+            unawaited(state.dismissContextMenu());
+          });
           _controller.attachDocumentSurface(
             paneId: pane.paneId,
             owner: state,
@@ -1274,6 +1348,7 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
           _syncCodeMirrorSearch(pane.paneId, findController);
         } else if (identical(_codeMirrorEditorStates[pane.paneId], state)) {
           _codeMirrorEditorStates.remove(pane.paneId);
+          widget.contextMenuCoordinator.unregister(state);
           _controller.detachDocumentSurface(paneId: pane.paneId, owner: state);
         }
       },
@@ -1352,6 +1427,32 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
     if (action.revision != hub.revision) {
       return;
     }
+    MarkdownImageReference? targetReference() {
+      final from = action.from;
+      final to = action.to;
+      if (from == null && to == null) {
+        return findMarkdownImageReference(
+          markdown: session.controller.text,
+          src: action.src,
+        );
+      }
+      if (from == null || to == null || from < 0 || to < from) {
+        return null;
+      }
+      final reference = findMarkdownImageReference(
+        markdown: session.controller.text,
+        src: action.src,
+        start: from,
+        end: to,
+      );
+      return reference?.start == from && reference?.end == to
+          ? reference
+          : null;
+    }
+
+    if (targetReference() == null) {
+      return;
+    }
     final attachment = _attachmentForMarkdownSrc(session, action.src);
     if (attachment == null ||
         _controller.resolvePaneEditorContext(context) == null) {
@@ -1372,10 +1473,7 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
         if (action.revision != hub.revision) {
           return;
         }
-        final reference = findMarkdownImageReference(
-          markdown: session.controller.text,
-          src: action.src,
-        );
+        final reference = targetReference();
         if (reference == null) {
           return;
         }
@@ -1513,6 +1611,123 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
       selection: updated.selection,
       addToHistory: true,
     );
+  }
+
+  Future<EditorClipboardResult> _handleCodeMirrorClipboardRequest(
+    PaneEditorContext context,
+    EditorDocumentHub hub,
+    EditorClipboardRequest request,
+  ) async {
+    EditorClipboardResult result(
+      String outcome, {
+      bool hasText = false,
+      bool hasImage = false,
+      String? text,
+    }) => EditorClipboardResult(
+      requestId: request.requestId,
+      revision: request.revision,
+      generation: request.generation,
+      outcome: outcome,
+      hasText: hasText,
+      hasImage: hasImage,
+      text: text,
+    );
+
+    if (request.revision != hub.revision ||
+        request.generation != hub.generation ||
+        _controller.resolvePaneEditorContext(context) == null) {
+      return result('stale');
+    }
+    if (request.action == 'availability') {
+      final availability = await _controller.notePasteAvailability(context);
+      if (request.revision != hub.revision ||
+          request.generation != hub.generation ||
+          _controller.resolvePaneEditorContext(context) == null) {
+        return result('stale');
+      }
+      return result(
+        'success',
+        hasText: availability.hasText,
+        hasImage: availability.hasImage,
+      );
+    }
+    if (request.target == 'tableCell') {
+      if (request.action == 'paste' || request.action == 'pastePlain') {
+        final text = (await Clipboard.getData(Clipboard.kTextPlain))?.text;
+        if (request.revision != hub.revision ||
+            request.generation != hub.generation ||
+            _controller.resolvePaneEditorContext(context) == null) {
+          return result('stale');
+        }
+        if (text == null || text.isEmpty) {
+          return result('unavailable');
+        }
+        return result('success', hasText: true, text: text);
+      }
+      final text = request.text;
+      if (text == null || text.isEmpty) {
+        return result('unavailable');
+      }
+      await Clipboard.setData(ClipboardData(text: text));
+      if (request.revision != hub.revision ||
+          request.generation != hub.generation ||
+          _controller.resolvePaneEditorContext(context) == null) {
+        return result('stale');
+      }
+      return result('success', hasText: true);
+    }
+
+    final selection = request.selection;
+    if (selection == null) {
+      return result('unavailable');
+    }
+    final start = selection.anchor < selection.head
+        ? selection.anchor
+        : selection.head;
+    final end = selection.anchor < selection.head
+        ? selection.head
+        : selection.anchor;
+    if (start < 0 || end > hub.markdown.length) {
+      return result('stale');
+    }
+    final target = TextEditingValue(
+      text: hub.markdown,
+      selection: TextSelection(
+        baseOffset: selection.anchor,
+        extentOffset: selection.head,
+      ),
+    );
+    if (request.action == 'paste' || request.action == 'pastePlain') {
+      final outcome = request.action == 'pastePlain'
+          ? await _controller.pastePlainTextIntoNote(context, target)
+          : await _pasteIntoNoteEditor(context, target);
+      return result(switch (outcome) {
+        PaneEditorCommandOutcome.committed => 'success',
+        PaneEditorCommandOutcome.staleTarget => 'stale',
+        PaneEditorCommandOutcome.unchanged => 'unavailable',
+      });
+    }
+    if (start == end) {
+      return result('unavailable');
+    }
+    final copiedText = hub.markdown.substring(start, end);
+    await Clipboard.setData(ClipboardData(text: copiedText));
+    if (request.revision != hub.revision ||
+        request.generation != hub.generation ||
+        _controller.resolvePaneEditorContext(context) == null ||
+        hub.markdown.substring(start, end) != copiedText) {
+      return result('stale');
+    }
+    if (request.action == 'cut') {
+      final updated = hub.markdown.replaceRange(start, end, '');
+      hub.runUserHostMutation(
+        () => hub.session.controller.value = TextEditingValue(
+          text: updated,
+          selection: TextSelection.collapsed(offset: start),
+        ),
+      );
+    }
+    return result('success', hasText: true);
   }
 
   void _handleCodeMirrorOutlineChanged(

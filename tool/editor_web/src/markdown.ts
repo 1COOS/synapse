@@ -54,7 +54,7 @@ function block(kind: MarkdownBlock['kind'], lines: Line[], start: number, end: n
 
 function isTableLine(text: string): boolean {
   const trimmed = text.trim();
-  return trimmed.startsWith('|') && trimmed.endsWith('|') && trimmed.split('|').length >= 4;
+  return trimmed.startsWith('|') && trimmed.endsWith('|') && trimmed.split('|').length >= 3;
 }
 
 function isListLine(text: string): boolean {

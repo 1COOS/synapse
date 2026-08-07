@@ -15,9 +15,13 @@ typedef EditorPastedImageHandler =
     Future<void> Function(EditorPastedImage image);
 typedef EditorCommandRequestHandler =
     Future<void> Function(EditorCommandRequest request);
+typedef EditorClipboardRequestHandler =
+    Future<EditorClipboardResult> Function(EditorClipboardRequest request);
 typedef EditorCommandStateHandler = void Function(EditorCommandState state);
 typedef EditorPerformanceSampleHandler =
     void Function(EditorPerformanceSample sample);
+typedef EditorFindRequestHandler =
+    void Function(String? selectionText, int? anchorOffset);
 
 final class EditorAttachmentPayload {
   const EditorAttachmentPayload({
@@ -34,6 +38,8 @@ final class EditorImageAction {
     required this.action,
     required this.src,
     required this.revision,
+    this.from,
+    this.to,
     this.targetSrc,
     this.beforeTarget,
     this.width,
@@ -42,6 +48,8 @@ final class EditorImageAction {
   final String action;
   final String src;
   final int revision;
+  final int? from;
+  final int? to;
   final String? targetSrc;
   final bool? beforeTarget;
   final int? width;
@@ -75,6 +83,8 @@ abstract interface class EditorDocumentSurfaceController {
   Future<void> replaceSearch({required bool all});
 
   Future<void> closeSearch();
+
+  Future<void> dismissContextMenu();
 }
 
 abstract interface class DocumentSurfaceFactory {
@@ -92,12 +102,14 @@ abstract interface class DocumentSurfaceFactory {
     required EditorImageActionHandler onImageAction,
     required EditorPastedImageHandler onPastedImage,
     required EditorCommandRequestHandler onCommandRequest,
+    required EditorClipboardRequestHandler onClipboardRequest,
     required ValueChanged<List<OutlineNode>> onOutlineChanged,
     required VoidCallback onFocusPane,
+    required VoidCallback onPointerInteraction,
     EditorCommandStateHandler? onCommandState,
     EditorPerformanceSampleHandler? onPerformanceSample,
-    VoidCallback? onFindRequested,
-    VoidCallback? onReplaceRequested,
+    EditorFindRequestHandler? onFindRequested,
+    EditorFindRequestHandler? onReplaceRequested,
     ValueChanged<Uri>? onOpenLink,
     ValueChanged<Object>? onError,
     void Function(EditorDocumentSurfaceController state, bool attached)?

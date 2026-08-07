@@ -63,6 +63,14 @@ describe('splitMarkdownBlocks', () => {
     expect(markdown.slice(blocks[0].from, blocks[0].to)).toBe(markdown);
     expect(blocks.map((block) => markdown.slice(block.from, block.to)).join('')).toBe(markdown);
   });
+
+  it('keeps a one-column pipe table rendered as a table block', () => {
+    const markdown = '| A |\n| --- |\n| 1 |\n';
+    const blocks = splitMarkdownBlocks(markdown);
+
+    expect(blocks[0].kind).toBe('table');
+    expect(blocks[0].text).toBe(markdown);
+  });
 });
 
 describe('markdown helpers', () => {

@@ -48,6 +48,172 @@ beforeEach(() => {
   messages.length = 0;
 });
 
+function pointerEvent(
+  type: string,
+  x: number,
+  y: number,
+  { button = 0, buttons = type === 'pointerup' ? 0 : 1 } = {},
+): MouseEvent {
+  return new MouseEvent(type, {
+    bubbles: true,
+    cancelable: true,
+    clientX: x,
+    clientY: y,
+    button,
+    buttons,
+  });
+}
+
+function rect(
+  left: number,
+  top: number,
+  width: number,
+  height: number,
+): DOMRect {
+  return {
+    x: left,
+    y: top,
+    left,
+    top,
+    width,
+    height,
+    right: left + width,
+    bottom: top + height,
+    toJSON: () => ({}),
+  } as DOMRect;
+}
+
+function setBounds(element: Element, bounds: DOMRect): void {
+  element.getBoundingClientRect = () => bounds;
+}
+
+function openDocumentContextMenu(x = 20, y = 20): HTMLElement {
+  document.querySelector<HTMLElement>('.cm-content')!.dispatchEvent(
+    new MouseEvent('contextmenu', {
+      bubbles: true,
+      cancelable: true,
+      clientX: x,
+      clientY: y,
+    }),
+  );
+  return document.querySelector<HTMLElement>('.synapse-context-menu')!;
+}
+
+function openKeyboardContextMenu(): HTMLElement {
+  document.querySelector<HTMLElement>('.cm-content')!.dispatchEvent(
+    new KeyboardEvent('keydown', {
+      key: 'ContextMenu',
+      code: 'ContextMenu',
+      bubbles: true,
+      cancelable: true,
+    }),
+  );
+  return document.querySelector<HTMLElement>('.synapse-context-menu')!;
+}
+
+function menuButton(root: ParentNode, label: string): HTMLButtonElement {
+  return Array.from(root.querySelectorAll<HTMLButtonElement>('button')).find(
+    (button) =>
+      button.querySelector('.synapse-context-label')?.textContent === label,
+  )!;
+}
+
+function clipboardRequest(action: string): Record<string, unknown> {
+  return messages.filter(
+    (message) =>
+      message.type === 'clipboardRequest' && message.action === action,
+  ).at(-1)!;
+}
+
+function resolveClipboard(
+  request: Record<string, unknown>,
+  {
+    outcome = 'success',
+    hasText = false,
+    hasImage = false,
+    text,
+  }: {
+    outcome?: 'success' | 'unavailable' | 'stale' | 'failure';
+    hasText?: boolean;
+    hasImage?: boolean;
+    text?: string;
+  } = {},
+): void {
+  window.synapseHost!.receive({
+    protocolVersion: 2,
+    type: 'clipboardResult',
+    requestId: request.requestId as number,
+    revision: request.revision as number,
+    generation: request.generation as number,
+    outcome,
+    hasText,
+    hasImage,
+    text,
+  });
+}
+
+function selectCellText(cell: HTMLElement, anchor: number, head: number): void {
+  cell.focus();
+  const text = cell.firstChild ?? cell.appendChild(document.createTextNode(''));
+  const range = document.createRange();
+  range.setStart(text, anchor);
+  range.setEnd(text, head);
+  const selection = window.getSelection()!;
+  selection.removeAllRanges();
+  selection.addRange(range);
+}
+
+function tableCell(row: number, column: number): HTMLElement {
+  return document.querySelector<HTMLElement>(
+    `.synapse-table-cell-editor[data-table-row="${row}"]`
+      + `[data-table-column="${column}"]`,
+  )!;
+}
+
+function tableColumnParents(): HTMLElement[] {
+  return Array.from(
+    document.querySelectorAll<HTMLElement>('.synapse-table-column-handle'),
+  ).map((handle) => handle.parentElement as HTMLElement);
+}
+
+function openTableSubmenu(cell: HTMLElement, label: string): HTMLElement {
+  cell.dispatchEvent(new MouseEvent('contextmenu', {
+    bubbles: true,
+    cancelable: true,
+    clientX: 20,
+    clientY: 20,
+  }));
+  const trigger = Array.from(
+    document.querySelectorAll<HTMLButtonElement>(
+      '.synapse-context-menu > .synapse-context-submenu-group > button',
+    ),
+  ).find((button) =>
+    button.querySelector('.synapse-context-label')?.textContent === label,
+  )!;
+  trigger.click();
+  return trigger.parentElement!.querySelector<HTMLElement>(
+    '.synapse-context-submenu',
+  )!;
+}
+
+function invokeTableMenu(
+  row: number,
+  column: number,
+  submenuLabel: string,
+  actionLabel: string,
+): void {
+  const submenu = openTableSubmenu(
+    tableCell(row, column),
+    submenuLabel,
+  );
+  const action = Array.from(
+    submenu.querySelectorAll<HTMLButtonElement>('button'),
+  ).find((button) =>
+    button.querySelector('.synapse-context-label')?.textContent === actionLabel,
+  )!;
+  action.click();
+}
+
 describe('CodeMirror live preview', () => {
   it('keeps the exact Markdown source while rendering structural previews', async () => {
     const markdown = [
@@ -79,7 +245,7 @@ describe('CodeMirror live preview', () => {
     window.synapseHost!.receive(initialize(markdown, 'editing'));
     window.synapseTest!.insertText(' edited');
     window.synapseHost!.receive({
-      protocolVersion: 1,
+      protocolVersion: 2,
       type: 'setMode',
       mode: 'reading',
       editable: false,
@@ -107,7 +273,7 @@ describe('CodeMirror live preview', () => {
       (message) => message.type === 'focusChanged' && message.focused === true,
     )).toBe(true);
     window.synapseHost!.receive({
-      protocolVersion: 1,
+      protocolVersion: 2,
       type: 'setMode',
       mode: 'editing',
       editable: true,
@@ -143,7 +309,7 @@ describe('CodeMirror live preview', () => {
       (message) => message.type === 'focusChanged' && message.focused === true,
     )).toBe(true);
     window.synapseHost!.receive({
-      protocolVersion: 1,
+      protocolVersion: 2,
       type: 'setMode',
       mode: 'editing',
       editable: true,
@@ -156,6 +322,33 @@ describe('CodeMirror live preview', () => {
         '.synapse-column .cm-content',
       )[0],
     );
+  });
+
+  it('reactivates an unfocused table and restores the intended cell', async () => {
+    const markdown = '| A | B |\n| --- | --- |\n| 1 | 2 |\n';
+    window.synapseHost!.receive(initialize(markdown, 'editing', false));
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+
+    const inactiveCell = tableCell(1, 1);
+    expect(inactiveCell.contentEditable).not.toBe('true');
+    inactiveCell.dispatchEvent(pointerEvent('pointerdown', 30, 30));
+
+    expect(messages.some(
+      (message) => message.type === 'focusChanged' && message.focused === true,
+    )).toBe(true);
+    window.synapseHost!.receive({
+      protocolVersion: 2,
+      type: 'setMode',
+      mode: 'editing',
+      editable: true,
+      focused: true,
+    });
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+
+    const activeCell = tableCell(1, 1);
+    expect(activeCell.contentEditable).toBe('true');
+    expect(document.activeElement).toBe(activeCell);
+    expect(document.querySelector('.synapse-table-controls')).toBeNull();
   });
 
   it('commits table cells and column source through parent transactions', async () => {
@@ -225,7 +418,7 @@ describe('CodeMirror live preview', () => {
     ).toBe('true');
 
     window.synapseHost!.receive({
-      protocolVersion: 1,
+      protocolVersion: 2,
       type: 'setMode',
       mode: 'reading',
       editable: false,
@@ -288,10 +481,7 @@ describe('CodeMirror live preview', () => {
     )!;
     first.textContent = 'Draft';
     first.dispatchEvent(new InputEvent('input', { bubbles: true }));
-    const addRow = Array.from(
-      document.querySelectorAll<HTMLButtonElement>('.synapse-table-controls button'),
-    ).find((button) => button.textContent === '+ 行')!;
-    addRow.click();
+    invokeTableMenu(1, 0, '行', '下方插入行');
     await new Promise((resolve) => window.setTimeout(resolve, 20));
 
     expect(window.synapseTest!.getText()).toContain('| Draft | 2 |');
@@ -305,13 +495,59 @@ describe('CodeMirror live preview', () => {
     restored.textContent = 'Before mode';
     restored.dispatchEvent(new InputEvent('input', { bubbles: true }));
     window.synapseHost!.receive({
-      protocolVersion: 1,
+      protocolVersion: 2,
       type: 'setMode',
       mode: 'reading',
       editable: false,
       focused: true,
     });
     expect(window.synapseTest!.getText()).toContain('| Before mode | 2 |');
+  });
+
+  it('adds and deletes table rows and columns from the context menu', async () => {
+    const markdown = [
+      '| A | B |',
+      '| --- | --- |',
+      '| 1 | 2 |',
+      '| 3 | 4 |',
+      '',
+      'After',
+    ].join('\n');
+    window.synapseHost!.receive(initialize(markdown, 'editing'));
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+
+    invokeTableMenu(1, 0, '行', '上方插入行');
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+    expect(window.synapseTest!.getText()).toContain('|  |  |\n| 1 | 2 |');
+
+    invokeTableMenu(2, 0, '行', '删除行');
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+    expect(window.synapseTest!.getText()).not.toContain('| 1 | 2 |');
+
+    invokeTableMenu(1, 0, '列', '右侧插入列');
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+    expect(window.synapseTest!.getText()).toContain('| A |  | B |');
+
+    invokeTableMenu(1, 1, '列', '删除列');
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+    expect(window.synapseTest!.getText()).toContain('| A | B |');
+    expect(window.synapseTest!.getText()).not.toContain('| A |  | B |');
+
+    const headerMenu = openTableSubmenu(tableCell(0, 0), '行');
+    const deleteHeader = Array.from(
+      headerMenu.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) =>
+      button.querySelector('.synapse-context-label')?.textContent === '删除行',
+    )!;
+    expect(deleteHeader.disabled).toBe(true);
+
+    invokeTableMenu(1, 1, '列', '删除列');
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+    const singleColumnMenu = openTableSubmenu(tableCell(1, 0), '列');
+    const deleteLastColumn = Array.from(
+      singleColumnMenu.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent === '删除列')!;
+    expect(deleteLastColumn.disabled).toBe(true);
   });
 
   it('keeps the visual table DOM synchronized through parent undo and redo', async () => {
@@ -329,7 +565,7 @@ describe('CodeMirror live preview', () => {
     cell.textContent = 'Edited';
     cell.dispatchEvent(new InputEvent('input', { bubbles: true }));
     window.synapseHost!.receive({
-      protocolVersion: 1,
+      protocolVersion: 2,
       type: 'flush',
       requestId: 2,
     });
@@ -381,6 +617,25 @@ describe('CodeMirror live preview', () => {
     expect(document.activeElement).toBe(cells[1]);
     expect(columns.classList.contains('synapse-columns-focused')).toBe(true);
     expect(window.synapseTest!.getText()).toContain('| Nested | 2 |');
+
+    const headerCells = tableColumnParents();
+    setBounds(headerCells[0], rect(100, 40, 100, 40));
+    setBounds(headerCells[1], rect(200, 40, 100, 40));
+    const columnHandle = document.querySelector<HTMLElement>(
+      '.synapse-column .synapse-table-column-handle[data-table-column="0"]',
+    )!;
+    columnHandle.dispatchEvent(pointerEvent('pointerdown', 120, 42));
+    window.dispatchEvent(pointerEvent('pointermove', 290, 42));
+    window.dispatchEvent(pointerEvent('pointerup', 290, 42));
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+    expect(window.synapseTest!.getText()).toContain('| B | A |');
+    expect(window.synapseTest!.getText()).toContain('| 2 | Nested |');
+
+    invokeTableMenu(1, 0, '行', '下方插入行');
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+    expect(window.synapseTest!.getText()).toContain(
+      '| 2 | Nested |\n|  |  |',
+    );
   });
 
   it('shows the columns frame only while focus remains inside the editable region', async () => {
@@ -414,8 +669,8 @@ describe('CodeMirror live preview', () => {
     expect(content.style.gridTemplateColumns).toBe('50fr 0px 50fr');
     expect(controls.hidden).toBe(false);
     expect(getComputedStyle(controls).visibility).toBe('hidden');
-    expect(getComputedStyle(columnRegions[0]).padding).toBe('0px');
-    expect(getComputedStyle(columnRegions[1]).padding).toBe('0px');
+    expect(getComputedStyle(columnRegions[0]).padding).toBe('0px 12px');
+    expect(getComputedStyle(columnRegions[1]).padding).toBe('0px 12px');
     expect(getComputedStyle(divider).pointerEvents).toBe('none');
 
     contents[0].focus();
@@ -440,13 +695,13 @@ describe('CodeMirror live preview', () => {
     expect(getComputedStyle(controls).visibility).toBe('hidden');
     expect(getComputedStyle(divider).pointerEvents).toBe('none');
     expect(content.style.gridTemplateColumns).toBe('50fr 0px 50fr');
-    expect(getComputedStyle(columnRegions[0]).padding).toBe('0px');
-    expect(getComputedStyle(columnRegions[1]).padding).toBe('0px');
+    expect(getComputedStyle(columnRegions[0]).padding).toBe('0px 12px');
+    expect(getComputedStyle(columnRegions[1]).padding).toBe('0px 12px');
 
     contents[0].focus();
     expect(columns.classList.contains('synapse-columns-focused')).toBe(true);
     window.synapseHost!.receive({
-      protocolVersion: 1,
+      protocolVersion: 2,
       type: 'setMode',
       mode: 'reading',
       editable: false,
@@ -469,7 +724,7 @@ describe('CodeMirror live preview', () => {
     for (const column of columns.querySelectorAll<HTMLElement>(
       '.synapse-column',
     )) {
-      expect(getComputedStyle(column).padding).toBe('0px');
+      expect(getComputedStyle(column).padding).toBe('0px 12px');
     }
   });
 
@@ -655,7 +910,7 @@ describe('CodeMirror live preview', () => {
       (message) => message.type === 'attachmentRequest' && message.src === src,
     )!;
     window.synapseHost!.receive({
-      protocolVersion: 1,
+      protocolVersion: 2,
       type: 'attachmentChunk',
       requestId: attachmentRequest.requestId as string,
       chunkIndex: 0,
@@ -785,7 +1040,7 @@ describe('CodeMirror live preview', () => {
       data: '中文输入',
     }));
     window.synapseHost!.receive({
-      protocolVersion: 1,
+      protocolVersion: 2,
       type: 'flush',
       requestId: 1,
     });
@@ -839,7 +1094,7 @@ describe('CodeMirror live preview', () => {
 
     expect(window.synapseTest!.moveRangeToColumn(0, table.length, 'left', 0)).toBe(true);
     window.synapseHost!.receive({
-      protocolVersion: 1,
+      protocolVersion: 2,
       type: 'setMode',
       mode: 'reading',
       editable: false,
@@ -849,7 +1104,7 @@ describe('CodeMirror live preview', () => {
     expect(messages.filter((message) => message.type === 'error')).toEqual([]);
     expect(document.querySelectorAll('.synapse-column .synapse-table-frame')).toHaveLength(1);
     window.synapseHost!.receive({
-      protocolVersion: 1,
+      protocolVersion: 2,
       type: 'setMode',
       mode: 'editing',
       editable: true,
@@ -862,7 +1117,7 @@ describe('CodeMirror live preview', () => {
   it('keeps user host commands in history but excludes external refreshes', async () => {
     window.synapseHost!.receive(initialize('Alpha', 'editing'));
     window.synapseHost!.receive({
-      protocolVersion: 1,
+      protocolVersion: 2,
       type: 'replaceDocument',
       generation: 1,
       revision: 1,
@@ -873,7 +1128,7 @@ describe('CodeMirror live preview', () => {
     expect(window.synapseTest!.getText()).toBe('Alpha');
 
     window.synapseHost!.receive({
-      protocolVersion: 1,
+      protocolVersion: 2,
       type: 'replaceDocument',
       generation: 1,
       revision: 2,
@@ -887,7 +1142,7 @@ describe('CodeMirror live preview', () => {
   it('owns find navigation and replacement in CodeMirror search state', async () => {
     window.synapseHost!.receive(initialize('Alpha alpha Alpha', 'editing'));
     window.synapseHost!.receive({
-      protocolVersion: 1,
+      protocolVersion: 2,
       type: 'setSearch',
       query: 'Alpha',
       replacement: 'Omega',
@@ -903,7 +1158,7 @@ describe('CodeMirror live preview', () => {
     expect(document.querySelectorAll('.synapse-search-match')).toHaveLength(3);
 
     window.synapseHost!.receive({
-      protocolVersion: 1,
+      protocolVersion: 2,
       type: 'navigateSearch',
       direction: 'next',
     });
@@ -912,7 +1167,7 @@ describe('CodeMirror live preview', () => {
     expect((state.search as { currentIndex: number }).currentIndex).toBe(1);
 
     window.synapseHost!.receive({
-      protocolVersion: 1,
+      protocolVersion: 2,
       type: 'replaceSearch',
       all: true,
     });
@@ -933,7 +1188,7 @@ describe('CodeMirror live preview', () => {
     ].join('\n');
     window.synapseHost!.receive(initialize(markdown, 'reading'));
     window.synapseHost!.receive({
-      protocolVersion: 1,
+      protocolVersion: 2,
       type: 'setSearch',
       query: 'Alpha',
       replacement: '',
@@ -973,6 +1228,7 @@ describe('CodeMirror live preview', () => {
 
   it('supports keyboard navigation inside the WebView context menu', async () => {
     window.synapseHost!.receive(initialize('Alpha', 'editing'));
+    window.synapseTest!.setSelection(0, 5);
     document.querySelector<HTMLElement>('.cm-content')!.dispatchEvent(
       new MouseEvent('contextmenu', {
         bubbles: true,
@@ -988,7 +1244,9 @@ describe('CodeMirror live preview', () => {
     expect(document.activeElement).toBe(buttons[0]);
     menu!.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
     expect(document.activeElement).toBe(buttons[1]);
-    const format = Array.from(buttons).find((button) => button.textContent === '格式 ›')!;
+    const format = Array.from(buttons).find((button) =>
+      button.querySelector('.synapse-context-label')?.textContent === '格式',
+    )!;
     format.focus();
     format.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
     const submenu = format.parentElement!.querySelector<HTMLElement>('.synapse-context-submenu')!;
@@ -1000,7 +1258,320 @@ describe('CodeMirror live preview', () => {
     expect(document.querySelector('.synapse-context-menu')).toBeNull();
   });
 
-  it('reorders table rows and columns with drag handles', async () => {
+  it('renders the complete polished document menu with stable checked state', async () => {
+    const markdown = '**Alpha** Beta';
+    window.synapseHost!.receive(initialize(markdown, 'editing'));
+    window.synapseTest!.setSelection(2, 7);
+
+    const menu = openKeyboardContextMenu();
+    const labels = Array.from(
+      menu.querySelectorAll<HTMLButtonElement>(
+        ':scope > button, :scope > .synapse-context-submenu-group > button',
+      ),
+    ).map((button) =>
+      button.querySelector('.synapse-context-label')?.textContent,
+    );
+    expect(labels).toEqual([
+      '撤销',
+      '重做',
+      '复制',
+      '剪切',
+      '粘贴',
+      '以纯文本粘贴',
+      '全选',
+      '查找所选内容',
+      '替换…',
+      '插入',
+      '格式',
+      '段落',
+      '列表',
+    ]);
+    expect(menu.querySelectorAll('[role="separator"]')).toHaveLength(3);
+    expect(getComputedStyle(menu).backgroundColor).toBe(
+      'rgba(58, 58, 62, 0.9)',
+    );
+    expect(getComputedStyle(menu).borderRadius).toBe('12px');
+    expect(getComputedStyle(menu).fontSize).toBe('13px');
+    const copyStyle = getComputedStyle(menuButton(menu, '复制'));
+    expect(copyStyle.height).toBe('30px');
+    expect(copyStyle.paddingLeft).toBe('6px');
+    expect(copyStyle.paddingRight).toBe('10px');
+    expect(copyStyle.gap).toBe('2px');
+    expect(
+      getComputedStyle(
+        menuButton(menu, '复制').querySelector('.synapse-context-check')!,
+      ).width,
+    ).toBe('12px');
+    expect(menuButton(menu, '复制').querySelector('svg')).toBeNull();
+    expect(menuButton(menu, '以纯文本粘贴').textContent).toContain('⇧⌘V');
+
+    menuButton(menu, '格式').click();
+    const formatMenu = menuButton(menu, '格式').parentElement!
+      .querySelector<HTMLElement>('.synapse-context-submenu')!;
+    expect(menuButton(formatMenu, '加粗').getAttribute('aria-checked')).toBe(
+      'true',
+    );
+    expect(menuButton(formatMenu, '加粗').textContent).toContain('⌘B');
+    expect(menuButton(formatMenu, '斜体').textContent).toContain('⌘I');
+  });
+
+  it('reports surface interactions and accepts host menu dismissal without mutation', () => {
+    window.synapseHost!.receive(initialize('Alpha Beta', 'editing'));
+    window.synapseTest!.setSelection(0, 5);
+    const content = document.querySelector<HTMLElement>('.cm-content')!;
+    content.dispatchEvent(pointerEvent('pointerdown', 20, 20));
+    expect(messages.some((message) => message.type === 'pointerInteraction'))
+      .toBe(true);
+
+    const menu = openKeyboardContextMenu();
+    const scroll = document.querySelector<HTMLElement>('.cm-scroller')!;
+    scroll.scrollTop = 37;
+    const before = {
+      text: window.synapseTest!.getText(),
+      selection: window.synapseTest!.getSelection(),
+      scrollTop: scroll.scrollTop,
+    };
+
+    window.synapseHost!.receive({
+      protocolVersion: 2,
+      type: 'dismissContextMenu',
+    });
+
+    expect(menu.isConnected).toBe(false);
+    expect(window.synapseTest!.getText()).toBe(before.text);
+    expect(window.synapseTest!.getSelection()).toEqual(before.selection);
+    expect(scroll.scrollTop).toBe(before.scrollTop);
+  });
+
+  it('keeps read-only commands visible and disables every mutation', () => {
+    window.synapseHost!.receive(initialize('Alpha Beta', 'reading'));
+    window.synapseTest!.setSelection(0, 5);
+
+    const menu = openKeyboardContextMenu();
+    for (const label of [
+      '撤销',
+      '重做',
+      '剪切',
+      '粘贴',
+      '以纯文本粘贴',
+      '替换…',
+      '插入',
+      '格式',
+      '段落',
+      '列表',
+    ]) {
+      expect(menuButton(menu, label).disabled, label).toBe(true);
+    }
+    for (const label of ['复制', '全选', '查找所选内容']) {
+      expect(menuButton(menu, label).disabled, label).toBe(false);
+    }
+  });
+
+  it('preserves document and column selections in clipboard requests', () => {
+    window.synapseHost!.receive(initialize('Alpha Beta', 'editing'));
+    window.synapseTest!.setSelection(0, 5);
+    const before = window.synapseTest!.getText();
+    const menu = openKeyboardContextMenu();
+
+    expect(window.synapseTest!.getSelection()).toEqual({ anchor: 0, head: 5 });
+    menuButton(menu, '复制').click();
+    expect(clipboardRequest('copy')).toMatchObject({
+      target: 'document',
+      revision: 0,
+      selection: { anchor: 0, head: 5 },
+    });
+    expect(window.synapseTest!.getText()).toBe(before);
+
+    const markdown = [
+      '<!-- synapse:columns ratio="50:50" -->',
+      'Left',
+      '<!-- synapse:column -->',
+      'Right',
+      '<!-- synapse:columns-end -->',
+      '',
+    ].join('\n');
+    window.synapseHost!.receive(initialize(markdown, 'editing'));
+    window.synapseTest!.selectColumn('right', 0, 5);
+    const rightContent = document.querySelectorAll<HTMLElement>(
+      '.synapse-column .cm-content',
+    )[1];
+    rightContent.dispatchEvent(new MouseEvent('contextmenu', {
+      bubbles: true,
+      cancelable: true,
+      clientX: 20,
+      clientY: 20,
+    }));
+    menuButton(
+      document.querySelector<HTMLElement>('.synapse-context-menu')!,
+      '复制',
+    ).click();
+    const rightFrom = markdown.indexOf('Right');
+    expect(clipboardRequest('copy')).toMatchObject({
+      target: 'document',
+      selection: { anchor: rightFrom, head: rightFrom + 5 },
+    });
+  });
+
+  it('applies table cut only after host success and rejects stale paste', async () => {
+    const markdown = '| A | B |\n| --- | --- |\n| 1 | 2 |\n\nAfter';
+    window.synapseHost!.receive(initialize(markdown, 'editing'));
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+
+    let cell = tableCell(1, 0);
+    selectCellText(cell, 0, 1);
+    cell.dispatchEvent(new MouseEvent('contextmenu', {
+      bubbles: true,
+      cancelable: true,
+      clientX: 20,
+      clientY: 20,
+    }));
+    menuButton(document, '剪切').click();
+    const failedCut = clipboardRequest('cut');
+    expect(cell.textContent).toBe('1');
+    resolveClipboard(failedCut, { outcome: 'failure' });
+    await Promise.resolve();
+    expect(window.synapseTest!.getText()).toBe(markdown);
+
+    cell = tableCell(1, 0);
+    selectCellText(cell, 0, 1);
+    cell.dispatchEvent(new MouseEvent('contextmenu', {
+      bubbles: true,
+      cancelable: true,
+      clientX: 20,
+      clientY: 20,
+    }));
+    menuButton(document, '剪切').click();
+    const successfulCut = clipboardRequest('cut');
+    expect(cell.textContent).toBe('1');
+    resolveClipboard(successfulCut, { hasText: true });
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+    expect(window.synapseTest!.getText()).toContain('|  | 2 |');
+
+    cell = tableCell(1, 0);
+    cell.dispatchEvent(new MouseEvent('contextmenu', {
+      bubbles: true,
+      cancelable: true,
+      clientX: 20,
+      clientY: 20,
+    }));
+    const availability = clipboardRequest('availability');
+    resolveClipboard(availability, { hasText: true });
+    await Promise.resolve();
+    const paste = menuButton(document, '粘贴');
+    expect(paste.disabled).toBe(false);
+    paste.click();
+    const pasteRequest = clipboardRequest('paste');
+    const current = window.synapseTest!.getText();
+    window.synapseHost!.receive({
+      protocolVersion: 2,
+      type: 'applyChanges',
+      generation: 1,
+      baseRevision: 1,
+      revision: 2,
+      changes: [{ from: current.length, to: current.length, insert: '\nExternal' }],
+      addToHistory: false,
+    });
+    resolveClipboard(pasteRequest, { hasText: true, text: 'PASTE' });
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+    expect(window.synapseTest!.getText()).not.toContain('PASTE');
+    expect(window.synapseTest!.getText()).toContain('External');
+  });
+
+  it('uses the exact image source and the remembered text caret for paste', async () => {
+    const markdown = 'Before\n\n![one](one.png)\n\n![two](two.png)';
+    window.synapseHost!.receive(initialize(markdown, 'editing'));
+    window.synapseTest!.setSelection(3, 3);
+    const images = document.querySelectorAll<HTMLElement>(
+      '.synapse-image-block',
+    );
+
+    images[1].dispatchEvent(new MouseEvent('contextmenu', {
+      bubbles: true,
+      cancelable: true,
+      clientX: 20,
+      clientY: 20,
+    }));
+    menuButton(document, '复制图片').click();
+    const secondImageFrom = markdown.indexOf('![two]');
+    expect(messages.filter((message) => message.type === 'imageAction').at(-1))
+      .toMatchObject({
+        action: 'copy',
+        src: 'two.png',
+        revision: 0,
+        from: secondImageFrom,
+        to: secondImageFrom + '![two](two.png)'.length,
+      });
+
+    images[1].dispatchEvent(new MouseEvent('contextmenu', {
+      bubbles: true,
+      cancelable: true,
+      clientX: 20,
+      clientY: 20,
+    }));
+    const availability = clipboardRequest('availability');
+    resolveClipboard(availability, { hasText: true });
+    await Promise.resolve();
+    const paste = menuButton(document, '粘贴');
+    expect(paste.disabled).toBe(false);
+    paste.click();
+    expect(clipboardRequest('paste')).toMatchObject({
+      target: 'document',
+      selection: { anchor: 3, head: 3 },
+    });
+  });
+
+  it('marks destructive table actions and flips edge submenus into view', async () => {
+    window.synapseHost!.receive(initialize(
+      '| A | B |\n| --- | --- |\n| 1 | 2 |\n',
+      'editing',
+    ));
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+    const bounds = vi.spyOn(
+      HTMLElement.prototype,
+      'getBoundingClientRect',
+    ).mockImplementation(function (this: HTMLElement) {
+      if (this.classList.contains('synapse-context-submenu')) {
+        return rect(window.innerWidth - 40, window.innerHeight - 40, 220, 240);
+      }
+      if (this.classList.contains('synapse-context-submenu-group')) {
+        return rect(window.innerWidth - 30, window.innerHeight - 50, 20, 30);
+      }
+      return rect(0, 0, 0, 0);
+    });
+
+    tableCell(1, 0).dispatchEvent(new MouseEvent('contextmenu', {
+      bubbles: true,
+      cancelable: true,
+      clientX: window.innerWidth + 200,
+      clientY: window.innerHeight + 200,
+    }));
+    const menu = document.querySelector<HTMLElement>('.synapse-context-menu')!;
+    expect(Number.parseFloat(menu.style.left)).toBeLessThanOrEqual(
+      window.innerWidth - 8,
+    );
+    expect(Number.parseFloat(menu.style.top)).toBeLessThanOrEqual(
+      window.innerHeight - 8,
+    );
+    expect(menuButton(menu, '删除表格').dataset.destructive).toBe('true');
+    const menuCss = Array.from(document.styleSheets)
+      .flatMap((sheet) => Array.from(sheet.cssRules))
+      .map((rule) => rule.cssText)
+      .join('\n');
+    expect(menuCss).toContain(
+      '.synapse-context-menu button[data-destructive="true"]',
+    );
+
+    const row = menuButton(menu, '行');
+    row.click();
+    const submenu = row.parentElement!
+      .querySelector<HTMLElement>('.synapse-context-submenu')!;
+    expect(submenu.style.right).toBe('calc(100% + 6px)');
+    expect(Number.parseFloat(submenu.style.top)).toBeLessThan(0);
+    expect(menuButton(submenu, '删除行').dataset.destructive).toBe('true');
+    bounds.mockRestore();
+  });
+
+  it('reorders table rows and columns with pointer drag handles', async () => {
     const markdown = [
       '| A | B |',
       '| :--- | ---: |',
@@ -1012,20 +1583,132 @@ describe('CodeMirror live preview', () => {
     window.synapseHost!.receive(initialize(markdown, 'editing'));
     await new Promise((resolve) => window.setTimeout(resolve, 20));
 
-    let rowHandles = document.querySelectorAll<HTMLElement>('.synapse-table-row-handle[draggable="true"]');
-    rowHandles[0].dispatchEvent(new Event('dragstart', { bubbles: true }));
-    rowHandles[1].dispatchEvent(new Event('drop', { bubbles: true, cancelable: true }));
+    let dataRows = Array.from(
+      document.querySelectorAll<HTMLElement>('.synapse-table-frame table tr'),
+    ).slice(1);
+    setBounds(dataRows[0], rect(0, 100, 320, 40));
+    setBounds(dataRows[1], rect(0, 140, 320, 40));
+    let rowHandle = document.querySelector<HTMLElement>(
+      '.synapse-table-row-handle[data-table-row="1"]',
+    )!;
+    rowHandle.dispatchEvent(pointerEvent('pointerdown', 8, 110));
+    window.dispatchEvent(pointerEvent('pointermove', 8, 175));
+    window.dispatchEvent(pointerEvent('pointerup', 8, 175));
     await new Promise((resolve) => window.setTimeout(resolve, 20));
     expect(window.synapseTest!.getText().indexOf('| 3 | 4 |')).toBeLessThan(
       window.synapseTest!.getText().indexOf('| 1 | 2 |'),
     );
 
-    const columnHandles = document.querySelectorAll<HTMLElement>('.synapse-table-column-handle');
-    columnHandles[0].dispatchEvent(new Event('dragstart', { bubbles: true }));
-    columnHandles[1].dispatchEvent(new Event('drop', { bubbles: true, cancelable: true }));
+    const resolvedHeaderCells = tableColumnParents();
+    setBounds(resolvedHeaderCells[0], rect(100, 40, 100, 40));
+    setBounds(resolvedHeaderCells[1], rect(200, 40, 100, 40));
+    const columnHandle = document.querySelector<HTMLElement>(
+      '.synapse-table-column-handle[data-table-column="0"]',
+    )!;
+    columnHandle.dispatchEvent(pointerEvent('pointerdown', 120, 42));
+    window.dispatchEvent(pointerEvent('pointermove', 290, 42));
+    window.dispatchEvent(pointerEvent('pointerup', 290, 42));
     await new Promise((resolve) => window.setTimeout(resolve, 20));
     expect(window.synapseTest!.getText()).toContain('| B | A |');
     expect(window.synapseTest!.getText()).toContain('| ---: | :--- |');
+  });
+
+  it('moves the complete table block with pointer drag feedback', async () => {
+    const markdown = [
+      '| A | B |',
+      '| :--- | ---: |',
+      '| 1 | 2 |',
+      '',
+      'After',
+    ].join('\n');
+    window.synapseHost!.receive(initialize(markdown, 'editing'));
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+
+    const editor = document.querySelector<HTMLElement>('.cm-editor')!;
+    const scroller = document.querySelector<HTMLElement>('.cm-scroller')!;
+    const content = document.querySelector<HTMLElement>('.cm-content')!;
+    const after = Array.from(
+      document.querySelectorAll<HTMLElement>('.cm-line'),
+    ).find((line) => line.textContent === 'After')!;
+    setBounds(editor, rect(0, 0, 640, 320));
+    setBounds(scroller, rect(0, 0, 640, 320));
+    setBounds(content, rect(0, 0, 640, 240));
+    setBounds(after, rect(16, 180, 120, 32));
+    const elementFromPoint = Object.getOwnPropertyDescriptor(
+      document,
+      'elementFromPoint',
+    );
+    Object.defineProperty(document, 'elementFromPoint', {
+      configurable: true,
+      value: () => after,
+    });
+    const handle = document.querySelector<HTMLElement>(
+      '.synapse-table-block-handle',
+    )!;
+
+    handle.dispatchEvent(pointerEvent('pointerdown', 20, 20));
+    window.dispatchEvent(pointerEvent('pointermove', 96, 196));
+    expect(document.querySelector('.synapse-table-block-drop-indicator'))
+      .not.toBeNull();
+    window.dispatchEvent(pointerEvent('pointerup', 96, 196));
+    if (elementFromPoint) {
+      Object.defineProperty(document, 'elementFromPoint', elementFromPoint);
+    } else {
+      Reflect.deleteProperty(document, 'elementFromPoint');
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+
+    expect(window.synapseTest!.getText().indexOf('After')).toBeLessThan(
+      window.synapseTest!.getText().indexOf('| A | B |'),
+    );
+    expect(window.synapseTest!.getText()).toContain(
+      '| A | B |\n| :--- | ---: |\n| 1 | 2 |',
+    );
+    expect(document.querySelector('.synapse-table-dragging')).toBeNull();
+    expect(document.querySelector('.synapse-table-block-drop-indicator'))
+      .toBeNull();
+  });
+
+  it('auto-scrolls table pointer drags and fully cleans up cancellation', async () => {
+    const markdown = [
+      '| A | B |',
+      '| --- | --- |',
+      '| 1 | 2 |',
+      '| 3 | 4 |',
+      '',
+      'After',
+    ].join('\n');
+    window.synapseHost!.receive(initialize(markdown, 'editing'));
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+
+    const scroller = document.querySelector<HTMLElement>('.cm-scroller')!;
+    setBounds(scroller, rect(0, 0, 1000, 800));
+    scroller.scrollTop = 100;
+    const dataRows = Array.from(
+      document.querySelectorAll<HTMLElement>('.synapse-table-frame table tr'),
+    ).slice(1);
+    setBounds(dataRows[0], rect(0, 100, 320, 40));
+    setBounds(dataRows[1], rect(0, 140, 320, 40));
+    const handle = document.querySelector<HTMLElement>(
+      '.synapse-table-row-handle[data-table-row="1"]',
+    )!;
+    handle.dispatchEvent(pointerEvent('pointerdown', 8, 110));
+    window.dispatchEvent(pointerEvent('pointermove', 8, 790));
+    await new Promise((resolve) => window.setTimeout(resolve, 10));
+
+    expect(scroller.scrollTop).toBeGreaterThan(100);
+    expect(handle.classList.contains('synapse-table-dragging')).toBe(true);
+    window.dispatchEvent(new KeyboardEvent('keydown', {
+      key: 'Escape',
+      bubbles: true,
+      cancelable: true,
+    }));
+    await new Promise((resolve) => window.setTimeout(resolve, 10));
+
+    expect(window.synapseTest!.getText()).toBe(markdown);
+    expect(document.querySelector('.synapse-table-dragging')).toBeNull();
+    expect(document.querySelector('[class*="synapse-table-row-drop-"]'))
+      .toBeNull();
   });
 });
 
@@ -1035,7 +1718,7 @@ function initialize(
   focused = true,
 ): InitializeCommand {
   return {
-    protocolVersion: 1,
+    protocolVersion: 2,
     type: 'initialize',
     paneId: 'pane-1',
     noteId: 'note.md',
@@ -1057,6 +1740,14 @@ function initialize(
       highlight: '#fff59d',
       fontSize: 14,
       fontFamily: 'sans-serif',
+      contextMenu: {
+        background: 'rgba(58,58,62,.9)',
+        text: '#f7f7fa',
+        disabledText: 'rgba(247,247,250,.4)',
+        divider: 'rgba(255,255,255,.18)',
+        border: 'rgba(255,255,255,.14)',
+        danger: '#ff453a',
+      },
     },
   };
 }

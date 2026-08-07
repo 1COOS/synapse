@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/cupertino.dart';
@@ -50,7 +51,7 @@ void main() {
       final originalState = surface;
 
       await surface!.debugRunJavaScriptReturningResult(
-        'window.synapseHost.receive({protocolVersion:1,type:"revealRange",from:22,to:22,focus:true}); true',
+        'window.synapseHost.receive({protocolVersion:2,type:"revealRange",from:22,to:22,focus:true}); true',
       );
       await surface!.debugRunJavaScriptReturningResult(
         'window.synapseTest.insertText(" edited"); true',
@@ -72,7 +73,7 @@ void main() {
             (() => {
               const startedAt = performance.now();
               window.synapseHost.receive({
-                protocolVersion: 1,
+                protocolVersion: 2,
                 type: 'setMode',
                 mode: 'reading',
                 editable: false,
@@ -184,6 +185,104 @@ void main() {
     session.dispose();
   });
 
+  testWidgets('CodeMirror activates an unfocused table on its first pointer', (
+    tester,
+  ) async {
+    const markdown = '| A | B |\n| --- | --- |\n| 1 | 2 |\n';
+    final session = _session(markdown);
+    final hub = EditorDocumentHub(session);
+    CodeMirrorDocumentSurfaceState? surface;
+    var focused = false;
+    var focusRequests = 0;
+    late StateSetter updateHarness;
+
+    await tester.pumpWidget(
+      CupertinoApp(
+        home: StatefulBuilder(
+          builder: (context, setState) {
+            updateHarness = setState;
+            return SizedBox.expand(
+              child: CodeMirrorDocumentSurface(
+                key: const ValueKey('integration-unfocused-table'),
+                paneId: 'pane-unfocused-table',
+                hub: hub,
+                mode: CodeMirrorDocumentMode.editing,
+                focused: focused,
+                enabled: true,
+                appearance: WorkspaceAppearance.defaults,
+                loadAttachment: (_) async => null,
+                onImageAction: (_) async {},
+                onPastedImage: (_) async {},
+                onCommandRequest: (_) async {},
+                onOutlineChanged: (_) {},
+                onFocusPane: () {
+                  focusRequests += 1;
+                  if (!focused) updateHarness(() => focused = true);
+                },
+                onStateChanged: (state, attached) {
+                  surface = attached ? state : null;
+                },
+              ),
+            );
+          },
+        ),
+      ),
+    );
+    await _pumpUntil(tester, () => surface?.debugReady == true);
+    expect(
+      await surface!.debugRunJavaScriptReturningResult(
+        '''document.querySelector(
+          '.synapse-table-cell-editor[data-table-row="1"]'
+            + '[data-table-column="1"]',
+        ).contentEditable''',
+      ),
+      isNot('true'),
+    );
+
+    await surface!.debugRunJavaScriptReturningResult('''
+      (() => {
+        const cell = document.querySelector(
+          '.synapse-table-cell-editor[data-table-row="1"]'
+            + '[data-table-column="1"]',
+        );
+        const bounds = cell.getBoundingClientRect();
+        cell.dispatchEvent(new PointerEvent('pointerdown', {
+          bubbles: true,
+          cancelable: true,
+          pointerId: 51,
+          pointerType: 'mouse',
+          isPrimary: true,
+          button: 0,
+          buttons: 1,
+          clientX: bounds.left + Math.max(1, bounds.width / 2),
+          clientY: bounds.top + Math.max(1, bounds.height / 2),
+        }));
+        return true;
+      })()
+    ''');
+    await _pumpUntil(tester, () => focused && focusRequests == 1);
+    await _pumpUntilAsync(
+      tester,
+      () async =>
+          await surface!.debugRunJavaScriptReturningResult('''
+            (() => {
+              const cell = document.querySelector(
+                '.synapse-table-cell-editor[data-table-row="1"]'
+                  + '[data-table-column="1"]',
+              );
+              return cell.contentEditable === 'true' &&
+                document.activeElement === cell &&
+                document.querySelector('.synapse-table-controls') == null;
+            })()
+          ''') ==
+          true,
+    );
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    hub.dispose();
+    session.dispose();
+  });
+
   testWidgets('CodeMirror loads local attachments through chunked blobs', (
     tester,
   ) async {
@@ -252,14 +351,15 @@ void main() {
     session.dispose();
   });
 
-  testWidgets('CodeMirror table and columns controls commit parent history', (
+  testWidgets('CodeMirror table and columns interactions commit parent history', (
     tester,
   ) async {
     const markdown =
         '<!-- synapse-table width="720" -->\n'
         '| A | B |\n'
         '| :--- | ---: |\n'
-        '| 1 | 2 |\n\n'
+        '| 1 | 2 |\n'
+        '| 3 | 4 |\n\n'
         '<!-- synapse:columns ratio="50:50" -->\n'
         'Left\n'
         '<!-- synapse:column -->\n'
@@ -403,6 +503,195 @@ void main() {
     expect(session.controller.text, contains('| :--- | ---: |'));
 
     await surface!.debugRunJavaScriptReturningResult('''
+      window.__invokeSynapseTableMenu = (row, column, submenuLabel, actionLabel) => {
+        const cell = document.querySelector(
+          `.synapse-table-cell-editor[data-table-row="\${row}"]`
+            + `[data-table-column="\${column}"]`,
+        );
+        const bounds = cell.getBoundingClientRect();
+        cell.dispatchEvent(new MouseEvent('contextmenu', {
+          bubbles: true,
+          cancelable: true,
+          clientX: bounds.left + Math.max(2, bounds.width / 2),
+          clientY: bounds.top + Math.max(2, bounds.height / 2),
+        }));
+        const trigger = Array.from(document.querySelectorAll(
+          '.synapse-context-menu > .synapse-context-submenu-group > button',
+        )).find((button) => button.querySelector(
+          '.synapse-context-label',
+        )?.textContent === submenuLabel);
+        trigger.click();
+        const action = Array.from(trigger.parentElement.querySelectorAll(
+          '.synapse-context-submenu button',
+        )).find((button) => button.querySelector(
+          '.synapse-context-label',
+        )?.textContent === actionLabel);
+        action.click();
+        return true;
+      };
+      true
+    ''');
+
+    await surface!.debugRunJavaScriptReturningResult(
+      'window.__invokeSynapseTableMenu(1, 0, "行", "下方插入行")',
+    );
+    await surface!.flush();
+    await _pumpUntil(
+      tester,
+      () => session.controller.text.contains('| Edited | 2 |\n|  |  |'),
+    );
+    await surface!.debugRunJavaScriptReturningResult(
+      'window.__invokeSynapseTableMenu(2, 0, "行", "删除行")',
+    );
+    await surface!.flush();
+    await _pumpUntil(
+      tester,
+      () => !session.controller.text.contains('|  |  |'),
+    );
+
+    await surface!.debugRunJavaScriptReturningResult(
+      'window.__invokeSynapseTableMenu(1, 0, "列", "右侧插入列")',
+    );
+    await surface!.flush();
+    await _pumpUntil(
+      tester,
+      () => session.controller.text.contains('| A |  | B |'),
+    );
+    await surface!.debugRunJavaScriptReturningResult(
+      'window.__invokeSynapseTableMenu(1, 1, "列", "删除列")',
+    );
+    await surface!.flush();
+    await _pumpUntil(
+      tester,
+      () => !session.controller.text.contains('| A |  | B |'),
+    );
+
+    final scrollBeforeTableDrag =
+        (await surface!.debugRunJavaScriptReturningResult(
+                  'document.querySelector(".cm-scroller").scrollTop',
+                )
+                as num)
+            .toDouble();
+    await surface!.debugRunJavaScriptReturningResult('''
+      (() => {
+        const table = document.querySelector('.synapse-table-frame table');
+        const rows = Array.from(table.querySelectorAll('tr')).slice(1);
+        const handle = table.querySelector(
+          '.synapse-table-row-handle[data-table-row="1"]',
+        );
+        const start = handle.getBoundingClientRect();
+        const target = rows[1].getBoundingClientRect();
+        const x = start.left + Math.max(1, start.width / 2);
+        const startY = start.top + Math.max(1, start.height / 2);
+        const targetY = target.bottom - 1;
+        handle.dispatchEvent(new PointerEvent('pointerdown', {
+          bubbles: true,
+          cancelable: true,
+          pointerId: 41,
+          pointerType: 'mouse',
+          isPrimary: true,
+          button: 0,
+          buttons: 1,
+          clientX: x,
+          clientY: startY,
+        }));
+        window.dispatchEvent(new PointerEvent('pointermove', {
+          bubbles: true,
+          cancelable: true,
+          pointerId: 41,
+          pointerType: 'mouse',
+          isPrimary: true,
+          button: 0,
+          buttons: 1,
+          clientX: x,
+          clientY: targetY,
+        }));
+        window.dispatchEvent(new PointerEvent('pointerup', {
+          bubbles: true,
+          cancelable: true,
+          pointerId: 41,
+          pointerType: 'mouse',
+          isPrimary: true,
+          button: 0,
+          buttons: 0,
+          clientX: x,
+          clientY: targetY,
+        }));
+        return true;
+      })()
+    ''');
+    await surface!.flush();
+    await _pumpUntil(
+      tester,
+      () =>
+          session.controller.text.indexOf('| 3 | 4 |') <
+          session.controller.text.indexOf('| Edited | 2 |'),
+    );
+
+    await surface!.debugRunJavaScriptReturningResult('''
+      (() => {
+        const handles = Array.from(document.querySelectorAll(
+          '.synapse-table-column-handle',
+        ));
+        const start = handles[0].getBoundingClientRect();
+        const target = handles[1].parentElement.getBoundingClientRect();
+        const startX = start.left + Math.max(1, start.width / 2);
+        const y = start.top + Math.max(1, start.height / 2);
+        const targetX = target.right - 1;
+        handles[0].dispatchEvent(new PointerEvent('pointerdown', {
+          bubbles: true,
+          cancelable: true,
+          pointerId: 42,
+          pointerType: 'mouse',
+          isPrimary: true,
+          button: 0,
+          buttons: 1,
+          clientX: startX,
+          clientY: y,
+        }));
+        window.dispatchEvent(new PointerEvent('pointermove', {
+          bubbles: true,
+          cancelable: true,
+          pointerId: 42,
+          pointerType: 'mouse',
+          isPrimary: true,
+          button: 0,
+          buttons: 1,
+          clientX: targetX,
+          clientY: y,
+        }));
+        window.dispatchEvent(new PointerEvent('pointerup', {
+          bubbles: true,
+          cancelable: true,
+          pointerId: 42,
+          pointerType: 'mouse',
+          isPrimary: true,
+          button: 0,
+          buttons: 0,
+          clientX: targetX,
+          clientY: y,
+        }));
+        return true;
+      })()
+    ''');
+    await surface!.flush();
+    await _pumpUntil(
+      tester,
+      () => session.controller.text.contains('| B | A |'),
+    );
+    expect(session.controller.text, contains('| ---: | :--- |'));
+    final scrollAfterTableDrag =
+        (await surface!.debugRunJavaScriptReturningResult(
+                  'document.querySelector(".cm-scroller").scrollTop',
+                )
+                as num)
+            .toDouble();
+    expect(
+      (scrollAfterTableDrag - scrollBeforeTableDrag).abs(),
+      lessThanOrEqualTo(1),
+    );
+
+    await surface!.debugRunJavaScriptReturningResult('''
       (() => {
         const button = Array.from(document.querySelectorAll('.synapse-columns-controls button'))
           .find((item) => item.textContent === '2:3');
@@ -436,6 +725,149 @@ void main() {
     hub.dispose();
     session.dispose();
   });
+
+  testWidgets(
+    'CodeMirror table block uses pointer drag and keeps its boundary',
+    (tester) async {
+      const markdown =
+          '<!-- synapse-table width="720" -->\n'
+          '| A | B |\n'
+          '| :--- | ---: |\n'
+          '| 1 | 2 |\n\n'
+          'After';
+      final session = _session(markdown);
+      final hub = EditorDocumentHub(session);
+      CodeMirrorDocumentSurfaceState? surface;
+
+      await tester.pumpWidget(
+        CupertinoApp(
+          home: SizedBox.expand(
+            child: CodeMirrorDocumentSurface(
+              paneId: 'pane-table-block-drag',
+              hub: hub,
+              mode: CodeMirrorDocumentMode.editing,
+              focused: true,
+              enabled: true,
+              appearance: WorkspaceAppearance.defaults,
+              loadAttachment: (_) async => null,
+              onImageAction: (_) async {},
+              onPastedImage: (_) async {},
+              onCommandRequest: (_) async {},
+              onOutlineChanged: (_) {},
+              onFocusPane: () {},
+              onStateChanged: (state, attached) {
+                surface = attached ? state : null;
+              },
+            ),
+          ),
+        ),
+      );
+      await _pumpUntil(tester, () => surface?.debugReady == true);
+
+      final scrollBefore =
+          (await surface!.debugRunJavaScriptReturningResult(
+                    'document.querySelector(".cm-scroller").scrollTop',
+                  )
+                  as num)
+              .toDouble();
+      expect(
+        await surface!.debugRunJavaScriptReturningResult('''
+        (() => {
+          const handle = document.querySelector('.synapse-table-block-handle');
+          const target = Array.from(document.querySelectorAll('.cm-line'))
+            .find((line) => line.textContent.includes('After'));
+          const start = handle.getBoundingClientRect();
+          const destination = target.getBoundingClientRect();
+          const startX = start.left + Math.max(1, start.width / 2);
+          const startY = start.top + Math.max(1, start.height / 2);
+          const targetX = destination.left + Math.min(80, destination.width / 2);
+          const targetY = destination.top + Math.max(1, destination.height / 2);
+          window.__tableBlockDragTarget = { targetX, targetY };
+          handle.dispatchEvent(new PointerEvent('pointerdown', {
+            bubbles: true,
+            cancelable: true,
+            pointerId: 43,
+            pointerType: 'mouse',
+            isPrimary: true,
+            button: 0,
+            buttons: 1,
+            clientX: startX,
+            clientY: startY,
+          }));
+          window.dispatchEvent(new PointerEvent('pointermove', {
+            bubbles: true,
+            cancelable: true,
+            pointerId: 43,
+            pointerType: 'mouse',
+            isPrimary: true,
+            button: 0,
+            buttons: 1,
+            clientX: targetX,
+            clientY: targetY,
+          }));
+          return document.querySelector(
+            '.synapse-table-block-drop-indicator',
+          ) != null;
+        })()
+      '''),
+        isTrue,
+      );
+      await surface!.debugRunJavaScriptReturningResult('''
+      (() => {
+        const { targetX, targetY } = window.__tableBlockDragTarget;
+        window.dispatchEvent(new PointerEvent('pointerup', {
+          bubbles: true,
+          cancelable: true,
+          pointerId: 43,
+          pointerType: 'mouse',
+          isPrimary: true,
+          button: 0,
+          buttons: 0,
+          clientX: targetX,
+          clientY: targetY,
+        }));
+        return true;
+      })()
+    ''');
+      await surface!.flush();
+
+      expect(
+        session.controller.text.indexOf('After'),
+        lessThan(session.controller.text.indexOf('synapse-table width="720"')),
+      );
+      expect(
+        session.controller.text,
+        contains(
+          '<!-- synapse-table width="720" -->\n'
+          '| A | B |\n'
+          '| :--- | ---: |\n'
+          '| 1 | 2 |',
+        ),
+      );
+      expect(
+        await surface!.debugRunJavaScriptReturningResult('''
+        document.querySelector('.synapse-table-dragging') == null &&
+          document.querySelector('.synapse-table-block-drop-indicator') == null
+      '''),
+        isTrue,
+      );
+      final scrollAfter =
+          (await surface!.debugRunJavaScriptReturningResult(
+                    'document.querySelector(".cm-scroller").scrollTop',
+                  )
+                  as num)
+              .toDouble();
+      expect((scrollAfter - scrollBefore).abs(), lessThanOrEqualTo(1));
+
+      // Let CodeMirror release pointer state before WKWebView is removed.
+      await surface!.debugRunJavaScriptReturningResult(
+        'window.synapseHost.receive({protocolVersion:2,type:"dispose"}); true',
+      );
+      await tester.pumpWidget(const SizedBox.shrink());
+      hub.dispose();
+      session.dispose();
+    },
+  );
 
   testWidgets('CodeMirror keeps daily-note transactions inside the frame budget', (
     tester,
@@ -504,14 +936,25 @@ void main() {
     );
     await _pumpUntil(tester, () => surface?.debugReady == true);
     readyWatch.stop();
-    await _pumpUntilAsync(
-      tester,
-      () async =>
-          await surface!.debugRunJavaScriptReturningResult(
-            'document.querySelectorAll(".synapse-image-block img").length',
-          ) ==
-          12,
-    );
+    await _pumpUntilAsync(tester, () async {
+      final imageState =
+          jsonDecode(
+                await surface!.debugRunJavaScriptReturningResult('''
+                  JSON.stringify({
+                    blocks: document.querySelectorAll(
+                      '.synapse-image-block',
+                    ).length,
+                    images: document.querySelectorAll(
+                      '.synapse-image-block img',
+                    ).length,
+                  })
+                ''')
+                    as String,
+              )
+              as Map<String, Object?>;
+      final blocks = imageState['blocks']! as int;
+      return blocks > 0 && imageState['images'] == blocks;
+    });
     await tester.pump(const Duration(milliseconds: 100));
     final scrollBefore =
         (await surface!.debugRunJavaScriptReturningResult(
@@ -558,6 +1001,356 @@ void main() {
       lessThanOrEqualTo(1),
       reason: 'ordinary input must not move the viewport unexpectedly',
     );
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    hub.dispose();
+    session.dispose();
+  });
+
+  testWidgets(
+    'CodeMirror context menu keeps its target, polished style, and focus',
+    (tester) async {
+      final session = _session('Alpha Beta');
+      final hub = EditorDocumentHub(session);
+      CodeMirrorDocumentSurfaceState? surface;
+      final commandRequests = <EditorCommandRequest>[];
+      final clipboardRequests = <EditorClipboardRequest>[];
+      var pointerInteractions = 0;
+
+      await tester.pumpWidget(
+        CupertinoApp(
+          home: SizedBox.expand(
+            child: CodeMirrorDocumentSurface(
+              paneId: 'pane-context-menu',
+              hub: hub,
+              mode: CodeMirrorDocumentMode.editing,
+              focused: true,
+              enabled: true,
+              appearance: WorkspaceAppearance.defaults,
+              loadAttachment: (_) async => null,
+              onImageAction: (_) async {},
+              onPastedImage: (_) async {},
+              onCommandRequest: (request) async {
+                commandRequests.add(request);
+              },
+              onClipboardRequest: (request) async {
+                clipboardRequests.add(request);
+                return EditorClipboardResult(
+                  requestId: request.requestId,
+                  revision: request.revision,
+                  generation: request.generation,
+                  outcome: 'success',
+                  hasText: true,
+                  hasImage: false,
+                );
+              },
+              onOutlineChanged: (_) {},
+              onFocusPane: () {},
+              onPointerInteraction: () => pointerInteractions += 1,
+              onStateChanged: (state, attached) {
+                surface = attached ? state : null;
+              },
+            ),
+          ),
+        ),
+      );
+      await _pumpUntil(tester, () => surface?.debugReady == true);
+      final menuState =
+          jsonDecode(
+                await surface!.debugRunJavaScriptReturningResult('''
+              (() => {
+                window.synapseTest.setSelection(0, 5);
+                document.querySelector('.cm-content').dispatchEvent(
+                  new KeyboardEvent('keydown', {
+                    key: 'ContextMenu',
+                    code: 'ContextMenu',
+                    bubbles: true,
+                    cancelable: true,
+                  }),
+                );
+                const menu = document.querySelector('.synapse-context-menu');
+                const style = getComputedStyle(menu);
+                const button = menu.querySelector('button');
+                const computedMenu = {
+                  background: style.backgroundColor,
+                  radius: style.borderRadius,
+                  blur: style.backdropFilter || style.webkitBackdropFilter,
+                  fontSize: style.fontSize,
+                  itemHeight: getComputedStyle(button).height,
+                  itemPaddingLeft: getComputedStyle(button).paddingLeft,
+                  itemPaddingRight: getComputedStyle(button).paddingRight,
+                  itemGap: getComputedStyle(button).gap,
+                  checkWidth: getComputedStyle(
+                    button.querySelector('.synapse-context-check'),
+                  ).width,
+                };
+                const format = Array.from(menu.querySelectorAll(
+                  ':scope > .synapse-context-submenu-group > button',
+                )).find((candidate) => candidate.querySelector(
+                  '.synapse-context-label',
+                )?.textContent === '格式');
+                format.click();
+                const italic = Array.from(format.parentElement.querySelectorAll(
+                  '.synapse-context-submenu button',
+                )).find((candidate) => candidate.querySelector(
+                  '.synapse-context-label',
+                )?.textContent === '斜体');
+                italic.click();
+                return JSON.stringify({
+                  ...computedMenu,
+                  selection: window.synapseTest.getSelection(),
+                  focused: document.activeElement ===
+                    document.querySelector('.cm-content'),
+                });
+              })()
+            ''')
+                    as String,
+              )
+              as Map<String, Object?>;
+      await _pumpUntil(tester, () => commandRequests.isNotEmpty);
+
+      expect(menuState['background'], 'rgba(58, 58, 62, 0.9)');
+      expect(menuState['radius'], '12px');
+      expect(menuState['blur'], 'blur(24px)');
+      expect(menuState['fontSize'], '13px');
+      expect(menuState['itemHeight'], '30px');
+      expect(menuState['itemPaddingLeft'], '6px');
+      expect(menuState['itemPaddingRight'], '10px');
+      expect(menuState['itemGap'], '2px');
+      expect(menuState['checkWidth'], '12px');
+      expect(menuState['selection'], {'anchor': 0, 'head': 5});
+      expect(menuState['focused'], isTrue);
+      expect(commandRequests.single.group, 'format');
+      expect(commandRequests.single.command, 'italic');
+      expect(commandRequests.single.selection.anchor, 0);
+      expect(commandRequests.single.selection.head, 5);
+      expect(session.controller.text, 'Alpha Beta');
+      expect(pointerInteractions, greaterThan(0));
+
+      await surface!.debugRunJavaScriptReturningResult('''
+        (() => {
+          document.querySelector('.cm-content').dispatchEvent(
+            new KeyboardEvent('keydown', {
+              key: 'ContextMenu',
+              code: 'ContextMenu',
+              bubbles: true,
+              cancelable: true,
+            }),
+          );
+          return document.querySelector('.synapse-context-menu') != null;
+        })()
+      ''');
+      await surface!.dismissContextMenu();
+      await _pumpUntilAsync(
+        tester,
+        () async =>
+            await surface!.debugRunJavaScriptReturningResult(
+              'document.querySelector(".synapse-context-menu") == null',
+            ) ==
+            true,
+      );
+      expect(
+        await surface!.debugRunJavaScriptReturningResult(
+          'JSON.stringify(window.synapseTest.getSelection())',
+        ),
+        '{"anchor":0,"head":5}',
+      );
+
+      await surface!.debugRunJavaScriptReturningResult('''
+        (() => {
+          document.querySelector('.cm-content').dispatchEvent(
+            new KeyboardEvent('keydown', {
+              key: 'ContextMenu',
+              code: 'ContextMenu',
+              bubbles: true,
+              cancelable: true,
+            }),
+          );
+          const copy = Array.from(document.querySelectorAll(
+            '.synapse-context-menu > button',
+          )).find((button) => button.querySelector(
+            '.synapse-context-label',
+          )?.textContent === '复制');
+          copy.click();
+          return true;
+        })()
+      ''');
+      await _pumpUntil(
+        tester,
+        () => clipboardRequests.any((request) => request.action == 'copy'),
+      );
+      final copyRequest = clipboardRequests.lastWhere(
+        (request) => request.action == 'copy',
+      );
+      expect(copyRequest.target, 'document');
+      expect(copyRequest.revision, 0);
+      expect(copyRequest.selection?.anchor, 0);
+      expect(copyRequest.selection?.head, 5);
+      expect(
+        await surface!.debugRunJavaScriptReturningResult(
+          'document.activeElement === document.querySelector(".cm-content")',
+        ),
+        isTrue,
+      );
+
+      await tester.pumpWidget(const SizedBox.shrink());
+      hub.dispose();
+      session.dispose();
+    },
+  );
+
+  testWidgets('CodeMirror table paste waits for host clipboard confirmation', (
+    tester,
+  ) async {
+    const markdown = '| A | B |\n| --- | --- |\n| 1 | 2 |\n';
+    final session = _session(markdown);
+    final hub = EditorDocumentHub(session);
+    CodeMirrorDocumentSurfaceState? surface;
+    final clipboardRequests = <EditorClipboardRequest>[];
+    final pasteRelease = Completer<void>();
+    final errors = <Object>[];
+
+    await tester.pumpWidget(
+      CupertinoApp(
+        home: SizedBox.expand(
+          child: CodeMirrorDocumentSurface(
+            paneId: 'pane-table-clipboard',
+            hub: hub,
+            mode: CodeMirrorDocumentMode.editing,
+            focused: true,
+            enabled: true,
+            appearance: WorkspaceAppearance.defaults,
+            loadAttachment: (_) async => null,
+            onImageAction: (_) async {},
+            onPastedImage: (_) async {},
+            onCommandRequest: (_) async {},
+            onClipboardRequest: (request) async {
+              clipboardRequests.add(request);
+              if (request.action == 'paste') {
+                await pasteRelease.future;
+              }
+              return EditorClipboardResult(
+                requestId: request.requestId,
+                revision: request.revision,
+                generation: request.generation,
+                outcome: 'success',
+                hasText: true,
+                hasImage: false,
+                text: request.action == 'paste' ? 'Host text' : null,
+              );
+            },
+            onOutlineChanged: (_) {},
+            onFocusPane: () {},
+            onError: errors.add,
+            onStateChanged: (state, attached) {
+              surface = attached ? state : null;
+            },
+          ),
+        ),
+      ),
+    );
+    await _pumpUntil(tester, () => surface?.debugReady == true);
+    await surface!.debugRunJavaScriptReturningResult('''
+      (() => {
+        const cell = document.querySelector(
+          '.synapse-table-cell-editor[data-table-row="1"]'
+            + '[data-table-column="0"]',
+        );
+        const bounds = cell.getBoundingClientRect();
+        cell.dispatchEvent(new MouseEvent('contextmenu', {
+          bubbles: true,
+          cancelable: true,
+          clientX: bounds.left + Math.max(2, bounds.width / 2),
+          clientY: bounds.top + Math.max(2, bounds.height / 2),
+        }));
+        return true;
+      })()
+    ''');
+    await _pumpUntil(
+      tester,
+      () =>
+          clipboardRequests.any((request) => request.action == 'availability'),
+    );
+    await _pumpUntilAsync(
+      tester,
+      () async =>
+          await surface!.debugRunJavaScriptReturningResult('''
+            (() => {
+              const paste = Array.from(document.querySelectorAll(
+                '.synapse-context-menu > button',
+              )).find((button) => button.querySelector(
+                '.synapse-context-label',
+              )?.textContent === '粘贴');
+              return paste?.disabled === false;
+            })()
+          ''') ==
+          true,
+    );
+    await surface!.debugRunJavaScriptReturningResult('''
+      (() => {
+        const paste = Array.from(document.querySelectorAll(
+          '.synapse-context-menu > button',
+        )).find((button) => button.querySelector(
+          '.synapse-context-label',
+        )?.textContent === '粘贴');
+        paste.click();
+        return true;
+      })()
+    ''');
+    await _pumpUntil(
+      tester,
+      () => clipboardRequests.any((request) => request.action == 'paste'),
+    );
+    expect(
+      jsonDecode(
+        await surface!.debugRunJavaScriptReturningResult('''
+          JSON.stringify({
+            text: window.synapseTest.getText(),
+            revision: window.synapseTest.getRevision(),
+            pendingClipboard: window.synapseTest.getPendingClipboardCount(),
+          })
+        ''')
+            as String,
+      ),
+      {'text': markdown, 'revision': 0, 'pendingClipboard': 1},
+    );
+    pasteRelease.complete();
+    await tester.pump(const Duration(milliseconds: 500));
+    final afterPaste =
+        jsonDecode(
+              await surface!.debugRunJavaScriptReturningResult('''
+        JSON.stringify({
+          text: window.synapseTest.getText(),
+          revision: window.synapseTest.getRevision(),
+          pendingClipboard: window.synapseTest.getPendingClipboardCount(),
+          cellText: document.querySelector(
+            '.synapse-table-cell-editor[data-table-row="1"]'
+              + '[data-table-column="0"]',
+          )?.textContent,
+          menuOpen: document.querySelector('.synapse-context-menu') != null,
+          activeClass: document.activeElement?.className,
+        })
+      ''')
+                  as String,
+            )
+            as Map<String, Object?>;
+    expect(
+      afterPaste['text'],
+      contains('| 1Host text | 2 |'),
+      reason: '$afterPaste',
+    );
+    await surface!.flush();
+    await _pumpUntil(
+      tester,
+      () => session.controller.text.contains('| 1Host text | 2 |'),
+    );
+    expect(
+      clipboardRequests
+          .lastWhere((request) => request.action == 'paste')
+          .target,
+      'tableCell',
+    );
+    expect(errors, isEmpty);
 
     await tester.pumpWidget(const SizedBox.shrink());
     hub.dispose();
@@ -689,13 +1482,13 @@ void main() {
         () => first?.debugReady == true && second?.debugReady == true,
       );
       await second!.debugRunJavaScriptReturningResult(
-        'window.synapseHost.receive({protocolVersion:1,type:"revealRange",from:0,to:0,focus:false}); true',
+        'window.synapseHost.receive({protocolVersion:2,type:"revealRange",from:0,to:0,focus:false}); true',
       );
       final selectionBefore = await second!.debugRunJavaScriptReturningResult(
         'JSON.stringify(window.synapseTest.getSelection())',
       );
       await first!.debugRunJavaScriptReturningResult(
-        'window.synapseHost.receive({protocolVersion:1,type:"revealRange",from:11,to:11,focus:true}); true',
+        'window.synapseHost.receive({protocolVersion:2,type:"revealRange",from:11,to:11,focus:true}); true',
       );
       await first!.debugRunJavaScriptReturningResult(
         'window.synapseTest.insertText(" edited"); true',

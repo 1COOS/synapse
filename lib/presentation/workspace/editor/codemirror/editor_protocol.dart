@@ -1,6 +1,6 @@
 import 'dart:convert';
 
-const synapseEditorProtocolVersion = 1;
+const synapseEditorProtocolVersion = 2;
 
 enum CodeMirrorDocumentMode { editing, reading }
 
@@ -157,6 +157,73 @@ final class EditorCommandRequest {
   final int revision;
 }
 
+final class EditorClipboardRequest {
+  const EditorClipboardRequest({
+    required this.requestId,
+    required this.action,
+    required this.target,
+    required this.revision,
+    required this.generation,
+    this.selection,
+    this.text,
+  });
+
+  final int requestId;
+  final String action;
+  final String target;
+  final int revision;
+  final int generation;
+  final EditorSelection? selection;
+  final String? text;
+
+  factory EditorClipboardRequest.fromJson(Map<String, Object?> json) =>
+      EditorClipboardRequest(
+        requestId: json['requestId']! as int,
+        action: json['action']! as String,
+        target: json['target']! as String,
+        revision: json['revision']! as int,
+        generation: json['generation']! as int,
+        selection: json['selection'] == null
+            ? null
+            : EditorSelection.fromJson(
+                json['selection']! as Map<String, Object?>,
+              ),
+        text: json['text'] as String?,
+      );
+}
+
+final class EditorClipboardResult {
+  const EditorClipboardResult({
+    required this.requestId,
+    required this.revision,
+    required this.generation,
+    required this.outcome,
+    required this.hasText,
+    required this.hasImage,
+    this.text,
+  });
+
+  final int requestId;
+  final int revision;
+  final int generation;
+  final String outcome;
+  final bool hasText;
+  final bool hasImage;
+  final String? text;
+
+  Map<String, Object?> toJson() => {
+    'protocolVersion': synapseEditorProtocolVersion,
+    'type': 'clipboardResult',
+    'requestId': requestId,
+    'revision': revision,
+    'generation': generation,
+    'outcome': outcome,
+    'hasText': hasText,
+    'hasImage': hasImage,
+    if (text != null) 'text': text,
+  };
+}
+
 final class EditorTransaction {
   const EditorTransaction({
     required this.paneId,
@@ -214,6 +281,7 @@ final class EditorThemeData {
     required this.highlight,
     required this.fontSize,
     required this.fontFamily,
+    required this.contextMenu,
   });
 
   final String background;
@@ -226,6 +294,7 @@ final class EditorThemeData {
   final String highlight;
   final double fontSize;
   final String fontFamily;
+  final EditorContextMenuThemeData contextMenu;
 
   Map<String, Object?> toJson() => {
     'background': background,
@@ -238,6 +307,34 @@ final class EditorThemeData {
     'highlight': highlight,
     'fontSize': fontSize,
     'fontFamily': fontFamily,
+    'contextMenu': contextMenu.toJson(),
+  };
+}
+
+final class EditorContextMenuThemeData {
+  const EditorContextMenuThemeData({
+    required this.background,
+    required this.text,
+    required this.disabledText,
+    required this.divider,
+    required this.border,
+    required this.danger,
+  });
+
+  final String background;
+  final String text;
+  final String disabledText;
+  final String divider;
+  final String border;
+  final String danger;
+
+  Map<String, Object?> toJson() => {
+    'background': background,
+    'text': text,
+    'disabledText': disabledText,
+    'divider': divider,
+    'border': border,
+    'danger': danger,
   };
 }
 

@@ -55,22 +55,21 @@ class NoteContextMenuToolbar extends StatelessWidget {
     const screenPadding = 8.0;
     final topPadding = MediaQuery.paddingOf(context).top + screenPadding;
     final localAdjustment = Offset(screenPadding, topPadding);
-    return GestureDetector(
-      behavior: HitTestBehavior.translucent,
-      onTap: _dismiss,
-      onSecondaryTapDown: (_) => _dismiss(),
-      child: Padding(
-        padding: EdgeInsets.fromLTRB(
-          screenPadding,
-          topPadding,
-          screenPadding,
-          screenPadding,
+    return Padding(
+      padding: EdgeInsets.fromLTRB(
+        screenPadding,
+        topPadding,
+        screenPadding,
+        screenPadding,
+      ),
+      child: CustomSingleChildLayout(
+        delegate: _NoteContextMenuLayoutDelegate(
+          anchor: anchors.primaryAnchor - localAdjustment,
         ),
-        child: CustomSingleChildLayout(
-          delegate: _NoteContextMenuLayoutDelegate(
-            anchor: anchors.primaryAnchor - localAdjustment,
-          ),
-          child: TapRegion(groupId: tapRegionGroupId, child: child),
+        child: TapRegion(
+          groupId: tapRegionGroupId,
+          onTapOutside: (_) => _dismiss(),
+          child: child,
         ),
       ),
     );
@@ -176,6 +175,7 @@ class NoteMenuAction extends StatefulWidget {
     this.onHoverChanged,
     this.onOpenSubmenu,
     this.dismissContextMenuOnPressed = true,
+    this.destructive = false,
   });
 
   final Key itemKey;
@@ -190,6 +190,7 @@ class NoteMenuAction extends StatefulWidget {
   final ValueChanged<bool>? onHoverChanged;
   final VoidCallback? onOpenSubmenu;
   final bool dismissContextMenuOnPressed;
+  final bool destructive;
 
   @override
   State<NoteMenuAction> createState() => _NoteMenuActionState();
@@ -216,6 +217,7 @@ class _NoteMenuActionState extends State<NoteMenuAction> {
       commandBeforeDismiss: true,
       onInteractionStart: interaction?.onStart,
       onInteractionEnd: interaction?.onEnd,
+      destructive: widget.destructive,
     );
   }
 }
@@ -288,48 +290,44 @@ class _NoteMenuSubmenuState extends State<NoteMenuSubmenu> {
     _overlayEntry = OverlayEntry(
       builder: (context) {
         return Positioned.fill(
-          child: GestureDetector(
-            behavior: HitTestBehavior.translucent,
-            onTap: _dismissAll,
-            onSecondaryTapDown: (_) => _dismissAll(),
-            child: CompositedTransformFollower(
-              link: _link,
-              showWhenUnlinked: false,
-              targetAnchor: Alignment.topRight,
-              followerAnchor: Alignment.topLeft,
-              offset: const Offset(0, -8),
-              child: MouseRegion(
-                onEnter: (_) {
-                  _submenuHovered = true;
-                  _closeTimer?.cancel();
-                },
-                onExit: (_) {
-                  _submenuHovered = false;
-                  _scheduleClose();
-                },
-                child: Padding(
-                  padding: const EdgeInsets.only(left: 6),
-                  child: Align(
-                    alignment: Alignment.topLeft,
-                    widthFactor: 1,
-                    heightFactor: 1,
-                    child: TapRegion(
-                      groupId: widget.tapRegionGroupId,
-                      child: WorkspaceAppearanceScope(
-                        appearance: appearance,
-                        child: _NoteMenuInteractionScope(
-                          onStart: interaction?.onStart,
-                          onEnd: interaction?.onEnd,
-                          child: WorkspaceContextMenuPanel(
-                            panelKey: widget.submenuKey,
-                            width: 136,
-                            autofocusFirst: true,
-                            onDismiss: _dismissAll,
-                            onNavigateBack: () {
-                              _hideOverlay();
-                            },
-                            children: widget.children,
-                          ),
+          child: CompositedTransformFollower(
+            link: _link,
+            showWhenUnlinked: false,
+            targetAnchor: Alignment.topRight,
+            followerAnchor: Alignment.topLeft,
+            offset: const Offset(0, -8),
+            child: MouseRegion(
+              onEnter: (_) {
+                _submenuHovered = true;
+                _closeTimer?.cancel();
+              },
+              onExit: (_) {
+                _submenuHovered = false;
+                _scheduleClose();
+              },
+              child: Padding(
+                padding: const EdgeInsets.only(left: 6),
+                child: Align(
+                  alignment: Alignment.topLeft,
+                  widthFactor: 1,
+                  heightFactor: 1,
+                  child: TapRegion(
+                    groupId: widget.tapRegionGroupId,
+                    onTapOutside: (_) => _dismissAll(),
+                    child: WorkspaceAppearanceScope(
+                      appearance: appearance,
+                      child: _NoteMenuInteractionScope(
+                        onStart: interaction?.onStart,
+                        onEnd: interaction?.onEnd,
+                        child: WorkspaceContextMenuPanel(
+                          panelKey: widget.submenuKey,
+                          width: 136,
+                          autofocusFirst: true,
+                          onDismiss: _dismissAll,
+                          onNavigateBack: () {
+                            _hideOverlay();
+                          },
+                          children: widget.children,
                         ),
                       ),
                     ),

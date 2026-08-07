@@ -17,6 +17,7 @@ import 'browser_context_menu_guard.dart';
 
 import 'workspace/workspace_controls.dart';
 import 'workspace/workspace_chrome.dart';
+import 'workspace/workspace_context_menu.dart';
 import 'workspace/workspace_layout.dart';
 import 'workspace/workspace_note_pane.dart';
 import 'workspace/workspace_resources.dart';
@@ -58,6 +59,7 @@ class SynapseWorkspace extends ConsumerStatefulWidget {
 class _SynapseWorkspaceState extends ConsumerState<SynapseWorkspace> {
   final _searchController = TextEditingController();
   final _outlineNavigationController = WorkspaceOutlineNavigationController();
+  final _contextMenuCoordinator = WorkspaceContextMenuCoordinator();
   bool _openingSettings = false;
 
   late WorkspaceState _workspace;
@@ -149,6 +151,7 @@ class _SynapseWorkspaceState extends ConsumerState<SynapseWorkspace> {
   void dispose() {
     _searchController.dispose();
     _outlineNavigationController.dispose();
+    _contextMenuCoordinator.dispose();
     super.dispose();
   }
 
@@ -667,6 +670,7 @@ class _SynapseWorkspaceState extends ConsumerState<SynapseWorkspace> {
             child: IgnorePointer(
               ignoring: _migrationRequired,
               child: ResourceTree(
+                contextMenuCoordinator: _contextMenuCoordinator,
                 nodes: _resources,
                 selectedId: _selectedResource?.id,
                 collapsedFolderIds: _collapsedFolderIds,
@@ -960,6 +964,7 @@ class _SynapseWorkspaceState extends ConsumerState<SynapseWorkspace> {
       controller: _controller,
       outlineNavigationController: _outlineNavigationController,
       documentSurfaceFactory: widget.documentSurfaceFactory,
+      contextMenuCoordinator: _contextMenuCoordinator,
     );
   }
 

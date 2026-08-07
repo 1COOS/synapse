@@ -7,11 +7,64 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:synapse/domain/vault/vault_resource.dart';
 import 'package:synapse/application/settings/synapse_settings.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
+import 'package:synapse/presentation/cupertino/workspace/workspace_context_menu.dart';
+import 'package:synapse/presentation/cupertino/workspace/workspace_resources.dart';
 
 import '../../support/workspace_fakes.dart';
 import '../../support/workspace_harness.dart';
 
 void main() {
+  testWidgets('resource secondary click dismisses other menus only once', (
+    tester,
+  ) async {
+    final coordinator = WorkspaceContextMenuCoordinator();
+    final otherOwner = Object();
+    var dismissalCount = 0;
+    coordinator.register(otherOwner, ({required bool restoreFocus}) {
+      dismissalCount += 1;
+    });
+    addTearDown(coordinator.dispose);
+    const note = VaultResourceNode(
+      id: 'note-1',
+      title: 'Alpha',
+      path: 'Alpha.md',
+      type: VaultResourceType.note,
+    );
+
+    await tester.pumpWidget(
+      CupertinoApp(
+        home: ResourceTree(
+          contextMenuCoordinator: coordinator,
+          nodes: const [note],
+          selectedId: note.id,
+          collapsedFolderIds: const {},
+          onSelect: (_) {},
+          onToggleFolder: (_) {},
+          onCreateFolder: (_) {},
+          onCreateNote: (_) {},
+          onCreateSiblingNote: (_) {},
+          onRenameFolder: (_) {},
+          onRenameNote: (_) {},
+          onCopyNote: (_) {},
+          onMoveNote: (_) {},
+          onDelete: (_) {},
+        ),
+      ),
+    );
+
+    await tester.tap(
+      find.byKey(const Key('resource-row-note-1')),
+      buttons: kSecondaryMouseButton,
+    );
+    await tester.pumpAndSettle();
+
+    expect(dismissalCount, 1);
+    expect(
+      find.byKey(const Key('resource-context-menu-note-1')),
+      findsOneWidget,
+    );
+  });
+
   testWidgets('selecting a note clears only that note source selection', (
     tester,
   ) async {
@@ -383,8 +436,8 @@ void main() {
     final noteMenuContainer = tester.widget<Container>(noteMenu);
     final noteMenuDecoration = noteMenuContainer.decoration! as BoxDecoration;
     expect(tester.getSize(noteMenu).width, 188);
-    expect(noteMenuDecoration.color, const Color(0xE65F5F5F));
-    expect(noteMenuDecoration.borderRadius, BorderRadius.circular(18));
+    expect(noteMenuDecoration.color, const Color(0xE63A3A3E));
+    expect(noteMenuDecoration.borderRadius, BorderRadius.circular(12));
 
     final moveItem = find.byKey(Key('note-menu-move-${note.id}'));
     expect(
@@ -410,6 +463,12 @@ void main() {
       matching: find.byType(AnimatedContainer),
     );
     final beforeHover = tester.widget<AnimatedContainer>(moveItemSurface);
+    expect(beforeHover.padding, const EdgeInsets.only(left: 6, right: 10));
+    final itemRow = tester.widget<Row>(
+      find.descendant(of: moveItem, matching: find.byType(Row)),
+    );
+    expect((itemRow.children[0] as SizedBox).width, 12);
+    expect((itemRow.children[1] as SizedBox).width, 2);
     expect(
       (beforeHover.decoration! as BoxDecoration).color,
       const Color(0x00000000),

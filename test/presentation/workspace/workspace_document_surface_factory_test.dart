@@ -76,12 +76,14 @@ final class _FakeDocumentSurfaceFactory implements DocumentSurfaceFactory {
     required EditorImageActionHandler onImageAction,
     required EditorPastedImageHandler onPastedImage,
     required EditorCommandRequestHandler onCommandRequest,
+    required EditorClipboardRequestHandler onClipboardRequest,
     required ValueChanged<List<OutlineNode>> onOutlineChanged,
     required VoidCallback onFocusPane,
+    required VoidCallback onPointerInteraction,
     EditorCommandStateHandler? onCommandState,
     EditorPerformanceSampleHandler? onPerformanceSample,
-    VoidCallback? onFindRequested,
-    VoidCallback? onReplaceRequested,
+    EditorFindRequestHandler? onFindRequested,
+    EditorFindRequestHandler? onReplaceRequested,
     ValueChanged<Uri>? onOpenLink,
     ValueChanged<Object>? onError,
     void Function(EditorDocumentSurfaceController state, bool attached)?
@@ -137,6 +139,9 @@ final class _FakeDocumentSurfaceState extends State<_FakeDocumentSurface>
 
   @override
   Future<void> closeSearch() async {}
+
+  @override
+  Future<void> dismissContextMenu() async {}
 
   @override
   Widget build(BuildContext context) =>

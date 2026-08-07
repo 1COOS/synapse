@@ -31,6 +31,29 @@ Future<void> clickNoteMenuItemWithMouse(
 }
 
 void main() {
+  testWidgets('workspace context menu coordinator dismisses inactive owners', (
+    tester,
+  ) async {
+    final coordinator = WorkspaceContextMenuCoordinator();
+    final first = Object();
+    final second = Object();
+    final dismissals = <Object>[];
+    bool? restoredFocus;
+    coordinator.register(first, ({required bool restoreFocus}) {
+      dismissals.add(first);
+    });
+    coordinator.register(second, ({required bool restoreFocus}) {
+      dismissals.add(second);
+      restoredFocus = restoreFocus;
+    });
+
+    coordinator.dismissAll(except: first);
+
+    expect(dismissals, [second]);
+    expect(restoredFocus, isFalse);
+    coordinator.dispose();
+  });
+
   for (final error in <Object>[
     PlatformException(code: 'clipboard-failed'),
     StateError('menu command failed'),
@@ -276,8 +299,8 @@ void main() {
 
     final menuContainer = tester.widget<Container>(menu);
     final decoration = menuContainer.decoration! as BoxDecoration;
-    expect(decoration.color, const Color(0xE65F5F5F));
-    expect(decoration.borderRadius, BorderRadius.circular(18));
+    expect(decoration.color, const Color(0xE63A3A3E));
+    expect(decoration.borderRadius, BorderRadius.circular(12));
     expect(tester.getSize(find.byKey(const Key('note-menu-copy'))).height, 30);
     expect(
       tester.getSize(find.byKey(const Key('note-menu-separator-0'))).height,
@@ -286,11 +309,11 @@ void main() {
 
     expect(
       noteMenuItemTextColor(tester, const Key('note-menu-copy')),
-      const Color(0x73F2F2F7),
+      const Color(0x66F7F7FA),
     );
     expect(
       noteMenuItemTextColor(tester, const Key('note-menu-text-format')),
-      const Color(0x73F2F2F7),
+      const Color(0x66F7F7FA),
     );
     final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
     await mouse.addPointer();
@@ -361,6 +384,74 @@ void main() {
     expect(find.byKey(const Key('note-submenu-text-format')), findsNothing);
     expect(find.byKey(const Key('note-editor')), findsNothing);
     await mouse.removePointer();
+  });
+
+  testWidgets(
+    'resource and note context menus dismiss each other without focus rollback',
+    (tester) async {
+      final vault = MemoryVaultBackend(seedExampleData: false);
+      final note = await vault.createNote(parentPath: '', title: 'Menu Focus');
+      await vault.updateMarkdown(noteId: note.id, markdown: 'Alpha beta\n');
+
+      await pumpWorkspace(tester, vault: vault);
+      await activateLiveMarkdownBlock(tester, blockIndex: 0);
+
+      final rowFocus = tester
+          .widget<Focus>(find.byKey(Key('resource-row-focus-${note.id}')))
+          .focusNode!;
+      rowFocus.requestFocus();
+      await tester.pump();
+      await tester.sendKeyEvent(LogicalKeyboardKey.contextMenu);
+      await tester.pumpAndSettle();
+
+      final resourceMenu = find.byKey(Key('resource-context-menu-${note.id}'));
+      expect(resourceMenu, findsOneWidget);
+
+      final editor = find.byKey(const Key('note-editor'));
+      if (editor.evaluate().isEmpty) {
+        await tester.tap(
+          find.byKey(const Key('live-markdown-block-preview-0')),
+        );
+      } else {
+        await tester.tap(editor);
+      }
+      await tester.pumpAndSettle();
+
+      expect(resourceMenu, findsNothing);
+      expect(activeLiveMarkdownTextField(tester).focusNode.hasFocus, isTrue);
+
+      await openNoteContextMenu(tester);
+      expect(find.byKey(const Key('note-context-menu')), findsOneWidget);
+
+      await tester.tap(find.byKey(Key('resource-row-${note.id}')));
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const Key('note-context-menu')), findsNothing);
+      expect(rowFocus.hasPrimaryFocus, isTrue);
+    },
+  );
+
+  testWidgets('right clicking a resource replaces an open note context menu', (
+    tester,
+  ) async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Menu Swap');
+    await vault.updateMarkdown(noteId: note.id, markdown: 'Alpha beta\n');
+
+    await pumpWorkspace(tester, vault: vault);
+    await activateLiveMarkdownBlock(tester, blockIndex: 0);
+    await openNoteContextMenu(tester);
+
+    expect(find.byKey(const Key('note-context-menu')), findsOneWidget);
+
+    await tester.tap(
+      find.byKey(Key('resource-row-${note.id}')),
+      buttons: kSecondaryMouseButton,
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('note-context-menu')), findsNothing);
+    expect(find.byKey(Key('resource-context-menu-${note.id}')), findsOneWidget);
   });
 
   testWidgets('note editor context menu bolds selected markdown text', (

@@ -12,6 +12,17 @@ import 'editor_protocol.dart';
 
 export 'document_surface.dart';
 
+Future<EditorClipboardResult> _unavailableClipboardHandler(
+  EditorClipboardRequest request,
+) async => EditorClipboardResult(
+  requestId: request.requestId,
+  revision: request.revision,
+  generation: request.generation,
+  outcome: 'unavailable',
+  hasText: false,
+  hasImage: false,
+);
+
 class CodeMirrorDocumentSurface extends StatefulWidget {
   const CodeMirrorDocumentSurface({
     super.key,
@@ -25,8 +36,10 @@ class CodeMirrorDocumentSurface extends StatefulWidget {
     required this.onImageAction,
     required this.onPastedImage,
     required this.onCommandRequest,
+    this.onClipboardRequest = _unavailableClipboardHandler,
     required this.onOutlineChanged,
     required this.onFocusPane,
+    this.onPointerInteraction,
     this.onCommandState,
     this.onPerformanceSample,
     this.onFindRequested,
@@ -46,12 +59,14 @@ class CodeMirrorDocumentSurface extends StatefulWidget {
   final EditorImageActionHandler onImageAction;
   final EditorPastedImageHandler onPastedImage;
   final EditorCommandRequestHandler onCommandRequest;
+  final EditorClipboardRequestHandler onClipboardRequest;
   final ValueChanged<List<OutlineNode>> onOutlineChanged;
   final VoidCallback onFocusPane;
+  final VoidCallback? onPointerInteraction;
   final EditorCommandStateHandler? onCommandState;
   final EditorPerformanceSampleHandler? onPerformanceSample;
-  final VoidCallback? onFindRequested;
-  final VoidCallback? onReplaceRequested;
+  final EditorFindRequestHandler? onFindRequested;
+  final EditorFindRequestHandler? onReplaceRequested;
   final ValueChanged<Uri>? onOpenLink;
   final ValueChanged<Object>? onError;
   final void Function(CodeMirrorDocumentSurfaceState state, bool attached)?
@@ -233,6 +248,12 @@ class CodeMirrorDocumentSurfaceState extends State<CodeMirrorDocumentSurface>
   }
 
   @override
+  Future<void> dismissContextMenu() => _sendCommand({
+    'protocolVersion': synapseEditorProtocolVersion,
+    'type': 'dismissContextMenu',
+  });
+
+  @override
   void applyHubUpdate(EditorDocumentUpdate update) {
     if (!_ready || _disposed) {
       _revision = update.revision;
@@ -357,6 +378,8 @@ class CodeMirrorDocumentSurfaceState extends State<CodeMirrorDocumentSurface>
           if (json['focused'] == true) {
             widget.onFocusPane();
           }
+        case 'pointerInteraction':
+          widget.onPointerInteraction?.call();
         case 'outlineChanged':
           widget.onOutlineChanged(_outlineFromJson(json));
         case 'commandState':
@@ -375,6 +398,8 @@ class CodeMirrorDocumentSurfaceState extends State<CodeMirrorDocumentSurface>
                 action: json['action']! as String,
                 src: json['src']! as String,
                 revision: json['revision']! as int,
+                from: json['from'] as int?,
+                to: json['to'] as int?,
                 targetSrc: json['targetSrc'] as String?,
                 beforeTarget: json['beforeTarget'] as bool?,
                 width: json['width'] as int?,
@@ -396,11 +421,19 @@ class CodeMirrorDocumentSurfaceState extends State<CodeMirrorDocumentSurface>
               ),
             ),
           );
+        case 'clipboardRequest':
+          unawaited(_handleClipboardRequest(json));
         case 'findRequest':
           if (json['replace'] == true) {
-            widget.onReplaceRequested?.call();
+            widget.onReplaceRequested?.call(
+              json['selectionText'] as String?,
+              json['anchorOffset'] as int?,
+            );
           } else {
-            widget.onFindRequested?.call();
+            widget.onFindRequested?.call(
+              json['selectionText'] as String?,
+              json['anchorOffset'] as int?,
+            );
           }
         case 'flushAck':
           final requestId = json['requestId']! as int;
@@ -507,6 +540,39 @@ class CodeMirrorDocumentSurfaceState extends State<CodeMirrorDocumentSurface>
     );
   }
 
+  Future<void> _handleClipboardRequest(Map<String, Object?> json) async {
+    final request = EditorClipboardRequest.fromJson(json);
+    EditorClipboardResult result;
+    try {
+      result = await widget.onClipboardRequest(request);
+    } catch (error, stackTrace) {
+      widget.onError?.call(error);
+      FlutterError.reportError(
+        FlutterErrorDetails(
+          exception: error,
+          stack: stackTrace,
+          library: 'synapse CodeMirror editor',
+          context: ErrorDescription('while handling a clipboard request'),
+        ),
+      );
+      result = EditorClipboardResult(
+        requestId: request.requestId,
+        revision: request.revision,
+        generation: request.generation,
+        outcome: 'failure',
+        hasText: false,
+        hasImage: false,
+      );
+    }
+    if (_disposed ||
+        request.requestId != result.requestId ||
+        request.revision != result.revision ||
+        request.generation != result.generation) {
+      return;
+    }
+    await _sendCommand(result.toJson());
+  }
+
   List<OutlineNode> _outlineFromJson(Map<String, Object?> json) {
     final flat = <_MutableEditorOutline>[];
     for (final item in json['outline']! as List<Object?>) {
@@ -548,12 +614,29 @@ class CodeMirrorDocumentSurfaceState extends State<CodeMirrorDocumentSurface>
       highlight: _cssColor(workspaceMarkdownHighlightColor),
       fontSize: appearance.noteFontSize,
       fontFamily: '-apple-system, BlinkMacSystemFont, sans-serif',
+      contextMenu: EditorContextMenuThemeData(
+        background: _cssColorWithAlpha(workspaceResourceMenuBackground),
+        text: _cssColorWithAlpha(workspaceResourceMenuText),
+        disabledText: _cssColorWithAlpha(workspaceNoteMenuDisabledText),
+        divider: _cssColorWithAlpha(workspaceResourceMenuLine),
+        border: _cssColorWithAlpha(workspaceResourceMenuBorder),
+        danger: _cssColorWithAlpha(workspaceDangerColor),
+      ),
     );
   }
 
   String _cssColor(Color color) {
     final value = color.toARGB32();
     return '#${(value & 0x00ffffff).toRadixString(16).padLeft(6, '0')}';
+  }
+
+  String _cssColorWithAlpha(Color color) {
+    final value = color.toARGB32();
+    final red = (value >> 16) & 0xff;
+    final green = (value >> 8) & 0xff;
+    final blue = value & 0xff;
+    final alpha = ((value >> 24) & 0xff) / 255;
+    return 'rgba($red, $green, $blue, ${alpha.toStringAsFixed(3)})';
   }
 
   @override

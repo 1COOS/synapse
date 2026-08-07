@@ -186,6 +186,25 @@ final class WorkspaceEditorCoordinator {
     return PaneEditorCommandOutcome.committed;
   }
 
+  Future<PaneEditorCommandOutcome> pastePlainTextIntoNote(
+    PaneEditorContext context,
+    TextEditingValue target,
+  ) async {
+    if (_resolvePasteTarget(context, target) == null) {
+      return PaneEditorCommandOutcome.staleTarget;
+    }
+    final text = (await Clipboard.getData(Clipboard.kTextPlain))?.text;
+    final resolved = _resolvePasteTarget(context, target);
+    if (resolved == null) {
+      return PaneEditorCommandOutcome.staleTarget;
+    }
+    if (text == null || text.isEmpty) {
+      return PaneEditorCommandOutcome.unchanged;
+    }
+    _replaceEditorSelection(resolved.session, text, target: target);
+    return PaneEditorCommandOutcome.committed;
+  }
+
   Future<PaneEditorCommandOutcome> pasteImportedImage(
     PaneEditorContext context,
     ImportedImage image,

@@ -1,10 +1,49 @@
 import 'dart:async';
+import 'dart:ui';
 
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
 
 import 'workspace_theme.dart';
+
+typedef WorkspaceContextMenuDismissCallback =
+    void Function({required bool restoreFocus});
+
+final class WorkspaceContextMenuCoordinator {
+  final Map<Object, WorkspaceContextMenuDismissCallback> _dismissers =
+      Map<Object, WorkspaceContextMenuDismissCallback>.identity();
+  bool _dismissing = false;
+
+  void register(Object owner, WorkspaceContextMenuDismissCallback dismiss) {
+    _dismissers[owner] = dismiss;
+  }
+
+  void unregister(Object owner) {
+    _dismissers.remove(owner);
+  }
+
+  void dismissAll({Object? except, bool restoreFocus = false}) {
+    if (_dismissing) {
+      return;
+    }
+    _dismissing = true;
+    try {
+      ContextMenuController.removeAny();
+      for (final entry in _dismissers.entries.toList(growable: false)) {
+        if (!identical(entry.key, except)) {
+          entry.value(restoreFocus: restoreFocus);
+        }
+      }
+    } finally {
+      _dismissing = false;
+    }
+  }
+
+  void dispose() {
+    _dismissers.clear();
+  }
+}
 
 class WorkspaceContextMenuPanel extends StatefulWidget {
   const WorkspaceContextMenuPanel({
@@ -146,19 +185,25 @@ class _WorkspaceContextMenuPanelState extends State<WorkspaceContextMenuPanel> {
     return _WorkspaceContextMenuKeyboardScope(
       controller: this,
       child: IntrinsicWidth(
-        child: Container(
-          key: widget.panelKey,
-          constraints: BoxConstraints(minWidth: widget.width),
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-          decoration: BoxDecoration(
-            color: workspaceResourceMenuBackground,
-            borderRadius: workspaceResourceMenuRadius,
-            border: Border.all(color: const Color(0xFF8A8A8A), width: 1),
-            boxShadow: workspaceContextMenuPanelShadow,
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: widget.children,
+        child: ClipRRect(
+          borderRadius: workspaceResourceMenuRadius,
+          child: BackdropFilter(
+            filter: ImageFilter.blur(sigmaX: 24, sigmaY: 24),
+            child: Container(
+              key: widget.panelKey,
+              constraints: BoxConstraints(minWidth: widget.width),
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
+              decoration: BoxDecoration(
+                color: workspaceResourceMenuBackground,
+                borderRadius: workspaceResourceMenuRadius,
+                border: Border.all(color: workspaceResourceMenuBorder),
+                boxShadow: workspaceContextMenuPanelShadow,
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: widget.children,
+              ),
+            ),
           ),
         ),
       ),
@@ -185,6 +230,7 @@ class WorkspaceContextMenuItem extends StatefulWidget {
     this.commandBeforeDismiss = false,
     this.onInteractionStart,
     this.onInteractionEnd,
+    this.destructive = false,
   });
 
   final Key itemKey;
@@ -203,6 +249,7 @@ class WorkspaceContextMenuItem extends StatefulWidget {
   final bool commandBeforeDismiss;
   final VoidCallback? onInteractionStart;
   final VoidCallback? onInteractionEnd;
+  final bool destructive;
 
   @override
   State<WorkspaceContextMenuItem> createState() =>
@@ -351,10 +398,14 @@ class _WorkspaceContextMenuItemState extends State<WorkspaceContextMenuItem> {
             widget.highlighted ||
             _hovered ||
             _keyboardHighlighted);
-    final textColor = enabled
-        ? workspaceResourceMenuText
-        : workspaceNoteMenuDisabledText;
-    final highlightColor = WorkspaceAppearanceScope.of(context).accentColor;
+    final textColor = !enabled
+        ? workspaceNoteMenuDisabledText
+        : widget.destructive && !highlighted
+        ? workspaceDangerColor
+        : workspaceResourceMenuText;
+    final highlightColor = widget.destructive
+        ? workspaceDangerColor
+        : WorkspaceAppearanceScope.of(context).accentColor;
     return Semantics(
       key: widget.itemKey,
       button: true,
@@ -414,7 +465,7 @@ class _WorkspaceContextMenuItemState extends State<WorkspaceContextMenuItem> {
               duration: const Duration(milliseconds: 80),
               curve: Curves.easeOut,
               height: workspaceContextMenuItemHeight,
-              padding: const EdgeInsets.symmetric(horizontal: 10),
+              padding: const EdgeInsets.only(left: 6, right: 10),
               decoration: BoxDecoration(
                 color: highlighted ? highlightColor : const Color(0x00000000),
                 borderRadius: workspaceContextMenuItemRadius,
@@ -422,7 +473,7 @@ class _WorkspaceContextMenuItemState extends State<WorkspaceContextMenuItem> {
               child: Row(
                 children: [
                   SizedBox(
-                    width: 18,
+                    width: 12,
                     child: Text(
                       widget.checked ? '✓' : '',
                       style: workspaceContextMenuItemTextStyle.copyWith(
@@ -430,6 +481,7 @@ class _WorkspaceContextMenuItemState extends State<WorkspaceContextMenuItem> {
                       ),
                     ),
                   ),
+                  const SizedBox(width: 2),
                   Expanded(
                     child: Text(
                       widget.label,
@@ -490,7 +542,7 @@ class WorkspaceContextMenuSeparator extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return const Padding(
-      padding: EdgeInsets.symmetric(vertical: 4),
+      padding: EdgeInsets.symmetric(horizontal: 8, vertical: 4),
       child: SizedBox(
         height: 1,
         width: double.infinity,

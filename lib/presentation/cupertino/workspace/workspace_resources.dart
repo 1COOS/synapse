@@ -1,4 +1,5 @@
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart' show MenuAnchor, MenuController;
 import 'package:flutter/services.dart';
 
@@ -305,6 +306,7 @@ class _MoveNoteTargetDialogState extends State<MoveNoteTargetDialog> {
 class ResourceTree extends StatelessWidget {
   const ResourceTree({
     super.key,
+    required this.contextMenuCoordinator,
     required this.nodes,
     required this.selectedId,
     required this.collapsedFolderIds,
@@ -320,6 +322,7 @@ class ResourceTree extends StatelessWidget {
     required this.onDelete,
   });
 
+  final WorkspaceContextMenuCoordinator contextMenuCoordinator;
   final List<VaultResourceNode> nodes;
   final String? selectedId;
   final Set<String> collapsedFolderIds;
@@ -336,16 +339,25 @@ class ResourceTree extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return ListView(
-      padding: EdgeInsets.zero,
-      children: [
-        if (nodes.isEmpty)
-          const Padding(
-            padding: EdgeInsets.symmetric(vertical: 18),
-            child: EmptyState(text: '暂无资源'),
-          ),
-        for (final node in nodes) ..._buildNode(context, node: node, depth: 0),
-      ],
+    return Listener(
+      behavior: HitTestBehavior.translucent,
+      onPointerDown: (event) {
+        if (event.buttons & kSecondaryMouseButton == 0) {
+          contextMenuCoordinator.dismissAll();
+        }
+      },
+      child: ListView(
+        padding: EdgeInsets.zero,
+        children: [
+          if (nodes.isEmpty)
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 18),
+              child: EmptyState(text: '暂无资源'),
+            ),
+          for (final node in nodes)
+            ..._buildNode(context, node: node, depth: 0),
+        ],
+      ),
     );
   }
 
@@ -357,6 +369,7 @@ class ResourceTree extends StatelessWidget {
     final collapsed = collapsedFolderIds.contains(node.id);
     return [
       _ResourceRow(
+        contextMenuCoordinator: contextMenuCoordinator,
         node: node,
         depth: depth,
         selected: node.id == selectedId,
@@ -382,6 +395,7 @@ class ResourceTree extends StatelessWidget {
 
 class _ResourceRow extends StatefulWidget {
   const _ResourceRow({
+    required this.contextMenuCoordinator,
     required this.node,
     required this.depth,
     required this.selected,
@@ -399,6 +413,7 @@ class _ResourceRow extends StatefulWidget {
     required this.onDelete,
   });
 
+  final WorkspaceContextMenuCoordinator contextMenuCoordinator;
   final VaultResourceNode node;
   final int depth;
   final bool selected;
@@ -423,6 +438,7 @@ class _ResourceRowState extends State<_ResourceRow> {
   final MenuController _menuController = MenuController();
   final FocusNode _focusNode = FocusNode();
   FocusNode? _previousFocus;
+  bool _restoreFocusAfterClose = false;
 
   VaultResourceNode get node => widget.node;
   int get depth => widget.depth;
@@ -439,9 +455,12 @@ class _ResourceRowState extends State<_ResourceRow> {
   VoidCallback get onCopyNote => widget.onCopyNote;
   VoidCallback get onMoveNote => widget.onMoveNote;
   VoidCallback get onDelete => widget.onDelete;
+  WorkspaceContextMenuCoordinator get _contextMenuCoordinator =>
+      widget.contextMenuCoordinator;
 
   @override
   void dispose() {
+    _contextMenuCoordinator.unregister(this);
     _focusNode.dispose();
     super.dispose();
   }
@@ -463,10 +482,22 @@ class _ResourceRowState extends State<_ResourceRow> {
 
   void _openMenu({Offset? position}) {
     _previousFocus = FocusManager.instance.primaryFocus;
+    _contextMenuCoordinator.dismissAll(except: this);
+    _contextMenuCoordinator.register(this, _dismissMenu);
+    _restoreFocusAfterClose = false;
     if (!selected) {
       onTap();
     }
     _menuController.open(position: position);
+  }
+
+  void _dismissMenu({required bool restoreFocus}) {
+    if (!_menuController.isOpen) {
+      _contextMenuCoordinator.unregister(this);
+      return;
+    }
+    _restoreFocusAfterClose = restoreFocus;
+    _menuController.close();
   }
 
   void _handleTap() {
@@ -474,7 +505,14 @@ class _ResourceRowState extends State<_ResourceRow> {
     onTap();
   }
 
-  void _restoreFocus() {
+  void _handleMenuClosed() {
+    _contextMenuCoordinator.unregister(this);
+    final restoreFocus = _restoreFocusAfterClose;
+    _restoreFocusAfterClose = false;
+    if (!restoreFocus) {
+      _previousFocus = null;
+      return;
+    }
     final target = _previousFocus;
     _previousFocus = null;
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -499,14 +537,14 @@ class _ResourceRowState extends State<_ResourceRow> {
         onKeyEvent: _handleKeyEvent,
         child: MenuAnchor(
           controller: _menuController,
-          onClose: _restoreFocus,
-          consumeOutsideTap: true,
+          onClose: _handleMenuClosed,
+          consumeOutsideTap: false,
           clipBehavior: Clip.none,
           style: workspaceResourceMenuAnchorStyle,
           menuChildren: [
             _ResourceContextMenu(
               resourceId: node.id,
-              onDismiss: _menuController.close,
+              onDismiss: () => _dismissMenu(restoreFocus: true),
               children: [
                 _ResourceMenuAction(
                   itemKey: Key('folder-menu-new-folder-${node.id}'),
@@ -529,6 +567,7 @@ class _ResourceRowState extends State<_ResourceRow> {
                 _ResourceMenuAction(
                   itemKey: Key('folder-menu-delete-${node.id}'),
                   label: '删除',
+                  destructive: true,
                   onPressed: _closeMenuAndRun(onDelete),
                 ),
               ],
@@ -594,14 +633,14 @@ class _ResourceRowState extends State<_ResourceRow> {
       onKeyEvent: _handleKeyEvent,
       child: MenuAnchor(
         controller: _menuController,
-        onClose: _restoreFocus,
-        consumeOutsideTap: true,
+        onClose: _handleMenuClosed,
+        consumeOutsideTap: false,
         clipBehavior: Clip.none,
         style: workspaceResourceMenuAnchorStyle,
         menuChildren: [
           _ResourceContextMenu(
             resourceId: node.id,
-            onDismiss: _menuController.close,
+            onDismiss: () => _dismissMenu(restoreFocus: true),
             children: [
               _ResourceMenuAction(
                 itemKey: Key('note-menu-new-note-${node.id}'),
@@ -629,6 +668,7 @@ class _ResourceRowState extends State<_ResourceRow> {
               _ResourceMenuAction(
                 itemKey: Key('note-menu-delete-${node.id}'),
                 label: '删除',
+                destructive: true,
                 onPressed: _closeMenuAndRun(onDelete),
               ),
             ],
@@ -668,7 +708,7 @@ class _ResourceRowState extends State<_ResourceRow> {
 
   VoidCallback _closeMenuAndRun(VoidCallback action) {
     return () {
-      _menuController.close();
+      _dismissMenu(restoreFocus: true);
       action();
     };
   }
@@ -712,11 +752,13 @@ class _ResourceMenuAction extends StatefulWidget {
     required this.itemKey,
     required this.label,
     required this.onPressed,
+    this.destructive = false,
   });
 
   final Key itemKey;
   final String label;
   final VoidCallback onPressed;
+  final bool destructive;
 
   @override
   State<_ResourceMenuAction> createState() => _ResourceMenuActionState();
@@ -730,6 +772,7 @@ class _ResourceMenuActionState extends State<_ResourceMenuAction> {
       label: widget.label,
       enabled: true,
       onPressed: widget.onPressed,
+      destructive: widget.destructive,
     );
   }
 }

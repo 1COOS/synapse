@@ -24,20 +24,21 @@ const workspaceResourceCountStyle = TextStyle(
   fontWeight: FontWeight.w500,
   height: 1.2,
 );
-const workspaceResourceMenuBackground = Color(0xE65F5F5F);
-const workspaceResourceMenuText = Color(0xFFF2F2F7);
-const workspaceNoteMenuDisabledText = Color(0x73F2F2F7);
-const workspaceResourceMenuLine = Color(0xFF777777);
-const workspaceResourceMenuRadius = BorderRadius.all(Radius.circular(18));
+const workspaceResourceMenuBackground = Color(0xE63A3A3E);
+const workspaceResourceMenuText = Color(0xFFF7F7FA);
+const workspaceNoteMenuDisabledText = Color(0x66F7F7FA);
+const workspaceResourceMenuLine = Color(0x2EFFFFFF);
+const workspaceResourceMenuBorder = Color(0x24FFFFFF);
+const workspaceResourceMenuRadius = BorderRadius.all(Radius.circular(12));
 const workspaceContextMenuItemHeight = 30.0;
-const workspaceContextMenuItemRadius = BorderRadius.all(Radius.circular(8));
+const workspaceContextMenuItemRadius = BorderRadius.all(Radius.circular(7));
 const workspaceContextMenuItemTextStyle = TextStyle(
   fontSize: 13,
   fontWeight: FontWeight.w400,
   height: 1.15,
 );
 const workspaceContextMenuPanelShadow = [
-  BoxShadow(color: Color(0x33000000), blurRadius: 24, offset: Offset(0, 12)),
+  BoxShadow(color: Color(0x47000000), blurRadius: 32, offset: Offset(0, 14)),
 ];
 const workspaceResourceMenuAnchorStyle = MenuStyle(
   backgroundColor: WidgetStatePropertyAll(Color(0x00000000)),

@@ -56,4 +56,62 @@ void main() {
     expect(state.search.currentIndex, 1);
     expect(state.search.matches.last.from, 8);
   });
+
+  test('accepts protocol v2 and rejects stale protocol versions', () {
+    expect(
+      decodeEditorMessage('{"protocolVersion":2,"type":"ready","revision":0}'),
+      containsPair('protocolVersion', synapseEditorProtocolVersion),
+    );
+    expect(
+      () => decodeEditorMessage(
+        '{"protocolVersion":1,"type":"ready","revision":0}',
+      ),
+      throwsFormatException,
+    );
+  });
+
+  test('decodes clipboard requests with stable target information', () {
+    final request = EditorClipboardRequest.fromJson({
+      'requestId': 17,
+      'action': 'cut',
+      'target': 'document',
+      'revision': 9,
+      'generation': 3,
+      'selection': {'anchor': 18, 'head': 7},
+      'text': 'selected text',
+    });
+
+    expect(request.requestId, 17);
+    expect(request.action, 'cut');
+    expect(request.target, 'document');
+    expect(request.revision, 9);
+    expect(request.generation, 3);
+    expect(request.selection?.anchor, 18);
+    expect(request.selection?.head, 7);
+    expect(request.text, 'selected text');
+  });
+
+  test('serializes clipboard results with protocol v2', () {
+    const result = EditorClipboardResult(
+      requestId: 21,
+      revision: 12,
+      generation: 4,
+      outcome: 'success',
+      hasText: true,
+      hasImage: false,
+      text: 'pasted text',
+    );
+
+    expect(result.toJson(), {
+      'protocolVersion': synapseEditorProtocolVersion,
+      'type': 'clipboardResult',
+      'requestId': 21,
+      'revision': 12,
+      'generation': 4,
+      'outcome': 'success',
+      'hasText': true,
+      'hasImage': false,
+      'text': 'pasted text',
+    });
+  });
 }
