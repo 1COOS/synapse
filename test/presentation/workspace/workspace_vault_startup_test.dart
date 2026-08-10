@@ -12,6 +12,7 @@ import 'package:synapse/infrastructure/bootstrap/workspace_dependencies_factory.
 import 'package:synapse/application/settings/synapse_settings.dart';
 import 'package:synapse/infrastructure/config/vault_directory_access.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
+import 'package:synapse/presentation/workspace/editor/codemirror/editor_protocol.dart';
 
 import '../../support/workspace_fakes.dart';
 import '../../support/workspace_harness.dart';
@@ -523,7 +524,10 @@ void main() {
       expect(semanticSearchFlags, [false, true, true]);
       expect(find.text('Second'), findsWidgets);
       expect(workspaceAccentColor(tester), CupertinoColors.systemGreen);
-      expect(find.byKey(const Key('markdown-reading-preview')), findsOneWidget);
+      expect(
+        testDocumentSurfaceState(tester).mode,
+        CodeMirrorDocumentMode.reading,
+      );
     },
   );
 

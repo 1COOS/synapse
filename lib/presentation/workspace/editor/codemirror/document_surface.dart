@@ -87,8 +87,20 @@ abstract interface class EditorDocumentSurfaceController {
   Future<void> dismissContextMenu();
 }
 
+enum DocumentSurfaceAvailability {
+  supported,
+  webPreviewReadOnly,
+  windowsPending,
+  missingMacOSWebView,
+  unsupportedPlatform,
+}
+
+extension DocumentSurfaceAvailabilityState on DocumentSurfaceAvailability {
+  bool get supported => this == DocumentSurfaceAvailability.supported;
+}
+
 abstract interface class DocumentSurfaceFactory {
-  bool get supported;
+  DocumentSurfaceAvailability get availability;
 
   Widget build({
     Key? key,

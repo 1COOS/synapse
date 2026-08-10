@@ -15,7 +15,7 @@ import '../../../infrastructure/input/image_input_service.dart';
 import '../../../infrastructure/vault/vault_backend.dart';
 import '../editor/codemirror/document_surface_registry.dart';
 import '../editor/pane_editor_context.dart' as editor_context;
-import '../editor/live_markdown_editor.dart' show NoteEditorPasteAvailability;
+import '../editor/note_editor_contracts.dart';
 import '../state/note_document_session.dart';
 import '../state/note_materials_registry.dart';
 import '../state/note_save_coordinator.dart';
@@ -286,7 +286,6 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
           selectedResourceId: pane.noteId,
           splitRoot: _splits.root,
           focusedPaneId: _splits.focusedPaneId,
-          selectedPreviewImageSrc: null,
         ),
       );
     }
@@ -319,13 +318,6 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
       collapsed.remove(folderId);
     }
     _publish(current.copyWith(collapsedFolderIds: collapsed));
-  }
-
-  void setSelectedPreviewImageSrc(String? src) {
-    final current = _requireState();
-    if (current.selectedPreviewImageSrc != src) {
-      _publish(current.copyWith(selectedPreviewImageSrc: src));
-    }
   }
 
   String splitFocused(SplitDirection direction) {
@@ -1182,7 +1174,6 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
         focusedPaneId: _splits.focusedPaneId,
         sessionNoteIds: _sessions.noteIds,
         narrowSection: WorkspaceSection.notes,
-        selectedPreviewImageSrc: null,
       ),
     );
     return WorkspaceActionResult.committed;
@@ -1259,7 +1250,6 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
         message: current.message,
         reloadRequired: _reloadRequired,
         collapsedFolderIds: current.collapsedFolderIds,
-        selectedPreviewImageSrc: current.selectedPreviewImageSrc,
       ),
     );
   }

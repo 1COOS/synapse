@@ -207,9 +207,6 @@ final class WorkspaceEditorOperationCoordinator {
             idChanged && current.selectedResourceId == result.oldNoteId
             ? savedNote.id
             : current.selectedResourceId;
-        final focusedSession = splits.focusedPane?.noteId == null
-            ? null
-            : sessions.sessionFor(splits.focusedPane!.noteId!);
         return commits.prepare(
           delta,
           savedNoteCommit: SavedNoteSessionCommit(
@@ -228,10 +225,6 @@ final class WorkspaceEditorOperationCoordinator {
                     !result.stillDirty
                 ? request.successMessage
                 : null,
-            selectedPreviewImageSrc:
-                pathChanged && identical(focusedSession, result.session)
-                ? null
-                : current.selectedPreviewImageSrc,
           ),
         );
       },

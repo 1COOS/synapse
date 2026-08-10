@@ -32,15 +32,15 @@ void main() {
     );
     await tester.tap(find.byKey(const Key('split-pane-right-button')));
     await tester.pump(const Duration(milliseconds: 250));
-    final paneOneController = liveMarkdownDocumentController(tester, paneId: 1);
-    final paneTwoController = liveMarkdownDocumentController(tester, paneId: 2);
+    final paneOneController = noteSessionController(tester, paneId: 1);
+    final paneTwoController = noteSessionController(tester, paneId: 2);
     expect(paneTwoController, same(paneOneController));
 
     tester
         .widget<GestureDetector>(find.byKey(const Key('split-pane-pane-1')))
         .onTap!();
     await tester.pump(const Duration(milliseconds: 250));
-    await enterTextInLiveMarkdownBlock(
+    await enterTextInTestDocumentBlock(
       tester,
       '# Draft title\nunsaved body',
       paneId: 1,
@@ -65,8 +65,8 @@ void main() {
     final renamed = await vault.readNote(note.id);
     expect(renamed.path, 'Gamma.md');
     expect(renamed.markdown, contains('# Gamma\nunsaved body'));
-    expect(paneOneController.text, '# Gamma\nunsaved body\n');
-    expect(paneTwoController.text, '# Gamma\nunsaved body\n');
+    expect(paneOneController.text, '# Gamma\nunsaved body');
+    expect(paneTwoController.text, '# Gamma\nunsaved body');
     for (final paneId in [1, 2]) {
       expect(
         find.descendant(
@@ -99,12 +99,12 @@ void main() {
           ),
         ),
       );
-      await enterTextInLiveMarkdownBlock(
+      await enterTextInTestDocumentBlock(
         tester,
         '# Beta\nunsaved conflict body',
         paneId: 1,
       );
-      final controller = liveMarkdownDocumentController(tester, paneId: 1);
+      final controller = noteSessionController(tester, paneId: 1);
 
       await tester.tap(
         find.byKey(Key('resource-row-${alpha.id}')),
@@ -126,7 +126,7 @@ void main() {
         tester.widget<Text>(find.byKey(const Key('resource-name-error'))).data,
         '同一文件夹中已存在名为“beta”的资源。',
       );
-      expect(controller.text, '# Beta\nunsaved conflict body\n');
+      expect(controller.text, '# Beta\nunsaved conflict body');
       final persisted = await vault.readNote(alpha.id);
       expect(persisted.path, 'Alpha.md');
       expect(persisted.markdown, isNot(contains('unsaved conflict body')));
@@ -179,8 +179,8 @@ void main() {
     await tester.tap(find.byKey(const Key('note-mode-source-pane-2')));
     await tester.pump(const Duration(milliseconds: 250));
 
-    final alphaController = liveMarkdownDocumentController(tester, paneId: 1);
-    final betaController = liveMarkdownDocumentController(tester, paneId: 2);
+    final alphaController = noteSessionController(tester, paneId: 1);
+    final betaController = noteSessionController(tester, paneId: 2);
 
     await tester.tap(
       find.byKey(Key('resource-row-${folder.id}')),
@@ -196,14 +196,8 @@ void main() {
     await tester.tap(find.byKey(const Key('note-mode-source-pane-2')));
     await tester.pump(const Duration(milliseconds: 250));
 
-    expect(
-      liveMarkdownDocumentController(tester, paneId: 1),
-      same(alphaController),
-    );
-    expect(
-      liveMarkdownDocumentController(tester, paneId: 2),
-      same(betaController),
-    );
+    expect(noteSessionController(tester, paneId: 1), same(alphaController));
+    expect(noteSessionController(tester, paneId: 2), same(betaController));
     expect(find.byKey(Key('resource-row-${alpha.id}')), findsOneWidget);
     expect(find.byKey(Key('resource-row-${beta.id}')), findsOneWidget);
     expect((await vault.readNote(alpha.id)).path, '课程/Alpha.md');
@@ -344,11 +338,8 @@ void main() {
     await tester.pump(const Duration(milliseconds: 250));
     await tester.tap(find.byKey(const Key('split-pane-right-button')));
     await tester.pump(const Duration(milliseconds: 250));
-    final sharedController = liveMarkdownDocumentController(tester, paneId: 1);
-    expect(
-      liveMarkdownDocumentController(tester, paneId: 2),
-      same(sharedController),
-    );
+    final sharedController = noteSessionController(tester, paneId: 1);
+    expect(noteSessionController(tester, paneId: 2), same(sharedController));
 
     await tester.tap(
       find.byKey(Key('resource-row-${note.id}')),
@@ -364,14 +355,8 @@ void main() {
     await tester.tap(find.byKey(const Key('note-mode-source-pane-2')));
     await tester.pump(const Duration(milliseconds: 250));
 
-    expect(
-      liveMarkdownDocumentController(tester, paneId: 1),
-      same(sharedController),
-    );
-    expect(
-      liveMarkdownDocumentController(tester, paneId: 2),
-      same(sharedController),
-    );
+    expect(noteSessionController(tester, paneId: 1), same(sharedController));
+    expect(noteSessionController(tester, paneId: 2), same(sharedController));
     expect(find.byKey(Key('resource-row-${note.id}')), findsOneWidget);
     expect((await vault.readNote(note.id)).path, '课程/心经.md');
   });
@@ -430,7 +415,7 @@ void main() {
       await tester.pump(const Duration(milliseconds: 250));
       await tester.tap(find.byKey(const Key('split-pane-right-button')));
       await tester.pump(const Duration(milliseconds: 250));
-      await enterTextInLiveMarkdownBlock(
+      await enterTextInTestDocumentBlock(
         tester,
         '# Alpha\npending delete',
         paneId: 2,

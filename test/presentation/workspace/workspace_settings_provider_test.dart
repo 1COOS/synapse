@@ -136,10 +136,7 @@ void main() {
       expect(providers.last.disposeCalls, 1);
       expect(workspaceAccentColor(tester), CupertinoColors.systemBlue);
       expect(find.textContaining('startup runtime build failed'), findsNothing);
-      expect(
-        find.byKey(const Key('live-markdown-block-preview-0')),
-        findsOneWidget,
-      );
+      expect(find.byKey(const Key('note-editor')), findsOneWidget);
 
       await _runSearch(tester);
       expect(providers.first.embeddingCalls, 1);

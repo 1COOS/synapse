@@ -30,7 +30,7 @@ void main() {
       dependencies: _dependencies(vault, exporter: exporter),
     );
     await switchToSourceMode(tester);
-    await enterTextInLiveMarkdownBlock(tester, '# Latest\nPDF body');
+    await enterTextInTestDocumentBlock(tester, '# Latest\nPDF body');
     final buildsBeforeExport = exporter.snapshots.length;
 
     await tester.tap(find.byKey(const Key('note-export-pdf-pane-1')));
@@ -60,7 +60,7 @@ void main() {
       dependencies: _dependencies(vault, exporter: exporter),
     );
     await switchToSourceMode(tester);
-    await enterTextInLiveMarkdownBlock(tester, 'Must stay in editor');
+    await enterTextInTestDocumentBlock(tester, 'Must stay in editor');
     vault.failUpdates = true;
     final buildsBeforeExport = exporter.snapshots.length;
 
@@ -71,7 +71,7 @@ void main() {
     expect(exporter.snapshots, hasLength(buildsBeforeExport));
     expect(find.byKey(const Key('note-pdf-export-dialog')), findsNothing);
     expect(
-      liveMarkdownDocumentController(tester, paneId: 1).text.trim(),
+      noteSessionController(tester, paneId: 1).text.trim(),
       'Must stay in editor',
     );
     expect(find.textContaining('保存失败'), findsWidgets);
@@ -141,10 +141,7 @@ void main() {
         findsOneWidget,
       );
       expect(find.byKey(const Key('note-page-orientation')), findsNothing);
-      expect(
-        find.byKey(const Key('note-page-boundary-pane-1-1')),
-        findsNothing,
-      );
+      expect(testDocumentSurfaceState(tester).pageLayout.boundaries, isEmpty);
 
       await tester.tap(find.byKey(const Key('note-page-layout-toggle-pane-1')));
       await tester.pump();
@@ -152,43 +149,31 @@ void main() {
       expect(exporter.snapshots, hasLength(1));
       expect(find.byKey(const Key('note-page-orientation')), findsOneWidget);
       expect(
-        find.byKey(const Key('note-page-boundary-pane-1-1')),
-        findsOneWidget,
-      );
-      expect(
-        tester
-            .getSize(find.byKey(const Key('note-page-boundary-pane-1-1')))
-            .height,
-        greaterThan(0),
+        testDocumentSurfaceState(tester).pageLayout.boundaries,
+        hasLength(1),
       );
       expect(vault.updateCalls, updatesBeforeEdit);
 
-      await enterTextInLiveMarkdownBlock(tester, '# Page\n第一段\n\n第二段');
+      await enterTextInTestDocumentBlock(tester, '# Page\n第一段\n\n第二段');
       await tester.pump();
       expect(
-        find.byKey(const Key('note-page-boundary-pane-1-1')),
-        findsOneWidget,
-      );
-      expect(
-        tester
-            .getSize(find.byKey(const Key('note-page-boundary-pane-1-1')))
-            .height,
-        greaterThan(0),
+        testDocumentSurfaceState(tester).pageLayout.boundaries,
+        hasLength(1),
       );
       final buildsBeforeDebounce = exporter.snapshots.length;
       await tester.pump(const Duration(milliseconds: 399));
       expect(exporter.snapshots.length, buildsBeforeDebounce);
       expect(
-        find.byKey(const Key('note-page-boundary-pane-1-1')),
-        findsOneWidget,
+        testDocumentSurfaceState(tester).pageLayout.boundaries,
+        hasLength(1),
       );
       await tester.pump(const Duration(milliseconds: 1));
       await tester.pump();
       expect(exporter.snapshots.length, buildsBeforeDebounce + 1);
       expect(exporter.snapshots.last.markdown, contains('第二段'));
       expect(
-        find.byKey(const Key('note-page-boundary-pane-1-1')),
-        findsOneWidget,
+        testDocumentSurfaceState(tester).pageLayout.boundaries,
+        hasLength(1),
       );
       expect(vault.updateCalls, updatesBeforeEdit);
 
@@ -221,10 +206,7 @@ void main() {
       await tester.tap(find.byKey(const Key('note-mode-reading-pane-1')));
       await tester.pump();
       expect(find.byKey(const Key('note-page-orientation')), findsNothing);
-      expect(
-        find.byKey(const Key('note-page-boundary-pane-1-1')),
-        findsNothing,
-      );
+      expect(testDocumentSurfaceState(tester).pageLayout.boundaries, isEmpty);
       final buildsWhileReading = exporter.snapshots.length;
       await tester.pump(const Duration(seconds: 1));
       expect(exporter.snapshots, hasLength(buildsWhileReading));
@@ -235,38 +217,32 @@ void main() {
       expect(find.byKey(const Key('note-page-orientation')), findsOneWidget);
       expect(exporter.snapshots.length, buildsWhileReading);
       expect(
-        find.byKey(const Key('note-page-boundary-pane-1-1')),
-        findsOneWidget,
+        testDocumentSurfaceState(tester).pageLayout.boundaries,
+        hasLength(1),
       );
 
       final buildsBeforeCachedToggle = exporter.snapshots.length;
       await tester.tap(find.byKey(const Key('note-page-layout-toggle-pane-1')));
       await tester.pump();
       expect(find.byKey(const Key('note-page-orientation')), findsNothing);
-      expect(
-        find.byKey(const Key('note-page-boundary-pane-1-1')),
-        findsNothing,
-      );
+      expect(testDocumentSurfaceState(tester).pageLayout.boundaries, isEmpty);
       await tester.tap(find.byKey(const Key('note-page-layout-toggle-pane-1')));
       await tester.pump();
       await tester.pump();
       expect(exporter.snapshots, hasLength(buildsBeforeCachedToggle));
       expect(
-        find.byKey(const Key('note-page-boundary-pane-1-1')),
-        findsOneWidget,
+        testDocumentSurfaceState(tester).pageLayout.boundaries,
+        hasLength(1),
       );
 
       await tester.tap(find.byKey(const Key('note-page-layout-toggle-pane-1')));
       await tester.pump();
       final buildsWhileDisabled = exporter.snapshots.length;
-      await enterTextInLiveMarkdownBlock(tester, '# Disabled\n第一段\n\n第二段');
+      await enterTextInTestDocumentBlock(tester, '# Disabled\n第一段\n\n第二段');
       await tester.pump(const Duration(milliseconds: 500));
       expect(exporter.snapshots, hasLength(buildsWhileDisabled));
       expect(find.byKey(const Key('note-page-orientation')), findsNothing);
-      expect(
-        find.byKey(const Key('note-page-boundary-pane-1-1')),
-        findsNothing,
-      );
+      expect(testDocumentSurfaceState(tester).pageLayout.boundaries, isEmpty);
 
       await tester.tap(find.byKey(const Key('note-page-layout-toggle-pane-1')));
       await tester.pump();
@@ -338,21 +314,10 @@ void main() {
       );
       await tester.pump(const Duration(milliseconds: 100));
 
+      expect(testDocumentSurfaceState(tester).pageLayout.boundaries, isEmpty);
       expect(
-        find.byKey(const Key('live-markdown-page-break-2')),
-        findsOneWidget,
-      );
-      expect(find.text('分页符'), findsOneWidget);
-      expect(
-        find.byKey(const Key('note-page-boundary-pane-1-1')),
-        findsNothing,
-      );
-
-      await tester.tap(find.byKey(const Key('live-markdown-page-break-2')));
-      await tester.pump();
-      expect(
-        activeLiveMarkdownTextField(tester).controller.text,
-        synapsePageBreakMarker,
+        testDocumentSurfaceState(tester).controller.text,
+        contains(synapsePageBreakMarker),
       );
     },
   );
@@ -465,8 +430,8 @@ void main() {
     );
     await tester.pump();
     expect(
-      find.byKey(const Key('note-page-boundary-pane-1-1')),
-      findsOneWidget,
+      testDocumentSurfaceState(tester).pageLayout.boundaries,
+      hasLength(1),
     );
 
     await tester.tap(find.byKey(const Key('note-page-orientation-landscape')));
@@ -477,8 +442,8 @@ void main() {
 
     expect(find.byKey(const Key('note-page-retry')), findsOneWidget);
     expect(
-      find.byKey(const Key('note-page-boundary-pane-1-1')),
-      findsOneWidget,
+      testDocumentSurfaceState(tester).pageLayout.boundaries,
+      hasLength(1),
     );
 
     await tester.tap(find.byKey(const Key('note-page-retry')));
@@ -652,15 +617,10 @@ void main() {
     );
     await tester.pump();
 
-    final boundaryFinder = find.byWidgetPredicate(
-      (widget) =>
-          widget.key is ValueKey<String> &&
-          (widget.key! as ValueKey<String>).value.startsWith(
-            'note-page-boundary-pane-1-',
-          ),
-    );
-    expect(boundaryFinder, findsWidgets);
-    final countBeforeEdit = boundaryFinder.evaluate().length;
+    expect(testDocumentSurfaceState(tester).pageLayout.boundaries, isNotEmpty);
+    final countBeforeEdit = testDocumentSurfaceState(
+      tester,
+    ).pageLayout.boundaries.length;
     final boundaryOffset =
         exporter.results.single.boundaries.first.sourceOffset;
     final blocks = splitMarkdownLiveBlocks(exporter.snapshots.single.markdown);
@@ -669,26 +629,24 @@ void main() {
       boundaryOffset,
     );
     final editedBlock = '${blocks[boundaryBlockIndex].text} 已编辑';
-    await tester.ensureVisible(
-      find.byKey(Key('live-markdown-block-preview-$boundaryBlockIndex')),
-    );
-    await tester.pump();
-
-    await enterTextInLiveMarkdownBlock(
+    await enterTextInTestDocumentBlock(
       tester,
       editedBlock,
       blockIndex: boundaryBlockIndex,
     );
     await tester.pump();
-    expect(boundaryFinder, findsWidgets);
+    expect(testDocumentSurfaceState(tester).pageLayout.boundaries, isNotEmpty);
     await tester.pump(const Duration(milliseconds: 400));
     await tester.runAsync(
       () => Future<void>.delayed(const Duration(seconds: 2)),
     );
     await tester.pump();
 
-    expect(boundaryFinder, findsWidgets);
-    expect(boundaryFinder.evaluate().length, countBeforeEdit);
+    expect(testDocumentSurfaceState(tester).pageLayout.boundaries, isNotEmpty);
+    expect(
+      testDocumentSurfaceState(tester).pageLayout.boundaries.length,
+      countBeforeEdit,
+    );
   });
 
   testWidgets('disables PDF export when no note is selected', (tester) async {

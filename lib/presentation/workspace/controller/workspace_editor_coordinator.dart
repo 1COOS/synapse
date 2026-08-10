@@ -5,8 +5,8 @@ import '../../../domain/markdown/markdown_document.dart';
 import '../../../domain/vault/vault_resource.dart';
 import '../../../infrastructure/input/image_input_service.dart';
 import '../../../infrastructure/vault/vault_post_commit_error.dart';
-import '../editor/live_markdown_editor.dart';
 import '../editor/markdown_image_transform.dart';
+import '../editor/note_editor_contracts.dart';
 import '../editor/pane_editor_context.dart';
 import '../state/note_document_session.dart';
 import '../state/note_materials_registry.dart';
@@ -383,9 +383,6 @@ final class WorkspaceEditorCoordinator {
                   : _readState().selectedResourceId,
               searchResults: const [],
               message: '图片已粘贴到笔记：$filename',
-              selectedPreviewImageSrc: focused
-                  ? _markdownAttachmentSrc(note, delta.value.attachment)
-                  : _readState().selectedPreviewImageSrc,
             ),
           );
         },
@@ -756,7 +753,6 @@ final class WorkspaceEditorCoordinator {
               message: requestedMaterials.length == 1
                   ? 'AI 素材已删除'
                   : '已删除 ${requestedMaterials.length} 个 AI 素材',
-              selectedPreviewImageSrc: null,
             ),
           );
         },
@@ -846,7 +842,6 @@ final class WorkspaceEditorCoordinator {
             message: impact.attachments.length == 1
                 ? '笔记附件已永久删除'
                 : '已永久删除 ${impact.attachments.length} 个笔记附件',
-            selectedPreviewImageSrc: null,
           ),
         ),
       ),

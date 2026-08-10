@@ -10,7 +10,6 @@ import 'package:synapse/infrastructure/bootstrap/workspace_dependencies_factory.
 import 'package:synapse/application/settings/synapse_settings.dart';
 import 'package:synapse/infrastructure/config/vault_directory_access.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
-import 'package:synapse/presentation/workspace/editor/live_markdown_editor.dart';
 
 import '../../support/workspace_fakes.dart';
 import '../../support/workspace_harness.dart';
@@ -43,7 +42,7 @@ void main() {
       },
     );
     await switchToSourceMode(tester);
-    await enterTextInLiveMarkdownBlock(tester, '# First\nchanged');
+    await enterTextInTestDocumentBlock(tester, '# First\nchanged');
     await tester.tap(find.byKey(const Key('vault-location-button')));
     await tester.pump(const Duration(milliseconds: 500));
 
@@ -82,23 +81,17 @@ void main() {
         directoryPicker: () async => secondPath,
         vaultBackendFactory: (_) => secondVault,
       );
-      await activateLiveMarkdownBlock(tester);
-      final initialEditor = tester.widget<LiveMarkdownEditor>(
-        find.byType(LiveMarkdownEditor),
-      );
-      final oldController = initialEditor.controller;
+      await activateTestDocumentBlock(tester);
+      final oldController = noteSessionController(tester, paneId: 1);
       final oldText = oldController.text;
-      expect(initialEditor.enabled, isTrue);
+      expect(testDocumentSurfaceState(tester).enabled, isTrue);
 
       await tester.tap(find.byKey(const Key('vault-location-button')));
       await secondVault.listStarted.future;
       await tester.pump();
 
-      final busyEditor = tester.widget<LiveMarkdownEditor>(
-        find.byType(LiveMarkdownEditor),
-      );
-      expect(busyEditor.enabled, isFalse);
-      expect(find.byKey(const Key('note-editor')), findsNothing);
+      expect(testDocumentSurfaceState(tester).enabled, isFalse);
+      expect(find.byKey(const Key('note-editor')), findsOneWidget);
       await tester.sendKeyEvent(LogicalKeyboardKey.keyX);
       await tester.pump();
       expect(oldController.text, oldText);
@@ -527,14 +520,14 @@ void main() {
     await tester.pump(const Duration(milliseconds: 250));
     await tester.tap(find.byKey(const Key('note-mode-source-pane-1')));
     await tester.pump(const Duration(milliseconds: 250));
-    await enterTextInLiveMarkdownBlock(
+    await enterTextInTestDocumentBlock(
       tester,
       '# Gamma\nalpha dirty',
       paneId: 1,
     );
     await tester.tap(find.byKey(const Key('note-mode-source-pane-2')));
     await tester.pump(const Duration(milliseconds: 250));
-    await enterTextInLiveMarkdownBlock(tester, '# Beta\nbeta dirty', paneId: 2);
+    await enterTextInTestDocumentBlock(tester, '# Beta\nbeta dirty', paneId: 2);
 
     expect(events, isEmpty);
     await tester.tap(find.byKey(const Key('vault-location-button')));
@@ -606,8 +599,8 @@ void main() {
 
     await pumpWorkspace(tester, vault: null, dependencies: dependencies);
     await switchToSourceMode(tester);
-    await enterTextInLiveMarkdownBlock(tester, '# Alpha\ndirty');
-    final controller = liveMarkdownDocumentController(tester, paneId: 1);
+    await enterTextInTestDocumentBlock(tester, '# Alpha\ndirty');
+    final controller = noteSessionController(tester, paneId: 1);
 
     await tester.tap(find.byKey(const Key('vault-location-button')));
     await tester.pump();
@@ -669,21 +662,21 @@ void main() {
       await tester.pump(const Duration(milliseconds: 250));
       await tester.tap(find.byKey(const Key('note-mode-source-pane-1')));
       await tester.pump(const Duration(milliseconds: 250));
-      await enterTextInLiveMarkdownBlock(
+      await enterTextInTestDocumentBlock(
         tester,
         '# Alpha\nalpha dirty',
         paneId: 1,
       );
-      final alphaController = liveMarkdownDocumentController(tester, paneId: 1);
+      final alphaController = noteSessionController(tester, paneId: 1);
       final alphaControllerText = alphaController.text;
       await tester.tap(find.byKey(const Key('note-mode-source-pane-2')));
       await tester.pump(const Duration(milliseconds: 250));
-      await enterTextInLiveMarkdownBlock(
+      await enterTextInTestDocumentBlock(
         tester,
         '# Beta\nbeta dirty',
         paneId: 2,
       );
-      final betaController = liveMarkdownDocumentController(tester, paneId: 2);
+      final betaController = noteSessionController(tester, paneId: 2);
       final betaControllerText = betaController.text;
 
       await tester.tap(find.byKey(const Key('vault-location-button')));
@@ -717,14 +710,8 @@ void main() {
         ),
         findsOneWidget,
       );
-      final retainedAlphaController = liveMarkdownDocumentController(
-        tester,
-        paneId: 1,
-      );
-      final retainedBetaController = liveMarkdownDocumentController(
-        tester,
-        paneId: 2,
-      );
+      final retainedAlphaController = noteSessionController(tester, paneId: 1);
+      final retainedBetaController = noteSessionController(tester, paneId: 2);
       expect(retainedAlphaController, same(alphaController));
       expect(retainedBetaController, same(betaController));
       expect(retainedAlphaController.text, alphaControllerText);
@@ -780,7 +767,7 @@ void main() {
 
     await pumpWorkspace(tester, vault: null, dependencies: dependencies);
     await switchToSourceMode(tester);
-    await enterTextInLiveMarkdownBlock(tester, '# First\nchanged');
+    await enterTextInTestDocumentBlock(tester, '# First\nchanged');
     firstVault.failUpdates = true;
 
     await tester.tap(find.byKey(const Key('vault-location-button')));

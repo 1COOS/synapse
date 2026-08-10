@@ -3,7 +3,6 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:synapse/domain/vault/vault_resource.dart';
 import 'package:synapse/application/ports/vault_revealer.dart';
 import 'package:synapse/infrastructure/ai/ai_provider.dart';
 import 'package:synapse/infrastructure/bootstrap/workspace_dependencies_factory.dart';
@@ -19,10 +18,10 @@ import 'package:synapse/main.dart';
 import 'package:synapse/presentation/cupertino/workspace/workspace_theme.dart';
 import 'package:synapse/presentation/workspace/controller/workspace_dependencies.dart';
 import 'package:synapse/presentation/workspace/controller/workspace_controller.dart';
+import 'package:synapse/presentation/workspace/editor/codemirror/document_surface.dart';
 import 'package:synapse/presentation/workspace/state/workspace_mutation_barrier.dart';
-import 'package:synapse/presentation/workspace/editor/live_markdown_editable_text.dart';
-import 'package:synapse/presentation/workspace/editor/live_markdown_editor.dart';
 
+import 'test_document_surface.dart';
 import 'workspace_fakes.dart';
 
 Future<({TextEditingController controller, String alphaId})>
@@ -62,21 +61,21 @@ runQueuedLastReferenceCloseRace(
 
   await tester.tap(find.byKey(const Key('note-mode-source-pane-1')));
   await tester.pump(const Duration(milliseconds: 250));
-  await enterTextInLiveMarkdownBlock(
+  await enterTextInTestDocumentBlock(
     tester,
     '# Alpha\ndirty Alpha session',
     paneId: 1,
   );
   await tester.tap(find.byKey(const Key('note-mode-source-pane-3')));
   await tester.pump(const Duration(milliseconds: 250));
-  await enterTextInLiveMarkdownBlock(
+  await enterTextInTestDocumentBlock(
     tester,
     '# Blocker\ndirty blocker session',
     paneId: 3,
   );
   await tester.pump();
 
-  final alphaController = liveMarkdownDocumentController(tester, paneId: 1);
+  final alphaController = noteSessionController(tester, paneId: 1);
   final focusPaneOne = tester
       .widget<GestureDetector>(find.byKey(const Key('split-pane-pane-1')))
       .onTap!;
@@ -126,6 +125,7 @@ Future<void> pumpWorkspace(
   ApplicationMetadataLoader? applicationMetadataLoader,
   bool? usesNativeMacTitlebarOverride,
   WorkspaceCommitPhase? workspaceCommitFailureForTesting,
+  DocumentSurfaceFactory? documentSurfaceFactory,
   Size size = const Size(1280, 820),
 }) async {
   await tester.binding.setSurfaceSize(size);
@@ -162,7 +162,10 @@ Future<void> pumpWorkspace(
       overrides: [
         workspaceDependenciesProvider.overrideWithValue(workspaceDependencies),
       ],
-      child: const SynapseApp(),
+      child: SynapseApp(
+        documentSurfaceFactory:
+            documentSurfaceFactory ?? const TestDocumentSurfaceFactory(),
+      ),
     ),
   );
   await tester.pump(const Duration(milliseconds: 250));
@@ -183,189 +186,79 @@ Finder inNotePane(Finder finder, int? paneId) {
   );
 }
 
-Future<void> activateLiveMarkdownBlock(
+Future<void> activateTestDocumentBlock(
   WidgetTester tester, {
   int blockIndex = 0,
   int? paneId,
 }) async {
-  final existingEditor = inNotePane(
-    find.byKey(const Key('note-editor')),
-    paneId,
-  );
-  if (existingEditor.evaluate().isNotEmpty) {
-    final requestedPreview = inNotePane(
-      find.byKey(Key('live-markdown-block-preview-$blockIndex')),
-      paneId,
-    );
-    if (requestedPreview.evaluate().isNotEmpty) {
-      await tester.tap(requestedPreview.first);
-      await tester.pump(const Duration(milliseconds: 250));
-    }
-    return;
-  }
-  await tester.tap(
-    inNotePane(
-      find.byKey(Key('live-markdown-block-preview-$blockIndex')),
-      paneId,
-    ).first,
-  );
-  await tester.pump(const Duration(milliseconds: 250));
+  testDocumentSurfaceState(tester, paneId: paneId).activateBlock(blockIndex);
+  await tester.pump();
 }
 
-Future<void> enterTextInLiveMarkdownBlock(
+Future<void> enterTextInTestDocumentBlock(
   WidgetTester tester,
   String text, {
   int blockIndex = 0,
   int? paneId,
 }) async {
-  await activateLiveMarkdownBlock(
+  await activateTestDocumentBlock(
     tester,
     blockIndex: blockIndex,
     paneId: paneId,
   );
-  final editableTextState = tester.state<EditableTextState>(
-    inNotePane(
-      find.descendant(
-        of: find.byKey(const Key('note-editor')),
-        matching: find.byType(EditableText),
-      ),
-      paneId,
-    ).first,
-  );
-  editableTextState.updateEditingValue(
-    TextEditingValue(
-      text: text,
-      selection: TextSelection.collapsed(offset: text.length),
-    ),
-  );
+  testDocumentSurfaceState(tester, paneId: paneId).replaceActiveBlock(text);
+  await tester.pump();
 }
 
-Future<void> setActiveLiveMarkdownSelection(
+Future<void> setTestDocumentBlockSelection(
   WidgetTester tester,
   TextSelection selection, {
   int? paneId,
 }) async {
-  final editableTextState = activeLiveMarkdownEditableTextState(
+  testDocumentSurfaceState(
     tester,
     paneId: paneId,
-  );
-  editableTextState.updateEditingValue(
-    editableTextState.textEditingValue.copyWith(
-      selection: selection,
-      composing: TextRange.empty,
-    ),
-  );
+  ).setActiveBlockSelection(selection);
   await tester.pump();
 }
 
-Future<void> dragSelectActiveLiveMarkdownRange(
+Future<void> dragSelectTestDocumentBlockRange(
   WidgetTester tester, {
   required int start,
   required int end,
   int? paneId,
 }) async {
-  final editableTextState = activeLiveMarkdownEditableTextState(
-    tester,
-    paneId: paneId,
+  testDocumentSurfaceState(tester, paneId: paneId).setActiveBlockSelection(
+    TextSelection(baseOffset: start, extentOffset: end),
   );
-  Offset caretGlobalOffset(int offset) {
-    final rect = editableTextState.renderEditable.getLocalRectForCaret(
-      TextPosition(offset: offset),
-    );
-    return editableTextState.renderEditable.localToGlobal(rect.center);
-  }
-
-  final gesture = await tester.createGesture(kind: PointerDeviceKind.mouse);
-  await gesture.down(caretGlobalOffset(start));
   await tester.pump();
-  await gesture.moveTo(caretGlobalOffset(end));
-  await tester.pump();
-  await gesture.up();
-  await gesture.removePointer();
-  await tester.pumpAndSettle();
 }
 
-EditableTextState activeLiveMarkdownEditableTextState(
+TestDocumentSurfaceState activeTestDocumentSurfaceState(
   WidgetTester tester, {
   int? paneId,
-}) {
-  return tester.state<EditableTextState>(
-    activeLiveMarkdownEditableText(paneId: paneId),
-  );
-}
+}) => testDocumentSurfaceState(tester, paneId: paneId);
 
-Finder activeLiveMarkdownEditableText({int? paneId}) {
-  return inNotePane(
-    find.descendant(
-      of: find.byKey(const Key('note-editor')),
-      matching: find.byType(EditableText),
-    ),
-    paneId,
-  ).first;
-}
-
-LiveMarkdownEditableText activeLiveMarkdownTextField(
-  WidgetTester tester, {
-  int? paneId,
-}) {
-  return tester.widget<LiveMarkdownEditableText>(
-    inNotePane(
-      find.descendant(
-        of: find.byKey(const Key('note-editor')),
-        matching: find.byType(LiveMarkdownEditableText),
-      ),
-      paneId,
-    ).first,
-  );
-}
-
-TextEditingController liveMarkdownDocumentController(
+TextEditingController noteSessionController(
   WidgetTester tester, {
   required int paneId,
-}) {
-  final editor = tester.widget<LiveMarkdownEditor>(
-    inNotePane(find.byType(LiveMarkdownEditor), paneId).first,
-  );
-  return editor.controller;
-}
+}) => testDocumentSurfaceState(tester, paneId: paneId).sessionController;
 
-TextSpan activeLiveMarkdownTextSpan(WidgetTester tester) {
-  final editableText = tester.widget<EditableText>(
-    find.descendant(
-      of: find.byKey(const Key('note-editor')),
-      matching: find.byType(EditableText),
-    ),
-  );
-  return editableText.controller.buildTextSpan(
-    context: tester.element(find.byType(EditableText).first),
-    style: editableText.style,
-    withComposing: false,
-  );
+TestDocumentSurfaceState testDocumentSurfaceState(
+  WidgetTester tester, {
+  int? paneId,
+}) {
+  final finder = paneId == null
+      ? find.byType(TestDocumentSurface).first
+      : inNotePane(find.byType(TestDocumentSurface), paneId).first;
+  return tester.state<TestDocumentSurfaceState>(finder);
 }
 
 Future<void> openNoteContextMenu(WidgetTester tester) async {
-  final editableText = find.descendant(
-    of: find.byKey(const Key('note-editor')),
-    matching: find.byType(EditableText),
+  await tester.tapAt(
+    tester.getCenter(find.byType(TestDocumentSurface).first),
+    buttons: kSecondaryMouseButton,
   );
-  final editableTextState = activeLiveMarkdownEditableTextState(tester);
-  var tapPosition = tester.getTopLeft(editableText.first) + const Offset(8, 8);
-  final selection = editableTextState.textEditingValue.selection;
-  if (selection.isValid && !selection.isCollapsed) {
-    final endpoints = editableTextState.renderEditable.getEndpointsForSelection(
-      selection,
-    );
-    if (endpoints.isNotEmpty) {
-      final start = endpoints.first.point;
-      final end = endpoints.length == 1
-          ? endpoints.first.point
-          : endpoints.last.point;
-      tapPosition = editableTextState.renderEditable.localToGlobal(
-        Offset((start.dx + end.dx) / 2, start.dy - 2),
-      );
-    }
-  }
-  await tester.tapAt(tapPosition, buttons: kSecondaryMouseButton);
   await tester.pumpAndSettle();
 }
 
@@ -426,75 +319,6 @@ double menuSeparatorHeight(WidgetTester tester, Key key) {
       .height;
 }
 
-enum PreviewImageDropSide { before, after }
-
-Future<void> dragPreviewImageToSide(
-  WidgetTester tester, {
-  required Object from,
-  required Object to,
-  required PreviewImageDropSide side,
-}) async {
-  final toId = _imageRecordId(to);
-  await dragPreviewImageToFinder(
-    tester,
-    from: from,
-    target: find.byKey(Key('preview-image-tap-$toId')),
-    side: side,
-  );
-}
-
-Future<void> dragPreviewImageToFinder(
-  WidgetTester tester, {
-  required Object from,
-  required Finder target,
-  required PreviewImageDropSide side,
-}) async {
-  final fromId = _imageRecordId(from);
-  final fromFinder = find.byKey(Key('preview-image-tap-$fromId'));
-  await tester.tap(fromFinder);
-  await tester.pump();
-  final handle = find.byKey(Key('image-move-handle-$fromId'));
-  final start = tester.getCenter(handle);
-  await tester.ensureVisible(target);
-  await tester.pump();
-  final targetRect = tester.getRect(target);
-  final drop = Offset(
-    targetRect.center.dx,
-    side == PreviewImageDropSide.before
-        ? targetRect.top + targetRect.height * 0.25
-        : targetRect.bottom - targetRect.height * 0.25,
-  );
-  final gesture = await tester.startGesture(
-    start,
-    kind: PointerDeviceKind.mouse,
-  );
-  await gesture.moveBy(const Offset(0, 12));
-  await tester.pump();
-  await gesture.moveTo(drop);
-  await tester.pump();
-  await gesture.up();
-  await tester.pumpAndSettle();
-  await tester.pump(const Duration(milliseconds: 1000));
-  await tester.pump();
-}
-
-Color previewImageFrameBorderColor(WidgetTester tester, Object imageRecord) {
-  final id = _imageRecordId(imageRecord);
-  final tapTarget = tester.widget<GestureDetector>(
-    find.byKey(Key('preview-image-tap-$id')),
-  );
-  final decoration =
-      (tapTarget.child! as DecoratedBox).decoration as BoxDecoration;
-  final border = decoration.border! as Border;
-  return border.top.color;
-}
-
-String _imageRecordId(Object imageRecord) => switch (imageRecord) {
-  final AiMaterial material => material.id,
-  final NoteAttachment attachment => attachment.id,
-  _ => throw ArgumentError.value(imageRecord, 'imageRecord'),
-};
-
 Color workspaceAccentColor(WidgetTester tester) {
   final scope = find.ancestor(
     of: find.byKey(const Key('source-pane')),
@@ -504,73 +328,6 @@ Color workspaceAccentColor(WidgetTester tester) {
       .widget<WorkspaceAppearanceScope>(scope.first)
       .appearance
       .accentColor;
-}
-
-bool spanHasBoldText(InlineSpan span, String text) {
-  if (span is TextSpan) {
-    if (span.text == text && span.style?.fontWeight == FontWeight.bold) {
-      return true;
-    }
-    return span.children?.any((child) => spanHasBoldText(child, text)) ?? false;
-  }
-  return false;
-}
-
-bool spanHasTextStyle(
-  InlineSpan span,
-  String text, {
-  double? fontSize,
-  FontWeight? fontWeight,
-  FontStyle? fontStyle,
-  TextDecoration? decoration,
-  Color? backgroundColor,
-}) => _spanHasTextStyle(
-  span,
-  text,
-  inheritedStyle: null,
-  fontSize: fontSize,
-  fontWeight: fontWeight,
-  fontStyle: fontStyle,
-  decoration: decoration,
-  backgroundColor: backgroundColor,
-);
-
-bool _spanHasTextStyle(
-  InlineSpan span,
-  String text, {
-  required TextStyle? inheritedStyle,
-  double? fontSize,
-  FontWeight? fontWeight,
-  FontStyle? fontStyle,
-  TextDecoration? decoration,
-  Color? backgroundColor,
-}) {
-  if (span is TextSpan) {
-    final style = inheritedStyle?.merge(span.style) ?? span.style;
-    if (span.text == text &&
-        (fontSize == null || style?.fontSize == fontSize) &&
-        (fontWeight == null || style?.fontWeight == fontWeight) &&
-        (fontStyle == null || style?.fontStyle == fontStyle) &&
-        (decoration == null || style?.decoration == decoration) &&
-        (backgroundColor == null ||
-            style?.backgroundColor == backgroundColor)) {
-      return true;
-    }
-    return span.children?.any(
-          (child) => _spanHasTextStyle(
-            child,
-            text,
-            inheritedStyle: style,
-            fontSize: fontSize,
-            fontWeight: fontWeight,
-            fontStyle: fontStyle,
-            decoration: decoration,
-            backgroundColor: backgroundColor,
-          ),
-        ) ??
-        false;
-  }
-  return false;
 }
 
 Icon iconForKey(WidgetTester tester, Key key) {

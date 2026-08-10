@@ -630,11 +630,8 @@ void main() {
     await pumpWorkspace(tester, vault: vault);
     await tester.tap(find.byKey(const Key('note-mode-source-pane-1')));
     await tester.pump(const Duration(milliseconds: 250));
-    await activateLiveMarkdownBlock(tester);
-    final documentController = liveMarkdownDocumentController(
-      tester,
-      paneId: 1,
-    );
+    await activateTestDocumentBlock(tester);
+    final documentController = noteSessionController(tester, paneId: 1);
 
     await tester.tap(find.byKey(const Key('delete-image-button')));
     await tester.pumpAndSettle();

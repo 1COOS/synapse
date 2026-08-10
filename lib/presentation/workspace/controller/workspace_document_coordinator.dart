@@ -111,7 +111,6 @@ final class WorkspaceDocumentCoordinator {
             searchResults: const [],
             narrowSection: WorkspaceSection.notes,
             message: '笔记已创建',
-            selectedPreviewImageSrc: null,
           ),
         ),
       ),
@@ -176,7 +175,6 @@ final class WorkspaceDocumentCoordinator {
                     id,
               },
               message: '文件夹已重命名',
-              selectedPreviewImageSrc: null,
             ),
           );
         },
@@ -257,7 +255,6 @@ final class WorkspaceDocumentCoordinator {
                   : _readState().selectedResourceId,
               searchResults: const [],
               message: '笔记已重命名',
-              selectedPreviewImageSrc: null,
             ),
           );
         },
@@ -300,7 +297,6 @@ final class WorkspaceDocumentCoordinator {
             searchResults: const [],
             narrowSection: WorkspaceSection.notes,
             message: '笔记已复制',
-            selectedPreviewImageSrc: null,
           ),
         ),
       ),
@@ -347,7 +343,6 @@ final class WorkspaceDocumentCoordinator {
             searchResults: const [],
             narrowSection: WorkspaceSection.notes,
             message: '笔记已移动',
-            selectedPreviewImageSrc: null,
           ),
         ),
       ),
@@ -393,7 +388,6 @@ final class WorkspaceDocumentCoordinator {
             closedPaneIds: {target.paneId},
             patch: WorkspaceStatePatch(
               selectedResourceId: nextFocusedPane?.noteId,
-              selectedPreviewImageSrc: null,
             ),
           );
         },
@@ -466,7 +460,6 @@ final class WorkspaceDocumentCoordinator {
                   ? WorkspaceSection.resources
                   : WorkspaceSection.notes,
               message: resource.isFolder ? '文件夹已删除' : '笔记已删除',
-              selectedPreviewImageSrc: null,
             ),
           );
         },

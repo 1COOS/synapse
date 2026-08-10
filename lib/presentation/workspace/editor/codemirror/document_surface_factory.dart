@@ -11,7 +11,8 @@ final class PlatformDocumentSurfaceFactory implements DocumentSurfaceFactory {
   const PlatformDocumentSurfaceFactory();
 
   @override
-  bool get supported => codeMirrorDocumentSurfaceSupported;
+  DocumentSurfaceAvailability get availability =>
+      codeMirrorDocumentSurfaceAvailability;
 
   @override
   Widget build({

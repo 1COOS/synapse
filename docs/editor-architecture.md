@@ -1,6 +1,18 @@
 # Synapse 编辑器架构
 
-macOS 的编辑和阅读视图使用同一个本地 CodeMirror 6 `EditorView`。Markdown 仍由 `NoteDocumentSession` 和 Vault 持有，WebView 负责低延迟交互、视口渲染、原生选区和用户按需开启的编辑态分页 overlay；真实 PDF 排版、预览与导出继续使用 Flutter 管线。
+CodeMirror 是唯一正文编辑器。macOS 的编辑和阅读视图使用同一个本地 CodeMirror 6 `EditorView`；项目不再包含 Flutter 正文编辑器或隐式 fallback。Markdown 仍由 `NoteDocumentSession` 和 Vault 持有，WebView 负责低延迟交互、视口渲染、原生选区和用户按需开启的编辑态分页 overlay；真实 PDF 排版、预览与导出继续使用 Flutter 管线。
+
+## 平台 surface 契约
+
+`DocumentSurfaceFactory.availability` 明确区分以下状态，`WorkspaceNotePane` 不得自行猜测或回退到另一套编辑器：
+
+- `supported`：当前仅指 macOS WKWebView 正常可用，编辑和阅读都由 CodeMirror surface 提供；
+- `webPreviewReadOnly`：Web/H5 阅读模式继续使用 Flutter Markdown renderer，源码模式只显示不可编辑提示；
+- `windowsPending`：Windows 保留 Vault、阅读与 PDF 等已有能力，源码模式明确提示正文编辑器等待 WebView2 接入；
+- `missingMacOSWebView`：macOS WebView 插件未初始化时显示显式错误，禁止静默 fallback；
+- `unsupportedPlatform`：未知或测试环境若未注入 surface，显示平台不支持状态。
+
+无可写 surface 时，格式化、替换、正文粘贴、表格操作和实时分页 overlay 必须禁用；阅读、查找和平台原本支持的 PDF 导出继续按各自能力工作。Windows 后续实现应新增 WebView2-backed `DocumentSurfaceFactory`，直接复用 `assets/editor_web/`、UTF-16 协议和 `EditorDocumentHub`，不得恢复独立 Flutter 编辑器。
 
 ## 离线资产
 
@@ -22,7 +34,7 @@ npm run check:generated
 
 - CodeMirror 按动画帧合并输入，发送 `baseRevision`、`revision`、changeset、selection 和 composition 状态。
 - `EditorDocumentHub` 校验 note、generation 和 revision 后更新 `NoteDocumentSession`，并把增量同步给同一笔记的其他窗格。
-- `DocumentSurfaceFactory` 是可注入边界；macOS 使用真实 WKWebView，Flutter widget tests 可使用 fake surface，不依赖平台视图。
+- `DocumentSurfaceFactory` 是唯一可注入的正文 surface 边界；macOS 使用真实 WKWebView，Flutter widget tests 使用 `TestDocumentSurfaceFactory`，不依赖平台视图。
 - 焦点窗格可写，非焦点窗格作为只读镜像。
 - revision 不一致时拒绝局部写入并发送完整正文重同步，禁止静默覆盖。
 - surface 命令按队列串行发送，避免 host changes 与 `flush` 越序。
@@ -44,7 +56,7 @@ npm run check:generated
 
 ## 门禁
 
-普通 Flutter widget tests 使用旧的无平台 surface，从而不依赖 WKWebView。真实桥接与 DOM 行为由 macOS integration test 覆盖：
+普通 Flutter widget tests 由 workspace harness 注入可编程的 `TestDocumentSurfaceFactory`。fake surface 可观测事务输入、selection、flush、mode、enabled、search、page layout 和 attach/detach 生命周期，并通过 `EditorDocumentHub` 驱动 Vault、保存、附件和 proposal 流程；它不模拟 CodeMirror DOM。真实桥接与 DOM 行为由 JavaScript tests 和 macOS integration test 覆盖：
 
 ```bash
 flutter test --no-pub integration_test/codemirror_document_surface_test.dart -d macos

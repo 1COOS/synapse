@@ -62,7 +62,8 @@ void main() {
 
 final class _FakeDocumentSurfaceFactory implements DocumentSurfaceFactory {
   @override
-  bool get supported => true;
+  DocumentSurfaceAvailability get availability =>
+      DocumentSurfaceAvailability.supported;
 
   @override
   Widget build({

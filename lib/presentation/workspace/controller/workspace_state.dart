@@ -63,7 +63,6 @@ final class WorkspaceState {
     this.message = '',
     this.reloadRequired = false,
     Set<String> collapsedFolderIds = const {},
-    this.selectedPreviewImageSrc,
   }) : settings = settings.withoutApiKey(),
        resources = List<VaultResourceNode>.unmodifiable(
          resources.map(_freezeResource),
@@ -104,7 +103,6 @@ final class WorkspaceState {
   final String message;
   final bool reloadRequired;
   final Set<String> collapsedFolderIds;
-  final String? selectedPreviewImageSrc;
 
   bool get hasVault =>
       phase == WorkspacePhase.migrationRequired ||
@@ -147,7 +145,6 @@ final class WorkspaceState {
     String? message,
     bool? reloadRequired,
     Set<String>? collapsedFolderIds,
-    Object? selectedPreviewImageSrc = _unset,
   }) {
     return WorkspaceState(
       phase: phase ?? this.phase,
@@ -184,9 +181,6 @@ final class WorkspaceState {
       message: message ?? this.message,
       reloadRequired: reloadRequired ?? this.reloadRequired,
       collapsedFolderIds: collapsedFolderIds ?? this.collapsedFolderIds,
-      selectedPreviewImageSrc: identical(selectedPreviewImageSrc, _unset)
-          ? this.selectedPreviewImageSrc
-          : selectedPreviewImageSrc as String?,
     );
   }
 }

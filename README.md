@@ -2,7 +2,7 @@
 
 Synapse 是一个多端学习资料整理工作台。它帮助个人学习者把零散的文本、截图、图片和后续扩展的音频、PDF、网页剪藏，整理成可审阅、可迁移、Obsidian 友好的 Markdown 学习笔记。
 
-项目当前使用 Flutter + Dart 构建。首版唯一生产目标是 macOS；Web/H5 作为内存预览入口，用于快速查看 UI 和主流程。Windows 工程资产仍保留，但不在当前生产承诺和发布门禁内。
+项目当前使用 Flutter + Dart 构建。首版唯一生产目标是 macOS；Web/H5 作为只读正文的内存预览入口，用于快速查看 UI 和主流程。Windows 工程资产仍保留，正文编辑等待 WebView2 CodeMirror surface，不在当前生产承诺和发布门禁内。
 
 ## 核心定位
 
@@ -17,9 +17,9 @@ Synapse 不是 Obsidian 的替代品，而是 Obsidian 之前的「结构化整�
 
 - 三栏学习工作台：左栏资源/搜索与大纲、中栏笔记阅读与编辑、右栏图片素材与 AI 建议；桌面端左右栏可折叠。
 - 桌面端 Vault：首次选择并记住本地 Markdown 仓库目录。
-- Web 预览库：使用内存示例数据，不直接访问本机文件系统。
+- Web 预览库：使用内存示例数据，不直接访问本机文件系统；阅读模式可用，源码模式不可编辑。
 - 普通资源创建：直接创建文件夹和 Markdown 笔记，不要求选择项目模板。
-- 笔记编辑：macOS 的编辑与阅读视图共用本地离线 CodeMirror 文档内核，当前编辑区域显示 Markdown 标签，其他区域使用 Live Preview；切换模式不会重载正文、滚动或选区。剪贴板图片仍保存为 Obsidian 友好的相对附件引用。
+- 笔记编辑：CodeMirror 是唯一正文编辑器。macOS 的编辑与阅读视图共用本地离线 CodeMirror 文档内核，当前编辑区域显示 Markdown 标签，其他区域使用 Live Preview；切换模式不会重载正文、滚动或选区。剪贴板图片仍保存为 Obsidian 友好的相对附件引用。Web/H5 只读；Windows 后续复用同一内核和协议接入 WebView2。
 - 图片素材：支持导入图片、粘贴剪贴板截图，再生成 OCR/整理建议。
 - AI Provider：桌面端支持 OpenAI 兼容 `baseURL/apiKey/model` 配置；无 key 时提示先设置模型。
 - AI proposal：未确认时保留在右侧素材栏且不修改正文；用户明确确认后可追加写入 Markdown，并把 proposal 状态标记为 `applied`。
@@ -104,6 +104,8 @@ Web/H5 预览：
 flutter run -d chrome --web-hostname 127.0.0.1 --web-port 5173
 ```
 
+Web/H5 的正文阅读和流程预览可用，但源码模式不提供编辑；这是平台能力边界，不会回退到另一套 Flutter 编辑器。
+
 macOS 构建：
 
 ```bash
@@ -111,7 +113,7 @@ flutter build macos --debug --no-pub
 flutter build web --no-pub
 ```
 
-Windows 工程资产不属于当前生产目标；本轮不以 Windows 构建作为发布门禁。
+Windows 工程资产不属于当前生产目标；本轮不以 Windows 构建作为发布门禁。后续 Windows 正文编辑通过 WebView2 实现 `DocumentSurfaceFactory`，复用现有 CodeMirror 资产、UTF-16 协议和 `EditorDocumentHub`。
 
 ## 数据原则
 

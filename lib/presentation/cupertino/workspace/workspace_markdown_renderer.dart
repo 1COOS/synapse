@@ -5,7 +5,6 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:markdown/markdown.dart' as md;
 import 'package:path/path.dart' as p;
@@ -77,17 +76,15 @@ final class WorkspaceMarkdownRenderer {
   }) {
     if (hiddenTableSeparator) {
       return SizedBox.shrink(
-        key: Key('live-markdown-reading-table-separator-$index'),
+        key: Key('markdown-reading-table-separator-$index'),
       );
     }
     if (block.kind == MarkdownLiveBlockKind.pageBreak) {
-      return SizedBox.shrink(
-        key: Key('live-markdown-reading-page-break-$index'),
-      );
+      return SizedBox.shrink(key: Key('markdown-reading-page-break-$index'));
     }
     if (block.isColumnsMarker) {
       return SizedBox.shrink(
-        key: Key('live-markdown-reading-columns-marker-$index'),
+        key: Key('markdown-reading-columns-marker-$index'),
       );
     }
     if (block.isBlank) {
@@ -100,7 +97,7 @@ final class WorkspaceMarkdownRenderer {
       return Padding(
         padding: const EdgeInsets.symmetric(vertical: 3),
         child: MarkdownTableFrame(
-          surfaceKey: Key('live-markdown-reading-table-$index'),
+          surfaceKey: Key('markdown-reading-table-$index'),
           table: table,
           cellBuilder: _buildReadOnlyTableCell,
         ),
@@ -108,30 +105,13 @@ final class WorkspaceMarkdownRenderer {
     }
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 3),
-      child: _buildMarkdownBody(
-        block.text,
-        mode: ImagePreviewMode.reading,
-        editorContext: editorContext,
-      ),
+      child: _buildMarkdownBody(block.text, editorContext: editorContext),
     );
   }
 
   Widget _buildMarkdownBody(
     String markdown, {
-    required ImagePreviewMode mode,
     required PaneEditorContext editorContext,
-    int? imageBlockStart,
-    String? selectedImageSrc,
-    ValueListenable<PreviewImageRenderState>? imageRenderState,
-    Object? imageTapRegionGroupId,
-    PreviewImageTapCallback? onImageTap,
-    PreviewImageTapCallback? onImageTapDown,
-    VoidCallback? onImageTapCancel,
-    PreviewImageSecondaryTapCallback? onImageSecondaryTapUp,
-    void Function(String src, bool available)? onImageAvailabilityChanged,
-    VoidCallback? onImageMoveDragStarted,
-    ValueChanged<DragUpdateDetails>? onImageMoveDragUpdate,
-    VoidCallback? onImageMoveDragEnded,
   }) {
     final styleSheet = _noteMarkdownStyleSheet(markdown);
     return MarkdownBody(
@@ -140,23 +120,8 @@ final class WorkspaceMarkdownRenderer {
       softLineBreak: true,
       inlineSyntaxes: [_highlightSyntax],
       builders: {'mark': _HighlightElementBuilder()},
-      sizedImageBuilder: (config) => _buildPreviewImage(
-        config,
-        mode: mode,
-        editorContext: editorContext,
-        imageBlockStart: imageBlockStart,
-        selectedImageSrc: selectedImageSrc,
-        imageRenderState: imageRenderState,
-        imageTapRegionGroupId: imageTapRegionGroupId,
-        onImageTap: onImageTap,
-        onImageTapDown: onImageTapDown,
-        onImageTapCancel: onImageTapCancel,
-        onImageSecondaryTapUp: onImageSecondaryTapUp,
-        onImageAvailabilityChanged: onImageAvailabilityChanged,
-        onImageMoveDragStarted: onImageMoveDragStarted,
-        onImageMoveDragUpdate: onImageMoveDragUpdate,
-        onImageMoveDragEnded: onImageMoveDragEnded,
-      ),
+      sizedImageBuilder: (config) =>
+          _buildPreviewImage(config, editorContext: editorContext),
       styleSheetTheme: MarkdownStyleSheetBaseTheme.cupertino,
       styleSheet: styleSheet,
     );
@@ -210,61 +175,6 @@ final class WorkspaceMarkdownRenderer {
       context,
       _appearance,
       headingMatch.group(1)!.length,
-    );
-  }
-
-  Widget buildLivePreviewBlock(
-    String markdown, {
-    required PaneEditorContext editorContext,
-    int? imageBlockStart,
-    String? selectedImageSrc,
-    ValueListenable<PreviewImageRenderState>? imageRenderState,
-    Object? imageTapRegionGroupId,
-    PreviewImageTapCallback? onImageTap,
-    PreviewImageTapCallback? onImageTapDown,
-    VoidCallback? onImageTapCancel,
-    PreviewImageSecondaryTapCallback? onImageSecondaryTapUp,
-    void Function(String src, bool available)? onImageAvailabilityChanged,
-    VoidCallback? onImageMoveDragStarted,
-    ValueChanged<DragUpdateDetails>? onImageMoveDragUpdate,
-    VoidCallback? onImageMoveDragEnded,
-    bool tableSelected = false,
-    Key? tableSelectionTargetKey,
-    VoidCallback? onTableFrameTap,
-    GestureTapDownCallback? onTableFrameSecondaryTapDown,
-    VoidCallback? onTableContentTap,
-  }) {
-    if (markdown.trim().isEmpty) {
-      return const SizedBox(height: 12);
-    }
-    final table = parseMarkdownLiveTable(markdown);
-    if (table != null) {
-      return MarkdownTableFrame(
-        table: table,
-        cellBuilder: _buildReadOnlyTableCell,
-        selected: tableSelected,
-        selectionTargetKey: tableSelectionTargetKey,
-        onFrameTap: onTableFrameTap,
-        onFrameSecondaryTapDown: onTableFrameSecondaryTapDown,
-        onContentTap: onTableContentTap,
-      );
-    }
-    return _buildMarkdownBody(
-      markdown,
-      mode: ImagePreviewMode.editing,
-      editorContext: editorContext,
-      imageBlockStart: imageBlockStart,
-      selectedImageSrc: selectedImageSrc,
-      imageRenderState: imageRenderState,
-      imageTapRegionGroupId: imageTapRegionGroupId,
-      onImageTap: onImageTap,
-      onImageTapDown: onImageTapDown,
-      onImageTapCancel: onImageTapCancel,
-      onImageSecondaryTapUp: onImageSecondaryTapUp,
-      onImageAvailabilityChanged: onImageAvailabilityChanged,
-      onImageMoveDragStarted: onImageMoveDragStarted,
-      onImageMoveDragUpdate: onImageMoveDragUpdate,
-      onImageMoveDragEnded: onImageMoveDragEnded,
     );
   }
 
@@ -328,20 +238,7 @@ final class WorkspaceMarkdownRenderer {
 
   Widget _buildPreviewImage(
     MarkdownImageConfig config, {
-    required ImagePreviewMode mode,
     required PaneEditorContext editorContext,
-    required int? imageBlockStart,
-    required String? selectedImageSrc,
-    required ValueListenable<PreviewImageRenderState>? imageRenderState,
-    required Object? imageTapRegionGroupId,
-    PreviewImageTapCallback? onImageTap,
-    PreviewImageTapCallback? onImageTapDown,
-    VoidCallback? onImageTapCancel,
-    PreviewImageSecondaryTapCallback? onImageSecondaryTapUp,
-    void Function(String src, bool available)? onImageAvailabilityChanged,
-    VoidCallback? onImageMoveDragStarted,
-    ValueChanged<DragUpdateDetails>? onImageMoveDragUpdate,
-    VoidCallback? onImageMoveDragEnded,
   }) {
     final src = safeUriDecode(config.uri.toString());
     final failureLabel = config.alt ?? src;
@@ -358,222 +255,13 @@ final class WorkspaceMarkdownRenderer {
     final width = clampImageWidth(
       (config.width ?? defaultMarkdownImageWidth.toDouble()).round(),
     ).toDouble();
-    Widget buildImage(PreviewImageRenderState renderState) => Consumer(
-      builder: (context, ref, child) {
-        final currentWorkspace =
-            ref.watch(workspaceControllerProvider).value ?? workspace;
-        final noteId = controller
-            .resolvePaneEditorContext(editorContext)
-            ?.noteId;
-        final locked =
-            noteId != null &&
-            currentWorkspace.lockedSessionNoteIds.contains(noteId);
-        return PreviewImageBlock(
-          key: Key('preview-image-${attachment.id}'),
-          attachment: attachment,
-          src: src,
-          width: width,
-          blockStart: renderState.blockStart,
-          tapRegionGroupId: imageTapRegionGroupId,
-          editableControls:
-              mode == ImagePreviewMode.editing &&
-              !currentWorkspace.isBusy &&
-              !locked,
-          selectedImageSrc: renderState.selectedImageSrc,
-          selectedSourceId: renderState.selectedSourceId,
-          loadImageBytes: () => controller.readNoteAttachment(attachment),
-          failureLabel: failureLabel,
-          onAvailabilityChanged: onImageAvailabilityChanged == null
-              ? null
-              : (available) => onImageAvailabilityChanged(
-                  normalizeImageSrc(src),
-                  available,
-                ),
-          onTap: () {
-            if (controller.isBusy ||
-                mode != ImagePreviewMode.editing ||
-                controller.resolvePaneEditorContext(editorContext) == null) {
-              return;
-            }
-            onImageTap?.call(attachment.id, normalizeImageSrc(src));
-          },
-          onTapDown: onImageTapDown == null
-              ? null
-              : () => onImageTapDown(attachment.id, normalizeImageSrc(src)),
-          onTapCancel: onImageTapCancel,
-          onSecondaryTapUp:
-              mode == ImagePreviewMode.editing &&
-                  onImageSecondaryTapUp != null &&
-                  controller.resolvePaneEditorContext(editorContext) != null
-              ? (details) => onImageSecondaryTapUp(
-                  attachment.id,
-                  normalizeImageSrc(src),
-                  details,
-                )
-              : null,
-          onMoveDragStarted: onImageMoveDragStarted,
-          onMoveDragUpdate: onImageMoveDragUpdate,
-          onMoveDragEnded: onImageMoveDragEnded,
-          onWidthChanged: (value) {
-            if (controller.isBusy ||
-                controller.isPaneEditorContextLocked(editorContext)) {
-              return;
-            }
-            unawaited(
-              _applyImageWidth(
-                editorContext,
-                sourceId: attachment.id,
-                src: src,
-                width: clampImageWidth(value.round()),
-              ),
-            );
-          },
-          onImageDropped: (dragged, target, side) {
-            if (controller.isBusy ||
-                controller.isPaneEditorContextLocked(editorContext)) {
-              return;
-            }
-            unawaited(
-              _applyImageDrop(
-                editorContext,
-                draggedSourceId: dragged.sourceId,
-                draggedSrc: dragged.src,
-                targetSourceId: target.sourceId,
-                targetSrc: target.src,
-                beforeTarget: side == ImageDropSide.before,
-              ),
-            );
-          },
-        );
-      },
-    );
-    final initialRenderState = PreviewImageRenderState(
-      blockStart: imageBlockStart,
-      selectedImageSrc: selectedImageSrc,
-      selectedSourceId: null,
-    );
-    if (imageRenderState == null) {
-      return buildImage(initialRenderState);
-    }
-    return ValueListenableBuilder<PreviewImageRenderState>(
-      valueListenable: imageRenderState,
-      builder: (context, renderState, child) => buildImage(renderState),
-    );
-  }
-
-  Future<PaneEditorCommandOutcome> _applyImageDrop(
-    PaneEditorContext context, {
-    required String draggedSourceId,
-    required String draggedSrc,
-    required String targetSourceId,
-    required String targetSrc,
-    required bool beforeTarget,
-  }) async {
-    if (draggedSourceId == targetSourceId ||
-        normalizeImageSrc(draggedSrc) == normalizeImageSrc(targetSrc)) {
-      return PaneEditorCommandOutcome.unchanged;
-    }
-    var resolved = controller.resolvePaneEditorContext(context);
-    if (resolved == null) {
-      return PaneEditorCommandOutcome.staleTarget;
-    }
-    if (controller.isPaneEditorContextLocked(context)) {
-      return PaneEditorCommandOutcome.unchanged;
-    }
-    if (_attachmentForId(resolved.session, draggedSourceId) == null ||
-        _attachmentForId(resolved.session, targetSourceId) == null) {
-      return PaneEditorCommandOutcome.unchanged;
-    }
-    final documentController = resolved.session.controller;
-    final updated = moveImageTagInMarkdown(
-      markdown: documentController.text,
-      draggedSrc: draggedSrc,
-      targetSrc: targetSrc,
-      beforeTarget: beforeTarget,
-    );
-    if (updated == documentController.text) {
-      return PaneEditorCommandOutcome.unchanged;
-    }
-    resolved = controller.resolvePaneEditorContext(context);
-    if (resolved == null) {
-      return PaneEditorCommandOutcome.staleTarget;
-    }
-    if (controller.isPaneEditorContextLocked(context)) {
-      return PaneEditorCommandOutcome.unchanged;
-    }
-    if (_attachmentForId(resolved.session, draggedSourceId) == null ||
-        _attachmentForId(resolved.session, targetSourceId) == null) {
-      return PaneEditorCommandOutcome.unchanged;
-    }
-    _setSelectedPreviewImageSrc(draggedSrc);
-    _replaceSessionMarkdown(resolved.session, updated);
-    final saveFailure = await _savePaneEditorSession(
-      context,
-      resolved.session,
-      successMessage: '图片位置已更新',
-      automatic: false,
-      rescheduleIfDirty: false,
-    );
-    return saveFailure ?? PaneEditorCommandOutcome.committed;
-  }
-
-  Future<PaneEditorCommandOutcome> _applyImageWidth(
-    PaneEditorContext context, {
-    required String sourceId,
-    required String src,
-    required int width,
-  }) async {
-    var resolved = controller.resolvePaneEditorContext(context);
-    if (resolved == null) {
-      return PaneEditorCommandOutcome.staleTarget;
-    }
-    if (controller.isPaneEditorContextLocked(context)) {
-      return PaneEditorCommandOutcome.unchanged;
-    }
-    if (_attachmentForId(resolved.session, sourceId) == null) {
-      return PaneEditorCommandOutcome.unchanged;
-    }
-    final documentController = resolved.session.controller;
-    final updated = replaceImageWidthInMarkdown(
-      markdown: documentController.text,
-      src: src,
+    return PreviewImageBlock(
+      key: Key('preview-image-${attachment.id}'),
+      attachment: attachment,
       width: width,
+      loadImageBytes: () => controller.readNoteAttachment(attachment),
+      failureLabel: failureLabel,
     );
-    if (updated == documentController.text) {
-      return PaneEditorCommandOutcome.unchanged;
-    }
-    resolved = controller.resolvePaneEditorContext(context);
-    if (resolved == null) {
-      return PaneEditorCommandOutcome.staleTarget;
-    }
-    if (controller.isPaneEditorContextLocked(context)) {
-      return PaneEditorCommandOutcome.unchanged;
-    }
-    if (_attachmentForId(resolved.session, sourceId) == null) {
-      return PaneEditorCommandOutcome.unchanged;
-    }
-    _setSelectedPreviewImageSrc(src);
-    _replaceSessionMarkdown(resolved.session, updated);
-    final saveFailure = await _savePaneEditorSession(
-      context,
-      resolved.session,
-      successMessage: '图片宽度已更新',
-      automatic: false,
-      rescheduleIfDirty: false,
-    );
-    return saveFailure ?? PaneEditorCommandOutcome.committed;
-  }
-
-  NoteAttachment? _attachmentForId(
-    NoteDocumentSession session,
-    String attachmentId,
-  ) {
-    for (final attachment in session.note.attachments) {
-      if (attachment.id == attachmentId) {
-        return attachment;
-      }
-    }
-    return null;
   }
 
   NoteAttachment? _imageAttachmentForMarkdownSrc(
@@ -638,39 +326,6 @@ final class WorkspaceMarkdownRenderer {
       titleFallback = attachment;
     }
     return titleFallback;
-  }
-
-  bool hasImageAttachment(PaneEditorContext context, String src) {
-    return _imageAttachmentForMarkdownSrc(context, src) != null;
-  }
-
-  void _setSelectedPreviewImageSrc(String? src) {
-    controller.setSelectedPreviewImageSrc(
-      src == null ? null : normalizeImageSrc(src),
-    );
-  }
-
-  void _replaceSessionMarkdown(NoteDocumentSession session, String markdown) {
-    session.replaceBodyProgrammatically(
-      MarkdownDocument.parse(markdown).body.trimLeft(),
-    );
-  }
-
-  Future<PaneEditorCommandOutcome?> _savePaneEditorSession(
-    PaneEditorContext context,
-    NoteDocumentSession session, {
-    String? successMessage,
-    required bool automatic,
-    required bool rescheduleIfDirty,
-  }) async {
-    final outcome = await controller.saveEditorSession(
-      context,
-      session,
-      automatic: automatic,
-      rescheduleIfDirty: rescheduleIfDirty,
-      successMessage: successMessage,
-    );
-    return outcome == PaneEditorCommandOutcome.committed ? null : outcome;
   }
 
   String _markdownAttachmentSrc(VaultNote note, NoteAttachment attachment) {
@@ -884,7 +539,7 @@ final class _WorkspaceReadingPreviewState
     );
 
     return Padding(
-      key: Key('live-markdown-reading-columns-${layout.startBlockIndex}'),
+      key: Key('markdown-reading-columns-${layout.startBlockIndex}'),
       padding: EdgeInsets.zero,
       child: DecoratedBox(
         decoration: BoxDecoration(

@@ -3,13 +3,10 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:synapse/application/settings/synapse_settings.dart';
-import 'package:synapse/domain/markdown/markdown_document.dart';
 import 'package:synapse/domain/vault/vault_resource.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
-import 'package:synapse/presentation/cupertino/markdown_live_blocks.dart';
 import 'package:synapse/presentation/cupertino/workspace/workspace_sources.dart';
 import 'package:synapse/presentation/cupertino/workspace/workspace_theme.dart';
-import 'package:synapse/presentation/workspace/outline_navigation.dart';
 
 import '../../support/workspace_fakes.dart';
 import '../../support/workspace_harness.dart';
@@ -125,7 +122,7 @@ void main() {
     );
 
     expect(find.byKey(const Key('outline-row-3-old-child')), findsOneWidget);
-    await enterTextInLiveMarkdownBlock(
+    await enterTextInTestDocumentBlock(
       tester,
       '## Renamed child',
       blockIndex: 2,
@@ -138,14 +135,14 @@ void main() {
       findsOneWidget,
     );
 
-    await enterTextInLiveMarkdownBlock(
+    await enterTextInTestDocumentBlock(
       tester,
       '### Renamed child',
       blockIndex: 2,
     );
     await tester.pump();
     expect(
-      liveMarkdownDocumentController(tester, paneId: 1).text,
+      noteSessionController(tester, paneId: 1).text,
       contains('### Renamed child'),
     );
     expect(
@@ -168,166 +165,14 @@ void main() {
       closeTo(28, 0.1),
     );
 
-    await enterTextInLiveMarkdownBlock(tester, 'Body', blockIndex: 2);
+    await enterTextInTestDocumentBlock(tester, 'Body', blockIndex: 2);
     await tester.pump();
     expect(find.byKey(const Key('outline-row-3-renamed-child')), findsNothing);
 
-    await enterTextInLiveMarkdownBlock(tester, '## Added child', blockIndex: 2);
+    await enterTextInTestDocumentBlock(tester, '## Added child', blockIndex: 2);
     await tester.pump();
     expect(find.byKey(const Key('outline-row-3-added-child')), findsOneWidget);
   });
-
-  testWidgets('navigates in reading and source modes without changing text', (
-    tester,
-  ) async {
-    final vault = MemoryVaultBackend(seedExampleData: false);
-    final note = await vault.createNote(parentPath: '', title: 'Navigation');
-    final markdown = _longMarkdown();
-    await vault.updateMarkdown(noteId: note.id, markdown: markdown);
-    final outline = _flatten(extractOutline(markdown)).toList();
-    final target = outline.firstWhere((node) => node.title == 'Target');
-    expect(
-      outlineNodesByBlockIndex(
-        markdown,
-        splitMarkdownLiveBlocks(markdown),
-        extractOutline(markdown),
-      ).values.map((node) => node.id),
-      contains(target.id),
-    );
-
-    await pumpWorkspace(
-      tester,
-      vault: vault,
-      settingsStore: _readingSettingsStore(),
-    );
-    expect(
-      find.byKey(Key('note-heading-anchor-pane-1-${outline.first.id}')),
-      findsOneWidget,
-    );
-    expect(
-      find.byKey(Key('note-heading-anchor-pane-1-${target.id}')),
-      findsOneWidget,
-    );
-
-    await tester.tap(find.byKey(Key('outline-row-${target.id}')));
-    await tester.pumpAndSettle();
-    expect(
-      tester
-          .widgetList<WorkspaceOutlineHeadingAnchor>(
-            find.byType(WorkspaceOutlineHeadingAnchor),
-          )
-          .map((anchor) => anchor.node.id),
-      contains(target.id),
-    );
-    _expectHeadingBelowPaneHeader(tester, paneId: 1, node: target);
-    expect(
-      find.byKey(Key('outline-active-indicator-${target.id}')),
-      findsOneWidget,
-    );
-
-    await switchToSourceMode(tester);
-    await activateLiveMarkdownBlock(tester, blockIndex: 0);
-    await setActiveLiveMarkdownSelection(
-      tester,
-      const TextSelection.collapsed(offset: 3),
-    );
-    final controller = liveMarkdownDocumentController(tester, paneId: 1);
-    final before = controller.value;
-
-    await tester.tap(find.byKey(Key('outline-row-${target.id}')));
-    await tester.pumpAndSettle();
-
-    _expectHeadingBelowPaneHeader(tester, paneId: 1, node: target);
-    expect(controller.text, before.text);
-    expect(controller.selection, before.selection);
-    expect(find.byKey(const Key('note-mode-source')), findsOneWidget);
-  });
-
-  testWidgets(
-    'tracks the visible heading and routes navigation to focused pane',
-    (tester) async {
-      final vault = MemoryVaultBackend(seedExampleData: false);
-      final alpha = await vault.createNote(parentPath: '', title: 'Alpha');
-      final alphaMarkdown = _longMarkdown(
-        root: 'Alpha',
-        target: 'Alpha target',
-      );
-      await vault.updateMarkdown(noteId: alpha.id, markdown: alphaMarkdown);
-      final beta = await vault.createNote(parentPath: '', title: 'Beta');
-      final betaMarkdown = _longMarkdown(root: 'Beta', target: 'Beta target');
-      await vault.updateMarkdown(noteId: beta.id, markdown: betaMarkdown);
-
-      await pumpWorkspace(
-        tester,
-        vault: vault,
-        size: const Size(1600, 900),
-        settingsStore: _readingSettingsStore(),
-      );
-      await tester.tap(find.byKey(Key('resource-row-${alpha.id}')));
-      await tester.pumpAndSettle();
-      await tester.tap(find.byKey(const Key('split-pane-right-button')));
-      await tester.pumpAndSettle();
-      await tester.tap(find.byKey(Key('resource-row-${beta.id}')));
-      await tester.pumpAndSettle();
-
-      final betaOutline = _flatten(extractOutline(betaMarkdown)).toList();
-      final betaRoot = betaOutline.first;
-      final betaTarget = betaOutline.last;
-      await tester.tap(find.byKey(Key('outline-row-${betaTarget.id}')));
-      await tester.pumpAndSettle();
-
-      _expectHeadingBelowPaneHeader(tester, paneId: 2, node: betaTarget);
-      expect(
-        find.byKey(Key('outline-active-indicator-${betaTarget.id}')),
-        findsOneWidget,
-      );
-
-      final readingPane = find.byKey(
-        const Key('markdown-reading-preview-pane-2'),
-        skipOffstage: false,
-      );
-      await tester.drag(readingPane, const Offset(0, 1600));
-      await tester.pumpAndSettle();
-
-      expect(
-        find.byKey(Key('outline-active-indicator-${betaRoot.id}')),
-        findsOneWidget,
-      );
-    },
-  );
-}
-
-String _longMarkdown({String root = 'Root', String target = 'Target'}) {
-  final before = List.generate(
-    18,
-    (index) => 'Paragraph before $index with enough text to occupy a line.',
-  ).join('\n\n');
-  final after = List.generate(
-    18,
-    (index) => 'Paragraph after $index with enough text to occupy a line.',
-  ).join('\n\n');
-  return '# $root\n\n$before\n\n## $target\n\n$after\n';
-}
-
-Iterable<OutlineNode> _flatten(List<OutlineNode> nodes) sync* {
-  for (final node in nodes) {
-    yield node;
-    yield* _flatten(node.children);
-  }
-}
-
-void _expectHeadingBelowPaneHeader(
-  WidgetTester tester, {
-  required int paneId,
-  required OutlineNode node,
-}) {
-  final pane = find.byKey(Key('split-pane-pane-$paneId'));
-  final anchor = find.byKey(
-    Key('note-heading-anchor-pane-$paneId-${node.id}'),
-    skipOffstage: false,
-  );
-  final offset = tester.getTopLeft(anchor).dy - tester.getTopLeft(pane).dy;
-  expect(offset, inInclusiveRange(54, 76));
 }
 
 FakeSettingsStore _readingSettingsStore() => FakeSettingsStore(

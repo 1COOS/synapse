@@ -8,8 +8,8 @@
 - Dart SDK：以 `pubspec.yaml` 约束为准；
 - macOS + Xcode：唯一生产开发、原生测试、签名和构建环境；
 - Apple Development signing：Debug/Profile/Release 都必须有有效签名 identity 和可用 Team；Debug/Profile 使用 Apple Development 签名并支持真实 Keychain 流程；
-- Chrome：Web/H5 内存预览；
-- Windows：工程资产存在，但不在当前 production gate 和发布承诺内。
+- Chrome：Web/H5 内存阅读与流程预览，正文不可编辑；
+- Windows：工程资产存在，正文编辑等待 WebView2 CodeMirror surface，不在当前 production gate 和发布承诺内。
 
 当前笔记 PDF 导出入口仅在 macOS 和 Windows 启用；Web/H5 不注册入口。Windows 的代码与插件装配在仓库中维护，但最终构建必须在 Windows 环境执行。
 
@@ -41,7 +41,7 @@ flutter run -d macos
 flutter run -d chrome --web-hostname 127.0.0.1 --web-port 5173
 ```
 
-Web/H5 使用 `MemoryVaultBackend`，刷新后数据重置，不保存 API Key，也不属于生产端。
+Web/H5 使用 `MemoryVaultBackend`，刷新后数据重置，不保存 API Key，也不属于生产端。阅读模式继续渲染 Markdown；源码模式只显示不可编辑提示，格式化、替换、正文粘贴、表格操作和实时分页均禁用。
 
 ### 2.3 测试与分析
 
@@ -72,11 +72,11 @@ flutter build windows --no-pub
 
 ## 3. 平台矩阵
 
-| 平台 | Vault backend | 数据持久化 | 当前定位 |
-| --- | --- | --- | --- |
-| macOS | `FileVaultBackend` | 本机 Markdown Vault | 唯一生产目标 |
-| Web/H5 | `MemoryVaultBackend` | 内存 | UI/流程预览 |
-| Windows | `FileVaultBackend` 工程资产 | PDF 导出代码与插件装配已实现，构建待 Windows 验证 | 不在当前 macOS production gate |
+| 平台 | Vault backend | 正文 surface | 数据持久化 | 当前定位 |
+| --- | --- | --- | --- | --- |
+| macOS | `FileVaultBackend` | WKWebView + CodeMirror，可编辑 | 本机 Markdown Vault | 唯一生产目标 |
+| Web/H5 | `MemoryVaultBackend` | Flutter 阅读 renderer，源码只读提示 | 内存 | UI/流程预览 |
+| Windows | `FileVaultBackend` 工程资产 | WebView2 + CodeMirror 待接入 | PDF 导出代码与插件装配已实现，构建待 Windows 验证 | 不在当前 macOS production gate |
 
 macOS 必须验证 File Vault、Keychain、security-scoped bookmark/lease、Debug/Release build 和最终签名 entitlement。Web 只验证页面与主流程，不承担本机文件、密钥或发布能力。
 
@@ -137,12 +137,13 @@ Widget 使用 Provider 渲染并发送 intent，不得重新引入本地业务�
 
 ### 5.3 Markdown 编辑器
 
-- Markdown marker 是存储格式，活动 block 中保持可见；
-- block 失焦后由渲染视图隐藏 marker；
+- CodeMirror 是唯一正文编辑器；`DocumentSurfaceFactory` 必须显式报告 `supported`、Web 只读、Windows 待接入、macOS WebView 缺失或未知平台，不得恢复 Flutter 编辑 fallback；
+- Markdown marker 是存储格式，CodeMirror 活动区域保持可见；区域失焦和阅读模式通过 decoration 隐藏 marker；
+- Web/H5 只提供 Flutter Markdown 阅读 renderer，Windows 在 WebView2 surface 完成前只显示不可编辑提示；无可写 surface 时必须禁用格式化、替换、正文粘贴、表格操作和实时分页；
 - inline parser 统一识别加粗、斜体、删除线、`==高亮==`、转义、任意嵌套和代码范围；formatting command 同时更新 Markdown source 和 styled display；
 - inline format 使用 toggle 语义；混合选区统一应用，跨行逐个非空行处理，只移除目标 marker，并保持相同可见文字选区；
 - 行内/围栏代码中的选区禁用格式、段落、列表和块插入；
-- 编辑和阅读共用窗格级 selection projection；每个可见叶子把渲染位置映射回全局 Markdown UTF-16 offset，滚动与无正文变化的保存不得清除选区，切换笔记、窗格绑定或模式必须清除；
+- 编辑和阅读共用 CodeMirror 窗格级 selection projection；每个可见叶子把渲染位置映射回全局 Markdown UTF-16 offset，滚动与无正文变化的保存不得清除选区，切换笔记或窗格绑定必须清除，模式热切换保留可恢复的 surface 状态；
 - selection tree 必须按 Markdown source 注册顺序遍历，双栏严格为左栏全部、右栏全部、下方全宽；横向滚动 viewport 不得创建隔离正文叶子的 selection container，纵向边缘拖选必须持续自动滚动；
 - `⌘A`/`Ctrl+A` 选中当前窗格正文且排除 frontmatter；Copy 输出 source range，Cut/Delete/Backspace/输入/粘贴复用同一 document replacement pipeline，并形成一个 undo/autosave 变更；
 - 图片、真实表格、分页符和分隔线按原子 source segment 保护；部分覆盖只能复制，禁止破坏性命令并提示完整选择。双栏部分删除必须保留成套 start/separator/end marker，完整覆盖整个布局时才允许一并删除；
@@ -153,9 +154,10 @@ Widget 使用 Provider 渲染并发送 intent，不得重新引入本地业务�
 - 双栏插入后聚焦左栏空正文；栏内禁止再次插入双栏。“取消双栏”只删除布局注释并按左后右展平；栏宽拖动只在 pointer-up 时写回一个归一化 `30:70` 至 `70:30` 比例，形成单个 undo 变更；
 - 双栏的横向滚动只属于该布局块，不能替换或联动正文纵向 scroll controller；查找、大纲、图片和表格操作仍按内部叶子 block 定位；
 - 分页符必须严格保存为独占一行的 `<!-- synapse:page-break -->`；非活动源码块显示辅助线，活动块显示真实 marker，阅读模式隐藏；普通 `---` 不得改写为分页；
-- 自动分页默认关闭；只有用户点击当前 pane 的“显示分页线”后才捕获附件快照并生成。启用期间 Flutter Live Markdown 只能使用 `IgnorePointer`/`ExcludeSemantics` 的 `CustomPaint` overlay，CodeMirror 只能使用 `pointer-events: none`、`aria-hidden` 的绝对 overlay；禁止插入占位字符或 widget span，禁止改变 caret、selection、copy、undo 和 `TextSpan.toPlainText()`。阅读模式和关闭状态必须发送空布局；手动分页符继续使用现有源码辅助线且不得重复绘制自动线；
-- active editor `TextSpan.toPlainText()` 必须与 backing controller text 完全一致；
+- 自动分页默认关闭；只有用户点击当前 pane 的“显示分页线”后才捕获附件快照并生成。CodeMirror 只能使用 `pointer-events: none`、`aria-hidden` 的绝对 overlay；禁止插入占位字符、改变 caret、selection、copy 或 undo。阅读模式、关闭状态和无 surface 平台必须发送空布局；手动分页符继续使用现有源码辅助线且不得重复绘制自动线；
 - focus、click、selection 和 context menu 不得修改正文或插入空行。
+
+Windows 后续实现必须以 WebView2-backed `DocumentSurfaceFactory` 接入同一份 CodeMirror HTML/JS，复用 UTF-16 事务协议、`EditorDocumentHub`、附件桥接、flush 与 search/page-layout 命令，不建立平台专属正文模型。
 
 H1 自动改名和右键笔记重命名必须把 Markdown save、严格 rename、assets 引用改写和 readback 放入同一 `VaultBackend.runMutationTransaction`。名称冲突属于可识别的普通保存错误：回滚持久层，保留 controller 文本与 dirty/failed 状态，不得误判为 backend 已提交后的 workspace invariant failure。
 
@@ -293,7 +295,7 @@ macOS 目录选择和 bookmark 恢复返回 `VaultAccessLease(location, token)`�
 | `test/macos_entitlements_test.dart` | Debug/Profile/Release Keychain entitlement、本机 Team 配置模板与签名策略 |
 | `test/macos_vault_access_lease_test.dart` | Dart/Swift lease 与 terminate releaseAll 契约 |
 
-当前记录基线为 913/913 tests，共 81 个测试文件；`flutter analyze --no-pub` 无 issue，`flutter build macos --no-pub` 成功。`git diff --check` 仍需在最终交付前执行；该记录不是完整 Release signing production gate 结果。
+当前编辑器统一迁移记录基线为 770/770 tests，共 82 个测试文件；`flutter analyze --no-pub` 无 issue，Web build 与 macOS Debug build 成功。Profile integration 因本机缺少 `co.onecoos.synapse` 对应的 Mac App Development provisioning profile 而被签名前置条件阻断；该记录不是完整 Release signing production gate 结果。
 
 ## 10. 当前工程债
 

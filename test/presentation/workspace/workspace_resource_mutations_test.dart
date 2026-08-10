@@ -44,8 +44,8 @@ void main() {
 
       expect(() => vault.readNote(first.id), throwsA(isA<StateError>()));
       expect((await vault.readNote(second.id)).title, 'Beta');
-      await activateLiveMarkdownBlock(tester);
-      final noteEditor = activeLiveMarkdownTextField(tester);
+      await activateTestDocumentBlock(tester);
+      final noteEditor = activeTestDocumentSurfaceState(tester);
       expect(noteEditor.controller.text, contains('# Beta'));
       expect(find.text('Alpha'), findsNothing);
     },
@@ -193,7 +193,7 @@ void main() {
           ),
         ),
       );
-      await enterTextInLiveMarkdownBlock(
+      await enterTextInTestDocumentBlock(
         tester,
         '# Alpha\ndiscard this edit',
         paneId: 1,
@@ -364,7 +364,7 @@ void main() {
       await tester.pump(const Duration(milliseconds: 250));
       await tester.tap(find.byKey(const Key('note-mode-source-pane-2')));
       await tester.pump(const Duration(milliseconds: 250));
-      await enterTextInLiveMarkdownBlock(
+      await enterTextInTestDocumentBlock(
         tester,
         '# 其他\npending autosave',
         paneId: 2,
@@ -373,14 +373,8 @@ void main() {
           .widget<GestureDetector>(find.byKey(const Key('split-pane-pane-1')))
           .onTap!();
       await tester.pump();
-      final originalPane1Controller = liveMarkdownDocumentController(
-        tester,
-        paneId: 1,
-      );
-      final originalPane2Controller = liveMarkdownDocumentController(
-        tester,
-        paneId: 2,
-      );
+      final originalPane1Controller = noteSessionController(tester, paneId: 1);
+      final originalPane2Controller = noteSessionController(tester, paneId: 2);
 
       Future<void> requestCopy() async {
         await tester.tap(
@@ -399,15 +393,15 @@ void main() {
       expect(reportedErrors, hasLength(1));
       expect(find.text('工作区状态提交异常。后端操作可能已完成，请重新加载工作区后再继续。'), findsOneWidget);
       expect(
-        liveMarkdownDocumentController(tester, paneId: 1),
+        noteSessionController(tester, paneId: 1),
         same(originalPane1Controller),
       );
       expect(
-        liveMarkdownDocumentController(tester, paneId: 2),
+        noteSessionController(tester, paneId: 2),
         same(originalPane2Controller),
       );
       expect(originalPane1Controller.text, contains('# 心经'));
-      expect(originalPane2Controller.text, '# 其他\npending autosave\n');
+      expect(originalPane2Controller.text, '# 其他\npending autosave');
 
       await tester.pump(const Duration(milliseconds: 10000));
       await tester.pump();
@@ -600,8 +594,8 @@ void main() {
 
       await pumpWorkspace(tester, vault: vault);
       await switchToSourceMode(tester);
-      await activateLiveMarkdownBlock(tester);
-      final beforeDelete = activeLiveMarkdownTextField(tester);
+      await activateTestDocumentBlock(tester);
+      final beforeDelete = activeTestDocumentSurfaceState(tester);
       expect(beforeDelete.controller.text, contains('# 心经'));
 
       await tester.tap(
@@ -617,8 +611,8 @@ void main() {
       expect(() => vault.readNote(nested.id), throwsA(isA<StateError>()));
       expect((await vault.readNote(remaining.id)).title, '其他');
       expect((await vault.listResources()).single.title, '其他');
-      await activateLiveMarkdownBlock(tester);
-      final afterDelete = activeLiveMarkdownTextField(tester);
+      await activateTestDocumentBlock(tester);
+      final afterDelete = activeTestDocumentSurfaceState(tester);
       expect(afterDelete.controller.text, contains('# 其他'));
       expect(find.text('读书'), findsNothing);
     },

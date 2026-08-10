@@ -11,65 +11,6 @@ import '../../support/workspace_harness.dart';
 
 void main() {
   testWidgets(
-    'renaming an unfocused pane keeps the focused preview image selected',
-    (tester) async {
-      final vault = MemoryVaultBackend(seedExampleData: false);
-      final alpha = await vault.createNote(parentPath: '', title: 'Alpha');
-      final beta = await vault.createNote(parentPath: '', title: 'Beta');
-      final alphaSource = await vault.addImageAttachment(
-        noteId: alpha.id,
-        filename: 'alpha.png',
-        mimeType: 'image/png',
-        bytes: tinyPng,
-      );
-      await vault.addImageAttachment(
-        noteId: beta.id,
-        filename: 'beta.png',
-        mimeType: 'image/png',
-        bytes: tinyPng,
-      );
-      await vault.updateMarkdown(
-        noteId: alpha.id,
-        markdown:
-            '# Alpha\n\n'
-            '<img src="Alpha.assets/attachments/alpha.png" width="360">',
-      );
-
-      await pumpWorkspace(tester, vault: vault);
-      await tester.tap(find.byKey(const Key('split-pane-right-button')));
-      await tester.pump(const Duration(milliseconds: 250));
-      await tester.tap(find.byKey(Key('resource-row-${beta.id}')));
-      await tester.pump(const Duration(milliseconds: 250));
-      await tester.tap(find.byKey(const Key('note-mode-source-pane-2')));
-      await tester.pump(const Duration(milliseconds: 250));
-      await enterTextInLiveMarkdownBlock(
-        tester,
-        '# Renamed Beta\nbody',
-        paneId: 2,
-      );
-
-      tester
-          .widget<GestureDetector>(find.byKey(const Key('split-pane-pane-1')))
-          .onTap!();
-      await tester.pump(const Duration(milliseconds: 250));
-      await tester.tap(find.byKey(Key('preview-image-tap-${alphaSource.id}')));
-      await tester.pump();
-      expect(
-        previewImageFrameBorderColor(tester, alphaSource),
-        CupertinoColors.activeBlue,
-      );
-
-      await tester.pump(const Duration(milliseconds: 1000));
-      await tester.pumpAndSettle();
-
-      expect(
-        previewImageFrameBorderColor(tester, alphaSource),
-        CupertinoColors.activeBlue,
-      );
-    },
-  );
-
-  testWidgets(
     'gated note selection retries after an unfocused title rename commit',
     (tester) async {
       final vault = _GatedSnapshotReadVault();
@@ -88,7 +29,7 @@ void main() {
       await tester.pump();
       await tester.tap(find.byKey(const Key('note-mode-source-pane-1')));
       await tester.pump(const Duration(milliseconds: 250));
-      await enterTextInLiveMarkdownBlock(
+      await enterTextInTestDocumentBlock(
         tester,
         '# Renamed Alpha\nbody',
         paneId: 1,
@@ -138,7 +79,7 @@ void main() {
     await tester.pump();
     await tester.tap(find.byKey(const Key('note-mode-source-pane-1')));
     await tester.pump(const Duration(milliseconds: 250));
-    await enterTextInLiveMarkdownBlock(
+    await enterTextInTestDocumentBlock(
       tester,
       '# Renamed Alpha\nremapped body',
       paneId: 1,
@@ -307,7 +248,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 250));
     await tester.tap(find.byKey(const Key('note-mode-source-pane-2')));
     await tester.pump(const Duration(milliseconds: 250));
-    await enterTextInLiveMarkdownBlock(
+    await enterTextInTestDocumentBlock(
       tester,
       '# Alpha\nshared edit',
       paneId: 2,
@@ -331,7 +272,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 250));
     await tester.tap(find.byKey(const Key('note-mode-source-pane-2')));
     await tester.pump(const Duration(milliseconds: 250));
-    await enterTextInLiveMarkdownBlock(
+    await enterTextInTestDocumentBlock(
       tester,
       '# Beta\nunsaved split edit',
       paneId: 2,
@@ -381,14 +322,14 @@ void main() {
 
       await tester.tap(find.byKey(const Key('note-mode-source-pane-1')));
       await tester.pump(const Duration(milliseconds: 250));
-      await enterTextInLiveMarkdownBlock(
+      await enterTextInTestDocumentBlock(
         tester,
         '# Gamma\ndirty Gamma session',
         paneId: 1,
       );
       await tester.tap(find.byKey(const Key('note-mode-source-pane-2')));
       await tester.pump(const Duration(milliseconds: 250));
-      await enterTextInLiveMarkdownBlock(
+      await enterTextInTestDocumentBlock(
         tester,
         '# Beta\nclose is waiting',
         paneId: 2,
@@ -434,11 +375,8 @@ void main() {
       );
       await tester.tap(find.byKey(const Key('note-mode-source-pane-2')));
       await tester.pump(const Duration(milliseconds: 250));
-      final gammaController = liveMarkdownDocumentController(tester, paneId: 1);
-      expect(
-        liveMarkdownDocumentController(tester, paneId: 2),
-        same(gammaController),
-      );
+      final gammaController = noteSessionController(tester, paneId: 1);
+      expect(noteSessionController(tester, paneId: 2), same(gammaController));
       expect(gammaController.text, contains('dirty Gamma session'));
     },
   );

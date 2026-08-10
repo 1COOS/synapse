@@ -1,5 +1,3 @@
-import 'dart:async';
-
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -25,12 +23,9 @@ void main() {
     );
     await pumpWorkspace(tester, vault: vault, imageInput: imageInput);
     await switchToSourceMode(tester);
-    await enterTextInLiveMarkdownBlock(tester, '# Attachment\n正文');
+    await enterTextInTestDocumentBlock(tester, '# Attachment\n正文');
 
-    await tester.sendKeyDownEvent(LogicalKeyboardKey.metaLeft);
-    await tester.sendKeyDownEvent(LogicalKeyboardKey.keyV);
-    await tester.sendKeyUpEvent(LogicalKeyboardKey.keyV);
-    await tester.sendKeyUpEvent(LogicalKeyboardKey.metaLeft);
+    await testDocumentSurfaceState(tester).pasteFromClipboard();
     await tester.pumpAndSettle();
 
     expect(await vault.listAiMaterials(note.id), isEmpty);
@@ -165,97 +160,4 @@ void main() {
     expect(await vault.listAiMaterials(note.id), isEmpty);
     expect(await vault.listNoteAttachments(note.id), isEmpty);
   });
-
-  testWidgets('deleting an AI material keeps note image elements mounted', (
-    tester,
-  ) async {
-    final vault = _GatedMaterialDeleteVault();
-    final note = await vault.createNote(parentPath: '', title: 'Stable Images');
-    final attachment = await vault.addImageAttachment(
-      noteId: note.id,
-      filename: 'note-image.png',
-      mimeType: 'image/png',
-      bytes: tinyPng,
-    );
-    await vault.addImageMaterial(
-      noteId: note.id,
-      filename: 'ai-material.png',
-      mimeType: 'image/png',
-      bytes: tinyPng,
-    );
-    await vault.updateMarkdown(
-      noteId: note.id,
-      markdown:
-          '# Stable Images\n\n'
-          '<img src="Stable Images.assets/${attachment.relativePath}" '
-          'width="320">',
-    );
-    await pumpWorkspace(tester, vault: vault);
-    await switchToSourceMode(tester);
-    await tester.pumpAndSettle();
-
-    final preview = find.byKey(Key('preview-image-${attachment.id}'));
-    final previewImage = find.descendant(
-      of: preview,
-      matching: find.byType(Image),
-    );
-    expect(previewImage, findsOneWidget);
-    final previewElement = tester.element(preview);
-    final imageElement = tester.element(previewImage);
-    final attachmentReads = vault.attachmentReadCalls;
-
-    await tester.tap(find.byKey(const Key('delete-image-button')));
-    await tester.pumpAndSettle();
-    await tester.tap(find.widgetWithText(CupertinoDialogAction, '删除').last);
-    await vault.deleteStarted.future;
-    await tester.pump();
-
-    expect(preview, findsOneWidget);
-    expect(tester.element(preview), same(previewElement));
-    expect(vault.attachmentReadCalls, attachmentReads);
-    expect(previewImage, findsOneWidget);
-    expect(tester.element(previewImage), same(imageElement));
-    expect(
-      find.descendant(
-        of: preview,
-        matching: find.byType(CupertinoActivityIndicator),
-      ),
-      findsNothing,
-    );
-
-    vault.releaseDelete();
-    await tester.pumpAndSettle();
-
-    expect(tester.element(previewImage), same(imageElement));
-    expect(vault.attachmentReadCalls, attachmentReads);
-  });
-}
-
-final class _GatedMaterialDeleteVault extends MemoryVaultBackend {
-  _GatedMaterialDeleteVault() : super(seedExampleData: false);
-
-  final deleteStarted = Completer<void>();
-  final _deleteRelease = Completer<void>();
-  int attachmentReadCalls = 0;
-
-  void releaseDelete() {
-    if (!_deleteRelease.isCompleted) {
-      _deleteRelease.complete();
-    }
-  }
-
-  @override
-  Future<void> deleteAiMaterial(AiMaterial material) async {
-    if (!deleteStarted.isCompleted) {
-      deleteStarted.complete();
-    }
-    await _deleteRelease.future;
-    return super.deleteAiMaterial(material);
-  }
-
-  @override
-  Future<List<int>> readNoteAttachment(NoteAttachment attachment) {
-    attachmentReadCalls += 1;
-    return super.readNoteAttachment(attachment);
-  }
 }

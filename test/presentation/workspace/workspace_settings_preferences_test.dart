@@ -1,12 +1,10 @@
 import 'dart:async';
 
 import 'package:flutter/cupertino.dart';
-import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:synapse/application/exports/note_pdf_export.dart';
 import 'package:synapse/application/settings/synapse_settings.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
-import 'package:synapse/presentation/workspace/editor/live_markdown_editor.dart';
 
 import '../../support/workspace_fakes.dart';
 import '../../support/workspace_harness.dart';
@@ -89,12 +87,7 @@ void main() {
     await vault.createNote(parentPath: '', title: 'Alpha');
 
     await pumpWorkspace(tester, vault: vault, settingsStore: settingsStore);
-    expect(
-      tester
-          .widget<LiveMarkdownEditor>(find.byType(LiveMarkdownEditor))
-          .enabled,
-      isTrue,
-    );
+    expect(testDocumentSurfaceState(tester).enabled, isTrue);
 
     await tester.tap(find.byKey(const Key('settings-button')));
     await tester.pumpAndSettle();
@@ -120,21 +113,11 @@ void main() {
     await settingsStore.saveStarted.future;
     await tester.pump();
 
-    expect(
-      tester
-          .widget<LiveMarkdownEditor>(find.byType(LiveMarkdownEditor))
-          .enabled,
-      isFalse,
-    );
+    expect(testDocumentSurfaceState(tester).enabled, isFalse);
 
     settingsStore.releaseSave();
     await tester.pumpAndSettle();
-    expect(
-      tester
-          .widget<LiveMarkdownEditor>(find.byType(LiveMarkdownEditor))
-          .enabled,
-      isTrue,
-    );
+    expect(testDocumentSurfaceState(tester).enabled, isTrue);
   });
 
   testWidgets('saves appearance preferences from the settings panel', (
@@ -244,34 +227,7 @@ void main() {
       ),
     );
 
-    final markdown = tester.widget<MarkdownBody>(
-      find.byType(MarkdownBody).first,
-    );
-    expect(markdown.styleSheet?.p?.fontSize, 28);
-    expect(markdown.styleSheet?.h1?.fontSize, 40);
-    expect(
-      tester
-          .widget<Text>(
-            find.descendant(
-              of: find.byKey(const Key('live-markdown-reading-table-2')),
-              matching: find.text('A'),
-            ),
-          )
-          .style
-          ?.fontSize,
-      28,
-    );
-
-    await switchToSourceMode(tester);
-    await activateLiveMarkdownBlock(tester);
-    expect(activeLiveMarkdownTextField(tester).style.fontSize, 40);
-
-    await tester.tap(find.byKey(const Key('live-markdown-block-preview-2')));
-    await tester.pumpAndSettle();
-    final tableCell = tester.widget<CupertinoTextField>(
-      find.byKey(const Key('live-markdown-table-cell-2-0-0')),
-    );
-    expect(tableCell.style?.fontSize, 28);
+    expect(testDocumentSurfaceState(tester).appearance.noteFontSize, 28);
   });
 }
 

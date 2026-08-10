@@ -4,7 +4,6 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:synapse/domain/vault/vault_resource.dart';
 import 'package:synapse/application/settings/synapse_settings.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
-import 'package:synapse/presentation/workspace/editor/live_markdown_editor.dart';
 import 'package:synapse/presentation/workspace/state/workspace_mutation_barrier.dart';
 
 import '../../support/workspace_fakes.dart';
@@ -16,7 +15,7 @@ void main() {
 
     await pumpWorkspace(tester, vault: vault);
     await switchToSourceMode(tester);
-    await enterTextInLiveMarkdownBlock(tester, '# 心经学习\n自动保存内容');
+    await enterTextInTestDocumentBlock(tester, '# 心经学习\n自动保存内容');
 
     await tester.pump(const Duration(milliseconds: 999));
     expect(vault.updateCalls, 0);
@@ -38,9 +37,9 @@ void main() {
 
     await pumpWorkspace(tester, vault: vault);
     await switchToSourceMode(tester);
-    await enterTextInLiveMarkdownBlock(tester, 'first');
+    await enterTextInTestDocumentBlock(tester, 'first');
     await tester.pump(const Duration(milliseconds: 600));
-    await enterTextInLiveMarkdownBlock(tester, 'final');
+    await enterTextInTestDocumentBlock(tester, 'final');
 
     await tester.pump(const Duration(milliseconds: 999));
     expect(vault.updateCalls, 0);
@@ -61,7 +60,7 @@ void main() {
 
     await pumpWorkspace(tester, vault: vault);
     await switchToSourceMode(tester);
-    await enterTextInLiveMarkdownBlock(tester, '# 金刚经\n正文');
+    await enterTextInTestDocumentBlock(tester, '# 金刚经\n正文');
 
     await tester.pump(const Duration(milliseconds: 1000));
     await tester.pump();
@@ -97,7 +96,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 250));
     await switchToSourceMode(tester);
     vault.failRenameReadback = true;
-    await enterTextInLiveMarkdownBlock(tester, '# 金刚经\n正文');
+    await enterTextInTestDocumentBlock(tester, '# 金刚经\n正文');
     await tester.pump(const Duration(milliseconds: 1000));
     await tester.pumpAndSettle();
     FlutterError.onError = previousOnError;
@@ -106,20 +105,11 @@ void main() {
     expect(vault.renameCalls, 1);
     expect(reportedErrors, isEmpty);
     expect(find.text(_reloadRequiredMessage), findsNothing);
-    expect(
-      tester
-          .widget<LiveMarkdownEditor>(find.byType(LiveMarkdownEditor))
-          .enabled,
-      isTrue,
-    );
-    expect(
-      liveMarkdownDocumentController(tester, paneId: 1).text,
-      '# 金刚经\n正文\n',
-    );
+    expect(testDocumentSurfaceState(tester).enabled, isTrue);
+    expect(noteSessionController(tester, paneId: 1).text, '# 金刚经\n正文');
 
     vault.failRenameReadback = false;
-    liveMarkdownDocumentController(tester, paneId: 1).text =
-        '# 金刚经\nlater edit';
+    noteSessionController(tester, paneId: 1).text = '# 金刚经\nlater edit';
     await tester.pump(const Duration(milliseconds: 1000));
     await tester.pumpAndSettle();
 
@@ -146,7 +136,7 @@ void main() {
         workspaceCommitFailureForTesting: WorkspaceCommitPhase.apply,
       );
       await switchToSourceMode(tester);
-      await enterTextInLiveMarkdownBlock(tester, '# 心经\n正文已保存');
+      await enterTextInTestDocumentBlock(tester, '# 心经\n正文已保存');
       await tester.pump(const Duration(milliseconds: 1000));
       await tester.pumpAndSettle();
       FlutterError.onError = previousOnError;
@@ -155,8 +145,7 @@ void main() {
       expect(reportedErrors, hasLength(1));
       expect(find.text(_reloadRequiredMessage), findsOneWidget);
 
-      liveMarkdownDocumentController(tester, paneId: 1).text =
-          '# 心经\nlater edit';
+      noteSessionController(tester, paneId: 1).text = '# 心经\nlater edit';
       await tester.pump(const Duration(milliseconds: 10000));
 
       expect(vault.updateCalls, 1);
@@ -190,7 +179,7 @@ void main() {
         ),
       );
       await switchToSourceMode(tester);
-      await enterTextInLiveMarkdownBlock(tester, '# Renamed Alpha\nbody');
+      await enterTextInTestDocumentBlock(tester, '# Renamed Alpha\nbody');
       await tester.tap(
         find.byKey(Key('resource-row-${folder.id}')),
         buttons: kSecondaryMouseButton,
@@ -272,7 +261,7 @@ void main() {
       expect(generateButtonBeforeRename.onPressed, isNotNull);
 
       await switchToSourceMode(tester);
-      await enterTextInLiveMarkdownBlock(tester, '# 金刚经\n独特问题线索');
+      await enterTextInTestDocumentBlock(tester, '# 金刚经\n独特问题线索');
       await tester.pump(const Duration(milliseconds: 1000));
       await tester.pump();
 
@@ -301,7 +290,7 @@ void main() {
     await tester.tap(find.byKey(const Key('split-pane-right-button')));
     await tester.pumpAndSettle();
     await switchToSourceMode(tester);
-    await enterTextInLiveMarkdownBlock(tester, '# 金刚经\n共享正文', paneId: 2);
+    await enterTextInTestDocumentBlock(tester, '# 金刚经\n共享正文', paneId: 2);
 
     await tester.pump(const Duration(milliseconds: 1000));
     await tester.pump();
@@ -332,16 +321,15 @@ void main() {
 
     await pumpWorkspace(tester, vault: vault);
     await switchToSourceMode(tester);
-    await enterTextInLiveMarkdownBlock(tester, '# First\nchanged');
-    final documentController = tester
-        .widget<LiveMarkdownEditor>(find.byType(LiveMarkdownEditor))
-        .controller;
+    await enterTextInTestDocumentBlock(tester, '# First\nchanged');
+    final documentController = noteSessionController(tester, paneId: 1);
     vault.failUpdates = true;
 
     await tester.tap(find.byKey(Key('resource-row-${second.id}')));
     await tester.pump(const Duration(milliseconds: 250));
 
-    expect(find.byKey(const Key('note-editor')), findsNothing);
+    expect(find.byKey(const Key('note-editor')), findsOneWidget);
+    expect(testDocumentSurfaceState(tester).enabled, isTrue);
     expect(documentController.text, contains('changed'));
     expect(documentController.text, isNot(contains('# Second')));
     expect(find.textContaining('save failed'), findsOneWidget);
@@ -354,7 +342,7 @@ void main() {
 
     await pumpWorkspace(tester, vault: vault);
     await switchToSourceMode(tester);
-    await enterTextInLiveMarkdownBlock(
+    await enterTextInTestDocumentBlock(
       tester,
       '# First\nchanged before switch',
     );
@@ -367,8 +355,8 @@ void main() {
       (await vault.readNote(first.id)).markdown,
       contains('changed before switch'),
     );
-    await activateLiveMarkdownBlock(tester);
-    final noteEditor = activeLiveMarkdownTextField(tester);
+    await activateTestDocumentBlock(tester);
+    final noteEditor = activeTestDocumentSurfaceState(tester);
     expect(noteEditor.controller.text, contains('# Second'));
   });
 }

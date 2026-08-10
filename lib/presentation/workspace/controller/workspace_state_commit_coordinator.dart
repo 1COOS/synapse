@@ -20,7 +20,6 @@ final class WorkspaceStatePatch {
     this.message,
     this.reloadRequired,
     this.collapsedFolderIds,
-    this.selectedPreviewImageSrc = _unset,
   });
 
   final List<VaultResourceNode>? resources;
@@ -31,7 +30,6 @@ final class WorkspaceStatePatch {
   final String? message;
   final bool? reloadRequired;
   final Set<String>? collapsedFolderIds;
-  final Object? selectedPreviewImageSrc;
 }
 
 final class WorkspaceStateCommitCoordinator {
@@ -128,9 +126,6 @@ final class WorkspaceStateCommitCoordinator {
       message: patch.message,
       reloadRequired: patch.reloadRequired,
       collapsedFolderIds: patch.collapsedFolderIds,
-      selectedPreviewImageSrc: identical(patch.selectedPreviewImageSrc, _unset)
-          ? current.selectedPreviewImageSrc
-          : patch.selectedPreviewImageSrc,
       savingNoteIds: current.savingNoteIds
           .where(preparedSessions.nextNoteIds.contains)
           .toSet(),

@@ -21,7 +21,7 @@ Synapse 使用 Flutter + Dart 构建本地优先的学习资料整理工作台�
 | Runtime | Flutter / Dart | 已使用 |
 | UI | Cupertino + Flutter widgets | 已使用 |
 | 状态管理 | Riverpod `AsyncNotifier` | 已实现，`WorkspaceController` 为 workspace snapshot 唯一写入者 |
-| Markdown | `flutter_markdown` + 自定义 Live Markdown editor | 已使用 |
+| Markdown | CodeMirror 6 正文 surface + `flutter_markdown` 只读 renderer | macOS 可编辑；Web/H5 与无 surface 平台只读 |
 | PDF 导出 | `pdf` + `printing` + `file_selector` | macOS/Windows 当前笔记 A4 生成、分页预览与保存已实现 |
 | macOS 文件访问 | security-scoped bookmark + tokenized lease + `dart:io` | 已实现 |
 | 密钥存储 | macOS Keychain / `flutter_secure_storage` | strict fail-closed |
@@ -33,7 +33,7 @@ Synapse 使用 Flutter + Dart 构建本地优先的学习资料整理工作台�
 
 ```text
 presentation
-  Cupertino 页面、Live Markdown editor、Riverpod controller/state
+  Cupertino 页面、CodeMirror document surface、Flutter 阅读 renderer、Riverpod controller/state
 
 application
   ports、proposal/search 用例编排、settings 值对象
@@ -106,7 +106,7 @@ test/
 
 - `controller/`：`WorkspaceController`、不可变 `WorkspaceState`、依赖/runtime 及 startup、document、editor、resource、search、state-commit collaborators；
 - `state/`：session registry、save coordinator、split controller、materials registry、mutation barrier、commit batch；
-- `editor/`：Pane context、Live Markdown、表格、图片与 context menu；
+- `editor/`：Pane context、CodeMirror bridge、只读 Markdown 表格/图片、selection 与 context menu；
 - `presentation/cupertino/workspace/`：布局、titlebar、资源树、搜索、素材、设置、note pane 和通用控件；设置进一步拆为弹窗外壳、私有 draft controller 和六个 section 组件。
 
 当前代码尺寸基线：
@@ -193,7 +193,7 @@ backend commit 成功后，`postCommitHydrate`、prepare/validate、apply 或 pu
 
 图片粘贴、导入、宽度调整、拖动和 proposal 等异步操作在 await 前捕获 `PaneEditorContext`。焦点切换不会改变发起目标；pane 重绑、关闭、session 移除、runtime 更换或 dispose 后，context 返回 stale target，不得把结果写入其他笔记。
 
-Live Markdown 继续遵守：活动 block 显示 Markdown marker，失焦后由预览隐藏；共享 inline parser 负责加粗、斜体、删除线、Obsidian `==高亮==`、转义、嵌套和代码范围；`TextSpan.toPlainText()` 必须与 backing controller text 完全一致；focus、selection 和 context menu 不得修改正文或插入空行。产品命令只开放 H1–H4，但 renderer 与 outline parser 继续兼容已有 H5/H6。
+CodeMirror 是唯一正文编辑器：活动区域显示 Markdown marker，失焦区域和阅读模式通过 decoration 隐藏；共享 command/parser 负责加粗、斜体、删除线、Obsidian `==高亮==`、转义、嵌套和代码范围。focus、selection 和 context menu 不得修改正文或插入空行。产品命令只开放 H1–H4，但阅读 renderer 与 outline parser 继续兼容已有 H5/H6。
 
 ### 6.4 PDF 导出管线
 
@@ -205,7 +205,7 @@ Live Markdown 继续遵守：活动 block 显示 Markdown marker，失焦后由�
 
 关闭分页线会取消防抖和在途 generation，但保留最后成功结果；完全相同的正文、附件和参数可在当前笔记会话内直接恢复缓存。切到阅读态只暂停，返回同一笔记编辑态按缓存匹配情况恢复或刷新；切换笔记或关闭窗格清除启用状态，pane 方向继续保留。旧结果的源码 offset 必须按当前正文的共同前后缀重定位。导出始终是独立显式操作，不会启用编辑态分页；只有 note id、标题、正文、附件字节、方向、页边距和页脚状态全部相同时才允许复用 PDF bytes。
 
-Flutter Live Markdown 只把自动边界绘制为 `IgnorePointer`/`ExcludeSemantics` 的 `CustomPaint` overlay，不参与文本、caret、selection、copy、undo 或 `TextSpan.toPlainText()`。macOS CodeMirror 通过协议 v2 的 `setPageLayout` 接收 `pageIndex/sourceOffset` 和 stale 状态，在绝对 overlay 中结合主编辑器或双栏子编辑器坐标、scroll、viewport 与 geometry 更新位置；overlay 使用 `pointer-events: none` 和 `aria-hidden`。阅读态发送空布局。手动分页仍由现有分页符 block 显示，避免同一位置出现两条线，协议和显示层都不得修改 Markdown。
+macOS CodeMirror 通过协议 v2 的 `setPageLayout` 接收 `pageIndex/sourceOffset` 和 stale 状态，在绝对 overlay 中结合主编辑器或双栏子编辑器坐标、scroll、viewport 与 geometry 更新位置；overlay 使用 `pointer-events: none` 和 `aria-hidden`。阅读态和无可写 surface 平台发送空布局。手动分页仍由现有分页符 block 显示，避免同一位置出现两条线，协议和显示层都不得修改 Markdown。
 
 导出器将 Markdown 转为独立打印块，不修改 Vault 数据模型。唯一新增正文契约是独占一行的 `<!-- synapse:page-break -->`；开头、结尾和连续标记折叠，fenced code 内保持字面量，`---` 继续解析为水平线。段落和长列表使用可跨页 RichText；代码块用逐行 table row 保证只在线之间分页；标题用 `NewPage(freeSpace: ...)` 防止孤立；普通表格按行分页并重复 header，超高行整表降级为可跨页字段布局；图片使用本地快照、等比 contain 和缺失占位。页眉按字体实际宽度省略标题；页脚开启时使用 `pageNumber / pagesCount`，关闭时不构建页脚并把原占用高度归还正文。编辑态边界和最终 PDF 始终来自同一套 A4、10/15/20 mm 页边距、方向与页脚参数。
 
@@ -367,7 +367,7 @@ Keychain、签名或 entitlement 异常必须明确报错并 fail-closed。任�
 
 - session/save/split/materials/mutation 的纯状态与竞态；
 - AsyncNotifier controller、Provider override 和 workspace widget 行为；
-- Live Markdown marker、caret、selection、context menu、空白行、表格和图片；
+- CodeMirror marker、caret、selection、context menu、空白行、表格和图片，以及 Flutter 只读 renderer；
 - File/Memory backend parity 与 dispatch；
 - UUID identity migration、File Vault WAL recovery 和 symlink/realpath 边界；
 - application/domain 分层、API Key observable redaction 与设置编辑基线；
