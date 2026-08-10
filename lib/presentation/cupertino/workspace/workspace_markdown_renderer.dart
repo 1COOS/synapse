@@ -120,9 +120,18 @@ final class WorkspaceMarkdownRenderer {
     String markdown, {
     required ImagePreviewMode mode,
     required PaneEditorContext editorContext,
-    ValueChanged<String>? onImageTap,
+    int? imageBlockStart,
+    String? selectedImageSrc,
+    ValueListenable<PreviewImageRenderState>? imageRenderState,
+    Object? imageTapRegionGroupId,
+    PreviewImageTapCallback? onImageTap,
+    PreviewImageTapCallback? onImageTapDown,
+    VoidCallback? onImageTapCancel,
     PreviewImageSecondaryTapCallback? onImageSecondaryTapUp,
     void Function(String src, bool available)? onImageAvailabilityChanged,
+    VoidCallback? onImageMoveDragStarted,
+    ValueChanged<DragUpdateDetails>? onImageMoveDragUpdate,
+    VoidCallback? onImageMoveDragEnded,
   }) {
     final styleSheet = _noteMarkdownStyleSheet(markdown);
     return MarkdownBody(
@@ -135,9 +144,18 @@ final class WorkspaceMarkdownRenderer {
         config,
         mode: mode,
         editorContext: editorContext,
+        imageBlockStart: imageBlockStart,
+        selectedImageSrc: selectedImageSrc,
+        imageRenderState: imageRenderState,
+        imageTapRegionGroupId: imageTapRegionGroupId,
         onImageTap: onImageTap,
+        onImageTapDown: onImageTapDown,
+        onImageTapCancel: onImageTapCancel,
         onImageSecondaryTapUp: onImageSecondaryTapUp,
         onImageAvailabilityChanged: onImageAvailabilityChanged,
+        onImageMoveDragStarted: onImageMoveDragStarted,
+        onImageMoveDragUpdate: onImageMoveDragUpdate,
+        onImageMoveDragEnded: onImageMoveDragEnded,
       ),
       styleSheetTheme: MarkdownStyleSheetBaseTheme.cupertino,
       styleSheet: styleSheet,
@@ -198,9 +216,18 @@ final class WorkspaceMarkdownRenderer {
   Widget buildLivePreviewBlock(
     String markdown, {
     required PaneEditorContext editorContext,
-    ValueChanged<String>? onImageTap,
+    int? imageBlockStart,
+    String? selectedImageSrc,
+    ValueListenable<PreviewImageRenderState>? imageRenderState,
+    Object? imageTapRegionGroupId,
+    PreviewImageTapCallback? onImageTap,
+    PreviewImageTapCallback? onImageTapDown,
+    VoidCallback? onImageTapCancel,
     PreviewImageSecondaryTapCallback? onImageSecondaryTapUp,
     void Function(String src, bool available)? onImageAvailabilityChanged,
+    VoidCallback? onImageMoveDragStarted,
+    ValueChanged<DragUpdateDetails>? onImageMoveDragUpdate,
+    VoidCallback? onImageMoveDragEnded,
     bool tableSelected = false,
     Key? tableSelectionTargetKey,
     VoidCallback? onTableFrameTap,
@@ -226,9 +253,18 @@ final class WorkspaceMarkdownRenderer {
       markdown,
       mode: ImagePreviewMode.editing,
       editorContext: editorContext,
+      imageBlockStart: imageBlockStart,
+      selectedImageSrc: selectedImageSrc,
+      imageRenderState: imageRenderState,
+      imageTapRegionGroupId: imageTapRegionGroupId,
       onImageTap: onImageTap,
+      onImageTapDown: onImageTapDown,
+      onImageTapCancel: onImageTapCancel,
       onImageSecondaryTapUp: onImageSecondaryTapUp,
       onImageAvailabilityChanged: onImageAvailabilityChanged,
+      onImageMoveDragStarted: onImageMoveDragStarted,
+      onImageMoveDragUpdate: onImageMoveDragUpdate,
+      onImageMoveDragEnded: onImageMoveDragEnded,
     );
   }
 
@@ -294,9 +330,18 @@ final class WorkspaceMarkdownRenderer {
     MarkdownImageConfig config, {
     required ImagePreviewMode mode,
     required PaneEditorContext editorContext,
-    ValueChanged<String>? onImageTap,
+    required int? imageBlockStart,
+    required String? selectedImageSrc,
+    required ValueListenable<PreviewImageRenderState>? imageRenderState,
+    required Object? imageTapRegionGroupId,
+    PreviewImageTapCallback? onImageTap,
+    PreviewImageTapCallback? onImageTapDown,
+    VoidCallback? onImageTapCancel,
     PreviewImageSecondaryTapCallback? onImageSecondaryTapUp,
     void Function(String src, bool available)? onImageAvailabilityChanged,
+    VoidCallback? onImageMoveDragStarted,
+    ValueChanged<DragUpdateDetails>? onImageMoveDragUpdate,
+    VoidCallback? onImageMoveDragEnded,
   }) {
     final src = safeUriDecode(config.uri.toString());
     final failureLabel = config.alt ?? src;
@@ -313,7 +358,7 @@ final class WorkspaceMarkdownRenderer {
     final width = clampImageWidth(
       (config.width ?? defaultMarkdownImageWidth.toDouble()).round(),
     ).toDouble();
-    return Consumer(
+    Widget buildImage(PreviewImageRenderState renderState) => Consumer(
       builder: (context, ref, child) {
         final currentWorkspace =
             ref.watch(workspaceControllerProvider).value ?? workspace;
@@ -328,11 +373,14 @@ final class WorkspaceMarkdownRenderer {
           attachment: attachment,
           src: src,
           width: width,
+          blockStart: renderState.blockStart,
+          tapRegionGroupId: imageTapRegionGroupId,
           editableControls:
               mode == ImagePreviewMode.editing &&
               !currentWorkspace.isBusy &&
               !locked,
-          selectedImageSrc: currentWorkspace.selectedPreviewImageSrc,
+          selectedImageSrc: renderState.selectedImageSrc,
+          selectedSourceId: renderState.selectedSourceId,
           loadImageBytes: () => controller.readNoteAttachment(attachment),
           failureLabel: failureLabel,
           onAvailabilityChanged: onImageAvailabilityChanged == null
@@ -347,8 +395,12 @@ final class WorkspaceMarkdownRenderer {
                 controller.resolvePaneEditorContext(editorContext) == null) {
               return;
             }
-            onImageTap?.call(normalizeImageSrc(src));
+            onImageTap?.call(attachment.id, normalizeImageSrc(src));
           },
+          onTapDown: onImageTapDown == null
+              ? null
+              : () => onImageTapDown(attachment.id, normalizeImageSrc(src)),
+          onTapCancel: onImageTapCancel,
           onSecondaryTapUp:
               mode == ImagePreviewMode.editing &&
                   onImageSecondaryTapUp != null &&
@@ -359,6 +411,9 @@ final class WorkspaceMarkdownRenderer {
                   details,
                 )
               : null,
+          onMoveDragStarted: onImageMoveDragStarted,
+          onMoveDragUpdate: onImageMoveDragUpdate,
+          onMoveDragEnded: onImageMoveDragEnded,
           onWidthChanged: (value) {
             if (controller.isBusy ||
                 controller.isPaneEditorContextLocked(editorContext)) {
@@ -391,6 +446,18 @@ final class WorkspaceMarkdownRenderer {
           },
         );
       },
+    );
+    final initialRenderState = PreviewImageRenderState(
+      blockStart: imageBlockStart,
+      selectedImageSrc: selectedImageSrc,
+      selectedSourceId: null,
+    );
+    if (imageRenderState == null) {
+      return buildImage(initialRenderState);
+    }
+    return ValueListenableBuilder<PreviewImageRenderState>(
+      valueListenable: imageRenderState,
+      builder: (context, renderState, child) => buildImage(renderState),
     );
   }
 

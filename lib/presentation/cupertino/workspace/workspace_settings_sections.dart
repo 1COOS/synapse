@@ -116,6 +116,41 @@ final class _GeneralSettingsSection extends StatelessWidget {
           keyboardType: TextInputType.number,
           error: draft.pastedImageWidthError,
         ),
+        const SizedBox(height: 8),
+        const _SettingsSectionTitle(
+          title: '页面与 PDF',
+          subtitle: '编辑态分页虚线与 PDF 导出使用同一套页面设置。',
+        ),
+        const _SettingsLabel('页边距'),
+        const SizedBox(height: 8),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            for (final preset in NotePdfMarginPreset.values)
+              _PreferenceChoice(
+                key: Key('settings-pdf-margin-${preset.name}'),
+                label: switch (preset) {
+                  NotePdfMarginPreset.compact => '紧凑 10 mm',
+                  NotePdfMarginPreset.standard => '标准 15 mm',
+                  NotePdfMarginPreset.wide => '宽松 20 mm',
+                },
+                selected: draft.pdfMarginPreset == preset,
+                onPressed: enabled
+                    ? () => draft.setPdfMarginPreset(preset)
+                    : null,
+              ),
+          ],
+        ),
+        const SizedBox(height: 18),
+        _SettingsToggleRow(
+          key: const Key('settings-pdf-footer-toggle'),
+          title: '显示页码页脚',
+          subtitle: '关闭后正文使用释放的页脚空间，并重新计算分页。',
+          value: draft.pdfFooterEnabled,
+          enabled: enabled,
+          onChanged: draft.setPdfFooterEnabled,
+        ),
       ],
     );
   }

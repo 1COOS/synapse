@@ -257,6 +257,70 @@ describe('CodeMirror live preview', () => {
     expect(window.synapseTest!.getMode()).toBe('reading');
   });
 
+  it('renders non-mutating page layout overlays and clears stale lines', async () => {
+    const markdown = '# Heading\n\nFirst page\n\nSecond page';
+    const rangeRects = vi.spyOn(Range.prototype, 'getClientRects')
+      .mockImplementation(() => [rect(16, 120, 2, 18)] as unknown as DOMRectList);
+    const rangeBounds = vi.spyOn(Range.prototype, 'getBoundingClientRect')
+      .mockImplementation(() => rect(16, 120, 2, 18));
+    window.synapseHost!.receive(initialize(markdown, 'editing'));
+    window.synapseTest!.setSelection(3, 8);
+    const selection = window.synapseTest!.getSelection();
+
+    window.synapseHost!.receive({
+      protocolVersion: 2,
+      type: 'setPageLayout',
+      boundaries: [{
+        pageIndex: 1,
+        sourceOffset: markdown.indexOf('Second'),
+      }],
+      stale: false,
+    });
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+
+    const host = document.querySelector<HTMLElement>('.synapse-page-layout')!;
+    const line = host.querySelector<HTMLElement>('.synapse-page-boundary')!;
+    expect(host.getAttribute('aria-hidden')).toBe('true');
+    expect(window.getComputedStyle(host).pointerEvents).toBe('none');
+    expect(line.dataset.pageIndex).toBe('1');
+    expect(line.textContent).toBe('第 1 页结束 / 第 2 页开始');
+    expect(window.synapseTest!.getText()).toBe(markdown);
+    expect(window.synapseTest!.getSelection()).toEqual(selection);
+
+    const scroller = document.querySelector<HTMLElement>('.cm-scroller')!;
+    scroller.scrollTop = 40;
+    scroller.dispatchEvent(new Event('scroll'));
+    window.synapseHost!.receive({
+      protocolVersion: 2,
+      type: 'setPageLayout',
+      boundaries: [{
+        pageIndex: 1,
+        sourceOffset: markdown.indexOf('Second'),
+      }],
+      stale: true,
+    });
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+
+    expect(host.classList.contains('synapse-page-layout-stale')).toBe(true);
+    expect(host.querySelectorAll('.synapse-page-boundary')).toHaveLength(1);
+    expect(window.synapseTest!.getText()).toBe(markdown);
+    expect(window.synapseTest!.getSelection()).toEqual(selection);
+
+    window.synapseHost!.receive({
+      protocolVersion: 2,
+      type: 'setPageLayout',
+      boundaries: [],
+      stale: false,
+    });
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+
+    expect(host.querySelectorAll('.synapse-page-boundary')).toHaveLength(0);
+    expect(window.synapseTest!.getText()).toBe(markdown);
+    expect(window.synapseTest!.getSelection()).toEqual(selection);
+    rangeRects.mockRestore();
+    rangeBounds.mockRestore();
+  });
+
   it('reactivates unfocused plain and column editors on their first pointer interaction', async () => {
     window.synapseHost!.receive(initialize('Alpha', 'editing', false));
     await new Promise((resolve) => window.setTimeout(resolve, 20));
@@ -871,9 +935,13 @@ describe('CodeMirror live preview', () => {
       '.synapse-column .cm-content',
     );
     contents[1].focus();
+    document.querySelector<HTMLElement>(
+      '.synapse-column:nth-child(3) .synapse-image-block',
+    )!.click();
     await Promise.resolve();
     expect(document.querySelector('.synapse-image-selected')).not.toBeNull();
-    expect(document.querySelector('.synapse-image-source')).not.toBeNull();
+    expect(document.querySelector('.synapse-image-move-handle')).not.toBeNull();
+    expect(document.querySelector('.synapse-image-source')).toBeNull();
 
     const outside = document.createElement('button');
     document.body.append(outside);
@@ -890,6 +958,82 @@ describe('CodeMirror live preview', () => {
       ),
     ).toBe(true);
     expect(document.querySelector('.synapse-image-selected')).toBeNull();
+  });
+
+  it('selects only the clicked inline image without exposing img source', async () => {
+    const first = '<img src="Note.assets/attachments/first.png" width="320">';
+    const second = '<img src="Note.assets/attachments/second.png" width="360">';
+    const markdown = `Before ${first} between ${second} after\n\nTail`;
+    window.synapseHost!.receive(initialize(markdown, 'editing'));
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+
+    let images = document.querySelectorAll<HTMLElement>(
+      '.synapse-inline-image',
+    );
+    expect(images).toHaveLength(2);
+    expect(document.querySelector('.synapse-image-move-handle')).toBeNull();
+    expect(document.querySelector('.synapse-image-resize')).toBeNull();
+    images[1].click();
+    await Promise.resolve();
+
+    images = document.querySelectorAll<HTMLElement>('.synapse-inline-image');
+    expect(images).toHaveLength(2);
+    expect(document.querySelector('.synapse-image-selected')?.getAttribute('data-src'))
+      .toBe('Note.assets/attachments/second.png');
+    expect(document.querySelector('.synapse-image-source')).toBeNull();
+    expect(document.querySelector('.synapse-image-move-handle')?.getAttribute('title'))
+      .toBe('拖动图片');
+
+    document.querySelector<HTMLElement>('.cm-content')!.dispatchEvent(
+      new KeyboardEvent('keydown', {
+        key: 'Delete',
+        code: 'Delete',
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+    expect(window.synapseTest!.getText()).toContain(first);
+    expect(window.synapseTest!.getText()).not.toContain(second);
+    expect(window.synapseTest!.getText()).toContain(`${first} between  after`);
+  });
+
+  it('moves a selected image to the document end from its handle', async () => {
+    const imageMarkdown =
+      '<img src="Note.assets/attachments/end.png" width="320">';
+    const markdown = `${imageMarkdown}\n\n# Heading\n\nParagraph`;
+    window.synapseHost!.receive(initialize(markdown, 'editing'));
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+
+    document.querySelector<HTMLElement>('.synapse-image-block')!.click();
+    await Promise.resolve();
+    const selected = document.querySelector<HTMLElement>(
+      '.synapse-image-selected',
+    )!;
+    const handle = selected.querySelector<HTMLElement>(
+      '.synapse-image-move-handle',
+    )!;
+    const editor = document.querySelector<HTMLElement>('.cm-editor')!;
+    const scroller = document.querySelector<HTMLElement>('.cm-scroller')!;
+    const content = document.querySelector<HTMLElement>('.cm-content')!;
+    setBounds(editor, rect(0, 0, 640, 400));
+    setBounds(scroller, rect(0, 0, 640, 400));
+    setBounds(content, rect(0, 0, 640, 220));
+
+    handle.dispatchEvent(pointerEvent('pointerdown', 12, 12));
+    window.dispatchEvent(pointerEvent('pointermove', 120, 300));
+    expect(document.querySelector('.synapse-image-block-drop-indicator'))
+      .not.toBeNull();
+    window.dispatchEvent(pointerEvent('pointerup', 120, 300));
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+
+    const updated = window.synapseTest!.getText();
+    expect(updated.indexOf('Paragraph')).toBeLessThan(
+      updated.indexOf(imageMarkdown),
+    );
+    expect(updated).toMatch(/Paragraph\n\n<img src=/);
+    expect(document.querySelector('.synapse-image-selected')).not.toBeNull();
+    expect(document.querySelector('.synapse-image-source')).toBeNull();
   });
 
   it('drags an image between column editors without replacing the drag source', async () => {
@@ -924,13 +1068,15 @@ describe('CodeMirror live preview', () => {
     const contents = columns.querySelectorAll<HTMLElement>('.cm-content');
     contents[0].focus();
     await Promise.resolve();
-    const sourceImage = columns.querySelector<HTMLElement>(
+    let sourceImage = columns.querySelector<HTMLElement>(
       '.synapse-column .synapse-image-block',
     )!;
     const renderedImage = sourceImage.querySelector<HTMLImageElement>('img')!;
     expect(renderedImage).not.toBeNull();
     expect(getComputedStyle(renderedImage).pointerEvents).toBe('none');
     expect(sourceImage.draggable).toBe(false);
+    expect(sourceImage.querySelector('.synapse-image-move-handle')).toBeNull();
+    expect(sourceImage.querySelector('.synapse-image-resize')).toBeNull();
     sourceImage.dispatchEvent(new MouseEvent('pointerdown', {
       bubbles: true,
       cancelable: true,
@@ -945,50 +1091,56 @@ describe('CodeMirror live preview', () => {
       clientX: 20,
       clientY: 10,
     }));
-    expect(sourceImage.classList.contains('synapse-image-dragging')).toBe(true);
+    expect(sourceImage.classList.contains('synapse-image-dragging')).toBe(false);
     window.dispatchEvent(new MouseEvent('pointercancel', {
       bubbles: true,
       cancelable: true,
     }));
     expect(sourceImage.classList.contains('synapse-image-dragging')).toBe(false);
-    sourceImage.dispatchEvent(new MouseEvent('mousedown', {
-      bubbles: true,
-      cancelable: true,
-    }));
-    expect(columns.querySelector('.synapse-image-block')).toBe(sourceImage);
-    expect(window.synapseTest!.columnHasFocus('left')).toBe(true);
+    sourceImage.click();
+    await Promise.resolve();
+    sourceImage = columns.querySelector<HTMLElement>(
+      '.synapse-column .synapse-image-selected',
+    )!;
+    expect(sourceImage).not.toBeNull();
+    expect(sourceImage.querySelector('.synapse-image-source')).toBeNull();
+    expect(sourceImage.querySelector('.synapse-image-move-handle')).not.toBeNull();
+    expect(sourceImage.querySelectorAll('.synapse-image-resize')).toHaveLength(2);
 
-    const values = new Map<string, string>();
-    const dataTransfer = {
-      effectAllowed: 'none',
-      get types() {
-        return [...values.keys()];
-      },
-      setData(type: string, value: string) {
-        values.set(type, value);
-      },
-      getData(type: string) {
-        return values.get(type) ?? '';
-      },
-    } as unknown as DataTransfer;
-    const dragEvent = (type: string) => {
-      const event = new Event(type, {
-        bubbles: true,
-        cancelable: true,
-      }) as DragEvent;
-      Object.defineProperties(event, {
-        dataTransfer: { value: dataTransfer },
-        clientX: { value: 10 },
-        clientY: { value: 10 },
-      });
-      return event;
-    };
-
-    sourceImage.dispatchEvent(dragEvent('dragstart'));
-    expect(dataTransfer.types).toContain(
-      'application/x-synapse-markdown-range',
+    const sides = columns.querySelectorAll<HTMLElement>('.synapse-column');
+    const rightLine = Array.from(
+      sides[1].querySelectorAll<HTMLElement>('.cm-line'),
+    ).find((line) => line.textContent === 'Right')!;
+    setBounds(columns, rect(0, 0, 640, 280));
+    setBounds(sides[0], rect(0, 0, 310, 280));
+    setBounds(sides[1], rect(330, 0, 310, 280));
+    setBounds(
+      sides[1].querySelector<HTMLElement>('.cm-content')!,
+      rect(330, 0, 310, 240),
     );
-    contents[1].dispatchEvent(dragEvent('drop'));
+    setBounds(rightLine, rect(346, 100, 140, 40));
+    const elementFromPoint = Object.getOwnPropertyDescriptor(
+      document,
+      'elementFromPoint',
+    );
+    Object.defineProperty(document, 'elementFromPoint', {
+      configurable: true,
+      value: () => rightLine,
+    });
+    const moveHandle = sourceImage.querySelector<HTMLElement>(
+      '.synapse-image-move-handle',
+    )!;
+    moveHandle.dispatchEvent(pointerEvent('pointerdown', 12, 12));
+    window.dispatchEvent(pointerEvent('pointermove', 400, 130));
+    expect(sourceImage.classList.contains('synapse-image-dragging')).toBe(true);
+    expect(document.querySelector('.synapse-image-block-drop-indicator'))
+      .not.toBeNull();
+    window.dispatchEvent(pointerEvent('pointerup', 400, 130));
+    if (elementFromPoint) {
+      Object.defineProperty(document, 'elementFromPoint', elementFromPoint);
+    } else {
+      Reflect.deleteProperty(document, 'elementFromPoint');
+    }
     await new Promise((resolve) => window.setTimeout(resolve, 20));
 
     const updated = window.synapseTest!.getText();
@@ -1003,7 +1155,8 @@ describe('CodeMirror live preview', () => {
     movedImage.click();
     await Promise.resolve();
     expect(document.querySelector('.synapse-image-selected')).not.toBeNull();
-    expect(document.querySelector('.synapse-image-source')).not.toBeNull();
+    expect(document.querySelector('.synapse-image-source')).toBeNull();
+    expect(document.querySelector('.synapse-image-move-handle')).not.toBeNull();
 
     document.querySelectorAll<HTMLElement>(
       '.synapse-column .cm-content',

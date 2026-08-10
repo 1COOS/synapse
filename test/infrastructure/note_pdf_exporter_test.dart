@@ -164,6 +164,44 @@ void main() {
     expect(result.bytes.take(4), '%PDF'.codeUnits);
   });
 
+  test('PDF margin presets map to 10, 15, and 20 millimeters', () {
+    expect(
+      NotePdfMarginPreset.values.map((preset) => preset.millimeters),
+      orderedEquals([10, 15, 20]),
+    );
+    expect(
+      const NotePdfExportOptions().marginPreset,
+      NotePdfMarginPreset.standard,
+    );
+  });
+
+  test('disabling the footer releases its body layout space', () async {
+    final body = List.generate(
+      180,
+      (index) => '第 $index 段：用于验证关闭页码页脚后正文空间会增加。',
+    ).join('\n\n');
+    final snapshot = _snapshot('# 页脚空间\n\n$body');
+
+    final withFooter = await buildNotePdf(
+      snapshot,
+      const NotePdfExportOptions(),
+      fonts,
+    );
+    final withoutFooter = await buildNotePdf(
+      snapshot,
+      const NotePdfExportOptions(footerEnabled: false),
+      fonts,
+    );
+
+    expect(withFooter.boundaries, isNotEmpty);
+    expect(withoutFooter.boundaries, isNotEmpty);
+    expect(withoutFooter.pageCount, lessThanOrEqualTo(withFooter.pageCount));
+    expect(
+      withoutFooter.boundaries.first.sourceOffset,
+      greaterThan(withFooter.boundaries.first.sourceOffset),
+    );
+  });
+
   test(
     'local columns stay side by side and both sides can span pages',
     () async {

@@ -4,8 +4,8 @@ import 'package:flutter/foundation.dart';
 
 import '../../../application/exports/note_pdf_export.dart';
 
-final class NotePrintLayoutController extends ChangeNotifier {
-  NotePrintLayoutController({
+final class NotePageLayoutController extends ChangeNotifier {
+  NotePageLayoutController({
     required NotePdfExporter exporter,
     this.debounce = const Duration(milliseconds: 400),
   }) : _exporter = exporter;
@@ -22,9 +22,13 @@ final class NotePrintLayoutController extends ChangeNotifier {
   Object? _error;
   Object? get error => _error;
 
+  bool _preparing = false;
   bool _building = false;
-  bool get building => _building;
-  bool get hasStaleResult => _building && _result != null;
+  bool get building => _preparing || _building;
+  bool get hasStaleResult => building && _result != null;
+
+  bool _active = false;
+  bool get active => _active;
 
   String? _noteId;
   String? get noteId => _noteId;
@@ -35,7 +39,7 @@ final class NotePrintLayoutController extends ChangeNotifier {
   var _assetGeneration = 0;
   var _buildGeneration = 0;
   Timer? _timer;
-  _NotePrintBuildKey? _lastCompletedKey;
+  _NotePageBuildKey? _lastCompletedKey;
   NotePdfExportSnapshot? _lastBuiltSnapshot;
   NotePdfExportOptions? _lastBuiltOptions;
 
@@ -61,6 +65,7 @@ final class NotePrintLayoutController extends ChangeNotifier {
     _markdown = snapshot.markdown;
     _assets = snapshot.assets;
     _assetsBound = true;
+    _preparing = false;
     _assetGeneration += 1;
     if (noteChanged) {
       _result = null;
@@ -101,6 +106,7 @@ final class NotePrintLayoutController extends ChangeNotifier {
     _assetGeneration += 1;
     _result = null;
     _error = null;
+    _preparing = false;
     _building = false;
     _lastCompletedKey = null;
     _lastBuiltSnapshot = null;
@@ -113,6 +119,43 @@ final class NotePrintLayoutController extends ChangeNotifier {
       return;
     }
     _options = options;
+    _schedule(immediate: true);
+  }
+
+  void setPreparing(bool preparing) {
+    if (_preparing == preparing) {
+      return;
+    }
+    _preparing = preparing;
+    if (preparing) {
+      _error = null;
+    }
+    notifyListeners();
+  }
+
+  void setActive(bool active) {
+    if (_active == active) {
+      return;
+    }
+    _active = active;
+    _timer?.cancel();
+    _buildGeneration += 1;
+    if (!active) {
+      _preparing = false;
+      _building = false;
+      notifyListeners();
+      return;
+    }
+    if (!_assetsBound || _noteId == null) {
+      notifyListeners();
+      return;
+    }
+    if (_currentKey() == _lastCompletedKey) {
+      _building = false;
+      _error = null;
+      notifyListeners();
+      return;
+    }
     _schedule(immediate: true);
   }
 
@@ -136,6 +179,12 @@ final class NotePrintLayoutController extends ChangeNotifier {
   }
 
   void _schedule({bool immediate = false, bool force = false}) {
+    if (!_active) {
+      _timer?.cancel();
+      _building = false;
+      notifyListeners();
+      return;
+    }
     if (!_assetsBound || _noteId == null) {
       return;
     }
@@ -155,7 +204,7 @@ final class NotePrintLayoutController extends ChangeNotifier {
     _timer = Timer(debounce, () => unawaited(_build(generation, key)));
   }
 
-  Future<void> _build(int generation, _NotePrintBuildKey key) async {
+  Future<void> _build(int generation, _NotePageBuildKey key) async {
     final snapshot = NotePdfExportSnapshot(
       noteId: key.noteId,
       title: key.title,
@@ -184,7 +233,7 @@ final class NotePrintLayoutController extends ChangeNotifier {
     }
   }
 
-  _NotePrintBuildKey _currentKey() => _NotePrintBuildKey(
+  _NotePageBuildKey _currentKey() => _NotePageBuildKey(
     noteId: _noteId!,
     title: _title,
     markdown: _markdown,
@@ -200,8 +249,8 @@ final class NotePrintLayoutController extends ChangeNotifier {
   }
 }
 
-final class _NotePrintBuildKey {
-  const _NotePrintBuildKey({
+final class _NotePageBuildKey {
+  const _NotePageBuildKey({
     required this.noteId,
     required this.title,
     required this.markdown,
@@ -217,7 +266,7 @@ final class _NotePrintBuildKey {
 
   @override
   bool operator ==(Object other) =>
-      other is _NotePrintBuildKey &&
+      other is _NotePageBuildKey &&
       other.noteId == noteId &&
       other.title == title &&
       other.markdown == markdown &&

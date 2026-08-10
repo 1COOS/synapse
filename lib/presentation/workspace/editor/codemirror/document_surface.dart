@@ -95,6 +95,7 @@ abstract interface class DocumentSurfaceFactory {
     required String paneId,
     required EditorDocumentHub hub,
     required CodeMirrorDocumentMode mode,
+    required EditorPageLayout pageLayout,
     required bool focused,
     required bool enabled,
     required WorkspaceAppearance appearance,

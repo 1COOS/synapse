@@ -20,7 +20,7 @@ import 'markdown_document_selection.dart';
 import 'markdown_image_transform.dart';
 import 'markdown_table_editor.dart';
 import 'note_find_controller.dart';
-import 'note_print_layout_controller.dart';
+import 'note_page_layout_controller.dart';
 import 'pane_editor_context.dart';
 import 'preview_image_block.dart';
 
@@ -63,7 +63,7 @@ class LiveMarkdownEditor extends StatefulWidget {
     required this.noteId,
     required this.controller,
     required this.findController,
-    this.printController,
+    this.pageLayoutController,
     required this.outlineNodes,
     required this.outlineNavigationController,
     required this.enabled,
@@ -85,7 +85,7 @@ class LiveMarkdownEditor extends StatefulWidget {
   final String noteId;
   final TextEditingController controller;
   final NoteFindController findController;
-  final NotePrintLayoutController? printController;
+  final NotePageLayoutController? pageLayoutController;
   final List<OutlineNode> outlineNodes;
   final WorkspaceOutlineNavigationController outlineNavigationController;
   final bool enabled;
@@ -102,9 +102,18 @@ class LiveMarkdownEditor extends StatefulWidget {
   final bool Function(String src) hasImageAttachment;
   final Widget Function(
     String markdown, {
-    ValueChanged<String>? onImageTap,
+    int? imageBlockStart,
+    String? selectedImageSrc,
+    ValueListenable<PreviewImageRenderState>? imageRenderState,
+    Object? imageTapRegionGroupId,
+    PreviewImageTapCallback? onImageTap,
+    PreviewImageTapCallback? onImageTapDown,
+    VoidCallback? onImageTapCancel,
     PreviewImageSecondaryTapCallback? onImageSecondaryTapUp,
     void Function(String src, bool available)? onImageAvailabilityChanged,
+    VoidCallback? onImageMoveDragStarted,
+    ValueChanged<DragUpdateDetails>? onImageMoveDragUpdate,
+    VoidCallback? onImageMoveDragEnded,
     bool? tableSelected,
     Key? tableSelectionTargetKey,
     VoidCallback? onTableFrameTap,
@@ -130,6 +139,8 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
   final _activeTextEditorKey = GlobalKey();
   final Map<int, GlobalKey> _findBlockKeys = <int, GlobalKey>{};
   final Map<int, GlobalKey> _previewSurfaceKeys = <int, GlobalKey>{};
+  final Map<int, ValueNotifier<PreviewImageRenderState>>
+  _imagePreviewRenderStates = <int, ValueNotifier<PreviewImageRenderState>>{};
   final Map<int, ScrollController> _columnsScrollControllers =
       <int, ScrollController>{};
   final Map<int, int> _columnsPreviewPercents = <int, int>{};
@@ -147,6 +158,9 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
   final _tableBlockDragSource = ValueNotifier<int?>(null);
   Offset? _tableBlockDragPosition;
   Timer? _tableBlockAutoScrollTimer;
+  int? _draggingImageBlockStart;
+  Offset? _imageBlockDragPosition;
+  Timer? _imageBlockAutoScrollTimer;
   var _persistentBlankInsertion = false;
   int _lastFindNavigationRevision = -1;
   int? _activationCoverBlockStart;
@@ -160,6 +174,7 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
   MarkdownDocumentSelectionSpan? _documentSelectionSpan;
   var _documentSelectionGeneration = 0;
   var _documentSelectionSyncScheduled = false;
+  int? _previewImageGestureBlockStart;
   OverlayEntry? _selectionFeedbackOverlay;
   Timer? _selectionFeedbackTimer;
 
@@ -220,6 +235,9 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
       _draggingTableBlockStart = null;
       _tableBlockDragSource.value = null;
       _tableBlockDragPosition = null;
+      _stopImageBlockAutoScroll();
+      _draggingImageBlockStart = null;
+      _imageBlockDragPosition = null;
       _failedImageSources.clear();
     }
     if (!widget.focused) {
@@ -247,7 +265,11 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
     widget.onStateChanged(this, false);
     widget.controller.removeListener(_handleFullDocumentChanged);
     _stopTableBlockAutoScroll();
+    _stopImageBlockAutoScroll();
     _tableBlockDragSource.dispose();
+    for (final renderState in _imagePreviewRenderStates.values) {
+      renderState.dispose();
+    }
     _editorController.dispose();
     _outlineViewport.dispose();
     _blockFocusNode.dispose();
@@ -263,6 +285,10 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
 
   void _resetRenderIdentityCaches() {
     _previewSurfaceKeys.clear();
+    for (final renderState in _imagePreviewRenderStates.values) {
+      renderState.dispose();
+    }
+    _imagePreviewRenderStates.clear();
     _findBlockKeys.clear();
     _columnsPreviewPercents.clear();
     for (final controller in _columnsScrollControllers.values) {
@@ -3077,8 +3103,38 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
     });
   }
 
-  void _handleImagePreviewTap(MarkdownLiveBlock block, String src) {
-    _selectImagePreview(block, src);
+  void _handleImagePreviewTap(
+    MarkdownLiveBlock block,
+    String sourceId,
+    String src,
+  ) {
+    _selectImagePreview(block, src, sourceId: sourceId);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && _previewImageGestureBlockStart == block.start) {
+        _previewImageGestureBlockStart = null;
+      }
+    });
+  }
+
+  void _handleImagePreviewTapDown(MarkdownLiveBlock block) {
+    _previewImageGestureBlockStart = block.start;
+  }
+
+  void _handleImagePreviewTapCancel(MarkdownLiveBlock block) {
+    if (_previewImageGestureBlockStart == block.start) {
+      _previewImageGestureBlockStart = null;
+    }
+  }
+
+  void _activatePreviewBlockFromTap(
+    MarkdownLiveBlock block,
+    Offset globalPosition,
+  ) {
+    if (_previewImageGestureBlockStart == block.start) {
+      _previewImageGestureBlockStart = null;
+      return;
+    }
+    _activateBlock(block, globalPosition: globalPosition);
   }
 
   void _handleImagePreviewSecondaryTap(
@@ -3123,6 +3179,40 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
     });
     widget.onImageSelectionChanged(normalizedSrc);
     _focusEditorSession();
+  }
+
+  String? _selectedImageSrcForBlock(MarkdownLiveBlock block) =>
+      _selectedImageBlockStart == block.start ? _selectedImageSrc : null;
+
+  String? _selectedImageSourceIdForBlock(MarkdownLiveBlock block) =>
+      _selectedImageBlockStart == block.start ? _selectedImageSourceId : null;
+
+  ValueNotifier<PreviewImageRenderState> _imageRenderStateForBlock(
+    MarkdownLiveBlock block,
+    int index,
+  ) {
+    final next = PreviewImageRenderState(
+      blockStart: block.start,
+      selectedImageSrc: _selectedImageSrcForBlock(block),
+      selectedSourceId: _selectedImageSourceIdForBlock(block),
+    );
+    final renderState = _imagePreviewRenderStates.putIfAbsent(
+      index,
+      () => ValueNotifier<PreviewImageRenderState>(next),
+    );
+    if (renderState.value != next) {
+      renderState.value = next;
+    }
+    return renderState;
+  }
+
+  MarkdownLiveBlock? _currentImagePreviewBlock(int index) {
+    final blocks = splitMarkdownLiveBlocks(widget.controller.text);
+    if (index < 0 || index >= blocks.length) {
+      return null;
+    }
+    final block = blocks[index];
+    return _blockHasPreviewImage(block) ? block : null;
   }
 
   void _handleTableFrameTap(MarkdownLiveBlock block) {
@@ -3193,6 +3283,46 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
     _tableBlockAutoScrollTimer = null;
   }
 
+  void _handleImageBlockDragStarted(MarkdownLiveBlock block) {
+    if (!mounted ||
+        !widget.enabled ||
+        widget.busy ||
+        _selectedImageBlockStart != block.start ||
+        _selectedImageSrc == null) {
+      return;
+    }
+    _imageBlockAutoScrollTimer?.cancel();
+    _imageBlockAutoScrollTimer = Timer.periodic(
+      const Duration(milliseconds: 16),
+      (_) => _imageBlockAutoScrollTick(),
+    );
+    _draggingImageBlockStart = block.start;
+    _imageBlockDragPosition = null;
+  }
+
+  void _handleImageBlockDragUpdate(DragUpdateDetails details) {
+    _imageBlockDragPosition = details.globalPosition;
+  }
+
+  void _handleImageBlockDragEnded() {
+    _stopImageBlockAutoScroll();
+    _draggingImageBlockStart = null;
+    _imageBlockDragPosition = null;
+  }
+
+  void _stopImageBlockAutoScroll() {
+    _imageBlockAutoScrollTimer?.cancel();
+    _imageBlockAutoScrollTimer = null;
+  }
+
+  void _imageBlockAutoScrollTick() {
+    final position = _imageBlockDragPosition;
+    if (!mounted || position == null || _draggingImageBlockStart == null) {
+      return;
+    }
+    _scrollNearTableBlockDragEdge(position.dy);
+  }
+
   void _tableBlockAutoScrollTick() {
     final position = _tableBlockDragPosition;
     if (!mounted || position == null || _draggingTableBlockStart == null) {
@@ -3256,14 +3386,38 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
   }
 
   bool _canAcceptImageBlockDrop(PreviewImageDragData data) {
-    return widget.enabled &&
-        !widget.busy &&
-        widget.hasImageAttachment(data.src) &&
-        findMarkdownImageReference(
-              markdown: widget.controller.text,
-              src: data.src,
-            ) !=
-            null;
+    return widget.enabled && !widget.busy && _imageDragSource(data) != null;
+  }
+
+  ({MarkdownLiveBlock block, MarkdownImageReference reference})?
+  _imageDragSource(PreviewImageDragData data) {
+    if (data.noteId != widget.noteId ||
+        data.blockStart != _selectedImageBlockStart ||
+        normalizeImageSrc(data.src) != _selectedImageSrc ||
+        (_selectedImageSourceId != null &&
+            data.sourceId != _selectedImageSourceId) ||
+        !widget.hasImageAttachment(data.src)) {
+      return null;
+    }
+    final markdown = widget.controller.text;
+    final blocks = splitMarkdownLiveBlocks(markdown);
+    final block = blocks.cast<MarkdownLiveBlock?>().firstWhere(
+      (candidate) => candidate?.start == data.blockStart,
+      orElse: () => null,
+    );
+    if (block == null) {
+      return null;
+    }
+    final reference = findMarkdownImageReference(
+      markdown: markdown,
+      src: data.src,
+      start: block.start,
+      end: block.end,
+    );
+    if (reference == null) {
+      return null;
+    }
+    return (block: block, reference: reference);
   }
 
   void _handleImageBlockDrop(
@@ -3278,16 +3432,13 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
   }
 
   void _moveImageToOffset(PreviewImageDragData data, int targetOffset) {
-    if (!_canAcceptImageBlockDrop(data)) {
+    final source = _imageDragSource(data);
+    if (!widget.enabled || widget.busy || source == null) {
       return;
     }
     final markdown = widget.controller.text;
-    final reference = findMarkdownImageReference(
-      markdown: markdown,
-      src: data.src,
-    );
-    if (reference == null ||
-        (targetOffset >= reference.start && targetOffset <= reference.end)) {
+    final reference = source.reference;
+    if (targetOffset >= reference.start && targetOffset <= reference.end) {
       return;
     }
     final imageMarkdown = markdown.substring(reference.start, reference.end);
@@ -3503,13 +3654,13 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
         : _editorController.nonBlankBlockIndexForOffset(blocks, activeOffset);
     final activeInsertionOffset = _editorController.activeInsertionOffset;
     _scheduleRevealFindMatch(blocks);
-    final printBoundariesByBlock = _printBoundariesByBlock(blocks);
+    final pageBoundariesByBlock = _pageBoundariesByBlock(blocks);
     final documentChildren = _buildDocumentChildren(
       blocks: blocks,
       activeIndex: activeIndex,
       activeInsertionOffset: activeInsertionOffset,
       outlineByBlock: outlineByBlock,
-      printBoundariesByBlock: printBoundariesByBlock,
+      pageBoundariesByBlock: pageBoundariesByBlock,
     );
 
     final editor = CallbackShortcuts(
@@ -3567,12 +3718,13 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
                                   _handleDocumentSelectionSpanChanged,
                               physics:
                                   _tableReordering ||
-                                      _draggingTableBlockStart != null
+                                      _draggingTableBlockStart != null ||
+                                      _draggingImageBlockStart != null
                                   ? const NeverScrollableScrollPhysics()
                                   : null,
-                              padding: EdgeInsets.fromLTRB(
+                              padding: const EdgeInsets.fromLTRB(
                                 16,
-                                widget.printController == null ? 54 : 12,
+                                54,
                                 16,
                                 16,
                               ),
@@ -3603,24 +3755,37 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
                                         _handleTableBlockDropAtDocumentEnd(
                                           data,
                                         ),
-                                    child: GestureDetector(
+                                    child: _MarkdownImageBlockDropTarget(
                                       key: const Key(
-                                        'live-markdown-end-edit-target',
+                                        'markdown-image-document-end-drop-target',
                                       ),
-                                      behavior: HitTestBehavior.opaque,
-                                      onTap: _activateTrailingTextBlock,
-                                      onSecondaryTapDown: (details) {
-                                        _openContextMenuAtDocumentEnd(
-                                          blocks,
-                                          details.globalPosition,
-                                        );
-                                      },
-                                      child: SizedBox(
-                                        height:
-                                            _editorController
-                                                .activeTrailingInsertion
-                                            ? 24
-                                            : 96,
+                                      enabled: widget.enabled && !widget.busy,
+                                      targetBlockStart: -1,
+                                      fixedSide: _MarkdownBlockDropSide.after,
+                                      canAccept: _canAcceptImageBlockDrop,
+                                      onAccept: (data, _) => _moveImageToOffset(
+                                        data,
+                                        widget.controller.text.length,
+                                      ),
+                                      child: GestureDetector(
+                                        key: const Key(
+                                          'live-markdown-end-edit-target',
+                                        ),
+                                        behavior: HitTestBehavior.opaque,
+                                        onTap: _activateTrailingTextBlock,
+                                        onSecondaryTapDown: (details) {
+                                          _openContextMenuAtDocumentEnd(
+                                            blocks,
+                                            details.globalPosition,
+                                          );
+                                        },
+                                        child: SizedBox(
+                                          height:
+                                              _editorController
+                                                  .activeTrailingInsertion
+                                              ? 24
+                                              : 96,
+                                        ),
                                       ),
                                     ),
                                   ),
@@ -3664,17 +3829,7 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
         ),
       ),
     );
-    final printController = widget.printController;
-    if (printController == null) {
-      return editor;
-    }
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        _buildPrintToolbar(printController),
-        Expanded(child: editor),
-      ],
-    );
+    return editor;
   }
 
   List<Widget> _buildDocumentChildren({
@@ -3682,7 +3837,7 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
     required int? activeIndex,
     required int? activeInsertionOffset,
     required Map<int, OutlineNode> outlineByBlock,
-    required Map<int, List<NotePdfPageBoundary>> printBoundariesByBlock,
+    required Map<int, List<NotePdfPageBoundary>> pageBoundariesByBlock,
   }) {
     final layouts = findMarkdownColumnsLayouts(blocks);
     final layoutByStart = <int, MarkdownColumnsLayout>{
@@ -3700,7 +3855,7 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
             activeIndex: activeIndex,
             activeInsertionOffset: activeInsertionOffset,
             outlineByBlock: outlineByBlock,
-            printBoundariesByBlock: printBoundariesByBlock,
+            pageBoundariesByBlock: pageBoundariesByBlock,
           ),
         );
         index = layout.endBlockIndex + 1;
@@ -3721,7 +3876,7 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
           activeIndex,
           outlineByBlock[index],
           blocks,
-          printBoundariesByBlock[index] ?? const [],
+          pageBoundariesByBlock[index] ?? const [],
         ),
       );
       if (activeInsertionOffset == block.end) {
@@ -3738,7 +3893,7 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
     required int? activeIndex,
     required int? activeInsertionOffset,
     required Map<int, OutlineNode> outlineByBlock,
-    required Map<int, List<NotePdfPageBoundary>> printBoundariesByBlock,
+    required Map<int, List<NotePdfPageBoundary>> pageBoundariesByBlock,
   }) {
     const gap = 16.0;
     const minColumnWidth = 280.0;
@@ -3828,8 +3983,8 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
                                     activeInsertionOffset:
                                         activeInsertionOffset,
                                     outlineByBlock: outlineByBlock,
-                                    printBoundariesByBlock:
-                                        printBoundariesByBlock,
+                                    pageBoundariesByBlock:
+                                        pageBoundariesByBlock,
                                     side: 'left',
                                   ),
                                 ),
@@ -3861,8 +4016,8 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
                                     activeInsertionOffset:
                                         activeInsertionOffset,
                                     outlineByBlock: outlineByBlock,
-                                    printBoundariesByBlock:
-                                        printBoundariesByBlock,
+                                    pageBoundariesByBlock:
+                                        pageBoundariesByBlock,
                                     side: 'right',
                                   ),
                                 ),
@@ -3892,7 +4047,7 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
     required int? activeIndex,
     required int? activeInsertionOffset,
     required Map<int, OutlineNode> outlineByBlock,
-    required Map<int, List<NotePdfPageBoundary>> printBoundariesByBlock,
+    required Map<int, List<NotePdfPageBoundary>> pageBoundariesByBlock,
     required String side,
   }) {
     final children = <Widget>[];
@@ -3915,7 +4070,7 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
             activeIndex,
             outlineByBlock[index],
             blocks,
-            printBoundariesByBlock[index] ?? const [],
+            pageBoundariesByBlock[index] ?? const [],
           ),
         ),
       );
@@ -4174,125 +4329,10 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
     );
   }
 
-  Widget _buildPrintToolbar(NotePrintLayoutController controller) {
-    final result = controller.result;
-    final status = controller.building && result == null
-        ? '正在计算分页…'
-        : result == null
-        ? '分页不可用'
-        : '${result.pageCount} 页';
-    return DecoratedBox(
-      key: const Key('note-print-toolbar'),
-      decoration: const BoxDecoration(
-        color: workspaceSurfaceColor,
-        border: Border(bottom: BorderSide(color: workspaceSoftLineColor)),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(16, 40, 16, 8),
-        child: Wrap(
-          spacing: 10,
-          runSpacing: 6,
-          crossAxisAlignment: WrapCrossAlignment.center,
-          children: [
-            SizedBox(
-              width: 122,
-              child: CupertinoSlidingSegmentedControl<NotePdfOrientation>(
-                key: const Key('note-print-orientation'),
-                groupValue: controller.options.orientation,
-                children: const {
-                  NotePdfOrientation.portrait: Padding(
-                    padding: EdgeInsets.symmetric(horizontal: 5),
-                    child: Text('纵向'),
-                  ),
-                  NotePdfOrientation.landscape: Padding(
-                    padding: EdgeInsets.symmetric(horizontal: 5),
-                    child: Text('横向'),
-                  ),
-                },
-                onValueChanged: (value) {
-                  if (value != null) {
-                    controller.setOptions(
-                      controller.options.copyWith(orientation: value),
-                    );
-                  }
-                },
-              ),
-            ),
-            SizedBox(
-              width: 176,
-              child: CupertinoSlidingSegmentedControl<NotePdfMarginPreset>(
-                key: const Key('note-print-margin'),
-                groupValue: controller.options.marginPreset,
-                children: const {
-                  NotePdfMarginPreset.compact: Padding(
-                    padding: EdgeInsets.symmetric(horizontal: 3),
-                    child: Text('紧凑'),
-                  ),
-                  NotePdfMarginPreset.standard: Padding(
-                    padding: EdgeInsets.symmetric(horizontal: 3),
-                    child: Text('标准'),
-                  ),
-                  NotePdfMarginPreset.wide: Padding(
-                    padding: EdgeInsets.symmetric(horizontal: 3),
-                    child: Text('宽松'),
-                  ),
-                },
-                onValueChanged: (value) {
-                  if (value != null) {
-                    controller.setOptions(
-                      controller.options.copyWith(marginPreset: value),
-                    );
-                  }
-                },
-              ),
-            ),
-            Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (controller.building)
-                  const Padding(
-                    padding: EdgeInsets.only(right: 6),
-                    child: CupertinoActivityIndicator(radius: 7),
-                  ),
-                Text(
-                  status,
-                  key: const Key('note-print-page-count'),
-                  style: TextStyle(
-                    color: controller.hasStaleResult
-                        ? workspaceMutedColor.withValues(alpha: 0.55)
-                        : workspaceMutedColor,
-                    fontSize: 12,
-                  ),
-                ),
-                if (result != null && result.warnings.isNotEmpty)
-                  Text(
-                    ' · ${result.warnings.length} 条警告',
-                    key: const Key('note-print-warning-count'),
-                    style: const TextStyle(
-                      color: workspaceMutedColor,
-                      fontSize: 12,
-                    ),
-                  ),
-              ],
-            ),
-            if (controller.error != null)
-              CupertinoButton(
-                key: const Key('note-print-retry'),
-                padding: EdgeInsets.zero,
-                minimumSize: Size.zero,
-                onPressed: controller.retry,
-                child: const Text('分页失败，重试'),
-              ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Map<int, List<NotePdfPageBoundary>> _printBoundariesByBlock(
+  Map<int, List<NotePdfPageBoundary>> _pageBoundariesByBlock(
     List<MarkdownLiveBlock> blocks,
   ) {
-    final boundaries = widget.printController?.boundaries ?? const [];
+    final boundaries = widget.pageLayoutController?.boundaries ?? const [];
     final result = <int, List<NotePdfPageBoundary>>{};
     for (final boundary in boundaries) {
       if (boundary.kind != NotePdfPageBoundaryKind.automatic ||
@@ -4308,7 +4348,7 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
     return result;
   }
 
-  Widget _decoratePrintBoundaries(
+  Widget _decoratePageBoundaries(
     MarkdownLiveBlock block,
     int blockIndex,
     Widget child,
@@ -4317,13 +4357,13 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
     if (boundaries.isEmpty) {
       return child;
     }
-    return _PrintBoundaryOverlay(
-      key: Key('note-print-boundary-block-$blockIndex'),
+    return _PageBoundaryOverlay(
+      key: Key('note-page-boundary-block-$blockIndex'),
       block: block,
       boundaries: boundaries,
       paneId: widget.paneId,
       style: _textStyleForBlock(block, WorkspaceAppearanceScope.of(context)),
-      accentColor: widget.printController?.hasStaleResult == true
+      accentColor: widget.pageLayoutController?.hasStaleResult == true
           ? WorkspaceAppearanceScope.of(
               context,
             ).accentColor.withValues(alpha: 0.4)
@@ -4339,9 +4379,9 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
     int? activeIndex,
     OutlineNode? outlineNode,
     List<MarkdownLiveBlock> blocks,
-    List<NotePdfPageBoundary> printBoundaries,
+    List<NotePdfPageBoundary> pageBoundaries,
   ) {
-    final child = _decoratePrintBoundaries(
+    final child = _decoratePageBoundaries(
       block,
       index,
       _decorateFindBlock(
@@ -4349,7 +4389,7 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
         index,
         _buildBlock(block, index, activeIndex, blocks),
       ),
-      printBoundaries,
+      pageBoundaries,
     );
     final outlined = outlineNode == null
         ? child
@@ -4371,6 +4411,14 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
     if (block.isBlank) {
       return selectionAware;
     }
+    final imageDropAware = _MarkdownImageBlockDropTarget(
+      key: Key('markdown-image-block-drop-target-$index'),
+      enabled: widget.enabled && !widget.busy,
+      targetBlockStart: block.start,
+      canAccept: _canAcceptImageBlockDrop,
+      onAccept: (data, side) => _handleImageBlockDrop(data, block, side),
+      child: selectionAware,
+    );
     return _MarkdownTableBlockDropTarget(
       key: Key('markdown-table-block-drop-target-$index'),
       enabled: widget.enabled && !widget.busy,
@@ -4379,7 +4427,7 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
       targetBlockStart: block.start,
       onDragMove: (position) => _tableBlockDragPosition = position,
       onAccept: (data, side) => _handleTableBlockDrop(data, block, side),
-      child: selectionAware,
+      child: imageDropAware,
     );
   }
 
@@ -4617,6 +4665,8 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
     }
     final hasPreviewImage = _blockHasPreviewImage(block);
     final hasEditableInlineText = markdownHasTextAlongsideImage(block.text);
+    final imageSelected =
+        _selectedImageBlockStart == block.start && _selectedImageSrc != null;
     final table = _tableForBlock(block);
     if (table != null) {
       final selected = _selectedTableBlockStart == block.start;
@@ -4636,9 +4686,20 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
       return preview;
     }
     if (hasPreviewImage && !hasEditableInlineText) {
-      return _buildImageBlock(block, index, editingTag: index == activeIndex);
+      return _buildImageBlock(
+        block,
+        index,
+        editingTag: index == activeIndex && !imageSelected,
+      );
     }
     if (hasPreviewImage) {
+      if (imageSelected) {
+        return _buildPreviewSurface(
+          block,
+          index,
+          _buildTextPreviewBlock(block, index, hasPreviewImage: true),
+        );
+      }
       if (index == activeIndex) {
         return _buildActivationTransition(
           block: block,
@@ -4682,7 +4743,7 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
       key: Key('live-markdown-block-preview-$index'),
       behavior: HitTestBehavior.opaque,
       onTapUp: (details) =>
-          _activateBlock(block, globalPosition: details.globalPosition),
+          _activatePreviewBlockFromTap(block, details.globalPosition),
       onSecondaryTapDown: hasPreviewImage
           ? null
           : (details) {
@@ -4700,20 +4761,53 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
                 key: Key('live-markdown-image-preview-$index'),
                 child: widget.previewBuilder(
                   block.text,
+                  imageBlockStart: block.start,
+                  selectedImageSrc: _selectedImageSrcForBlock(block),
+                  imageRenderState: _imageRenderStateForBlock(block, index),
+                  imageTapRegionGroupId: _editingSessionTapGroup,
                   onImageAvailabilityChanged: _handleImageAvailabilityChanged,
-                  onImageTap: (src) => _handleImagePreviewTap(block, src),
-                  onImageSecondaryTapUp: (sourceId, src, details) =>
+                  onImageTap: (sourceId, src) {
+                    final current = _currentImagePreviewBlock(index);
+                    if (current != null) {
+                      _handleImagePreviewTap(current, sourceId, src);
+                    }
+                  },
+                  onImageTapDown: (_, _) {
+                    final current = _currentImagePreviewBlock(index);
+                    if (current != null) {
+                      _handleImagePreviewTapDown(current);
+                    }
+                  },
+                  onImageTapCancel: () {
+                    final current = _currentImagePreviewBlock(index);
+                    if (current != null) {
+                      _handleImagePreviewTapCancel(current);
+                    }
+                  },
+                  onImageSecondaryTapUp: (sourceId, src, details) {
+                    final current = _currentImagePreviewBlock(index);
+                    if (current != null) {
                       _handleImagePreviewSecondaryTap(
-                        block,
+                        current,
                         sourceId,
                         src,
                         details,
-                      ),
+                      );
+                    }
+                  },
+                  onImageMoveDragStarted: () {
+                    final current = _currentImagePreviewBlock(index);
+                    if (current != null) {
+                      _handleImageBlockDragStarted(current);
+                    }
+                  },
+                  onImageMoveDragUpdate: _handleImageBlockDragUpdate,
+                  onImageMoveDragEnded: _handleImageBlockDragEnded,
                 ),
               )
             : widget.previewBuilder(
                 block.text,
-                onImageTap: (_) => _activateBlock(block),
+                onImageTap: (_, _) => _activateBlock(block),
               ),
       ),
     );
@@ -4863,7 +4957,7 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
       key: Key('live-markdown-block-preview-$index'),
       behavior: HitTestBehavior.opaque,
       onTapUp: (details) =>
-          _activateBlock(block, globalPosition: details.globalPosition),
+          _activatePreviewBlockFromTap(block, details.globalPosition),
       onSecondaryTapUp: (details) {
         _activateBlockAndOpenContextMenu(block, details.globalPosition);
       },
@@ -4881,15 +4975,48 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
               key: Key('live-markdown-image-preview-$index'),
               child: widget.previewBuilder(
                 block.text,
+                imageBlockStart: block.start,
+                selectedImageSrc: _selectedImageSrcForBlock(block),
+                imageRenderState: _imageRenderStateForBlock(block, index),
+                imageTapRegionGroupId: _editingSessionTapGroup,
                 onImageAvailabilityChanged: _handleImageAvailabilityChanged,
-                onImageTap: (src) => _handleImagePreviewTap(block, src),
-                onImageSecondaryTapUp: (sourceId, src, details) =>
+                onImageTap: (sourceId, src) {
+                  final current = _currentImagePreviewBlock(index);
+                  if (current != null) {
+                    _handleImagePreviewTap(current, sourceId, src);
+                  }
+                },
+                onImageTapDown: (_, _) {
+                  final current = _currentImagePreviewBlock(index);
+                  if (current != null) {
+                    _handleImagePreviewTapDown(current);
+                  }
+                },
+                onImageTapCancel: () {
+                  final current = _currentImagePreviewBlock(index);
+                  if (current != null) {
+                    _handleImagePreviewTapCancel(current);
+                  }
+                },
+                onImageSecondaryTapUp: (sourceId, src, details) {
+                  final current = _currentImagePreviewBlock(index);
+                  if (current != null) {
                     _handleImagePreviewSecondaryTap(
-                      block,
+                      current,
                       sourceId,
                       src,
                       details,
-                    ),
+                    );
+                  }
+                },
+                onImageMoveDragStarted: () {
+                  final current = _currentImagePreviewBlock(index);
+                  if (current != null) {
+                    _handleImageBlockDragStarted(current);
+                  }
+                },
+                onImageMoveDragUpdate: _handleImageBlockDragUpdate,
+                onImageMoveDragEnded: _handleImageBlockDragEnded,
               ),
             ),
           ],
@@ -4985,14 +5112,59 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
     _editorController.blockController.brokenImageMatcher = block == null
         ? null
         : _imageTagIsBroken;
+    final blockIndex = block == null
+        ? -1
+        : splitMarkdownLiveBlocks(
+            widget.controller.text,
+          ).indexWhere((candidate) => candidate.start == block.start);
     _editorController.blockController.inlineImageBuilder =
-        block != null && markdownHasTextAlongsideImage(block.text)
+        block != null &&
+            blockIndex >= 0 &&
+            markdownHasTextAlongsideImage(block.text)
         ? (source) => widget.previewBuilder(
             source,
+            imageBlockStart: block.start,
+            selectedImageSrc: _selectedImageSrcForBlock(block),
+            imageRenderState: _imageRenderStateForBlock(block, blockIndex),
+            imageTapRegionGroupId: _editingSessionTapGroup,
             onImageAvailabilityChanged: _handleImageAvailabilityChanged,
-            onImageTap: (src) => _handleImagePreviewTap(block, src),
-            onImageSecondaryTapUp: (sourceId, src, details) =>
-                _handleImagePreviewSecondaryTap(block, sourceId, src, details),
+            onImageTap: (sourceId, src) {
+              final current = _currentImagePreviewBlock(blockIndex);
+              if (current != null) {
+                _handleImagePreviewTap(current, sourceId, src);
+              }
+            },
+            onImageTapDown: (_, _) {
+              final current = _currentImagePreviewBlock(blockIndex);
+              if (current != null) {
+                _handleImagePreviewTapDown(current);
+              }
+            },
+            onImageTapCancel: () {
+              final current = _currentImagePreviewBlock(blockIndex);
+              if (current != null) {
+                _handleImagePreviewTapCancel(current);
+              }
+            },
+            onImageSecondaryTapUp: (sourceId, src, details) {
+              final current = _currentImagePreviewBlock(blockIndex);
+              if (current != null) {
+                _handleImagePreviewSecondaryTap(
+                  current,
+                  sourceId,
+                  src,
+                  details,
+                );
+              }
+            },
+            onImageMoveDragStarted: () {
+              final current = _currentImagePreviewBlock(blockIndex);
+              if (current != null) {
+                _handleImageBlockDragStarted(current);
+              }
+            },
+            onImageMoveDragUpdate: _handleImageBlockDragUpdate,
+            onImageMoveDragEnded: _handleImageBlockDragEnded,
           )
         : null;
     return KeyedSubtree(
@@ -5117,8 +5289,8 @@ class LiveMarkdownEditorState extends State<LiveMarkdownEditor> {
   }
 }
 
-final class _PrintBoundaryOverlay extends StatelessWidget {
-  const _PrintBoundaryOverlay({
+final class _PageBoundaryOverlay extends StatelessWidget {
+  const _PageBoundaryOverlay({
     super.key,
     required this.block,
     required this.boundaries,
@@ -5146,11 +5318,11 @@ final class _PrintBoundaryOverlay extends StatelessWidget {
         child,
         for (final boundary in boundaries)
           Positioned.fill(
-            key: Key('note-print-boundary-$paneId-${boundary.pageIndex}'),
+            key: Key('note-page-boundary-$paneId-${boundary.pageIndex}'),
             child: IgnorePointer(
               child: ExcludeSemantics(
                 child: CustomPaint(
-                  painter: _PrintBoundaryPainter(
+                  painter: _PageBoundaryPainter(
                     block: block,
                     boundary: boundary,
                     style: style,
@@ -5166,8 +5338,8 @@ final class _PrintBoundaryOverlay extends StatelessWidget {
   }
 }
 
-final class _PrintBoundaryPainter extends CustomPainter {
-  const _PrintBoundaryPainter({
+final class _PageBoundaryPainter extends CustomPainter {
+  const _PageBoundaryPainter({
     required this.block,
     required this.boundary,
     required this.style,
@@ -5271,7 +5443,7 @@ final class _PrintBoundaryPainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(_PrintBoundaryPainter oldDelegate) =>
+  bool shouldRepaint(_PageBoundaryPainter oldDelegate) =>
       oldDelegate.block.start != block.start ||
       oldDelegate.block.text != block.text ||
       oldDelegate.boundary.pageIndex != boundary.pageIndex ||
@@ -5761,9 +5933,6 @@ class _MarkdownTableBlockDropTargetState
 
   @override
   Widget build(BuildContext context) {
-    if (!_interactionEnabled) {
-      return widget.child;
-    }
     final side = _side;
     return DragTarget<_MarkdownTableDragData>(
       onWillAcceptWithDetails: (details) => _canAccept(details.data),
@@ -5880,9 +6049,6 @@ class _MarkdownImageBlockDropTargetState
 
   @override
   Widget build(BuildContext context) {
-    if (!widget.enabled) {
-      return widget.child;
-    }
     final side = _side;
     return DragTarget<PreviewImageDragData>(
       onWillAcceptWithDetails: (details) => _canAccept(details.data),

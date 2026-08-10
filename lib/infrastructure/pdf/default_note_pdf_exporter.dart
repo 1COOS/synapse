@@ -83,7 +83,15 @@ Future<NotePdfBuildResult> buildNotePdf(
       : PdfPageFormat.a4.portrait;
   final margin = options.marginPreset.millimeters * PdfPageFormat.mm;
   final contentWidth = pageFormat.width - margin * 2;
-  final contentHeight = pageFormat.height - margin * 2 - 48;
+  const headerHeight = 22.0;
+  const footerHeight = 18.0;
+  const pageChromeSpacing = 8.0;
+  final contentHeight =
+      pageFormat.height -
+      margin * 2 -
+      headerHeight -
+      pageChromeSpacing -
+      (options.footerEnabled ? footerHeight : 0);
   final renderer = _MarkdownPdfRenderer(
     snapshot: snapshot,
     fonts: fonts,
@@ -142,7 +150,7 @@ Future<NotePdfBuildResult> buildNotePdf(
           maxWidth: contentWidth,
         );
         return pw.Container(
-          height: 22,
+          height: headerHeight,
           alignment: pw.Alignment.topLeft,
           decoration: const pw.BoxDecoration(
             border: pw.Border(
@@ -162,18 +170,20 @@ Future<NotePdfBuildResult> buildNotePdf(
           ),
         );
       },
-      footer: (context) => pw.Container(
-        height: 18,
-        alignment: pw.Alignment.bottomCenter,
-        child: pw.Text(
-          '${context.pageNumber} / ${context.pagesCount}',
-          style: pw.TextStyle(
-            font: fonts.regular,
-            fontSize: 8.5,
-            color: PdfColors.grey600,
-          ),
-        ),
-      ),
+      footer: options.footerEnabled
+          ? (context) => pw.Container(
+              height: footerHeight,
+              alignment: pw.Alignment.bottomCenter,
+              child: pw.Text(
+                '${context.pageNumber} / ${context.pagesCount}',
+                style: pw.TextStyle(
+                  font: fonts.regular,
+                  fontSize: 8.5,
+                  color: PdfColors.grey600,
+                ),
+              ),
+            )
+          : null,
       build: (_) => widgets.isEmpty
           ? [
               pw.Text(
@@ -735,7 +745,8 @@ final class _MarkdownPdfRenderer {
     final fallback = rows
         .skip(1)
         .any(
-          (row) => _estimatedTableRowHeight(row, columnWidth) > contentHeight,
+          (row) =>
+              _estimatedTableRowHeight(row, columnWidth) > contentHeight * 0.86,
         );
     if (fallback) {
       _warn(

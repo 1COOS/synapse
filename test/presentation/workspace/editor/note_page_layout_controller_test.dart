@@ -3,15 +3,44 @@ import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:synapse/application/exports/note_pdf_export.dart';
-import 'package:synapse/presentation/workspace/editor/note_print_layout_controller.dart';
+import 'package:synapse/presentation/workspace/editor/note_page_layout_controller.dart';
 
 void main() {
+  testWidgets('stays idle until page layout is explicitly activated', (
+    tester,
+  ) async {
+    final exporter = _ControlledExporter();
+    final controller = NotePageLayoutController(exporter: exporter);
+    addTearDown(controller.dispose);
+
+    controller.bindSnapshot(_snapshot('# 初始'));
+    controller.updateDocument(
+      noteId: 'note-1',
+      title: '已修改',
+      markdown: '# 已修改',
+    );
+    controller.setOptions(
+      const NotePdfExportOptions(orientation: NotePdfOrientation.landscape),
+    );
+    await tester.pump(const Duration(seconds: 1));
+
+    expect(controller.active, isFalse);
+    expect(controller.building, isFalse);
+    expect(exporter.snapshots, isEmpty);
+
+    controller.setActive(true);
+    expect(exporter.snapshots, hasLength(1));
+    expect(exporter.snapshots.single.markdown, '# 已修改');
+    expect(exporter.options.single.orientation, NotePdfOrientation.landscape);
+  });
+
   testWidgets('debounces live edits and keeps only the latest document', (
     tester,
   ) async {
     final exporter = _ControlledExporter();
-    final controller = NotePrintLayoutController(exporter: exporter);
+    final controller = NotePageLayoutController(exporter: exporter);
     addTearDown(controller.dispose);
+    controller.setActive(true);
 
     controller.bindSnapshot(_snapshot('# 初始'));
     expect(exporter.snapshots, hasLength(1));
@@ -40,11 +69,12 @@ void main() {
     tester,
   ) async {
     final exporter = _ControlledExporter();
-    final controller = NotePrintLayoutController(
+    final controller = NotePageLayoutController(
       exporter: exporter,
       debounce: Duration.zero,
     );
     addTearDown(controller.dispose);
+    controller.setActive(true);
 
     controller.bindSnapshot(_snapshot('# 文档'));
     controller.setOptions(
@@ -79,11 +109,12 @@ void main() {
     tester,
   ) async {
     final exporter = _ControlledExporter();
-    final controller = NotePrintLayoutController(
+    final controller = NotePageLayoutController(
       exporter: exporter,
       debounce: Duration.zero,
     );
     addTearDown(controller.dispose);
+    controller.setActive(true);
     final snapshot = _snapshot('# 文档');
 
     controller.bindSnapshot(snapshot);
@@ -102,17 +133,83 @@ void main() {
       ),
       isNull,
     );
+    expect(
+      controller.reusableResultFor(
+        snapshot,
+        const NotePdfExportOptions(marginPreset: NotePdfMarginPreset.compact),
+      ),
+      isNull,
+    );
+    expect(
+      controller.reusableResultFor(
+        snapshot,
+        const NotePdfExportOptions(footerEnabled: false),
+      ),
+      isNull,
+    );
+  });
+
+  testWidgets('suspends layout work and refreshes immediately when resumed', (
+    tester,
+  ) async {
+    final exporter = _ControlledExporter();
+    final controller = NotePageLayoutController(exporter: exporter);
+    addTearDown(controller.dispose);
+    controller.setActive(true);
+
+    controller.bindSnapshot(_snapshot('# 第一版'));
+    final first = _result(2, marker: 1);
+    exporter.complete(0, first);
+    await tester.pump();
+
+    controller.setActive(false);
+    controller.updateDocument(
+      noteId: 'note-1',
+      title: '第二版',
+      markdown: '# 第二版',
+    );
+    controller.setOptions(
+      const NotePdfExportOptions(
+        orientation: NotePdfOrientation.landscape,
+        marginPreset: NotePdfMarginPreset.wide,
+        footerEnabled: false,
+      ),
+    );
+    await tester.pump(const Duration(seconds: 1));
+
+    expect(controller.active, isFalse);
+    expect(controller.result, same(first));
+    expect(controller.building, isFalse);
+    expect(exporter.snapshots, hasLength(1));
+
+    controller.setActive(true);
+    expect(controller.active, isTrue);
+    expect(exporter.snapshots, hasLength(2));
+    expect(exporter.snapshots.last.markdown, '# 第二版');
+    expect(exporter.options.last, controller.options);
+
+    final refreshed = _result(1, marker: 2);
+    exporter.complete(1, refreshed);
+    await tester.pump();
+    expect(controller.result, same(refreshed));
+    expect(controller.hasStaleResult, isFalse);
+
+    controller.setActive(false);
+    controller.setActive(true);
+    expect(exporter.snapshots, hasLength(2));
+    expect(controller.result, same(refreshed));
   });
 
   testWidgets(
     'keeps the last boundaries visible while rebuilding and failing',
     (tester) async {
       final exporter = _ControlledExporter();
-      final controller = NotePrintLayoutController(
+      final controller = NotePageLayoutController(
         exporter: exporter,
         debounce: Duration.zero,
       );
       addTearDown(controller.dispose);
+      controller.setActive(true);
 
       controller.bindSnapshot(_snapshot('# 第一版'));
       final first = _result(
@@ -163,11 +260,12 @@ void main() {
     'drops stale attachment builds and matches reusable bytes exactly',
     (tester) async {
       final exporter = _ControlledExporter();
-      final controller = NotePrintLayoutController(
+      final controller = NotePageLayoutController(
         exporter: exporter,
         debounce: Duration.zero,
       );
       addTearDown(controller.dispose);
+      controller.setActive(true);
       final first = _snapshotWithAsset(1);
       final second = _snapshotWithAsset(2);
 
@@ -199,11 +297,12 @@ void main() {
     tester,
   ) async {
     final exporter = _ControlledExporter();
-    final controller = NotePrintLayoutController(
+    final controller = NotePageLayoutController(
       exporter: exporter,
       debounce: Duration.zero,
     );
     addTearDown(controller.dispose);
+    controller.setActive(true);
     const original = '# 标题\n\n第一段\n\n第二段\n\n第三段';
     final snapshot = _snapshot(original);
 

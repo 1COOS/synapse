@@ -10,49 +10,61 @@ import 'package:synapse/presentation/cupertino/workspace/workspace_theme.dart';
 import '../../support/workspace_fakes.dart';
 
 void main() {
-  testWidgets('drops stale builds when orientation and margin change quickly', (
-    tester,
-  ) async {
-    final exporter = _ControlledPdfExporter();
-    final rasterizer = _RecordingRasterizer();
-    final saver = _RecordingFileSaver();
-
-    await _pumpDialog(
-      tester,
-      exporter: exporter,
-      rasterizer: rasterizer,
-      saver: saver,
-    );
-
-    expect(exporter.options.single, const NotePdfExportOptions());
-    exporter.complete(0, _result(1, marker: 1));
-    await tester.pump();
-    expect(find.text('A4 · 1 页'), findsOneWidget);
-
-    await tester.tap(find.text('横向'));
-    await tester.pump();
-    expect(exporter.options[1].orientation, NotePdfOrientation.landscape);
-
-    await tester.tap(find.text('紧凑'));
-    await tester.pump();
-    expect(
-      exporter.options[2],
-      const NotePdfExportOptions(
-        orientation: NotePdfOrientation.landscape,
+  testWidgets(
+    'keeps global PDF options while dropping stale orientation builds',
+    (tester) async {
+      final exporter = _ControlledPdfExporter();
+      final rasterizer = _RecordingRasterizer();
+      final saver = _RecordingFileSaver();
+      final changedOptions = <NotePdfExportOptions>[];
+      const inheritedOptions = NotePdfExportOptions(
         marginPreset: NotePdfMarginPreset.compact,
-      ),
-    );
+        footerEnabled: false,
+      );
 
-    exporter.complete(1, _result(9, marker: 2));
-    await tester.pump();
-    expect(find.text('A4 · 9 页'), findsNothing);
-    expect(find.byKey(const Key('note-pdf-building')), findsOneWidget);
+      await _pumpDialog(
+        tester,
+        exporter: exporter,
+        rasterizer: rasterizer,
+        saver: saver,
+        initialOptions: inheritedOptions,
+        onOptionsChanged: changedOptions.add,
+      );
 
-    exporter.complete(2, _result(3, marker: 3));
-    await tester.pump();
-    expect(find.text('A4 · 3 页'), findsOneWidget);
-    expect(find.byKey(const Key('note-pdf-building')), findsNothing);
-  });
+      expect(exporter.options.single, inheritedOptions);
+      expect(find.textContaining('紧凑'), findsNothing);
+      expect(find.textContaining('宽松'), findsNothing);
+      exporter.complete(0, _result(1, marker: 1));
+      await tester.pump();
+      expect(find.text('A4 · 1 页'), findsOneWidget);
+
+      await tester.tap(find.text('横向'));
+      await tester.pump();
+      expect(
+        exporter.options[1],
+        const NotePdfExportOptions(
+          orientation: NotePdfOrientation.landscape,
+          marginPreset: NotePdfMarginPreset.compact,
+          footerEnabled: false,
+        ),
+      );
+
+      await tester.tap(find.text('纵向'));
+      await tester.pump();
+      expect(exporter.options[2], inheritedOptions);
+      expect(changedOptions, [exporter.options[1], inheritedOptions]);
+
+      exporter.complete(1, _result(9, marker: 2));
+      await tester.pump();
+      expect(find.text('A4 · 9 页'), findsNothing);
+      expect(find.byKey(const Key('note-pdf-building')), findsOneWidget);
+
+      exporter.complete(2, _result(3, marker: 3));
+      await tester.pump();
+      expect(find.text('A4 · 3 页'), findsOneWidget);
+      expect(find.byKey(const Key('note-pdf-building')), findsNothing);
+    },
+  );
 
   testWidgets('save cancellation is quiet and failures remain retryable', (
     tester,
@@ -123,7 +135,7 @@ void main() {
     expect(find.byKey(const Key('note-pdf-build-error')), findsNothing);
   });
 
-  testWidgets('accepts a matching print-mode result without rebuilding', (
+  testWidgets('accepts a matching edit-layout result without rebuilding', (
     tester,
   ) async {
     final exporter = _ControlledPdfExporter();
@@ -145,9 +157,10 @@ void main() {
 
     expect(exporter.options, isEmpty);
     expect(find.text('A4 · 2 页'), findsOneWidget);
-    final orientation = tester.widget<
-      CupertinoSlidingSegmentedControl<NotePdfOrientation>
-    >(find.byKey(const Key('note-pdf-orientation')));
+    final orientation = tester
+        .widget<CupertinoSlidingSegmentedControl<NotePdfOrientation>>(
+          find.byKey(const Key('note-pdf-orientation')),
+        );
     expect(orientation.groupValue, NotePdfOrientation.landscape);
   });
 }
@@ -159,6 +172,7 @@ Future<void> _pumpDialog(
   required NotePdfFileSaver saver,
   NotePdfExportOptions initialOptions = const NotePdfExportOptions(),
   NotePdfBuildResult? initialResult,
+  ValueChanged<NotePdfExportOptions>? onOptionsChanged,
 }) async {
   await tester.binding.setSurfaceSize(const Size(1200, 820));
   addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -187,6 +201,7 @@ Future<void> _pumpDialog(
                       fileSaver: saver,
                       initialOptions: initialOptions,
                       initialResult: initialResult,
+                      onOptionsChanged: onOptionsChanged,
                     ),
                   ),
                 ),

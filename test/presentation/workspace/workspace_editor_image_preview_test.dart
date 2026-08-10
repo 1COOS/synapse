@@ -515,7 +515,7 @@ void main() {
   testWidgets(
     'selecting a loaded preview image exposes border resize handles',
     (tester) async {
-      final vault = MemoryVaultBackend(seedExampleData: false);
+      final vault = _CountingAttachmentReadBackend();
       final note = await vault.createNote(parentPath: '', title: 'Image Study');
       final source = await vault.addImageAttachment(
         noteId: note.id,
@@ -535,6 +535,14 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.byKey(Key('preview-image-${source.id}')), findsOneWidget);
+      final previewFinder = find.byKey(Key('preview-image-${source.id}'));
+      final imageFinder = find.descendant(
+        of: previewFinder,
+        matching: find.byType(Image),
+      );
+      final previewElement = tester.element(previewFinder);
+      final imageElement = tester.element(imageFinder);
+      final attachmentReads = vault.attachmentReadCalls;
       expect(
         find.byIcon(CupertinoIcons.arrow_down_right_arrow_up_left),
         findsNothing,
@@ -563,6 +571,9 @@ void main() {
         ),
         findsOneWidget,
       );
+      expect(tester.element(previewFinder), same(previewElement));
+      expect(tester.element(imageFinder), same(imageElement));
+      expect(vault.attachmentReadCalls, attachmentReads);
       expect(
         find.byKey(Key('image-resize-handle-icon-${source.id}')),
         findsOneWidget,
@@ -841,8 +852,18 @@ void main() {
     expect(rebuiltTarget.src, remappedSecondSrc);
 
     rebuiltTarget.onImageDropped(
-      PreviewImageDragData(sourceId: first.id, src: remappedFirstSrc),
-      PreviewImageDragData(sourceId: second.id, src: remappedSecondSrc),
+      PreviewImageDragData(
+        noteId: note.id,
+        sourceId: first.id,
+        src: remappedFirstSrc,
+        blockStart: rebuiltTarget.blockStart!,
+      ),
+      PreviewImageDragData(
+        noteId: note.id,
+        sourceId: second.id,
+        src: remappedSecondSrc,
+        blockStart: rebuiltTarget.blockStart!,
+      ),
       ImageDropSide.after,
     );
     await tester.pumpAndSettle();
@@ -893,6 +914,7 @@ Widget _previewImageApp({
         attachment: attachment,
         src: src,
         width: width,
+        blockStart: 0,
         editableControls: true,
         selectedImageSrc: src,
         loadImageBytes: loadImageBytes,

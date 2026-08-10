@@ -4,6 +4,65 @@ const synapseEditorProtocolVersion = 2;
 
 enum CodeMirrorDocumentMode { editing, reading }
 
+final class EditorPageBoundary {
+  const EditorPageBoundary({
+    required this.pageIndex,
+    required this.sourceOffset,
+  });
+
+  final int pageIndex;
+  final int sourceOffset;
+
+  Map<String, Object?> toJson() => {
+    'pageIndex': pageIndex,
+    'sourceOffset': sourceOffset,
+  };
+
+  @override
+  bool operator ==(Object other) =>
+      other is EditorPageBoundary &&
+      other.pageIndex == pageIndex &&
+      other.sourceOffset == sourceOffset;
+
+  @override
+  int get hashCode => Object.hash(pageIndex, sourceOffset);
+}
+
+final class EditorPageLayout {
+  EditorPageLayout({
+    required List<EditorPageBoundary> boundaries,
+    required this.stale,
+  }) : boundaries = List<EditorPageBoundary>.unmodifiable(boundaries);
+
+  static final empty = EditorPageLayout(boundaries: const [], stale: false);
+
+  final List<EditorPageBoundary> boundaries;
+  final bool stale;
+
+  Map<String, Object?> toJson() => {
+    'boundaries': [for (final boundary in boundaries) boundary.toJson()],
+    'stale': stale,
+  };
+
+  @override
+  bool operator ==(Object other) {
+    if (other is! EditorPageLayout ||
+        other.stale != stale ||
+        other.boundaries.length != boundaries.length) {
+      return false;
+    }
+    for (var index = 0; index < boundaries.length; index += 1) {
+      if (other.boundaries[index] != boundaries[index]) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  @override
+  int get hashCode => Object.hash(stale, Object.hashAll(boundaries));
+}
+
 final class EditorChange {
   const EditorChange({
     required this.from,

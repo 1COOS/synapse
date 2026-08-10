@@ -153,6 +153,7 @@ Future<void> pumpWorkspace(
               buildNumber: '1',
               platformMode: '测试桌面端',
             ),
+        supportsPdfExportOverride: false,
         usesNativeMacTitlebarOverride: usesNativeMacTitlebarOverride,
         workspaceCommitFailureForTesting: workspaceCommitFailureForTesting,
       );
@@ -425,7 +426,7 @@ double menuSeparatorHeight(WidgetTester tester, Key key) {
       .height;
 }
 
-enum PreviewImageDropSide { left, right }
+enum PreviewImageDropSide { before, after }
 
 Future<void> dragPreviewImageToSide(
   WidgetTester tester, {
@@ -433,20 +434,48 @@ Future<void> dragPreviewImageToSide(
   required Object to,
   required PreviewImageDropSide side,
 }) async {
-  final fromId = _imageRecordId(from);
   final toId = _imageRecordId(to);
-  final fromFinder = find.byKey(Key('preview-image-tap-$fromId'));
-  final toFinder = find.byKey(Key('preview-image-tap-$toId'));
-  final start = tester.getCenter(fromFinder);
-  final targetRect = tester.getRect(toFinder);
-  final drop = Offset(
-    side == PreviewImageDropSide.left
-        ? targetRect.left + targetRect.width * 0.25
-        : targetRect.right - targetRect.width * 0.25,
-    targetRect.center.dy,
+  await dragPreviewImageToFinder(
+    tester,
+    from: from,
+    target: find.byKey(Key('preview-image-tap-$toId')),
+    side: side,
   );
-  await tester.dragFrom(start, drop - start);
+}
+
+Future<void> dragPreviewImageToFinder(
+  WidgetTester tester, {
+  required Object from,
+  required Finder target,
+  required PreviewImageDropSide side,
+}) async {
+  final fromId = _imageRecordId(from);
+  final fromFinder = find.byKey(Key('preview-image-tap-$fromId'));
+  await tester.tap(fromFinder);
+  await tester.pump();
+  final handle = find.byKey(Key('image-move-handle-$fromId'));
+  final start = tester.getCenter(handle);
+  await tester.ensureVisible(target);
+  await tester.pump();
+  final targetRect = tester.getRect(target);
+  final drop = Offset(
+    targetRect.center.dx,
+    side == PreviewImageDropSide.before
+        ? targetRect.top + targetRect.height * 0.25
+        : targetRect.bottom - targetRect.height * 0.25,
+  );
+  final gesture = await tester.startGesture(
+    start,
+    kind: PointerDeviceKind.mouse,
+  );
+  await gesture.moveBy(const Offset(0, 12));
+  await tester.pump();
+  await gesture.moveTo(drop);
+  await tester.pump();
+  await gesture.up();
   await tester.pumpAndSettle();
+  await tester.pump(const Duration(milliseconds: 1000));
+  await tester.pump();
 }
 
 Color previewImageFrameBorderColor(WidgetTester tester, Object imageRecord) {

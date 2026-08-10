@@ -1,3 +1,4 @@
+import '../../application/exports/note_pdf_export.dart';
 import '../../application/settings/synapse_settings.dart';
 
 final class SynapseSettingsDecodeResult {
@@ -13,7 +14,7 @@ final class SynapseSettingsDecodeResult {
 final class SynapseSettingsCodec {
   const SynapseSettingsCodec();
 
-  static const currentSchemaVersion = 2;
+  static const currentSchemaVersion = 3;
 
   Map<String, Object?> encode(SynapseSettings settings) => {
     'schemaVersion': currentSchemaVersion,
@@ -31,6 +32,8 @@ final class SynapseSettingsCodec {
       'autoSaveDelayMillis': settings.preferences.autoSaveDelayMillis,
       'accentColor': settings.preferences.accentColor.name,
       'noteFontSize': settings.preferences.noteFontSize,
+      'pdfMarginPreset': settings.preferences.pdfMarginPreset.name,
+      'pdfFooterEnabled': settings.preferences.pdfFooterEnabled,
     },
   };
 
@@ -103,8 +106,19 @@ final class SynapseSettingsCodec {
           json['defaultNoteMode']?.toString(),
         ) ??
         defaults.defaultNoteMode;
-    if ((schemaVersion ?? 1) < currentSchemaVersion) {
+    if ((schemaVersion ?? 1) < 2) {
       defaultMode = WorkspaceDefaultNoteMode.source;
+    }
+    final pdfMarginPreset = _enumByName(
+      NotePdfMarginPreset.values,
+      json['pdfMarginPreset']?.toString(),
+    );
+    if (json['pdfMarginPreset'] != null && pdfMarginPreset == null) {
+      recoveryMessages.add('PDF 页边距无法识别，已恢复为标准 15 mm。');
+    }
+    final pdfFooterEnabled = json['pdfFooterEnabled'];
+    if (pdfFooterEnabled != null && pdfFooterEnabled is! bool) {
+      recoveryMessages.add('PDF 页码页脚设置无法解析，已恢复为显示。');
     }
     return WorkspacePreferences(
       defaultNoteMode: defaultMode,
@@ -120,6 +134,10 @@ final class SynapseSettingsCodec {
           ) ??
           defaults.accentColor,
       noteFontSize: fontSize,
+      pdfMarginPreset: pdfMarginPreset ?? defaults.pdfMarginPreset,
+      pdfFooterEnabled: pdfFooterEnabled is bool
+          ? pdfFooterEnabled
+          : defaults.pdfFooterEnabled,
     );
   }
 

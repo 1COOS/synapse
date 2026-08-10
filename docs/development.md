@@ -142,7 +142,7 @@ Widget 使用 Provider 渲染并发送 intent，不得重新引入本地业务�
 - inline parser 统一识别加粗、斜体、删除线、`==高亮==`、转义、任意嵌套和代码范围；formatting command 同时更新 Markdown source 和 styled display；
 - inline format 使用 toggle 语义；混合选区统一应用，跨行逐个非空行处理，只移除目标 marker，并保持相同可见文字选区；
 - 行内/围栏代码中的选区禁用格式、段落、列表和块插入；
-- 编辑、阅读和打印共用窗格级 selection projection；每个可见叶子把渲染位置映射回全局 Markdown UTF-16 offset，滚动与无正文变化的保存不得清除选区，切换笔记、窗格绑定或模式必须清除；
+- 编辑和阅读共用窗格级 selection projection；每个可见叶子把渲染位置映射回全局 Markdown UTF-16 offset，滚动与无正文变化的保存不得清除选区，切换笔记、窗格绑定或模式必须清除；
 - selection tree 必须按 Markdown source 注册顺序遍历，双栏严格为左栏全部、右栏全部、下方全宽；横向滚动 viewport 不得创建隔离正文叶子的 selection container，纵向边缘拖选必须持续自动滚动；
 - `⌘A`/`Ctrl+A` 选中当前窗格正文且排除 frontmatter；Copy 输出 source range，Cut/Delete/Backspace/输入/粘贴复用同一 document replacement pipeline，并形成一个 undo/autosave 变更；
 - 图片、真实表格、分页符和分隔线按原子 source segment 保护；部分覆盖只能复制，禁止破坏性命令并提示完整选择。双栏部分删除必须保留成套 start/separator/end marker，完整覆盖整个布局时才允许一并删除；
@@ -153,7 +153,7 @@ Widget 使用 Provider 渲染并发送 intent，不得重新引入本地业务�
 - 双栏插入后聚焦左栏空正文；栏内禁止再次插入双栏。“取消双栏”只删除布局注释并按左后右展平；栏宽拖动只在 pointer-up 时写回一个归一化 `30:70` 至 `70:30` 比例，形成单个 undo 变更；
 - 双栏的横向滚动只属于该布局块，不能替换或联动正文纵向 scroll controller；查找、大纲、图片和表格操作仍按内部叶子 block 定位；
 - 分页符必须严格保存为独占一行的 `<!-- synapse:page-break -->`；非活动源码块显示辅助线，活动块显示真实 marker，阅读模式隐藏；普通 `---` 不得改写为分页；
-- 打印模式继续复用 Live Markdown editor；自动分页线只能作为 `IgnorePointer`/`ExcludeSemantics` overlay，禁止插入占位字符或 widget span，禁止改变 caret、selection、copy、undo 和 `TextSpan.toPlainText()`；手动分页符继续使用现有源码辅助线；
+- 自动分页默认关闭；只有用户点击当前 pane 的“显示分页线”后才捕获附件快照并生成。启用期间 Flutter Live Markdown 只能使用 `IgnorePointer`/`ExcludeSemantics` 的 `CustomPaint` overlay，CodeMirror 只能使用 `pointer-events: none`、`aria-hidden` 的绝对 overlay；禁止插入占位字符或 widget span，禁止改变 caret、selection、copy、undo 和 `TextSpan.toPlainText()`。阅读模式和关闭状态必须发送空布局；手动分页符继续使用现有源码辅助线且不得重复绘制自动线；
 - active editor `TextSpan.toPlainText()` 必须与 backing controller text 完全一致；
 - focus、click、selection 和 context menu 不得修改正文或插入空行。
 
@@ -162,10 +162,12 @@ H1 自动改名和右键笔记重命名必须把 Markdown save、严格 rename�
 ### 5.4 PDF 导出
 
 - `NotePdfExportSnapshot` 是 flush 成功后复制的不可变快照；生成与预览不得继续读取 live session 或 Vault；
-- 编辑区打印视图使用 `captureNotePdfPreview` 获取无保存的当前正文和附件快照；进入打印视图不得 flush。`NotePrintLayoutController` 负责 400 ms 防抖、选项/附件立即刷新、generation token、旧结果保留和精确 bytes 复用；正文变更期间必须把旧分页 offset 重定位到当前 UTF-16 source，不能直接使用编辑前偏移；
+- `NotePageLayoutController` 默认 inactive；未显式启用不得调用 `captureNotePdfPreview`、读取附件或生成 PDF。启用后使用无保存的当前正文和附件快照，不得为显示辅助线而 flush，并负责 400 ms 防抖、方向/全局页边距/页脚/附件立即刷新、generation token、阅读态暂停、旧结果保留和精确 bytes 复用；正文变更期间必须把旧分页 offset 重定位到当前 UTF-16 source，不能直接使用编辑前偏移；
 - `NotePdfBuildResult.boundaries` 必须来自生成最终 PDF 的同一次排版，以 Markdown UTF-16 offset 表示每页首个可见内容；自动边界显示为编辑器 overlay，手动边界继续由持久化分页符显示；
-- PDF 生成只能在后台 isolate 运行，方向/边距切换必须通过 generation token 丢弃过期结果；预览只栅格化可见页附近并限制缓存；
-- A4 纸张、15/20/25 mm 页边距、11 pt 正文、1.5 倍行高、页眉标题和 `当前页 / 总页数` 是打印契约，不读取屏幕字号或主题色；
+- CodeMirror `setPageLayout` 只传自动边界的 `pageIndex/sourceOffset` 和 stale 状态；滚动、viewport、geometry 和双栏内部坐标变化必须刷新 overlay，禁止产生 document transaction；
+- PDF 生成只能在后台 isolate 运行，方向、页边距和页脚变化必须通过 generation token 丢弃过期结果；预览只栅格化可见页附近并限制缓存；
+- A4 纸张、10/15/20 mm 页边距、11 pt 正文、1.5 倍行高和页眉标题是打印契约，不读取屏幕字号或主题色；页脚默认显示 `当前页 / 总页数`，关闭后必须把 18 pt 空间归还正文；
+- 编辑器标题栏默认只显示分页开关，开启后才展开 pane 会话级纵向/横向切换。启用状态绑定当前 pane-note，阅读态暂停但不清除，切换笔记或关闭 pane 后清除；方向仍按 pane 会话保留。导出弹窗只提供方向并继承全局页边距/页脚；弹窗方向变化同步当前 pane，取消不回滚，但分页未启用时不得因此启动编辑态排版；
 - 字体和许可证位于 `assets/fonts/`，不得添加运行时网络字体下载；
 - 图片必须等比 contain，缺失/损坏时产生 warning 和可见占位；表格超高行必须整表降级，不能静默裁切；
 - PDF 双栏使用可跨页的独立 partition，始终保留保存的比例；双栏后的全宽内容必须等待左右两栏都结束后继续，栏内图片与表格使用各自栏宽计算，布局注释本身不得进入 PDF；
@@ -177,12 +179,16 @@ PDF 目标验证顺序：
 flutter test --no-pub test/infrastructure/note_pdf_exporter_test.dart
 flutter test --no-pub test/presentation/markdown_live_blocks_test.dart
 flutter test --no-pub test/presentation/markdown_context_commands_test.dart
-flutter test --no-pub test/presentation/workspace/editor/note_print_layout_controller_test.dart
+flutter test --no-pub test/presentation/workspace/editor/note_page_layout_controller_test.dart
+flutter test --no-pub test/presentation/workspace/editor/editor_protocol_test.dart
 flutter test --no-pub test/presentation/workspace/note_pdf_export_dialog_test.dart
 flutter test --no-pub test/presentation/workspace/workspace_note_pdf_export_test.dart
+cd tool/editor_web && npm test && npm run build && npm run check:generated
+cd ../.. && flutter test --no-pub integration_test/codemirror_document_surface_test.dart -d macos
 flutter test --no-pub --concurrency=1
 flutter analyze --no-pub
-flutter build macos --no-pub
+flutter build macos --debug --no-pub
+git diff --check
 ```
 
 综合样例由 `tool/generate_note_pdf_sample_test.dart` 生成到 `output/pdf/`，再用 Poppler 检查所有页面：
@@ -199,7 +205,7 @@ pdftoppm -png output/pdf/synapse-note-pdf-export-sample.pdf \
 
 ### 5.5 设置面板
 
-- 设置值对象、数值约束和 `SettingsChangeSet` 只放在 `lib/application/settings/`；schema v2 codec、legacy migration、Keychain 与文件 IO 留在 infrastructure；
+- 设置值对象、数值约束和 `SettingsChangeSet` 只放在 `lib/application/settings/`；schema v3 codec、legacy migration、Keychain 与文件 IO 留在 infrastructure；旧 schema 缺少页面设置时使用标准 15 mm 和开启页脚；
 - `settings.json` 字段、默认值和 schema version 不随 UI 重构改变。未知字段必须兼容；坏数值按字段收敛/恢复并通过 `SettingsLoadResult` 报告，不能让单个字段废弃整个文件；
 - `workspace_settings.dart` 只承担弹窗外壳和流程，私有 draft controller 管理字段、dirty、校验、API Key 意图和测试状态，六个 section 组件只负责渲染；
 - API Key 不得进入 Riverpod observable state。未变化时必须走 `savePreservingApiKey`；只有替换或明确清除才访问 Keychain；

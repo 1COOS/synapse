@@ -29,6 +29,7 @@ class CodeMirrorDocumentSurface extends StatefulWidget {
     required this.paneId,
     required this.hub,
     required this.mode,
+    required this.pageLayout,
     required this.focused,
     required this.enabled,
     required this.appearance,
@@ -52,6 +53,7 @@ class CodeMirrorDocumentSurface extends StatefulWidget {
   final String paneId;
   final EditorDocumentHub hub;
   final CodeMirrorDocumentMode mode;
+  final EditorPageLayout pageLayout;
   final bool focused;
   final bool enabled;
   final WorkspaceAppearance appearance;
@@ -168,6 +170,9 @@ class CodeMirrorDocumentSurfaceState extends State<CodeMirrorDocumentSurface>
           'theme': _themeData().toJson(),
         }),
       );
+    }
+    if (oldWidget.pageLayout != widget.pageLayout) {
+      unawaited(_sendPageLayout());
     }
   }
 
@@ -306,6 +311,7 @@ class CodeMirrorDocumentSurfaceState extends State<CodeMirrorDocumentSurface>
         ...searchQuery.toJson(),
       });
     }
+    await _sendPageLayout();
   }
 
   bool get _editable =>
@@ -319,6 +325,12 @@ class CodeMirrorDocumentSurfaceState extends State<CodeMirrorDocumentSurface>
     'mode': widget.mode.name,
     'editable': _editable,
     'focused': widget.focused,
+  });
+
+  Future<void> _sendPageLayout() => _sendCommand({
+    'protocolVersion': synapseEditorProtocolVersion,
+    'type': 'setPageLayout',
+    ...widget.pageLayout.toJson(),
   });
 
   Future<void> _replaceDocument(EditorDocumentUpdate update) => _sendCommand({

@@ -13,6 +13,7 @@ import {
   type DecorationSet,
   EditorView,
   type ViewUpdate,
+  ViewPlugin,
   WidgetType,
   drawSelection,
   highlightActiveLine,
@@ -52,6 +53,7 @@ import {
   type EditorChange,
   type EditorEvent,
   type EditorMode,
+  type EditorPageBoundary,
   type EditorSelection,
   type EditorTheme,
   type HostCommand,
@@ -110,6 +112,12 @@ let commandStateFrame = 0;
 let inputStartedAt: number | undefined;
 let pointerStartedAt: number | undefined;
 let pointerInteractionHost: HTMLElement | undefined;
+let pageLayoutHost: HTMLElement | undefined;
+let pageLayoutScrollHost: HTMLElement | undefined;
+let pageLayoutFrame = 0;
+let pageLayoutFallbackTimer = 0;
+let pageLayoutBoundaries: EditorPageBoundary[] = [];
+let pageLayoutStale = false;
 let pendingNestedComposition = false;
 let pendingColumnFocus: {
   layoutFrom: number;
@@ -141,6 +149,79 @@ function post(event: EditorEventPayload): void {
   }));
 }
 
+function clearPageLayout(): void {
+  if (pageLayoutFrame) cancelAnimationFrame(pageLayoutFrame);
+  if (pageLayoutFallbackTimer) window.clearTimeout(pageLayoutFallbackTimer);
+  pageLayoutFrame = 0;
+  pageLayoutFallbackTimer = 0;
+  pageLayoutScrollHost?.removeEventListener('scroll', schedulePageLayout);
+  pageLayoutScrollHost = undefined;
+  pageLayoutHost?.remove();
+  pageLayoutHost = undefined;
+}
+
+function schedulePageLayout(): void {
+  if (pageLayoutFrame) return;
+  const frame = requestAnimationFrame(() => {
+    if (pageLayoutFrame !== frame) return;
+    pageLayoutFrame = 0;
+    if (pageLayoutFallbackTimer) {
+      window.clearTimeout(pageLayoutFallbackTimer);
+      pageLayoutFallbackTimer = 0;
+    }
+    renderPageLayout();
+  });
+  pageLayoutFrame = frame;
+  pageLayoutFallbackTimer = window.setTimeout(() => {
+    if (pageLayoutFrame !== frame) return;
+    cancelAnimationFrame(frame);
+    pageLayoutFrame = 0;
+    pageLayoutFallbackTimer = 0;
+    renderPageLayout();
+  }, 50);
+}
+
+function renderPageLayout(): void {
+  if (!view || pageLayoutBoundaries.length === 0) {
+    pageLayoutHost?.replaceChildren();
+    return;
+  }
+  if (!pageLayoutHost || !pageLayoutHost.isConnected) {
+    pageLayoutHost = document.createElement('div');
+    pageLayoutHost.className = 'synapse-page-layout';
+    pageLayoutHost.setAttribute('aria-hidden', 'true');
+    view.scrollDOM.append(pageLayoutHost);
+  }
+  if (pageLayoutScrollHost !== view.scrollDOM) {
+    pageLayoutScrollHost?.removeEventListener('scroll', schedulePageLayout);
+    pageLayoutScrollHost = view.scrollDOM;
+    pageLayoutScrollHost.addEventListener('scroll', schedulePageLayout, {
+      passive: true,
+    });
+  }
+  const scrollBounds = view.scrollDOM.getBoundingClientRect();
+  const contentBounds = view.contentDOM.getBoundingClientRect();
+  pageLayoutHost.style.left = `${contentBounds.left - scrollBounds.left + view.scrollDOM.scrollLeft}px`;
+  pageLayoutHost.style.width = `${contentBounds.width}px`;
+  pageLayoutHost.style.height = `${view.scrollDOM.scrollHeight}px`;
+  pageLayoutHost.classList.toggle('synapse-page-layout-stale', pageLayoutStale);
+  const children: HTMLElement[] = [];
+  for (const boundary of pageLayoutBoundaries) {
+    const coordinates = coordsAtMarkdownOffset(boundary.sourceOffset);
+    if (!coordinates) continue;
+    const line = document.createElement('div');
+    line.className = 'synapse-page-boundary';
+    line.dataset.pageIndex = String(boundary.pageIndex);
+    line.style.top = `${coordinates.top - scrollBounds.top + view.scrollDOM.scrollTop}px`;
+    const label = document.createElement('span');
+    label.className = 'synapse-page-boundary-label';
+    label.textContent = `第 ${boundary.pageIndex} 页结束 / 第 ${boundary.pageIndex + 1} 页开始`;
+    line.append(label);
+    children.push(line);
+  }
+  pageLayoutHost.replaceChildren(...children);
+}
+
 function handleSurfacePointerInteraction(event: PointerEvent): void {
   if (
     event.target instanceof Element &&
@@ -167,6 +248,12 @@ interface DraggedMarkdownRange {
   from: number;
   to: number;
   block: boolean;
+  noteId?: string;
+  generation?: number;
+  revision?: number;
+  src?: string;
+  sourceBlockFrom?: number;
+  sourceBlockTo?: number;
 }
 
 function writeDraggedMarkdownRange(
@@ -188,14 +275,76 @@ function readDraggedMarkdownRange(event: DragEvent): DraggedMarkdownRange | unde
   try {
     const decoded = JSON.parse(encoded) as Partial<DraggedMarkdownRange>;
     if (!Number.isInteger(decoded.from) || !Number.isInteger(decoded.to)) return undefined;
-    return { from: decoded.from!, to: decoded.to!, block: decoded.block === true };
+    return {
+      from: decoded.from!,
+      to: decoded.to!,
+      block: decoded.block === true,
+      noteId: typeof decoded.noteId === 'string' ? decoded.noteId : undefined,
+      generation: Number.isInteger(decoded.generation) ? decoded.generation : undefined,
+      revision: Number.isInteger(decoded.revision) ? decoded.revision : undefined,
+      src: typeof decoded.src === 'string' ? decoded.src : undefined,
+      sourceBlockFrom: Number.isInteger(decoded.sourceBlockFrom)
+        ? decoded.sourceBlockFrom
+        : undefined,
+      sourceBlockTo: Number.isInteger(decoded.sourceBlockTo)
+        ? decoded.sourceBlockTo
+        : undefined,
+    };
   } catch (_) {
     return undefined;
   }
 }
 
-function moveMarkdownRange(range: DraggedMarkdownRange, targetOffset: number): boolean {
+function normalizedImageSrc(src: string): string {
+  const slashNormalized = src.trim().replaceAll('\\', '/');
+  try {
+    return decodeURIComponent(slashNormalized);
+  } catch (_) {
+    return slashNormalized;
+  }
+}
+
+function draggedRangeStillValid(range: DraggedMarkdownRange): boolean {
   if (!view || !runtime?.editable) return false;
+  if (range.noteId != null && range.noteId !== runtime.noteId) return false;
+  if (range.generation != null && range.generation !== runtime.generation) {
+    return false;
+  }
+  if (range.revision != null && range.revision !== runtime.revision) return false;
+  const length = view.state.doc.length;
+  if (range.from < 0 || range.to <= range.from || range.to > length) return false;
+  if (range.src != null) {
+    const currentSource = view.state.doc.sliceString(range.from, range.to);
+    const currentSrc = markdownImageSource(currentSource) ??
+      imageRanges({
+        from: range.from,
+        to: range.to,
+        text: currentSource,
+        kind: 'paragraph',
+      })[0]?.src;
+    if (
+      currentSrc == null ||
+      normalizedImageSrc(currentSrc) !== normalizedImageSrc(range.src)
+    ) {
+      return false;
+    }
+  }
+  if (range.sourceBlockFrom != null && range.sourceBlockTo != null) {
+    const sourceBlock = splitMarkdownBlocks(view.state.doc.toString()).find(
+      (block) => range.from >= block.from && range.to <= block.to,
+    );
+    if (
+      sourceBlock?.from !== range.sourceBlockFrom ||
+      sourceBlock.to !== range.sourceBlockTo
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function moveMarkdownRange(range: DraggedMarkdownRange, targetOffset: number): boolean {
+  if (!view || !draggedRangeStillValid(range)) return false;
   const length = view.state.doc.length;
   const from = Math.max(0, Math.min(range.from, length));
   const to = Math.max(from, Math.min(range.to, length));
@@ -228,6 +377,57 @@ function moveMarkdownRange(range: DraggedMarkdownRange, targetOffset: number): b
     changes,
     selection: { anchor: insertionOffset + insertion.length },
   });
+  return true;
+}
+
+function moveImageRange(
+  range: DraggedMarkdownRange,
+  targetOffset: number,
+): boolean {
+  if (!view || range.src == null || !draggedRangeStillValid(range)) return false;
+  const length = view.state.doc.length;
+  const target = Math.max(0, Math.min(targetOffset, length));
+  if (target >= range.from && target <= range.to) return false;
+  const source = view.state.doc.sliceString(range.from, range.to).trim();
+  if (source.length === 0) return false;
+  const insertionOffset = target > range.to
+    ? target - (range.to - range.from)
+    : target;
+  const remaining = `${view.state.doc.sliceString(0, range.from)}`
+    + `${view.state.doc.sliceString(range.to)}`;
+  const before = remaining.slice(0, insertionOffset);
+  const after = remaining.slice(insertionOffset);
+  const leading = before.length === 0
+    ? ''
+    : before.endsWith('\n\n')
+      ? ''
+      : before.endsWith('\n')
+        ? '\n'
+        : '\n\n';
+  const trailing = after.length === 0
+    ? ''
+    : after.startsWith('\n\n')
+      ? ''
+      : after.startsWith('\n')
+        ? '\n'
+        : '\n\n';
+  const insertion = `${leading}${source}${trailing}`;
+  const changes = target < range.from
+    ? [
+        { from: target, to: target, insert: insertion },
+        { from: range.from, to: range.to, insert: '' },
+      ]
+    : [
+        { from: range.from, to: range.to, insert: '' },
+        { from: target, to: target, insert: insertion },
+      ];
+  const selectedOffset = insertionOffset + leading.length;
+  view.dispatch({
+    changes,
+    selection: { anchor: selectedOffset },
+    annotations: Transaction.userEvent.of('move.image'),
+  });
+  requestAnimationFrame(() => focusImageAtMarkdownOffset(selectedOffset));
   return true;
 }
 
@@ -311,6 +511,7 @@ class PageBreakWidget extends WidgetType {
 
 class ImageWidget extends WidgetType {
   private disposeAttachment?: () => void;
+  private cancelDrag?: () => void;
 
   constructor(
     readonly from: number,
@@ -318,7 +519,6 @@ class ImageWidget extends WidgetType {
     readonly src: string,
     readonly width: number,
     readonly block: boolean,
-    readonly sourceText: string,
     readonly selected: boolean,
     readonly editable: boolean,
     readonly activate?: () => void,
@@ -330,7 +530,6 @@ class ImageWidget extends WidgetType {
       other.src === this.src &&
       other.width === this.width &&
       other.block === this.block &&
-      other.sourceText === this.sourceText &&
       other.selected === this.selected &&
       other.editable === this.editable;
   }
@@ -343,113 +542,67 @@ class ImageWidget extends WidgetType {
     if (this.selected) root.classList.add('synapse-image-selected');
     root.dataset.src = this.src;
     root.draggable = false;
-    let suppressClick = false;
+    const appendControls = (image?: HTMLImageElement) => {
+      if (!this.selected || !this.editable) return;
+      const moveHandle = document.createElement('span');
+      moveHandle.className = 'synapse-image-move-handle';
+      moveHandle.title = '拖动图片';
+      moveHandle.setAttribute('aria-label', '拖动图片');
+      moveHandle.addEventListener('pointerdown', (event) => {
+        this.beginMove(event, root, moveHandle);
+      });
+      root.append(moveHandle);
+      if (!image) return;
+      for (const side of ['left', 'right'] as const) {
+        const resizeHandle = document.createElement('span');
+        resizeHandle.className =
+          `synapse-image-resize synapse-image-resize-${side}`;
+        resizeHandle.setAttribute(
+          'aria-label',
+          `${side === 'left' ? '左侧' : '右侧'}缩放图片`,
+        );
+        resizeHandle.addEventListener('pointerdown', (event) => {
+          this.beginResize(event, image, side);
+        });
+        root.append(resizeHandle);
+      }
+    };
     const loading = document.createElement('span');
     loading.className = 'synapse-image-loading';
     loading.textContent = '正在载入图片…';
     root.append(loading);
+    appendControls();
     this.disposeAttachment = requestAttachment(this.src, (url) => {
       root.replaceChildren();
+      let image: HTMLImageElement | undefined;
       if (!url) {
         const broken = document.createElement('span');
         broken.className = 'synapse-image-broken';
         broken.textContent = this.src;
         root.append(broken);
-        return;
+      } else {
+        image = document.createElement('img');
+        image.src = url;
+        image.alt = this.src;
+        image.draggable = false;
+        image.style.width = `${this.width}px`;
+        image.style.maxWidth = '100%';
+        root.append(image);
       }
-      const image = document.createElement('img');
-      image.src = url;
-      image.alt = this.src;
-      image.draggable = false;
-      image.style.width = `${this.width}px`;
-      image.style.maxWidth = '100%';
-      root.append(image);
-      if (this.editable) {
-        const handle = document.createElement('span');
-        handle.className = 'synapse-image-resize';
-        handle.addEventListener('pointerdown', (event) => this.beginResize(event, image));
-        root.append(handle);
-      }
+      appendControls(image);
     });
-    if (this.selected && this.editable) {
-      const source = document.createElement('textarea');
-      source.className = 'synapse-image-source';
-      source.value = this.sourceText;
-      source.spellcheck = false;
-      source.addEventListener('mousedown', (event) => event.stopPropagation());
-      source.addEventListener('click', (event) => event.stopPropagation());
-      source.addEventListener('keydown', (event) => event.stopPropagation());
-      source.addEventListener('blur', () => {
-        if (!view || source.value === this.sourceText) return;
-        view.dispatch({
-          changes: { from: this.from, to: this.to, insert: source.value },
-          selection: { anchor: this.from + source.selectionStart },
-        });
-      });
-      root.prepend(source);
-    }
     root.addEventListener('click', (event) => {
-      if (suppressClick) {
-        suppressClick = false;
-        event.preventDefault();
-        return;
-      }
-      if ((event.target as HTMLElement).closest('.synapse-image-resize, .synapse-image-source')) return;
+      if ((event.target as HTMLElement).closest(
+        '.synapse-image-resize, .synapse-image-move-handle',
+      )) return;
       event.preventDefault();
       if (this.activate) this.activate();
       else safeDispatchSelection(this.from);
     });
-    root.addEventListener('pointerdown', (event) => {
-      if (
-        !this.editable ||
-        event.button !== 0 ||
-        (event.target as HTMLElement).closest(
-          '.synapse-image-resize, .synapse-image-source',
-        )
-      ) {
-        return;
-      }
-      const startX = event.clientX;
-      const startY = event.clientY;
-      let dragging = false;
-      const move = (next: PointerEvent) => {
-        if (!dragging && Math.hypot(next.clientX - startX, next.clientY - startY) < 4) {
-          return;
-        }
-        dragging = true;
-        next.preventDefault();
-        root.classList.add('synapse-image-dragging');
-      };
-      const cleanup = () => {
-        window.removeEventListener('pointermove', move);
-        window.removeEventListener('pointerup', end);
-        window.removeEventListener('pointercancel', cancel);
-        root.classList.remove('synapse-image-dragging');
-      };
-      const cancel = () => {
-        cleanup();
-      };
-      const end = (next: PointerEvent) => {
-        cleanup();
-        if (!dragging) return;
-        suppressClick = true;
-        const target = markdownOffsetAtCoords(next.clientX, next.clientY);
-        if (target != null) {
-          moveMarkdownRange(
-            { from: this.from, to: this.to, block: this.block },
-            target,
-          );
-        }
-        window.setTimeout(() => {
-          suppressClick = false;
-        }, 0);
-      };
-      window.addEventListener('pointermove', move);
-      window.addEventListener('pointerup', end, { once: true });
-      window.addEventListener('pointercancel', cancel, { once: true });
-    });
     root.addEventListener('contextmenu', (event: MouseEvent) => {
       event.preventDefault();
+      if (this.activate) this.activate();
+      else safeDispatchSelection(this.from);
       showContextMenu(event.clientX, event.clientY, {
         kind: 'image',
         from: this.from,
@@ -458,63 +611,162 @@ class ImageWidget extends WidgetType {
         pasteSelection: rememberedTextSelection,
       });
     });
-    root.addEventListener('dragstart', (event: DragEvent) => {
-      event.dataTransfer?.setData('application/x-synapse-image-src', this.src);
-      writeDraggedMarkdownRange(event, this.from, this.to, this.block);
-    });
-    root.addEventListener('dragover', (event: DragEvent) => {
-      if (!runtime?.editable) return;
-      const dragged = event.dataTransfer?.types.includes('application/x-synapse-image-src') ||
-        event.dataTransfer?.types.includes(markdownRangeDragType);
-      if (!dragged) return;
-      event.preventDefault();
-      root.classList.add('synapse-image-drop-target');
-    });
-    root.addEventListener('dragleave', () => root.classList.remove('synapse-image-drop-target'));
-    root.addEventListener('drop', (event: DragEvent) => {
-      root.classList.remove('synapse-image-drop-target');
-      const draggedRange = readDraggedMarkdownRange(event);
-      if (draggedRange) {
-        event.preventDefault();
-        const bounds = root.getBoundingClientRect();
-        const before = this.block
-          ? event.clientY < bounds.top + bounds.height / 2
-          : event.clientX < bounds.left + bounds.width / 2;
-        moveMarkdownRange(draggedRange, before ? this.from : this.to);
-        return;
-      }
-      const draggedSrc = event.dataTransfer?.getData('application/x-synapse-image-src');
-      if (!runtime?.editable || !draggedSrc || draggedSrc === this.src) return;
-      event.preventDefault();
-      const bounds = root.getBoundingClientRect();
-      flushPendingTransaction();
-      post({
-        type: 'imageAction',
-        action: 'move',
-        src: draggedSrc,
-        revision: runtime.revision,
-        targetSrc: this.src,
-        beforeTarget: event.clientX < bounds.left + bounds.width / 2,
-      });
-    });
     return root;
   }
 
-  destroy(): void { this.disposeAttachment?.(); }
+  destroy(): void {
+    this.cancelDrag?.();
+    this.disposeAttachment?.();
+  }
 
   ignoreEvent(): boolean { return true; }
 
-  private beginResize(event: PointerEvent, image: HTMLImageElement): void {
+  private beginMove(
+    event: PointerEvent,
+    root: HTMLElement,
+    handle: HTMLElement,
+  ): void {
+    if (!view || !runtime?.editable || event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    flushPendingTransaction();
+    const sourceBlock = splitMarkdownBlocks(view.state.doc.toString()).find(
+      (block) => this.from >= block.from && this.to <= block.to,
+    );
+    if (!sourceBlock) return;
+    const range: DraggedMarkdownRange = {
+      from: this.from,
+      to: this.to,
+      block: true,
+      noteId: runtime.noteId,
+      generation: runtime.generation,
+      revision: runtime.revision,
+      src: normalizedImageSrc(this.src),
+      sourceBlockFrom: sourceBlock.from,
+      sourceBlockTo: sourceBlock.to,
+    };
+    const pointerId = Number.isInteger(event.pointerId) ? event.pointerId : 1;
+    const startX = event.clientX;
+    const startY = event.clientY;
+    let clientX = startX;
+    let clientY = startY;
+    let active = false;
+    let targetOffset: number | undefined;
+    let autoScrollFrame = 0;
+    let indicator: HTMLElement | undefined;
+    const updateTarget = () => {
+      targetOffset = markdownBlockBoundaryAtCoords(clientX, clientY);
+      if (targetOffset == null) return;
+      const coordinates = coordsAtMarkdownOffset(targetOffset);
+      indicator ??= document.createElement('span');
+      indicator.className = 'synapse-image-block-drop-indicator';
+      const editorBounds = view!.dom.getBoundingClientRect();
+      indicator.style.left = `${editorBounds.left}px`;
+      indicator.style.top = `${coordinates?.top ?? clientY}px`;
+      indicator.style.width = `${editorBounds.width}px`;
+      if (!indicator.isConnected) document.body.append(indicator);
+    };
+    const scheduleAutoScroll = () => {
+      if (autoScrollFrame) return;
+      const tick = () => {
+        autoScrollFrame = 0;
+        if (!active || !view) return;
+        const bounds = view.scrollDOM.getBoundingClientRect();
+        let changed = false;
+        if (clientY < bounds.top + 32) {
+          view.scrollDOM.scrollTop -= 14;
+          changed = true;
+        } else if (clientY > bounds.bottom - 32) {
+          view.scrollDOM.scrollTop += 14;
+          changed = true;
+        }
+        if (!changed) return;
+        updateTarget();
+        autoScrollFrame = requestAnimationFrame(tick);
+      };
+      autoScrollFrame = requestAnimationFrame(tick);
+    };
+    const cleanup = () => {
+      if (autoScrollFrame) cancelAnimationFrame(autoScrollFrame);
+      autoScrollFrame = 0;
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', finish);
+      window.removeEventListener('pointercancel', cancel);
+      window.removeEventListener('keydown', keydown, true);
+      root.classList.remove('synapse-image-dragging');
+      handle.classList.remove('synapse-image-handle-dragging');
+      indicator?.remove();
+      indicator = undefined;
+      try {
+        if (handle.hasPointerCapture?.(pointerId)) {
+          handle.releasePointerCapture(pointerId);
+        }
+      } catch (_) {
+        // Global pointer listeners remain the WebKit fallback.
+      }
+      this.cancelDrag = undefined;
+    };
+    const move = (next: PointerEvent) => {
+      clientX = next.clientX;
+      clientY = next.clientY;
+      if (!active && Math.hypot(clientX - startX, clientY - startY) < 4) {
+        return;
+      }
+      if (!active) {
+        active = true;
+        root.classList.add('synapse-image-dragging');
+        handle.classList.add('synapse-image-handle-dragging');
+      }
+      next.preventDefault();
+      updateTarget();
+      scheduleAutoScroll();
+    };
+    const finish = () => {
+      const shouldMove = active;
+      const target = targetOffset;
+      cleanup();
+      if (shouldMove && target != null) moveImageRange(range, target);
+    };
+    const cancel = () => cleanup();
+    const keydown = (keyEvent: KeyboardEvent) => {
+      if (keyEvent.key !== 'Escape') return;
+      keyEvent.preventDefault();
+      cancel();
+    };
+    this.cancelDrag?.();
+    this.cancelDrag = cancel;
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', finish, { once: true });
+    window.addEventListener('pointercancel', cancel, { once: true });
+    window.addEventListener('keydown', keydown, true);
+    try {
+      handle.setPointerCapture?.(pointerId);
+    } catch (_) {
+      // Global pointer listeners remain the WebKit fallback.
+    }
+  }
+
+  private beginResize(
+    event: PointerEvent,
+    image: HTMLImageElement,
+    side: 'left' | 'right',
+  ): void {
     event.preventDefault();
     event.stopPropagation();
     const startX = event.clientX;
     const startWidth = image.getBoundingClientRect().width;
     const move = (next: PointerEvent) => {
-      image.style.width = `${Math.max(120, Math.min(1600, startWidth + next.clientX - startX))}px`;
+      const delta = next.clientX - startX;
+      const width = side === 'left' ? startWidth - delta : startWidth + delta;
+      image.style.width = `${Math.max(120, Math.min(1600, width))}px`;
     };
-    const end = () => {
+    const cleanup = () => {
       window.removeEventListener('pointermove', move);
       window.removeEventListener('pointerup', end);
+      window.removeEventListener('pointercancel', cancel);
+    };
+    const end = () => {
+      cleanup();
       const width = Math.round(image.getBoundingClientRect().width);
       flushPendingTransaction();
       post({
@@ -527,8 +779,10 @@ class ImageWidget extends WidgetType {
         width,
       });
     };
+    const cancel = () => cleanup();
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', end, { once: true });
+    window.addEventListener('pointercancel', cancel, { once: true });
   }
 }
 
@@ -1668,7 +1922,11 @@ function absoluteBlock(block: MarkdownBlock, baseOffset: number): MarkdownBlock 
 function buildColumnDecorations(state: EditorState, runtimeState: ColumnSideRuntime): DecorationSet {
   const doc = state.doc.toString();
   const blocks = splitMarkdownBlocks(doc);
-  const active = activeBlockForSelection(blocks, selectionOf(state));
+  const selection = selectionOf(state);
+  const active = activeBlockForSelection(blocks, selection);
+  const imageFocused =
+    runtimeState.editable &&
+    runtimeState.host.contains(document.activeElement);
   const ranges: any[] = [];
   for (const block of blocks) {
     const activeBlock =
@@ -1683,6 +1941,8 @@ function buildColumnDecorations(state: EditorState, runtimeState: ColumnSideRunt
     if (block.kind === 'image') {
       const src = markdownImageSource(block.text);
       if (src) {
+        const selected =
+          imageFocused && imageSelectionMatches(selection, block.from);
         ranges.push(Decoration.replace({
           widget: new ImageWidget(
             absolute.from,
@@ -1690,14 +1950,13 @@ function buildColumnDecorations(state: EditorState, runtimeState: ColumnSideRunt
             src,
             markdownImageWidth(block.text),
             true,
-            block.text,
-            activeBlock,
+            selected,
             runtimeState.editable,
             () => {
+              runtimeState.editorView.focus();
               runtimeState.editorView.dispatch({
                 selection: { anchor: block.from },
               });
-              runtimeState.editorView.focus();
             },
           ),
           block: true,
@@ -1709,8 +1968,11 @@ function buildColumnDecorations(state: EditorState, runtimeState: ColumnSideRunt
       ranges.push(Decoration.replace({ widget: new TableWidget(absolute, runtimeState.editable), block: true }).range(block.from, block.to));
       continue;
     }
-    if (!activeBlock) {
-      const images = imageRanges(block);
+    const images = imageRanges(block);
+    const selectedImage = imageFocused
+      ? images.find((image) => imageSelectionMatches(selection, image.from))
+      : undefined;
+    if (!activeBlock || selectedImage != null) {
       const overlapsImage = (from: number, to: number) =>
         images.some((image) => from < image.to && to > image.from);
       for (const marker of markerRanges(block)) {
@@ -1727,14 +1989,13 @@ function buildColumnDecorations(state: EditorState, runtimeState: ColumnSideRunt
             image.src,
             image.width,
             false,
-            doc.slice(image.from, image.to),
-            false,
+            selectedImage?.from === image.from,
             runtimeState.editable,
             () => {
+              runtimeState.editorView.focus();
               runtimeState.editorView.dispatch({
                 selection: { anchor: image.from },
               });
-              runtimeState.editorView.focus();
             },
           ),
         }).range(image.from, image.to));
@@ -1950,6 +2211,7 @@ function createColumnEditor(
           { key: 'Mod-y', preventDefault: true, run: () => view ? redo(view) : false },
           { key: 'Mod-b', preventDefault: true, run: () => requestCommand('format', 'bold') },
           { key: 'Mod-i', preventDefault: true, run: () => requestCommand('format', 'italic') },
+          ...imageKeyBindings(() => runtimeState.baseOffset),
           ...defaultKeymap,
           indentWithTab,
         ]),
@@ -2132,6 +2394,154 @@ function markdownOffsetAtCoords(x: number, y: number): number | undefined {
   } catch (_) {
     return undefined;
   }
+}
+
+function blockBoundaryInEditor(
+  editorView: EditorView,
+  baseOffset: number,
+  x: number,
+  y: number,
+): number | undefined {
+  const doc = editorView.state.doc.toString();
+  const contentBounds = editorView.contentDOM.getBoundingClientRect();
+  if (y >= contentBounds.bottom && contentBounds.height > 0) {
+    return baseOffset + doc.length;
+  }
+  if (y <= contentBounds.top && contentBounds.height > 0) return baseOffset;
+  const pointed = typeof document.elementFromPoint === 'function'
+    ? document.elementFromPoint(x, y)
+    : null;
+  let position = editorView.posAtCoords({ x, y });
+  if (position == null) {
+    const line = pointed?.closest<HTMLElement>('.cm-line');
+    if (line && editorView.dom.contains(line)) {
+      try {
+        position = editorView.posAtDOM(
+          line,
+          x < line.getBoundingClientRect().left + line.getBoundingClientRect().width / 2
+            ? 0
+            : line.childNodes.length,
+        );
+      } catch (_) {
+        position = null;
+      }
+    }
+  }
+  if (position == null) return undefined;
+  const blocks = splitMarkdownBlocks(doc);
+  const block = blocks.find((candidate, index) =>
+    position >= candidate.from &&
+    (position < candidate.to ||
+      (index === blocks.length - 1 && position === candidate.to)));
+  if (!block) return baseOffset + position;
+  let top: number | undefined;
+  let bottom: number | undefined;
+  const structural = pointed?.closest<HTMLElement>(
+    '.synapse-image-block, .synapse-table-frame, .synapse-page-break',
+  );
+  if (structural && editorView.dom.contains(structural)) {
+    const bounds = structural.getBoundingClientRect();
+    if (bounds.height > 0) {
+      top = bounds.top;
+      bottom = bounds.bottom;
+    }
+  }
+  if (top == null || bottom == null) {
+    const start = editorView.coordsAtPos(block.from);
+    const end = editorView.coordsAtPos(Math.max(block.from, block.to - 1));
+    if (start && end) {
+      top = Math.min(start.top, end.top);
+      bottom = Math.max(start.bottom, end.bottom);
+    }
+  }
+  if (top == null || bottom == null || bottom <= top) {
+    const line = pointed?.closest<HTMLElement>('.cm-line');
+    const bounds = line?.getBoundingClientRect();
+    if (bounds && bounds.height > 0) {
+      top = bounds.top;
+      bottom = bounds.bottom;
+    }
+  }
+  const before = top == null || bottom == null
+    ? position <= block.from + (block.to - block.from) / 2
+    : y < top + (bottom - top) / 2;
+  return baseOffset + (before ? block.from : block.to);
+}
+
+function markdownBlockBoundaryAtCoords(x: number, y: number): number | undefined {
+  for (const root of document.querySelectorAll<HTMLElement>('.synapse-columns')) {
+    const bounds = root.getBoundingClientRect();
+    if (x < bounds.left || x > bounds.right || y < bounds.top || y > bounds.bottom) {
+      continue;
+    }
+    const state = columnsDomStates.get(root);
+    if (!state) continue;
+    for (const side of [state.left, state.right]) {
+      const sideBounds = side.host.getBoundingClientRect();
+      if (
+        x >= sideBounds.left && x <= sideBounds.right &&
+        y >= sideBounds.top && y <= sideBounds.bottom
+      ) {
+        return blockBoundaryInEditor(side.editorView, side.baseOffset, x, y);
+      }
+    }
+    return y < bounds.top + bounds.height / 2
+      ? state.widget.from
+      : state.widget.to;
+  }
+  return view ? blockBoundaryInEditor(view, 0, x, y) : undefined;
+}
+
+function coordsAtEditorOffset(editorView: EditorView, offset: number) {
+  const position = Math.max(
+    0,
+    Math.min(offset, editorView.state.doc.length),
+  );
+  const coordinates = editorView.coordsAtPos(position);
+  if (coordinates) return coordinates;
+  try {
+    const block = editorView.lineBlockAt(position);
+    const top = editorView.documentTop + block.top;
+    return {
+      top,
+      bottom: top + block.height,
+    };
+  } catch (_) {
+    return undefined;
+  }
+}
+
+function coordsAtMarkdownOffset(offset: number) {
+  for (const root of document.querySelectorAll<HTMLElement>('.synapse-columns')) {
+    const state = columnsDomStates.get(root);
+    if (!state) continue;
+    for (const side of [state.left, state.right]) {
+      if (offset < side.baseOffset || offset > side.toOffset) continue;
+      return coordsAtEditorOffset(side.editorView, offset - side.baseOffset);
+    }
+  }
+  return view ? coordsAtEditorOffset(view, offset) : undefined;
+}
+
+function focusImageAtMarkdownOffset(offset: number): void {
+  for (const root of document.querySelectorAll<HTMLElement>('.synapse-columns')) {
+    const state = columnsDomStates.get(root);
+    if (!state) continue;
+    for (const side of [state.left, state.right]) {
+      if (offset < side.baseOffset || offset > side.toOffset) continue;
+      side.editorView.focus();
+      side.editorView.dispatch({
+        selection: {
+          anchor: Math.max(
+            0,
+            Math.min(offset - side.baseOffset, side.editorView.state.doc.length),
+          ),
+        },
+      });
+      return;
+    }
+  }
+  view?.focus();
 }
 
 class ColumnsWidget extends WidgetType {
@@ -2433,6 +2843,53 @@ function imageRanges(block: MarkdownBlock): Array<{ from: number; to: number; sr
   return result;
 }
 
+function imageSelectionMatches(
+  selection: EditorSelection,
+  imageFrom: number,
+): boolean {
+  return selection.anchor === imageFrom && selection.head === imageFrom;
+}
+
+interface SelectedImageRange {
+  from: number;
+  to: number;
+  src: string;
+  block: MarkdownBlock;
+}
+
+function selectedImageRange(
+  state: EditorState,
+  baseOffset = 0,
+): SelectedImageRange | undefined {
+  const selection = selectionOf(state);
+  if (selection.anchor !== selection.head) return undefined;
+  for (const block of splitMarkdownBlocks(state.doc.toString())) {
+    if (block.kind === 'image') {
+      const src = markdownImageSource(block.text);
+      if (src && imageSelectionMatches(selection, block.from)) {
+        return {
+          from: baseOffset + block.from,
+          to: baseOffset + block.to,
+          src,
+          block: absoluteBlock(block, baseOffset),
+        };
+      }
+      continue;
+    }
+    const image = imageRanges(block).find((candidate) =>
+      imageSelectionMatches(selection, candidate.from));
+    if (image) {
+      return {
+        from: baseOffset + image.from,
+        to: baseOffset + image.to,
+        src: image.src,
+        block: absoluteBlock(block, baseOffset),
+      };
+    }
+  }
+  return undefined;
+}
+
 function withoutStructuralTrailingLineBreak(source: string): string {
   if (source.endsWith('\r\n')) return source.slice(0, -2);
   if (source.endsWith('\n')) return source.slice(0, -1);
@@ -2509,15 +2966,28 @@ function buildDecorations(state: EditorState): DecorationSet {
     }
     if (block.kind === 'image') {
       const src = markdownImageSource(block.text);
-      if (src) ranges.push(Decoration.replace({ widget: new ImageWidget(block.from, block.to, src, markdownImageWidth(block.text), true, block.text, activeBlock, editable), block: true }).range(block.from, block.to));
+      if (src) ranges.push(Decoration.replace({
+        widget: new ImageWidget(
+          block.from,
+          block.to,
+          src,
+          markdownImageWidth(block.text),
+          true,
+          imageSelectionMatches(selection, block.from),
+          editable,
+        ),
+        block: true,
+      }).range(block.from, block.to));
       continue;
     }
     if (block.kind === 'table') {
       ranges.push(Decoration.replace({ widget: new TableWidget(block, editable), block: true }).range(block.from, block.to));
       continue;
     }
-    if (!activeBlock) {
-      const images = imageRanges(block);
+    const images = imageRanges(block);
+    const selectedImage = images.find((image) =>
+      imageSelectionMatches(selection, image.from));
+    if (!activeBlock || selectedImage != null) {
       const overlapsImage = (from: number, to: number) =>
         images.some((image) => from < image.to && to > image.from);
       for (const marker of markerRanges(block)) {
@@ -2526,7 +2996,17 @@ function buildDecorations(state: EditorState): DecorationSet {
       }
       for (const style of inlineStyleDecorations(block)) ranges.push(style);
       for (const image of images) {
-        ranges.push(Decoration.replace({ widget: new ImageWidget(image.from, image.to, image.src, image.width, false, doc.slice(image.from, image.to), false, editable) }).range(image.from, image.to));
+        ranges.push(Decoration.replace({
+          widget: new ImageWidget(
+            image.from,
+            image.to,
+            image.src,
+            image.width,
+            false,
+            selectedImage?.from === image.from,
+            editable,
+          ),
+        }).range(image.from, image.to));
       }
     }
     if (block.kind === 'heading') ranges.push(Decoration.line({ class: `synapse-heading synapse-heading-${block.level ?? 1}` }).range(block.from));
@@ -2635,7 +3115,7 @@ function schedulePerformanceSample(name: string, startedAt: number | undefined):
 function editorTheme(theme: EditorTheme) {
   return EditorView.theme({
     '&': { height: '100%', color: theme.text, backgroundColor: theme.background, fontSize: `${theme.fontSize}px` },
-    '.cm-scroller': { overflow: 'auto', fontFamily: theme.fontFamily, lineHeight: '1.55' },
+    '.cm-scroller': { position: 'relative', overflow: 'auto', fontFamily: theme.fontFamily, lineHeight: '1.55' },
     '.cm-content': { minHeight: '100%', padding: '54px 16px 18px', caretColor: theme.accent },
     '.cm-focused': { outline: 'none' },
     '.cm-line': { padding: '3px 0' },
@@ -2650,16 +3130,24 @@ function editorTheme(theme: EditorTheme) {
     '.synapse-code-block': { backgroundColor: theme.codeBackground, fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace' },
     '.synapse-page-break': { display: 'flex', alignItems: 'center', gap: '10px', color: theme.muted, fontSize: '12px', padding: '10px 0' },
     '.synapse-page-break > span:first-child, .synapse-page-break > span:last-child': { height: '1px', backgroundColor: theme.line, flex: '1' },
+    '.synapse-page-layout': { position: 'absolute', top: '0', zIndex: '5', pointerEvents: 'none', userSelect: 'none' },
+    '.synapse-page-layout-stale': { opacity: '0.4' },
+    '.synapse-page-boundary': { position: 'absolute', left: '0', width: '100%', height: '0', borderTop: `1px dashed ${theme.accent}`, pointerEvents: 'none' },
+    '.synapse-page-boundary-label': { position: 'absolute', right: '0', top: '0', transform: 'translateY(-50%)', padding: '2px 4px', borderRadius: '4px', color: theme.accent, backgroundColor: theme.background, font: '600 10px/1.2 -apple-system, BlinkMacSystemFont, sans-serif', whiteSpace: 'nowrap' },
     '.synapse-image-block': { position: 'relative', display: 'block', width: 'fit-content', maxWidth: '100%', margin: '5px 0' },
     '.synapse-inline-image': { position: 'relative', display: 'inline-block', verticalAlign: 'middle', maxWidth: '100%' },
     '.synapse-image-block img, .synapse-inline-image img': { display: 'block', height: 'auto', borderRadius: '6px', pointerEvents: 'none' },
     '.synapse-image-selected': { outline: `1px solid ${theme.accent}`, outlineOffset: '3px', borderRadius: '6px' },
     '.synapse-image-dragging': { opacity: '0.58' },
-    '.synapse-image-source': { display: 'block', width: '100%', minWidth: '320px', minHeight: '42px', boxSizing: 'border-box', marginBottom: '6px', border: `1px solid ${theme.line}`, borderRadius: '5px', padding: '6px 8px', color: theme.text, backgroundColor: theme.background, font: '12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace', resize: 'vertical' },
     '.synapse-image-loading': { color: theme.muted, fontSize: '12px' },
     '.synapse-image-broken': { color: theme.muted, textDecoration: 'line-through' },
-    '.synapse-image-resize': { position: 'absolute', right: '-5px', bottom: '-5px', width: '10px', height: '10px', borderRadius: '50%', backgroundColor: theme.accent, cursor: 'nwse-resize' },
-    '.synapse-image-drop-target': { outline: `2px solid ${theme.accent}`, outlineOffset: '3px' },
+    '.synapse-image-move-handle': { position: 'absolute', left: '-7px', top: '-7px', zIndex: '3', width: '18px', height: '18px', borderRadius: '4px', color: theme.muted, backgroundColor: theme.surface, boxShadow: `0 0 0 1px ${theme.line}`, cursor: 'grab', userSelect: 'none' },
+    '.synapse-image-move-handle::before': { content: '"⠿"', display: 'block', fontSize: '13px', lineHeight: '18px', textAlign: 'center' },
+    '.synapse-image-handle-dragging': { cursor: 'grabbing !important' },
+    '.synapse-image-resize': { position: 'absolute', bottom: '-5px', width: '10px', height: '10px', borderRadius: '50%', backgroundColor: theme.accent },
+    '.synapse-image-resize-left': { left: '-5px', cursor: 'nesw-resize' },
+    '.synapse-image-resize-right': { right: '-5px', cursor: 'nwse-resize' },
+    '.synapse-image-block-drop-indicator': { position: 'fixed', zIndex: '2147483646', height: '2px', backgroundColor: theme.accent, pointerEvents: 'none' },
     '.synapse-bold': { fontWeight: '700' },
     '.synapse-italic': { fontStyle: 'italic' },
     '.synapse-strike': { textDecoration: 'line-through' },
@@ -2799,6 +3287,105 @@ function scheduleOutline(): void {
   }, 80);
 }
 
+function imageKeyBindings(baseOffsetValue: number | (() => number) = 0) {
+  const baseOffset = () => typeof baseOffsetValue === 'function'
+    ? baseOffsetValue()
+    : baseOffsetValue;
+  const selected = (editorView: EditorView) =>
+    selectedImageRange(editorView.state, baseOffset());
+  const remove = (editorView: EditorView) => {
+    const image = selected(editorView);
+    if (!image || !runtime?.editable) return false;
+    const offset = baseOffset();
+    const from = image.from - offset;
+    const to = image.to - offset;
+    editorView.dispatch({
+      changes: { from, to, insert: '' },
+      selection: { anchor: from },
+      annotations: Transaction.userEvent.of('delete.image'),
+    });
+    return true;
+  };
+  return [
+    {
+      key: 'Enter',
+      preventDefault: true,
+      run: (editorView: EditorView) => {
+        const image = selected(editorView);
+        if (!image || !runtime?.editable) return false;
+        const localTo = image.to - baseOffset();
+        const doc = editorView.state.doc.toString();
+        let insert = '\n\n';
+        let anchor = localTo + insert.length;
+        if (image.block.kind === 'image') {
+          if (doc[localTo] === '\n') {
+            insert = '';
+            anchor = localTo + 1;
+          } else {
+            insert = '\n';
+            anchor = localTo + 1;
+          }
+        }
+        editorView.dispatch({
+          changes: insert.length > 0
+            ? { from: localTo, to: localTo, insert }
+            : undefined,
+          selection: { anchor },
+          annotations: Transaction.userEvent.of('input.image-enter'),
+        });
+        return true;
+      },
+    },
+    { key: 'Backspace', preventDefault: true, run: remove },
+    { key: 'Delete', preventDefault: true, run: remove },
+    {
+      key: 'Mod-c',
+      run: (editorView: EditorView) => {
+        const image = selected(editorView);
+        if (!image || !runtime) return false;
+        flushPendingTransaction();
+        post({
+          type: 'imageAction',
+          action: 'copy',
+          src: image.src,
+          revision: runtime.revision,
+          from: image.from,
+          to: image.to,
+        });
+        return true;
+      },
+    },
+    {
+      key: 'Mod-x',
+      run: (editorView: EditorView) => {
+        const image = selected(editorView);
+        if (!image || !runtime?.editable) return false;
+        flushPendingTransaction();
+        post({
+          type: 'imageAction',
+          action: 'cut',
+          src: image.src,
+          revision: runtime.revision,
+          from: image.from,
+          to: image.to,
+        });
+        return true;
+      },
+    },
+    {
+      key: 'Escape',
+      run: (editorView: EditorView) => {
+        const image = selected(editorView);
+        if (!image) return false;
+        editorView.dispatch({
+          selection: { anchor: image.to - baseOffset() },
+        });
+        return true;
+      },
+    },
+  ];
+}
+
 function extensions(command: InitializeCommand) {
   const jsdom = navigator.userAgent.toLowerCase().includes('jsdom');
   return [
@@ -2834,6 +3421,7 @@ function extensions(command: InitializeCommand) {
       },
       { key: 'Mod-b', preventDefault: true, run: () => requestCommand('format', 'bold') },
       { key: 'Mod-i', preventDefault: true, run: () => requestCommand('format', 'italic') },
+      ...imageKeyBindings(),
       {
         key: 'Shift-F10',
         preventDefault: true,
@@ -2875,6 +3463,15 @@ function extensions(command: InitializeCommand) {
     placeholder('选择或创建笔记后开始整理 Markdown'),
     EditorView.lineWrapping,
     EditorView.updateListener.of(updateListener),
+    ViewPlugin.fromClass(class {
+      update(update: ViewUpdate) {
+        if (
+          update.docChanged ||
+          update.viewportChanged ||
+          update.geometryChanged
+        ) schedulePageLayout();
+      }
+    }),
     EditorView.domEventHandlers({
       beforeinput() {
         inputStartedAt = performance.now();
@@ -2964,6 +3561,9 @@ function extensions(command: InitializeCommand) {
 }
 
 function initialize(command: InitializeCommand): void {
+  clearPageLayout();
+  pageLayoutBoundaries = [];
+  pageLayoutStale = false;
   view?.destroy();
   clearAttachmentState();
   clearClipboardRequests();
@@ -3148,6 +3748,20 @@ function receive(command: HostCommand): void {
         view.dispatch({ effects: themeCompartment.reconfigure(editorTheme(command.theme)) });
         syncVisibleColumns();
         break;
+      case 'setPageLayout':
+        pageLayoutBoundaries = command.boundaries
+          .filter((boundary) =>
+            Number.isInteger(boundary.pageIndex) &&
+            Number.isInteger(boundary.sourceOffset) &&
+            boundary.pageIndex > 0 &&
+            boundary.sourceOffset >= 0)
+          .map((boundary) => ({
+            pageIndex: boundary.pageIndex,
+            sourceOffset: boundary.sourceOffset,
+          }));
+        pageLayoutStale = command.stale;
+        schedulePageLayout();
+        break;
       case 'revealRange':
         if (!view) break;
         view.dispatch({ selection: { anchor: command.from, head: command.to }, scrollIntoView: true });
@@ -3167,6 +3781,7 @@ function receive(command: HostCommand): void {
       case 'clipboardResult': receiveClipboardResult(command); break;
       case 'dispose':
         flushPendingTransaction();
+        clearPageLayout();
         view?.destroy();
         clearAttachmentState();
         clearClipboardRequests();
@@ -3590,7 +4205,7 @@ function showContextMenu(
   };
   const action = (
     label: string,
-    invoke: () => void | Promise<void>,
+    invoke: () => unknown | Promise<unknown>,
     options: MenuActionOptions = {},
     parent: HTMLElement = menu,
     collection: HTMLButtonElement[] = buttons,
@@ -3648,7 +4263,7 @@ function showContextMenu(
     build: (
       add: (
         label: string,
-        invoke: () => void | Promise<void>,
+        invoke: () => unknown | Promise<unknown>,
         options?: MenuActionOptions,
       ) => HTMLButtonElement,
     ) => void,
@@ -4133,6 +4748,13 @@ window.synapseTest = {
   getText: () => view?.state.doc.toString() ?? '',
   getMode: () => runtime?.mode ?? 'reading',
   getRevision: () => runtime?.revision ?? -1,
+  getPageLayout: () => ({
+    boundaries: pageLayoutBoundaries.map((boundary) => ({ ...boundary })),
+    stale: pageLayoutStale,
+    framePending: pageLayoutFrame !== 0,
+    hostConnected: pageLayoutHost?.isConnected ?? false,
+    hostChildren: pageLayoutHost?.childElementCount ?? 0,
+  }),
   getPendingClipboardCount: () => clipboardRequests.size,
   getSelection: () => view ? selectionOf(view.state) : { anchor: 0, head: 0 },
   insertText: (text: string) => {

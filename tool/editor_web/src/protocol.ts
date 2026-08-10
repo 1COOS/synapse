@@ -21,6 +21,11 @@ export interface EditorSearchQuery {
   visible: boolean;
 }
 
+export interface EditorPageBoundary {
+  pageIndex: number;
+  sourceOffset: number;
+}
+
 export interface InitializeCommand {
   protocolVersion: number;
   type: 'initialize';
@@ -90,6 +95,12 @@ export type HostCommand =
       focused: boolean;
     }
   | { protocolVersion: number; type: 'setTheme'; theme: EditorTheme }
+  | {
+      protocolVersion: number;
+      type: 'setPageLayout';
+      boundaries: EditorPageBoundary[];
+      stale: boolean;
+    }
   | {
       protocolVersion: number;
       type: 'revealRange';
@@ -245,6 +256,13 @@ declare global {
       getText(): string;
       getMode(): EditorMode;
       getRevision(): number;
+      getPageLayout(): {
+        boundaries: EditorPageBoundary[];
+        stale: boolean;
+        framePending: boolean;
+        hostConnected: boolean;
+        hostChildren: number;
+      };
       getPendingClipboardCount(): number;
       getSelection(): EditorSelection;
       insertText(text: string): void;

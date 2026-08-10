@@ -36,7 +36,7 @@ bool imageNoteMenuItemEnabled(WidgetTester tester, Key itemKey) {
 
 void main() {
   testWidgets(
-    'selected block image exposes a selectable deletable source tag',
+    'selected block image stays in preview and supports structural deletion',
     (tester) async {
       final vault = CountingUpdateVaultBackend(seedExampleData: false);
       final note = await vault.createNote(parentPath: '', title: 'Image Study');
@@ -65,14 +65,19 @@ void main() {
         find.byKey(const Key('live-markdown-image-tag-editor-2')),
         findsNothing,
       );
+      expect(find.byKey(Key('image-move-handle-${source.id}')), findsNothing);
+      expect(
+        find.byKey(Key('image-resize-handle-icon-${source.id}')),
+        findsNothing,
+      );
 
       await tester.tap(find.byKey(Key('preview-image-tap-${source.id}')));
       await tester.pumpAndSettle();
 
-      final imageTagEditor = find.byKey(
-        const Key('live-markdown-image-tag-editor-2'),
+      expect(
+        find.byKey(const Key('live-markdown-image-tag-editor-2')),
+        findsNothing,
       );
-      expect(imageTagEditor, findsOneWidget);
       expect(find.byKey(Key('preview-image-${source.id}')), findsOneWidget);
       expect(
         previewImageFrameBorderColor(tester, source),
@@ -80,35 +85,22 @@ void main() {
       );
       expect(
         find.byKey(const Key('live-markdown-block-editor-2')),
+        findsNothing,
+      );
+      expect(find.byKey(const Key('note-editor')), findsNothing);
+      expect(find.byKey(Key('image-move-handle-${source.id}')), findsOneWidget);
+      expect(
+        find.byKey(Key('image-resize-handle-icon-${source.id}')),
         findsOneWidget,
       );
-      expect(find.byKey(const Key('note-editor')), findsOneWidget);
-      final noteEditor = activeLiveMarkdownTextField(tester);
-      expect(
-        noteEditor.controller.text,
-        '<img src="Image Study.assets/attachments/pasted.png" width="360">',
-      );
-      await setActiveLiveMarkdownSelection(
-        tester,
-        TextSelection(
-          baseOffset: 0,
-          extentOffset: noteEditor.controller.text.length,
-        ),
-      );
-      expect(noteEditor.controller.selection.isCollapsed, isFalse);
 
-      activeLiveMarkdownEditableTextState(tester).updateEditingValue(
-        const TextEditingValue(
-          text: '',
-          selection: TextSelection.collapsed(offset: 0),
-        ),
-      );
+      await tester.sendKeyEvent(LogicalKeyboardKey.delete);
       await tester.pumpAndSettle();
 
       final editor = tester.widget<LiveMarkdownEditor>(
         find.byType(LiveMarkdownEditor),
       );
-      expect(editor.controller.text, '# Image Study\n\n');
+      expect(editor.controller.text, '# Image Study\n');
       expect(find.byKey(Key('preview-image-${source.id}')), findsNothing);
 
       final undoModifier =
@@ -130,7 +122,7 @@ void main() {
       await tester.sendKeyUpEvent(undoModifier);
       await tester.pumpAndSettle();
 
-      expect(editor.controller.text, '# Image Study\n\n');
+      expect(editor.controller.text, '# Image Study\n');
       expect(find.byKey(Key('preview-image-${source.id}')), findsNothing);
     },
   );
@@ -184,13 +176,11 @@ void main() {
     );
     expect(
       find.byKey(const Key('live-markdown-image-tag-editor-2')),
-      findsOneWidget,
+      findsNothing,
     );
-    expect(find.byKey(const Key('note-editor')), findsOneWidget);
-    expect(
-      activeLiveMarkdownTextField(tester).controller.text,
-      '$firstTag $secondTag',
-    );
+    expect(find.byKey(const Key('note-editor')), findsNothing);
+    expect(find.byKey(Key('image-move-handle-${first.id}')), findsOneWidget);
+    expect(find.byKey(Key('image-move-handle-${second.id}')), findsNothing);
   });
 
   testWidgets(
@@ -427,9 +417,7 @@ void main() {
 
     final imagePreview = find.byKey(const Key('live-markdown-image-preview-2'));
     final previewBounds = tester.getRect(imagePreview);
-    await tester.tapAt(
-      Offset(previewBounds.left + 8, previewBounds.bottom - 8),
-    );
+    await tester.tapAt(Offset(previewBounds.left + 8, previewBounds.top + 8));
     await tester.pumpAndSettle();
 
     expect(find.byKey(Key('preview-image-${source.id}')), findsOneWidget);
@@ -506,8 +494,15 @@ void main() {
 
     final imagePreview = find.byKey(const Key('live-markdown-image-preview-2'));
     final previewBounds = tester.getRect(imagePreview);
-    await tester.tapAt(
-      Offset(previewBounds.left + 8, previewBounds.bottom - 8),
+    tester
+        .widget<GestureDetector>(
+          find.byKey(const Key('live-markdown-block-preview-2')),
+        )
+        .onTapUp!(
+      TapUpDetails(
+        globalPosition: Offset(previewBounds.left + 8, previewBounds.top + 8),
+        kind: PointerDeviceKind.mouse,
+      ),
     );
     await tester.pumpAndSettle();
 
@@ -2268,7 +2263,7 @@ void main() {
       imageInput: imageInput,
     );
     await switchToSourceMode(tester);
-    await tester.tap(find.byKey(const Key('note-editor-paste-target')));
+    await tester.tap(find.byKey(const Key('note-editor-paste-target-pane-1')));
     await tester.pump();
     await tester.sendKeyDownEvent(LogicalKeyboardKey.metaLeft);
     await tester.sendKeyDownEvent(LogicalKeyboardKey.keyV);

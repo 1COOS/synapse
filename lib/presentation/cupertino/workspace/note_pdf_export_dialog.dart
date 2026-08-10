@@ -16,6 +16,7 @@ final class NotePdfExportDialog extends StatefulWidget {
     required this.fileSaver,
     this.initialOptions = const NotePdfExportOptions(),
     this.initialResult,
+    this.onOptionsChanged,
   });
 
   final NotePdfExportSnapshot snapshot;
@@ -24,6 +25,7 @@ final class NotePdfExportDialog extends StatefulWidget {
   final NotePdfFileSaver fileSaver;
   final NotePdfExportOptions initialOptions;
   final NotePdfBuildResult? initialResult;
+  final ValueChanged<NotePdfExportOptions>? onOptionsChanged;
 
   @override
   State<NotePdfExportDialog> createState() => _NotePdfExportDialogState();
@@ -96,6 +98,7 @@ final class _NotePdfExportDialogState extends State<NotePdfExportDialog> {
       _saveError = null;
       _previewFutures.clear();
     });
+    widget.onOptionsChanged?.call(options);
     _startBuild();
   }
 
@@ -269,35 +272,6 @@ final class _NotePdfExportDialogState extends State<NotePdfExportDialog> {
             onValueChanged: (value) {
               if (!_saving && value != null) {
                 _setOptions(_options.copyWith(orientation: value));
-              }
-            },
-          ),
-          const SizedBox(height: 22),
-          const Text(
-            '页边距',
-            style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
-          ),
-          const SizedBox(height: 8),
-          CupertinoSlidingSegmentedControl<NotePdfMarginPreset>(
-            key: const Key('note-pdf-margin'),
-            groupValue: _options.marginPreset,
-            children: const {
-              NotePdfMarginPreset.compact: Padding(
-                padding: EdgeInsets.symmetric(horizontal: 5),
-                child: Text('紧凑'),
-              ),
-              NotePdfMarginPreset.standard: Padding(
-                padding: EdgeInsets.symmetric(horizontal: 5),
-                child: Text('标准'),
-              ),
-              NotePdfMarginPreset.wide: Padding(
-                padding: EdgeInsets.symmetric(horizontal: 5),
-                child: Text('宽松'),
-              ),
-            },
-            onValueChanged: (value) {
-              if (!_saving && value != null) {
-                _setOptions(_options.copyWith(marginPreset: value));
               }
             },
           ),

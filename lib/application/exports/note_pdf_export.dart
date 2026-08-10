@@ -5,9 +5,9 @@ const synapsePageBreakMarker = '<!-- synapse:page-break -->';
 enum NotePdfOrientation { portrait, landscape }
 
 enum NotePdfMarginPreset {
-  compact(15),
-  standard(20),
-  wide(25);
+  compact(10),
+  standard(15),
+  wide(20);
 
   const NotePdfMarginPreset(this.millimeters);
 
@@ -78,27 +78,32 @@ final class NotePdfExportOptions {
   const NotePdfExportOptions({
     this.orientation = NotePdfOrientation.portrait,
     this.marginPreset = NotePdfMarginPreset.standard,
+    this.footerEnabled = true,
   });
 
   final NotePdfOrientation orientation;
   final NotePdfMarginPreset marginPreset;
+  final bool footerEnabled;
 
   NotePdfExportOptions copyWith({
     NotePdfOrientation? orientation,
     NotePdfMarginPreset? marginPreset,
+    bool? footerEnabled,
   }) => NotePdfExportOptions(
     orientation: orientation ?? this.orientation,
     marginPreset: marginPreset ?? this.marginPreset,
+    footerEnabled: footerEnabled ?? this.footerEnabled,
   );
 
   @override
   bool operator ==(Object other) =>
       other is NotePdfExportOptions &&
       other.orientation == orientation &&
-      other.marginPreset == marginPreset;
+      other.marginPreset == marginPreset &&
+      other.footerEnabled == footerEnabled;
 
   @override
-  int get hashCode => Object.hash(orientation, marginPreset);
+  int get hashCode => Object.hash(orientation, marginPreset, footerEnabled);
 }
 
 final class NotePdfBuildResult {

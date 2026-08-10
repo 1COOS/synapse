@@ -4,6 +4,7 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart' show SelectableText, VerticalDivider;
 import 'package:flutter/services.dart';
 
+import '../../../application/exports/note_pdf_export.dart';
 import '../../../application/settings/synapse_settings.dart';
 import '../../workspace/controller/workspace_settings_dialog_model.dart';
 import '../../workspace/controller/workspace_state.dart';

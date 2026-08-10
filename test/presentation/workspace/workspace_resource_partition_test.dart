@@ -200,6 +200,7 @@ void main() {
       matching: find.byType(Image),
     );
     expect(previewImage, findsOneWidget);
+    final previewElement = tester.element(preview);
     final imageElement = tester.element(previewImage);
     final attachmentReads = vault.attachmentReadCalls;
 
@@ -209,6 +210,10 @@ void main() {
     await vault.deleteStarted.future;
     await tester.pump();
 
+    expect(preview, findsOneWidget);
+    expect(tester.element(preview), same(previewElement));
+    expect(vault.attachmentReadCalls, attachmentReads);
+    expect(previewImage, findsOneWidget);
     expect(tester.element(previewImage), same(imageElement));
     expect(
       find.descendant(
@@ -217,7 +222,6 @@ void main() {
       ),
       findsNothing,
     );
-    expect(vault.attachmentReadCalls, attachmentReads);
 
     vault.releaseDelete();
     await tester.pumpAndSettle();

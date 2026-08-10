@@ -44,6 +44,7 @@ void main() {
       find.byKey(const Key('fake-document-surface-pane-1')),
     );
     expect(state.mode, CodeMirrorDocumentMode.editing);
+    expect(state.pageLayout, same(EditorPageLayout.empty));
 
     await tester.tap(find.byKey(const Key('note-mode-reading')));
     await tester.pump(const Duration(milliseconds: 100));
@@ -69,6 +70,7 @@ final class _FakeDocumentSurfaceFactory implements DocumentSurfaceFactory {
     required String paneId,
     required EditorDocumentHub hub,
     required CodeMirrorDocumentMode mode,
+    required EditorPageLayout pageLayout,
     required bool focused,
     required bool enabled,
     required WorkspaceAppearance appearance,
@@ -91,6 +93,7 @@ final class _FakeDocumentSurfaceFactory implements DocumentSurfaceFactory {
   }) => _FakeDocumentSurface(
     key: Key('fake-document-surface-$paneId'),
     mode: mode,
+    pageLayout: pageLayout,
     onStateChanged: onStateChanged,
   );
 }
@@ -99,10 +102,12 @@ final class _FakeDocumentSurface extends StatefulWidget {
   const _FakeDocumentSurface({
     super.key,
     required this.mode,
+    required this.pageLayout,
     required this.onStateChanged,
   });
 
   final CodeMirrorDocumentMode mode;
+  final EditorPageLayout pageLayout;
   final void Function(EditorDocumentSurfaceController state, bool attached)?
   onStateChanged;
 
@@ -115,6 +120,7 @@ final class _FakeDocumentSurfaceState extends State<_FakeDocumentSurface>
   var flushCount = 0;
 
   CodeMirrorDocumentMode get mode => widget.mode;
+  EditorPageLayout get pageLayout => widget.pageLayout;
 
   @override
   void initState() {

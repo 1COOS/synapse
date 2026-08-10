@@ -1,6 +1,6 @@
 # Synapse 编辑器架构
 
-macOS 的编辑和阅读视图使用同一个本地 CodeMirror 6 `EditorView`。Markdown 仍由 `NoteDocumentSession` 和 Vault 持有，WebView 只负责低延迟交互、视口渲染和原生选区；打印与 PDF 继续使用 Flutter 管线。
+macOS 的编辑和阅读视图使用同一个本地 CodeMirror 6 `EditorView`。Markdown 仍由 `NoteDocumentSession` 和 Vault 持有，WebView 负责低延迟交互、视口渲染、原生选区和用户按需开启的编辑态分页 overlay；真实 PDF 排版、预览与导出继续使用 Flutter 管线。
 
 ## 离线资产
 
@@ -18,7 +18,7 @@ npm run check:generated
 
 ## 文档事务
 
-桥接协议版本固定为 `1`，所有位置均为 UTF-16 offset，与 Dart `String` 和 CodeMirror 文档位置保持一致。
+桥接协议版本固定为 `2`，所有位置均为 UTF-16 offset，与 Dart `String` 和 CodeMirror 文档位置保持一致。
 
 - CodeMirror 按动画帧合并输入，发送 `baseRevision`、`revision`、changeset、selection 和 composition 状态。
 - `EditorDocumentHub` 校验 note、generation 和 revision 后更新 `NoteDocumentSession`，并把增量同步给同一笔记的其他窗格。
@@ -26,7 +26,7 @@ npm run check:generated
 - 焦点窗格可写，非焦点窗格作为只读镜像。
 - revision 不一致时拒绝局部写入并发送完整正文重同步，禁止静默覆盖。
 - surface 命令按队列串行发送，避免 host changes 与 `flush` 越序。
-- 切换笔记/Vault、关闭或转移焦点窗格、AI 操作、附件 mutation、查找替换、保存和进入打印/PDF 前调用 `flush`，等待 JavaScript 返回已提交 revision。
+- 切换笔记/Vault、关闭或转移焦点窗格、AI 操作、附件 mutation、查找替换、保存和打开 PDF 导出前调用 `flush`，等待 JavaScript 返回已提交 revision。编辑态分页默认关闭；用户显式开启后只读取当前 session 快照，不触发 flush。
 
 ## Live Preview
 
@@ -38,6 +38,7 @@ npm run check:generated
 - 图片和表格可在正文与双栏之间拖放，移动本身是父 CodeMirror 的单个可撤销 transaction；栏内表格和图片继续使用同一附件与表格命令链。
 - 用户触发的格式、表格、图片、双栏和替换进入同一撤销链；镜像更新与全量重同步不进入历史。
 - 查找 query、匹配高亮、导航和替换由 CodeMirror search state 持有；Flutter 查找面板只发送命令并显示 `commandState`，不再随输入扫描 Markdown 全文。
+- Flutter 仅在当前 pane-note 已启用分页且处于编辑态时，通过 `setPageLayout` 发送自动分页的 `pageIndex/sourceOffset` 和 stale 状态；默认关闭、手动关闭、阅读态和切换笔记后均发送空布局。CodeMirror 把虚线放在 `.cm-scroller` 内的绝对 overlay，根据滚动、viewport、geometry 和双栏子编辑器坐标刷新；overlay 必须 `pointer-events: none`、`aria-hidden`，不得发起 transaction 或改变 Markdown/selection/history。
 - 右键菜单在 WebView 内渲染，格式、段落、列表和插入命令使用嵌套子菜单，支持方向键和 Esc；外部链接只允许通过 Flutter 桥接打开 `http`、`https` 或 `mailto`。
 - `commandState` 回传搜索、选区和 undo/redo 可用状态；`performanceSample` 回传输入到绘制及点击到选区绘制耗时，用于 Profile 门禁。
 
@@ -50,6 +51,6 @@ flutter test --no-pub integration_test/codemirror_document_surface_test.dart -d 
 flutter drive --profile --driver=test_driver/integration_test.dart --target=integration_test/codemirror_document_surface_test.dart -d macos
 ```
 
-该测试覆盖正文事务、CodeMirror 原生查找替换、编辑/阅读热切换、表格与双栏投影、附件 Blob，以及 30k 字符/500 block 的日常笔记性能基线。
+该测试覆盖正文事务、CodeMirror 原生查找替换、编辑/阅读热切换、分页 overlay、表格与双栏投影、附件 Blob，以及 30k 字符/500 block 的日常笔记性能基线。
 
 `.github/workflows/editor-web.yml` 在相关源码或生成资产变化时执行 `npm ci`、JS tests/build 与生成物一致性检查。

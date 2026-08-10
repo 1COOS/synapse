@@ -457,8 +457,11 @@ void main() {
       Key('live-markdown-columns-right-$layoutIdentity'),
     );
     final imageSource = find.byKey(Key('preview-image-tap-${image.id}'));
+    await tester.tap(imageSource);
+    await tester.pump();
+    final imageMoveHandle = find.byKey(Key('image-move-handle-${image.id}'));
     final imageGesture = await tester.startGesture(
-      tester.getCenter(imageSource),
+      tester.getCenter(imageMoveHandle),
       kind: PointerDeviceKind.mouse,
     );
     await imageGesture.moveBy(const Offset(0, 12));

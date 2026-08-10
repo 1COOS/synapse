@@ -5,6 +5,7 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:synapse/application/exports/note_pdf_export.dart';
 import 'package:synapse/domain/markdown/markdown_document.dart';
+import 'package:synapse/domain/vault/vault_resource.dart';
 import 'package:synapse/infrastructure/bootstrap/workspace_dependencies_factory.dart';
 import 'package:synapse/infrastructure/pdf/default_note_pdf_exporter.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
@@ -30,6 +31,7 @@ void main() {
     );
     await switchToSourceMode(tester);
     await enterTextInLiveMarkdownBlock(tester, '# Latest\nPDF body');
+    final buildsBeforeExport = exporter.snapshots.length;
 
     await tester.tap(find.byKey(const Key('note-export-pdf-pane-1')));
     await tester.pump();
@@ -39,9 +41,9 @@ void main() {
       MarkdownDocument.parse(vault.lastSavedMarkdown!).body.trim(),
       '# Latest\nPDF body',
     );
-    expect(exporter.snapshots, hasLength(1));
-    expect(exporter.snapshots.single.markdown.trim(), '# Latest\nPDF body');
-    expect(exporter.snapshots.single.title, 'Latest');
+    expect(exporter.snapshots.length, greaterThan(buildsBeforeExport));
+    expect(exporter.snapshots.last.markdown.trim(), '# Latest\nPDF body');
+    expect(exporter.snapshots.last.title, 'Latest');
     expect(find.byKey(const Key('note-pdf-export-dialog')), findsOneWidget);
   });
 
@@ -60,12 +62,13 @@ void main() {
     await switchToSourceMode(tester);
     await enterTextInLiveMarkdownBlock(tester, 'Must stay in editor');
     vault.failUpdates = true;
+    final buildsBeforeExport = exporter.snapshots.length;
 
     await tester.tap(find.byKey(const Key('note-export-pdf-pane-1')));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 300));
 
-    expect(exporter.snapshots, isEmpty);
+    expect(exporter.snapshots, hasLength(buildsBeforeExport));
     expect(find.byKey(const Key('note-pdf-export-dialog')), findsNothing);
     expect(
       liveMarkdownDocumentController(tester, paneId: 1).text.trim(),
@@ -95,10 +98,14 @@ void main() {
   });
 
   testWidgets(
-    'print mode keeps editing live, shows page boundaries, and reuses bytes',
+    'editing enables live page boundaries on demand and keeps orientation',
     (tester) async {
       final vault = CountingUpdateVaultBackend(seedExampleData: false);
-      await vault.createNote(parentPath: '', title: 'Print note');
+      final note = await vault.createNote(parentPath: '', title: 'Page note');
+      await vault.updateMarkdown(
+        noteId: note.id,
+        markdown: '# Page note\n\n第一段\n\n第二段',
+      );
       final exporter = _RecordingPdfExporter(
         resultBuilder: (snapshot, _) {
           final requestedOffset = snapshot.markdown.indexOf('第二段');
@@ -123,35 +130,48 @@ void main() {
         vault: vault,
         dependencies: _dependencies(vault, exporter: exporter),
       );
-      final updatesBeforePrint = vault.updateCalls;
+      await tester.pump(const Duration(milliseconds: 500));
+      final updatesBeforeEdit = vault.updateCalls;
 
-      await tester.tap(find.byKey(const Key('note-mode-print-pane-1')));
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 100));
-
-      expect(find.byKey(const Key('note-print-toolbar')), findsOneWidget);
-      expect(find.text('2 页'), findsOneWidget);
+      expect(find.byKey(const Key('note-mode-print-pane-1')), findsNothing);
+      expect(find.byKey(const Key('note-print-toolbar')), findsNothing);
+      expect(exporter.snapshots, isEmpty);
       expect(
-        find.byKey(const Key('note-print-boundary-pane-1-1')),
+        find.byKey(const Key('note-page-layout-toggle-pane-1')),
+        findsOneWidget,
+      );
+      expect(find.byKey(const Key('note-page-orientation')), findsNothing);
+      expect(
+        find.byKey(const Key('note-page-boundary-pane-1-1')),
+        findsNothing,
+      );
+
+      await tester.tap(find.byKey(const Key('note-page-layout-toggle-pane-1')));
+      await tester.pump();
+      await tester.pump();
+      expect(exporter.snapshots, hasLength(1));
+      expect(find.byKey(const Key('note-page-orientation')), findsOneWidget);
+      expect(
+        find.byKey(const Key('note-page-boundary-pane-1-1')),
         findsOneWidget,
       );
       expect(
         tester
-            .getSize(find.byKey(const Key('note-print-boundary-pane-1-1')))
+            .getSize(find.byKey(const Key('note-page-boundary-pane-1-1')))
             .height,
         greaterThan(0),
       );
-      expect(vault.updateCalls, updatesBeforePrint);
+      expect(vault.updateCalls, updatesBeforeEdit);
 
-      await enterTextInLiveMarkdownBlock(tester, '# Print\n第一段\n\n第二段');
+      await enterTextInLiveMarkdownBlock(tester, '# Page\n第一段\n\n第二段');
       await tester.pump();
       expect(
-        find.byKey(const Key('note-print-boundary-pane-1-1')),
+        find.byKey(const Key('note-page-boundary-pane-1-1')),
         findsOneWidget,
       );
       expect(
         tester
-            .getSize(find.byKey(const Key('note-print-boundary-pane-1-1')))
+            .getSize(find.byKey(const Key('note-page-boundary-pane-1-1')))
             .height,
         greaterThan(0),
       );
@@ -159,7 +179,7 @@ void main() {
       await tester.pump(const Duration(milliseconds: 399));
       expect(exporter.snapshots.length, buildsBeforeDebounce);
       expect(
-        find.byKey(const Key('note-print-boundary-pane-1-1')),
+        find.byKey(const Key('note-page-boundary-pane-1-1')),
         findsOneWidget,
       );
       await tester.pump(const Duration(milliseconds: 1));
@@ -167,23 +187,16 @@ void main() {
       expect(exporter.snapshots.length, buildsBeforeDebounce + 1);
       expect(exporter.snapshots.last.markdown, contains('第二段'));
       expect(
-        find.byKey(const Key('note-print-boundary-pane-1-1')),
+        find.byKey(const Key('note-page-boundary-pane-1-1')),
         findsOneWidget,
       );
-      expect(vault.updateCalls, updatesBeforePrint);
+      expect(vault.updateCalls, updatesBeforeEdit);
 
-      await tester.tap(find.text('横向'));
+      await tester.tap(
+        find.byKey(const Key('note-page-orientation-landscape')),
+      );
       await tester.pump();
       expect(exporter.options.last.orientation, NotePdfOrientation.landscape);
-      await tester.tap(find.text('宽松'));
-      await tester.pump();
-      expect(
-        exporter.options.last,
-        const NotePdfExportOptions(
-          orientation: NotePdfOrientation.landscape,
-          marginPreset: NotePdfMarginPreset.wide,
-        ),
-      );
 
       final buildsBeforeExport = exporter.snapshots.length;
       await tester.tap(find.byKey(const Key('note-export-pdf-pane-1')));
@@ -191,8 +204,107 @@ void main() {
       await tester.pump(const Duration(milliseconds: 300));
       expect(find.byKey(const Key('note-pdf-export-dialog')), findsOneWidget);
       expect(exporter.snapshots.length, buildsBeforeExport);
+
+      await tester.tap(find.text('纵向'));
+      await tester.pump();
+      await tester.tap(find.byKey(const Key('note-pdf-cancel')));
+      await tester.pumpAndSettle();
+      expect(
+        tester
+            .widget<PaneModeIconAction>(
+              find.byKey(const Key('note-page-orientation-portrait')),
+            )
+            .selected,
+        isTrue,
+      );
+
+      await tester.tap(find.byKey(const Key('note-mode-reading-pane-1')));
+      await tester.pump();
+      expect(find.byKey(const Key('note-page-orientation')), findsNothing);
+      expect(
+        find.byKey(const Key('note-page-boundary-pane-1-1')),
+        findsNothing,
+      );
+      final buildsWhileReading = exporter.snapshots.length;
+      await tester.pump(const Duration(seconds: 1));
+      expect(exporter.snapshots, hasLength(buildsWhileReading));
+
+      await tester.tap(find.byKey(const Key('note-mode-source-pane-1')));
+      await tester.pump();
+      await tester.pump();
+      expect(find.byKey(const Key('note-page-orientation')), findsOneWidget);
+      expect(exporter.snapshots.length, buildsWhileReading);
+      expect(
+        find.byKey(const Key('note-page-boundary-pane-1-1')),
+        findsOneWidget,
+      );
+
+      final buildsBeforeCachedToggle = exporter.snapshots.length;
+      await tester.tap(find.byKey(const Key('note-page-layout-toggle-pane-1')));
+      await tester.pump();
+      expect(find.byKey(const Key('note-page-orientation')), findsNothing);
+      expect(
+        find.byKey(const Key('note-page-boundary-pane-1-1')),
+        findsNothing,
+      );
+      await tester.tap(find.byKey(const Key('note-page-layout-toggle-pane-1')));
+      await tester.pump();
+      await tester.pump();
+      expect(exporter.snapshots, hasLength(buildsBeforeCachedToggle));
+      expect(
+        find.byKey(const Key('note-page-boundary-pane-1-1')),
+        findsOneWidget,
+      );
+
+      await tester.tap(find.byKey(const Key('note-page-layout-toggle-pane-1')));
+      await tester.pump();
+      final buildsWhileDisabled = exporter.snapshots.length;
+      await enterTextInLiveMarkdownBlock(tester, '# Disabled\n第一段\n\n第二段');
+      await tester.pump(const Duration(milliseconds: 500));
+      expect(exporter.snapshots, hasLength(buildsWhileDisabled));
+      expect(find.byKey(const Key('note-page-orientation')), findsNothing);
+      expect(
+        find.byKey(const Key('note-page-boundary-pane-1-1')),
+        findsNothing,
+      );
+
+      await tester.tap(find.byKey(const Key('note-page-layout-toggle-pane-1')));
+      await tester.pump();
+      await tester.pump();
+      expect(exporter.snapshots, hasLength(buildsWhileDisabled + 1));
+      expect(exporter.snapshots.last.markdown, startsWith('# Disabled'));
     },
   );
+
+  testWidgets('disabled page layout does not read PDF attachment snapshots', (
+    tester,
+  ) async {
+    final vault = _CountingPdfAttachmentVault(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Attachment');
+    await vault.addImageAttachment(
+      noteId: note.id,
+      filename: 'unused.png',
+      mimeType: 'image/png',
+      bytes: tinyPng,
+    );
+    final exporter = _RecordingPdfExporter();
+
+    await pumpWorkspace(
+      tester,
+      vault: vault,
+      dependencies: _dependencies(vault, exporter: exporter),
+    );
+    final attachmentReadsBeforeIdle = vault.attachmentReadCalls;
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(vault.attachmentReadCalls, attachmentReadsBeforeIdle);
+    expect(exporter.snapshots, isEmpty);
+
+    await tester.tap(find.byKey(const Key('note-page-layout-toggle-pane-1')));
+    await tester.pump();
+    await tester.pump();
+    expect(vault.attachmentReadCalls, attachmentReadsBeforeIdle + 1);
+    expect(exporter.snapshots, hasLength(1));
+  });
 
   testWidgets(
     'manual breaks stay editable without duplicating the automatic overlay',
@@ -224,8 +336,6 @@ void main() {
         vault: vault,
         dependencies: _dependencies(vault, exporter: exporter),
       );
-      await tester.tap(find.byKey(const Key('note-mode-print-pane-1')));
-      await tester.pump();
       await tester.pump(const Duration(milliseconds: 100));
 
       expect(
@@ -234,7 +344,7 @@ void main() {
       );
       expect(find.text('分页符'), findsOneWidget);
       expect(
-        find.byKey(const Key('note-print-boundary-pane-1-1')),
+        find.byKey(const Key('note-page-boundary-pane-1-1')),
         findsNothing,
       );
 
@@ -247,7 +357,79 @@ void main() {
     },
   );
 
-  testWidgets('print errors retain stale boundaries and support retry', (
+  testWidgets('page layout activation is pane local and resets per note', (
+    tester,
+  ) async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    await vault.createNote(parentPath: '', title: 'Alpha');
+    final beta = await vault.createNote(parentPath: '', title: 'Beta');
+    final exporter = _RecordingPdfExporter();
+
+    await pumpWorkspace(
+      tester,
+      vault: vault,
+      size: const Size(1600, 900),
+      dependencies: _dependencies(vault, exporter: exporter),
+    );
+    await tester.tap(find.byKey(const Key('split-pane-right-button')));
+    await tester.pump(const Duration(milliseconds: 250));
+
+    await tester.tap(find.byKey(const Key('note-page-layout-toggle-pane-1')));
+    await tester.pump();
+    await tester.pump();
+    await tester.tap(find.byKey(const Key('note-page-layout-toggle-pane-2')));
+    await tester.pump();
+    await tester.pump();
+    expect(exporter.snapshots, hasLength(2));
+    expect(
+      tester
+          .widget<PaneModeIconAction>(
+            find.byKey(const Key('note-page-layout-toggle-pane-1')),
+          )
+          .selected,
+      isTrue,
+    );
+    expect(
+      tester
+          .widget<PaneModeIconAction>(
+            find.byKey(const Key('note-page-layout-toggle-pane-2')),
+          )
+          .selected,
+      isTrue,
+    );
+    await tester.tap(find.byKey(const Key('note-page-orientation-landscape')));
+    await tester.pump();
+    expect(exporter.snapshots, hasLength(3));
+
+    await tester.tap(find.byKey(Key('resource-row-${beta.id}')));
+    await tester.pump(const Duration(milliseconds: 250));
+    expect(exporter.snapshots, hasLength(3));
+    expect(
+      tester
+          .widget<PaneModeIconAction>(
+            find.byKey(const Key('note-page-layout-toggle-pane-1')),
+          )
+          .selected,
+      isTrue,
+    );
+    expect(
+      tester
+          .widget<PaneModeIconAction>(
+            find.byKey(const Key('note-page-layout-toggle-pane-2')),
+          )
+          .selected,
+      isFalse,
+    );
+
+    await tester.tap(find.byKey(const Key('note-page-layout-toggle-pane-2')));
+    await tester.pump();
+    await tester.pump();
+    expect(exporter.snapshots, hasLength(4));
+    expect(exporter.snapshots.last.noteId, beta.id);
+    expect(exporter.options.last.orientation, NotePdfOrientation.landscape);
+  });
+
+  testWidgets('page layout errors retain boundaries and support retry', (
     tester,
   ) async {
     final vault = MemoryVaultBackend(seedExampleData: false);
@@ -260,7 +442,9 @@ void main() {
       vault: vault,
       dependencies: _dependencies(vault, exporter: exporter),
     );
-    await tester.tap(find.byKey(const Key('note-mode-print-pane-1')));
+    await tester.pump();
+    expect(exporter.completers, isEmpty);
+    await tester.tap(find.byKey(const Key('note-page-layout-toggle-pane-1')));
     await tester.pump();
     await tester.pump();
     expect(exporter.completers, hasLength(1));
@@ -281,24 +465,23 @@ void main() {
     );
     await tester.pump();
     expect(
-      find.byKey(const Key('note-print-boundary-pane-1-1')),
+      find.byKey(const Key('note-page-boundary-pane-1-1')),
       findsOneWidget,
     );
 
-    await tester.tap(find.text('横向'));
+    await tester.tap(find.byKey(const Key('note-page-orientation-landscape')));
     await tester.pump();
     expect(exporter.completers, hasLength(2));
     exporter.fail(1, StateError('layout failed'));
     await tester.pump();
 
-    expect(find.byKey(const Key('note-print-retry')), findsOneWidget);
-    expect(find.text('2 页'), findsOneWidget);
+    expect(find.byKey(const Key('note-page-retry')), findsOneWidget);
     expect(
-      find.byKey(const Key('note-print-boundary-pane-1-1')),
+      find.byKey(const Key('note-page-boundary-pane-1-1')),
       findsOneWidget,
     );
 
-    await tester.tap(find.byKey(const Key('note-print-retry')));
+    await tester.tap(find.byKey(const Key('note-page-retry')));
     await tester.pump();
     expect(exporter.completers, hasLength(3));
     exporter.complete(
@@ -310,9 +493,136 @@ void main() {
       ),
     );
     await tester.pump();
-    expect(find.text('1 页'), findsOneWidget);
-    expect(find.byKey(const Key('note-print-retry')), findsNothing);
+    expect(find.byKey(const Key('note-page-retry')), findsNothing);
   });
+
+  testWidgets('saving global PDF settings immediately rebuilds edit panes', (
+    tester,
+  ) async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    await vault.createNote(parentPath: '', title: 'Settings layout');
+    final exporter = _RecordingPdfExporter();
+    final settingsStore = FakeSettingsStore();
+
+    await pumpWorkspace(
+      tester,
+      vault: vault,
+      dependencies: _dependencies(
+        vault,
+        exporter: exporter,
+        settingsStore: settingsStore,
+      ),
+    );
+    await tester.pump();
+    expect(exporter.options, isEmpty);
+    await tester.tap(find.byKey(const Key('note-page-layout-toggle-pane-1')));
+    await tester.pump();
+    await tester.pump();
+    expect(exporter.options.last.marginPreset, NotePdfMarginPreset.standard);
+    expect(exporter.options.last.footerEnabled, isTrue);
+    final buildsBeforeSave = exporter.options.length;
+
+    await tester.tap(find.byKey(const Key('settings-button')));
+    await tester.pumpAndSettle();
+    final wideMargin = find.byKey(const Key('settings-pdf-margin-wide'));
+    await tester.ensureVisible(wideMargin);
+    await tester.tap(wideMargin);
+    final footerSwitch = find.descendant(
+      of: find.byKey(const Key('settings-pdf-footer-toggle')),
+      matching: find.byType(CupertinoSwitch),
+    );
+    await tester.ensureVisible(footerSwitch);
+    await tester.tap(footerSwitch);
+    await tester.pump();
+    await tester.tap(find.text('保存设置'));
+    await tester.pumpAndSettle();
+
+    expect(
+      settingsStore.savedSettings.last.preferences.pdfMarginPreset,
+      NotePdfMarginPreset.wide,
+    );
+    expect(
+      settingsStore.savedSettings.last.preferences.pdfFooterEnabled,
+      isFalse,
+    );
+    expect(exporter.options.length, greaterThan(buildsBeforeSave));
+    expect(
+      exporter.options.last,
+      const NotePdfExportOptions(
+        marginPreset: NotePdfMarginPreset.wide,
+        footerEnabled: false,
+      ),
+    );
+  });
+
+  testWidgets(
+    'disabled page layout stays idle through settings and PDF export',
+    (tester) async {
+      final vault = MemoryVaultBackend(seedExampleData: false);
+      await vault.createNote(parentPath: '', title: 'Idle layout');
+      final exporter = _RecordingPdfExporter();
+      final settingsStore = FakeSettingsStore();
+
+      await pumpWorkspace(
+        tester,
+        vault: vault,
+        dependencies: _dependencies(
+          vault,
+          exporter: exporter,
+          settingsStore: settingsStore,
+        ),
+      );
+      await tester.pump(const Duration(milliseconds: 500));
+      expect(exporter.snapshots, isEmpty);
+
+      await tester.tap(find.byKey(const Key('settings-button')));
+      await tester.pumpAndSettle();
+      final wideMargin = find.byKey(const Key('settings-pdf-margin-wide'));
+      await tester.ensureVisible(wideMargin);
+      await tester.tap(wideMargin);
+      final footerSwitch = find.descendant(
+        of: find.byKey(const Key('settings-pdf-footer-toggle')),
+        matching: find.byType(CupertinoSwitch),
+      );
+      await tester.ensureVisible(footerSwitch);
+      await tester.tap(footerSwitch);
+      await tester.pump();
+      await tester.tap(find.text('保存设置'));
+      await tester.pumpAndSettle();
+      expect(exporter.snapshots, isEmpty);
+
+      await tester.tap(find.byKey(const Key('note-export-pdf-pane-1')));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(find.byKey(const Key('note-pdf-export-dialog')), findsOneWidget);
+      expect(exporter.options.last.marginPreset, NotePdfMarginPreset.wide);
+      expect(exporter.options.last.footerEnabled, isFalse);
+      await tester.tap(find.text('横向'));
+      await tester.pump();
+      await tester.tap(find.byKey(const Key('note-pdf-cancel')));
+      await tester.pumpAndSettle();
+
+      final toggle = tester.widget<PaneModeIconAction>(
+        find.byKey(const Key('note-page-layout-toggle-pane-1')),
+      );
+      expect(toggle.selected, isFalse);
+      expect(find.byKey(const Key('note-page-orientation')), findsNothing);
+
+      final buildsBeforeEnable = exporter.snapshots.length;
+      await tester.tap(find.byKey(const Key('note-page-layout-toggle-pane-1')));
+      await tester.pump();
+      await tester.pump();
+      expect(exporter.snapshots, hasLength(buildsBeforeEnable + 1));
+      expect(
+        exporter.options.last,
+        const NotePdfExportOptions(
+          orientation: NotePdfOrientation.landscape,
+          marginPreset: NotePdfMarginPreset.wide,
+          footerEnabled: false,
+        ),
+      );
+    },
+  );
 
   testWidgets('real PDF boundaries remain visible after editing earlier text', (
     tester,
@@ -334,7 +644,8 @@ void main() {
       vault: vault,
       dependencies: _dependencies(vault, exporter: exporter),
     );
-    await tester.tap(find.byKey(const Key('note-mode-print-pane-1')));
+    expect(exporter.snapshots, isEmpty);
+    await tester.tap(find.byKey(const Key('note-page-layout-toggle-pane-1')));
     await tester.pump();
     await tester.runAsync(
       () => Future<void>.delayed(const Duration(seconds: 2)),
@@ -345,7 +656,7 @@ void main() {
       (widget) =>
           widget.key is ValueKey<String> &&
           (widget.key! as ValueKey<String>).value.startsWith(
-            'note-print-boundary-pane-1-',
+            'note-page-boundary-pane-1-',
           ),
     );
     expect(boundaryFinder, findsWidgets);
@@ -400,10 +711,11 @@ WorkspaceDependencies _dependencies(
   MemoryVaultBackend vault, {
   required NotePdfExporter exporter,
   bool supportsPdfExport = true,
+  FakeSettingsStore? settingsStore,
 }) {
   return createWorkspaceDependencies(
     initialVault: vault,
-    settingsStore: FakeSettingsStore(),
+    settingsStore: settingsStore ?? FakeSettingsStore(),
     notePdfExporter: exporter,
     notePdfPreviewRasterizer: _TinyPdfRasterizer(),
     notePdfFileSaver: _NoopPdfFileSaver(),
@@ -435,6 +747,18 @@ final class _RecordingPdfExporter implements NotePdfExporter {
           pageCount: 1,
           warnings: const [],
         );
+  }
+}
+
+final class _CountingPdfAttachmentVault extends CountingUpdateVaultBackend {
+  _CountingPdfAttachmentVault({required super.seedExampleData});
+
+  int attachmentReadCalls = 0;
+
+  @override
+  Future<List<int>> readNoteAttachment(NoteAttachment attachment) {
+    attachmentReadCalls += 1;
+    return super.readNoteAttachment(attachment);
   }
 }
 

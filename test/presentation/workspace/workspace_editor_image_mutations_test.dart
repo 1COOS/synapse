@@ -1,14 +1,33 @@
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:synapse/domain/vault/vault_resource.dart';
 import 'package:synapse/application/settings/synapse_settings.dart';
 import 'package:synapse/infrastructure/input/image_input_service.dart';
+import 'package:synapse/presentation/cupertino/markdown_live_blocks.dart';
 import 'package:synapse/presentation/workspace/editor/live_markdown_editor.dart';
 import 'package:synapse/presentation/workspace/editor/pane_editor_context.dart';
 import 'package:synapse/presentation/workspace/editor/preview_image_block.dart';
 
 import '../../support/workspace_fakes.dart';
 import '../../support/workspace_harness.dart';
+
+Finder _imageBlockDropTargetContaining(
+  WidgetTester tester,
+  String sourceFragment,
+) {
+  final editor = tester.widget<LiveMarkdownEditor>(
+    find.byType(LiveMarkdownEditor).first,
+  );
+  final blocks = splitMarkdownLiveBlocks(editor.controller.text);
+  final index = blocks.indexWhere(
+    (block) => block.text.contains(sourceFragment),
+  );
+  if (index < 0) {
+    throw StateError('No Markdown block contains $sourceFragment');
+  }
+  return find.byKey(Key('markdown-image-block-drop-target-$index'));
+}
 
 void main() {
   testWidgets('stale delayed image save failure does not replace runtime UI', (
@@ -311,6 +330,203 @@ void main() {
     expect(vault.lastSavedMarkdown, isNull);
   });
 
+  testWidgets('selected image move handle shows hover hint and drag cursors', (
+    tester,
+  ) async {
+    final vault = CountingUpdateVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Image Handle');
+    final source = await vault.addImageAttachment(
+      noteId: note.id,
+      filename: 'handle.png',
+      mimeType: 'image/png',
+      bytes: tinyPng,
+    );
+    const imageTag =
+        '<img src="Image Handle.assets/attachments/handle.png" width="320">';
+    await vault.updateMarkdown(noteId: note.id, markdown: imageTag);
+    vault
+      ..updateCalls = 0
+      ..lastSavedMarkdown = null;
+
+    await pumpWorkspace(tester, vault: vault);
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(Key('preview-image-tap-${source.id}')));
+    await tester.pumpAndSettle();
+
+    final handle = find.byKey(Key('image-move-handle-${source.id}'));
+    MouseRegion handleMouseRegion() =>
+        tester.element(handle).findAncestorWidgetOfExactType<MouseRegion>()!;
+    expect(handleMouseRegion().cursor, SystemMouseCursors.grab);
+
+    final hover = await tester.createGesture(kind: PointerDeviceKind.mouse);
+    await hover.moveTo(tester.getCenter(handle));
+    await tester.pump();
+    expect(find.byKey(const Key('image-move-hint')), findsOneWidget);
+    expect(find.text('拖动图片'), findsOneWidget);
+    await hover.removePointer();
+    await tester.pump();
+
+    final drag = await tester.startGesture(
+      tester.getCenter(handle),
+      kind: PointerDeviceKind.mouse,
+    );
+    await drag.moveBy(const Offset(0, 12));
+    await tester.pump();
+    expect(handleMouseRegion().cursor, SystemMouseCursors.grabbing);
+    expect(find.byKey(const Key('image-move-hint')), findsNothing);
+    await drag.up();
+    await tester.pumpAndSettle();
+
+    expect(vault.updateCalls, 0);
+    expect((await vault.readNote(note.id)).markdown, contains(imageTag));
+  });
+
+  testWidgets(
+    'drags an image across heading body table page break and document end',
+    (tester) async {
+      final vault = CountingUpdateVaultBackend(seedExampleData: false);
+      final note = await vault.createNote(
+        parentPath: '',
+        title: 'Drop Targets',
+      );
+      final source = await vault.addImageAttachment(
+        noteId: note.id,
+        filename: 'moving.png',
+        mimeType: 'image/png',
+        bytes: tinyPng,
+      );
+      const imageTag =
+          '<img src="Drop Targets.assets/attachments/moving.png" width="320">';
+      const table = '| A | B |\n| --- | --- |\n| 1 | 2 |';
+      const pageBreak = '<!-- synapse:page-break -->';
+      await vault.updateMarkdown(
+        noteId: note.id,
+        markdown:
+            '$imageTag\n\n'
+            '# Drop Targets\n\n'
+            'Body paragraph\n\n'
+            '$table\n\n'
+            '$pageBreak\n\n'
+            'Tail paragraph',
+      );
+      vault
+        ..updateCalls = 0
+        ..lastSavedMarkdown = null;
+
+      await pumpWorkspace(tester, vault: vault, size: const Size(1400, 1000));
+      await tester.pumpAndSettle();
+      final editor = tester.widget<LiveMarkdownEditor>(
+        find.byType(LiveMarkdownEditor),
+      );
+
+      await dragPreviewImageToFinder(
+        tester,
+        from: source,
+        target: _imageBlockDropTargetContaining(tester, '# Drop Targets'),
+        side: PreviewImageDropSide.after,
+      );
+      expect(editor.controller.text, contains('# Drop Targets\n\n$imageTag'));
+
+      await dragPreviewImageToFinder(
+        tester,
+        from: source,
+        target: _imageBlockDropTargetContaining(tester, 'Body paragraph'),
+        side: PreviewImageDropSide.after,
+      );
+      expect(editor.controller.text, contains('Body paragraph\n\n$imageTag'));
+
+      await dragPreviewImageToFinder(
+        tester,
+        from: source,
+        target: _imageBlockDropTargetContaining(tester, '| A | B |'),
+        side: PreviewImageDropSide.after,
+      );
+      expect(editor.controller.text, contains('$table\n\n$imageTag'));
+
+      await dragPreviewImageToFinder(
+        tester,
+        from: source,
+        target: _imageBlockDropTargetContaining(tester, pageBreak),
+        side: PreviewImageDropSide.after,
+      );
+      expect(editor.controller.text, contains('$pageBreak\n\n$imageTag'));
+
+      await dragPreviewImageToFinder(
+        tester,
+        from: source,
+        target: find.byKey(
+          const Key('markdown-image-document-end-drop-target'),
+        ),
+        side: PreviewImageDropSide.after,
+      );
+      expect(editor.controller.text.trimRight(), endsWith(imageTag));
+      expect(find.byKey(Key('image-move-handle-${source.id}')), findsOneWidget);
+
+      final savesAfterMove = vault.updateCalls;
+      await dragPreviewImageToFinder(
+        tester,
+        from: source,
+        target: find.byKey(
+          const Key('markdown-image-document-end-drop-target'),
+        ),
+        side: PreviewImageDropSide.after,
+      );
+      expect(vault.updateCalls, savesAfterMove);
+      expect(editor.controller.text.trimRight(), endsWith(imageTag));
+    },
+  );
+
+  testWidgets('mixed block drag extracts only the selected image reference', (
+    tester,
+  ) async {
+    final vault = CountingUpdateVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: 'Mixed Move');
+    final first = await vault.addImageAttachment(
+      noteId: note.id,
+      filename: 'first.png',
+      mimeType: 'image/png',
+      bytes: tinyPng,
+    );
+    final second = await vault.addImageAttachment(
+      noteId: note.id,
+      filename: 'second.png',
+      mimeType: 'image/png',
+      bytes: tinyPng,
+    );
+    const firstTag =
+        '<img src="Mixed Move.assets/attachments/first.png" width="320">';
+    const secondTag =
+        '<img src="Mixed Move.assets/attachments/second.png" width="320">';
+    await vault.updateMarkdown(
+      noteId: note.id,
+      markdown: 'Lead $firstTag middle $secondTag tail\n\nBody target',
+    );
+    vault
+      ..updateCalls = 0
+      ..lastSavedMarkdown = null;
+
+    await pumpWorkspace(tester, vault: vault);
+    await tester.pumpAndSettle();
+    await dragPreviewImageToFinder(
+      tester,
+      from: second,
+      target: _imageBlockDropTargetContaining(tester, 'Body target'),
+      side: PreviewImageDropSide.after,
+    );
+
+    final markdown = tester
+        .widget<LiveMarkdownEditor>(find.byType(LiveMarkdownEditor))
+        .controller
+        .text;
+    expect(RegExp(RegExp.escape(firstTag)).allMatches(markdown), hasLength(1));
+    expect(RegExp(RegExp.escape(secondTag)).allMatches(markdown), hasLength(1));
+    expect(markdown, contains('Lead $firstTag middle'));
+    expect(markdown, contains('tail\n\nBody target\n\n$secondTag'));
+    expect(find.byKey(Key('preview-image-${first.id}')), findsOneWidget);
+    expect(find.byKey(Key('preview-image-${second.id}')), findsOneWidget);
+    expect(find.byKey(Key('image-move-handle-${second.id}')), findsOneWidget);
+  });
+
   testWidgets('clamps dragged preview image width to the allowed range', (
     tester,
   ) async {
@@ -348,7 +564,7 @@ void main() {
     expect((await vault.readNote(note.id)).markdown, contains('width="1200"'));
   });
 
-  testWidgets('drags a preview image to the right of another image row', (
+  testWidgets('drags a selected image block after another image block', (
     tester,
   ) async {
     final vault = CountingUpdateVaultBackend(seedExampleData: false);
@@ -383,19 +599,19 @@ void main() {
       tester,
       from: first,
       to: second,
-      side: PreviewImageDropSide.right,
+      side: PreviewImageDropSide.after,
     );
 
     expect(vault.updateCalls, greaterThanOrEqualTo(1));
-    expect(vault.lastSavedMarkdown, contains('$secondTag $firstTag'));
+    expect(vault.lastSavedMarkdown, contains('$secondTag\n\n$firstTag'));
     expect(vault.lastSavedMarkdown, isNot(contains('$firstTag\n\n$secondTag')));
     expect(
       (await vault.readNote(note.id)).markdown,
-      contains('$secondTag $firstTag'),
+      contains('$secondTag\n\n$firstTag'),
     );
   });
 
-  testWidgets('drags a preview image to the left of another image row', (
+  testWidgets('drags a selected image block before another image block', (
     tester,
   ) async {
     final vault = CountingUpdateVaultBackend(seedExampleData: false);
@@ -430,14 +646,14 @@ void main() {
       tester,
       from: second,
       to: first,
-      side: PreviewImageDropSide.left,
+      side: PreviewImageDropSide.before,
     );
 
     expect(vault.updateCalls, greaterThanOrEqualTo(1));
-    expect(vault.lastSavedMarkdown, contains('$secondTag $firstTag'));
+    expect(vault.lastSavedMarkdown, contains('$secondTag\n\n$firstTag'));
     expect(
       (await vault.readNote(note.id)).markdown,
-      contains('$secondTag $firstTag'),
+      contains('$secondTag\n\n$firstTag'),
     );
   });
 
@@ -459,7 +675,7 @@ void main() {
       mimeType: 'image/png',
       bytes: tinyPng,
     );
-    await vault.addImageAttachment(
+    final betaSource = await vault.addImageAttachment(
       noteId: beta.id,
       filename: 'beta.png',
       mimeType: 'image/png',
@@ -495,11 +711,17 @@ void main() {
     await tester.tap(
       inNotePane(find.byKey(Key('preview-image-tap-${first.id}')), 1),
     );
-    await tester.pump();
-    final firstHandle = inNotePane(
-      find.byKey(Key('image-resize-handle-${first.id}')),
-      1,
+    await tester.pumpAndSettle();
+    await dragPreviewImageToFinder(
+      tester,
+      from: first,
+      target: find.byKey(Key('preview-image-tap-${betaSource.id}')),
+      side: PreviewImageDropSide.after,
     );
+    expect(vault.updateCalls, 0);
+    expect((await vault.readNote(beta.id)).markdown, contains(betaTag));
+
+    final firstHandle = find.byKey(Key('image-resize-handle-${first.id}'));
     expect(firstHandle, findsOneWidget);
     await tester.drag(firstHandle, const Offset(80, 0));
     await tester.pumpAndSettle();
@@ -507,13 +729,13 @@ void main() {
       tester,
       from: second,
       to: first,
-      side: PreviewImageDropSide.left,
+      side: PreviewImageDropSide.before,
     );
 
     expect(vault.updatedNoteIds, isNotEmpty);
     expect(vault.updatedNoteIds, everyElement(alpha.id));
     expect(vault.lastSavedMarkdown, contains('first.png" width="400"'));
-    expect(vault.lastSavedMarkdown, contains('$secondTag '));
+    expect(vault.lastSavedMarkdown, contains('$secondTag\n\n'));
     expect((await vault.readNote(beta.id)).markdown, contains(betaTag));
   });
 
@@ -586,6 +808,8 @@ void main() {
     await pumpWorkspace(tester, vault: vault);
     await tester.pumpAndSettle();
 
+    await tester.tap(find.byKey(Key('preview-image-tap-${source.id}')));
+    await tester.pumpAndSettle();
     final start = tester.getCenter(
       find.byKey(Key('preview-image-tap-${source.id}')),
     );

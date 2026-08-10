@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
+import 'package:flutter/material.dart' show Tooltip;
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path/path.dart' as p;
@@ -23,7 +24,7 @@ import '../../workspace/editor/markdown_context_menu.dart';
 import '../../workspace/editor/markdown_image_transform.dart';
 import '../../workspace/editor/note_find_controller.dart';
 import '../../workspace/editor/note_find_panel.dart';
-import '../../workspace/editor/note_print_layout_controller.dart';
+import '../../workspace/editor/note_page_layout_controller.dart';
 import '../../workspace/editor/pane_editor_context.dart';
 import '../../workspace/outline_navigation.dart';
 import '../../workspace/state/note_document_session.dart';
@@ -69,11 +70,15 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
   final Map<String, String> _codeMirrorOutlineSignatures = {};
   final Map<String, int> _codeMirrorFindRevisions = {};
   final Map<String, FocusNode> _paneFocusNodes = {};
-  final Map<String, NotePrintLayoutController> _printControllers = {};
-  final Map<String, String> _printAssetSignatures = {};
-  final Map<String, String> _printLoadingSignatures = {};
-  final Map<String, int> _printSnapshotGenerations = {};
-  final Set<String> _printRefreshScheduled = {};
+  final Map<String, String> _pageLayoutEnabledNoteIds = {};
+  final Map<String, NotePdfOrientation> _pageLayoutOrientations = {};
+  final Map<String, NotePageLayoutController> _pageLayoutControllers = {};
+  final Map<String, String> _pageLayoutAssetSignatures = {};
+  final Map<String, String> _pageLayoutLoadingSignatures = {};
+  final Map<String, int> _pageLayoutSnapshotGenerations = {};
+  final Set<String> _pageLayoutRefreshScheduled = {};
+  final Map<String, TextEditingController> _pageLayoutDocuments = {};
+  final Map<String, VoidCallback> _pageLayoutDocumentListeners = {};
   var _paneStatePruneScheduled = false;
   Future<PaneEditorCommandOutcome>? _pasteIntoNoteOperation;
 
@@ -151,8 +156,16 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
     for (final focusNode in _paneFocusNodes.values) {
       focusNode.dispose();
     }
-    for (final controller in _printControllers.values) {
+    for (final controller in _pageLayoutControllers.values) {
       controller.dispose();
+    }
+    _pageLayoutEnabledNoteIds.clear();
+    _pageLayoutOrientations.clear();
+    for (final entry in _pageLayoutDocuments.entries) {
+      final listener = _pageLayoutDocumentListeners[entry.key];
+      if (listener != null) {
+        entry.value.removeListener(listener);
+      }
     }
     for (final hub in _editorDocumentHubs.values) {
       hub.dispose();
@@ -222,40 +235,141 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
     );
   }
 
-  NotePrintLayoutController _printControllerFor(
+  bool _pageLayoutEnabledFor(SplitLeaf pane, NoteDocumentSession? session) =>
+      session != null &&
+      _pageLayoutEnabledNoteIds[pane.paneId] == session.noteId;
+
+  NotePdfOrientation _pageLayoutOrientationFor(String paneId) =>
+      _pageLayoutOrientations[paneId] ?? NotePdfOrientation.portrait;
+
+  void _resetPageLayoutSession(String paneId) {
+    _pageLayoutEnabledNoteIds.remove(paneId);
+    _pageLayoutControllers.remove(paneId)?.dispose();
+    _pageLayoutAssetSignatures.remove(paneId);
+    _pageLayoutLoadingSignatures.remove(paneId);
+    _pageLayoutSnapshotGenerations.remove(paneId);
+    _pageLayoutRefreshScheduled.remove(paneId);
+    _unbindPageLayoutDocument(paneId);
+  }
+
+  void _togglePageLayout(SplitLeaf pane, NoteDocumentSession session) {
+    final enabled = _pageLayoutEnabledFor(pane, session);
+    setState(() {
+      if (enabled) {
+        _pageLayoutEnabledNoteIds.remove(pane.paneId);
+        _pageLayoutLoadingSignatures.remove(pane.paneId);
+        _pageLayoutSnapshotGenerations[pane.paneId] =
+            (_pageLayoutSnapshotGenerations[pane.paneId] ?? 0) + 1;
+        _pageLayoutControllers[pane.paneId]?.setActive(false);
+      } else {
+        _pageLayoutEnabledNoteIds[pane.paneId] = session.noteId;
+      }
+    });
+  }
+
+  void _setPageLayoutOrientation(
+    SplitLeaf pane,
+    NotePdfOrientation orientation, {
+    NotePageLayoutController? controller,
+  }) {
+    if (_pageLayoutOrientationFor(pane.paneId) == orientation) {
+      return;
+    }
+    setState(() {
+      _pageLayoutOrientations[pane.paneId] = orientation;
+    });
+    if (_pageLayoutEnabledFor(
+      pane,
+      pane.noteId == null ? null : _controller.sessionFor(pane.noteId!),
+    )) {
+      controller?.setOptions(
+        controller.options.copyWith(orientation: orientation),
+      );
+    }
+  }
+
+  NotePageLayoutController _pageLayoutControllerFor(
     SplitLeaf pane,
     NoteDocumentSession session,
     PaneEditorContext? editorContext,
   ) {
-    var controller = _printControllers[pane.paneId];
+    var controller = _pageLayoutControllers[pane.paneId];
     if (controller != null &&
         controller.noteId != null &&
         controller.noteId != session.noteId) {
       controller.dispose();
-      _printControllers.remove(pane.paneId);
-      _printAssetSignatures.remove(pane.paneId);
-      _printLoadingSignatures.remove(pane.paneId);
-      _printSnapshotGenerations.remove(pane.paneId);
+      _pageLayoutControllers.remove(pane.paneId);
+      _pageLayoutAssetSignatures.remove(pane.paneId);
+      _pageLayoutLoadingSignatures.remove(pane.paneId);
+      _pageLayoutSnapshotGenerations.remove(pane.paneId);
+      _unbindPageLayoutDocument(pane.paneId);
       controller = null;
     }
-    controller ??= NotePrintLayoutController(
+    controller ??= NotePageLayoutController(
       exporter: _controller.notePdfExporter,
     );
-    _printControllers[pane.paneId] = controller;
-    _schedulePrintRefresh(pane.paneId, session.noteId, editorContext);
+    _pageLayoutControllers[pane.paneId] = controller;
+    controller.setOptions(
+      controller.options.copyWith(
+        orientation: _pageLayoutOrientationFor(pane.paneId),
+        marginPreset: _workspace.preferences.pdfMarginPreset,
+        footerEnabled: _workspace.preferences.pdfFooterEnabled,
+      ),
+    );
+    _bindPageLayoutDocument(pane, session, controller);
+    _schedulePageLayoutRefresh(pane.paneId, session.noteId, editorContext);
     return controller;
   }
 
-  void _schedulePrintRefresh(
+  void _bindPageLayoutDocument(
+    SplitLeaf pane,
+    NoteDocumentSession session,
+    NotePageLayoutController controller,
+  ) {
+    final current = _pageLayoutDocuments[pane.paneId];
+    if (identical(current, session.controller)) {
+      return;
+    }
+    _unbindPageLayoutDocument(pane.paneId);
+    void listener() {
+      final currentPane = _splitWorkspaceController.pane(pane.paneId);
+      if (!mounted ||
+          currentPane?.mode != NoteMode.source ||
+          currentPane?.noteId != session.noteId ||
+          !identical(_pageLayoutControllers[pane.paneId], controller)) {
+        return;
+      }
+      final markdown = session.controller.text;
+      controller.updateDocument(
+        noteId: session.noteId,
+        title: noteTitleFromMarkdownBody(markdown),
+        markdown: markdown,
+      );
+    }
+
+    _pageLayoutDocuments[pane.paneId] = session.controller;
+    _pageLayoutDocumentListeners[pane.paneId] = listener;
+    session.controller.addListener(listener);
+  }
+
+  void _unbindPageLayoutDocument(String paneId) {
+    final document = _pageLayoutDocuments.remove(paneId);
+    final listener = _pageLayoutDocumentListeners.remove(paneId);
+    if (document != null && listener != null) {
+      document.removeListener(listener);
+    }
+  }
+
+  void _schedulePageLayoutRefresh(
     String paneId,
     String noteId,
     PaneEditorContext? editorContext,
   ) {
-    if (!_printRefreshScheduled.add(paneId)) {
+    if (!_pageLayoutRefreshScheduled.add(paneId)) {
       return;
     }
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      _printRefreshScheduled.remove(paneId);
+      _pageLayoutRefreshScheduled.remove(paneId);
       if (!mounted) {
         return;
       }
@@ -263,30 +377,56 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
       final session = pane?.noteId == null
           ? null
           : _controller.sessionFor(pane!.noteId!);
-      final controller = _printControllers[paneId];
+      final controller = _pageLayoutControllers[paneId];
       if (pane == null ||
           pane.noteId != noteId ||
-          pane.mode != NoteMode.print ||
           session == null ||
           controller == null) {
         return;
       }
+      if (_pageLayoutEnabledNoteIds[paneId] != noteId) {
+        controller.setActive(false);
+        return;
+      }
+      final active = pane.mode == NoteMode.source;
+      if (!active) {
+        controller.setActive(false);
+        controller.setOptions(
+          controller.options.copyWith(
+            marginPreset: _workspace.preferences.pdfMarginPreset,
+            footerEnabled: _workspace.preferences.pdfFooterEnabled,
+          ),
+        );
+        return;
+      }
+      controller.setOptions(
+        controller.options.copyWith(
+          orientation: _pageLayoutOrientationFor(paneId),
+          marginPreset: _workspace.preferences.pdfMarginPreset,
+          footerEnabled: _workspace.preferences.pdfFooterEnabled,
+        ),
+      );
       controller.updateDocument(
         noteId: noteId,
         title: noteTitleFromMarkdownBody(session.controller.text),
         markdown: session.controller.text,
       );
-      final signature = _printAttachmentSignature(session);
-      if (_printAssetSignatures[paneId] == signature ||
-          _printLoadingSignatures[paneId] == signature ||
+      final signature = _pageLayoutAttachmentSignature(session);
+      if (_pageLayoutAssetSignatures[paneId] == signature) {
+        controller.setActive(true);
+        return;
+      }
+      if (_pageLayoutLoadingSignatures[paneId] == signature ||
           editorContext == null) {
         return;
       }
-      _printLoadingSignatures[paneId] = signature;
-      final generation = (_printSnapshotGenerations[paneId] ?? 0) + 1;
-      _printSnapshotGenerations[paneId] = generation;
+      controller.setActive(false);
+      controller.setPreparing(true);
+      _pageLayoutLoadingSignatures[paneId] = signature;
+      final generation = (_pageLayoutSnapshotGenerations[paneId] ?? 0) + 1;
+      _pageLayoutSnapshotGenerations[paneId] = generation;
       unawaited(
-        _loadPrintSnapshot(
+        _loadPageLayoutSnapshot(
           paneId: paneId,
           noteId: noteId,
           signature: signature,
@@ -298,7 +438,7 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
     WidgetsBinding.instance.scheduleFrame();
   }
 
-  Future<void> _loadPrintSnapshot({
+  Future<void> _loadPageLayoutSnapshot({
     required String paneId,
     required String noteId,
     required String signature,
@@ -307,29 +447,31 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
   }) async {
     final snapshot = await _controller.captureNotePdfPreview(editorContext);
     if (!mounted ||
-        _printSnapshotGenerations[paneId] != generation ||
-        _printLoadingSignatures[paneId] != signature) {
+        _pageLayoutSnapshotGenerations[paneId] != generation ||
+        _pageLayoutLoadingSignatures[paneId] != signature) {
       return;
     }
-    _printLoadingSignatures.remove(paneId);
+    _pageLayoutLoadingSignatures.remove(paneId);
     final pane = _splitWorkspaceController.pane(paneId);
     final session = pane?.noteId == null
         ? null
         : _controller.sessionFor(pane!.noteId!);
-    final controller = _printControllers[paneId];
+    final controller = _pageLayoutControllers[paneId];
     if (snapshot == null ||
         pane == null ||
-        pane.mode != NoteMode.print ||
+        pane.mode != NoteMode.source ||
         pane.noteId != noteId ||
         session == null ||
-        controller == null) {
+        controller == null ||
+        _pageLayoutEnabledNoteIds[paneId] != noteId) {
+      controller?.setPreparing(false);
       return;
     }
-    if (_printAttachmentSignature(session) != signature) {
-      _schedulePrintRefresh(paneId, noteId, editorContext);
+    if (_pageLayoutAttachmentSignature(session) != signature) {
+      _schedulePageLayoutRefresh(paneId, noteId, editorContext);
       return;
     }
-    _printAssetSignatures[paneId] = signature;
+    _pageLayoutAssetSignatures[paneId] = signature;
     final markdown = session.controller.text;
     controller.bindSnapshot(
       NotePdfExportSnapshot(
@@ -339,9 +481,10 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
         assets: snapshot.assets,
       ),
     );
+    controller.setActive(true);
   }
 
-  String _printAttachmentSignature(NoteDocumentSession session) => session
+  String _pageLayoutAttachmentSignature(NoteDocumentSession session) => session
       .note
       .attachments
       .map(
@@ -723,12 +866,13 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
     if (!mounted || snapshot == null) {
       return;
     }
-    final printController = pane.mode == NoteMode.print
-        ? _printControllers[pane.paneId]
-        : null;
-    final initialOptions =
-        printController?.options ?? const NotePdfExportOptions();
-    final initialResult = printController?.reusableResultFor(
+    final pageLayoutController = _pageLayoutControllers[pane.paneId];
+    final initialOptions = NotePdfExportOptions(
+      orientation: _pageLayoutOrientationFor(pane.paneId),
+      marginPreset: _workspace.preferences.pdfMarginPreset,
+      footerEnabled: _workspace.preferences.pdfFooterEnabled,
+    );
+    final initialResult = pageLayoutController?.reusableResultFor(
       snapshot,
       initialOptions,
     );
@@ -745,6 +889,13 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
             fileSaver: _controller.notePdfFileSaver,
             initialOptions: initialOptions,
             initialResult: initialResult,
+            onOptionsChanged: (options) {
+              _setPageLayoutOrientation(
+                pane,
+                options.orientation,
+                controller: _pageLayoutControllers[pane.paneId],
+              );
+            },
           ),
         ),
       ),
@@ -793,11 +944,14 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
         _codeMirrorOutlineSignatures.remove(paneId);
         _codeMirrorFindRevisions.remove(paneId);
         _paneFocusNodes.remove(paneId)?.dispose();
-        _printControllers.remove(paneId)?.dispose();
-        _printAssetSignatures.remove(paneId);
-        _printLoadingSignatures.remove(paneId);
-        _printSnapshotGenerations.remove(paneId);
-        _printRefreshScheduled.remove(paneId);
+        _pageLayoutControllers.remove(paneId)?.dispose();
+        _pageLayoutEnabledNoteIds.remove(paneId);
+        _pageLayoutOrientations.remove(paneId);
+        _pageLayoutAssetSignatures.remove(paneId);
+        _pageLayoutLoadingSignatures.remove(paneId);
+        _pageLayoutSnapshotGenerations.remove(paneId);
+        _pageLayoutRefreshScheduled.remove(paneId);
+        _unbindPageLayoutDocument(paneId);
       }
       final retainedSessions = Set<Object>.identity();
       for (final paneId in currentPaneIds) {
@@ -866,6 +1020,12 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
     final session = pane.noteId == null
         ? null
         : _noteSessionRegistry.sessionFor(pane.noteId!);
+    final pageLayoutNoteId =
+        _pageLayoutEnabledNoteIds[pane.paneId] ??
+        _pageLayoutControllers[pane.paneId]?.noteId;
+    if (pageLayoutNoteId != null && pageLayoutNoteId != session?.noteId) {
+      _resetPageLayoutSession(pane.paneId);
+    }
     final editorContext = _capturePaneEditorContext(
       pane: pane,
       session: session,
@@ -873,8 +1033,7 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
     final findController = _findControllerFor(pane, session);
     final paneFocusNode = _paneFocusNodeFor(pane.paneId);
     final accentColor = _workspaceAppearance.accentColor;
-    final useCodeMirror =
-        _codeMirrorEnabled && session != null && pane.mode != NoteMode.print;
+    final useCodeMirror = _codeMirrorEnabled && session != null;
     findController.setExternalSearch(useCodeMirror, notify: false);
     return CallbackShortcuts(
       bindings: _findShortcuts(pane, findController),
@@ -887,12 +1046,18 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
               ? _emptyMarkdownController
               : session ?? _emptyMarkdownController,
           builder: (context, child) {
-            final printController =
-                pane.mode == NoteMode.print && session != null
-                ? _printControllerFor(pane, session, editorContext)
+            final pageLayoutEnabled = _pageLayoutEnabledFor(pane, session);
+            final pageLayoutController =
+                _controller.supportsPdfExport &&
+                    session != null &&
+                    pageLayoutEnabled
+                ? _pageLayoutControllerFor(pane, session, editorContext)
                 : null;
             return ListenableBuilder(
-              listenable: Listenable.merge([findController, ?printController]),
+              listenable: Listenable.merge([
+                findController,
+                ?pageLayoutController,
+              ]),
               builder: (context, child) {
                 final outlineNodes = session == null
                     ? const <OutlineNode>[]
@@ -926,6 +1091,7 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
                                   editorContext: editorContext!,
                                   focused: focused,
                                   findController: findController,
+                                  pageLayoutController: pageLayoutController,
                                 )
                               : Listener(
                                   behavior: HitTestBehavior.translucent,
@@ -1013,7 +1179,8 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
                                           pane: pane,
                                           outlineNodes: outlineNodes,
                                           findController: findController,
-                                          printController: printController,
+                                          pageLayoutController:
+                                              pageLayoutController,
                                         ),
                                 ),
                         ),
@@ -1025,6 +1192,8 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
                             pane,
                             session: session,
                             focused: focused,
+                            pageLayoutEnabled: pageLayoutEnabled,
+                            pageLayoutController: pageLayoutController,
                           ),
                         ),
                         if (session != null && findController.visible)
@@ -1112,6 +1281,8 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
     SplitLeaf pane, {
     required NoteDocumentSession? session,
     required bool focused,
+    required bool pageLayoutEnabled,
+    required NotePageLayoutController? pageLayoutController,
   }) {
     return SizedBox(
       height: 24,
@@ -1140,6 +1311,32 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
               ),
             ),
           ),
+          if (pane.mode == NoteMode.source &&
+              session != null &&
+              _controller.supportsPdfExport) ...[
+            const SizedBox(width: 4),
+            PaneModeIconAction(
+              key: Key('note-page-layout-toggle-${pane.paneId}'),
+              label: pageLayoutEnabled ? '隐藏分页线' : '显示分页线',
+              icon: CupertinoIcons.doc_text,
+              selected: pageLayoutEnabled,
+              onPressed:
+                  _busy ||
+                      _reloadRequired ||
+                      _workspace.requiresMigration ||
+                      _paneEditorCommandLocks.contains(session.noteId)
+                  ? null
+                  : () => _togglePageLayout(pane, session),
+            ),
+            if (pageLayoutEnabled && pageLayoutController != null) ...[
+              const SizedBox(width: 4),
+              _buildPageLayoutControls(
+                pane,
+                focused: focused,
+                controller: pageLayoutController,
+              ),
+            ],
+          ],
           if (_controller.supportsPdfExport) ...[
             const SizedBox(width: 4),
             PaneModeIconAction(
@@ -1154,6 +1351,82 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
           ],
         ],
       ),
+    );
+  }
+
+  Widget _buildPageLayoutControls(
+    SplitLeaf pane, {
+    required bool focused,
+    required NotePageLayoutController controller,
+  }) {
+    final orientation = _pageLayoutOrientationFor(pane.paneId);
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        DecoratedBox(
+          key: focused
+              ? const Key('note-page-orientation')
+              : Key('note-page-orientation-${pane.paneId}'),
+          decoration: BoxDecoration(
+            color: workspaceSurfaceColor.withValues(alpha: 0.92),
+            border: Border.all(color: workspaceSoftLineColor),
+            borderRadius: workspaceBorderRadius,
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              PaneModeIconAction(
+                key: focused
+                    ? const Key('note-page-orientation-portrait')
+                    : Key('note-page-orientation-portrait-${pane.paneId}'),
+                label: '纵向',
+                icon: CupertinoIcons.device_phone_portrait,
+                selected: orientation == NotePdfOrientation.portrait,
+                onPressed: _busy || _reloadRequired
+                    ? null
+                    : () => _setPageLayoutOrientation(
+                        pane,
+                        NotePdfOrientation.portrait,
+                        controller: controller,
+                      ),
+              ),
+              PaneModeIconAction(
+                key: focused
+                    ? const Key('note-page-orientation-landscape')
+                    : Key('note-page-orientation-landscape-${pane.paneId}'),
+                label: '横向',
+                icon: CupertinoIcons.device_phone_landscape,
+                selected: orientation == NotePdfOrientation.landscape,
+                onPressed: _busy || _reloadRequired
+                    ? null
+                    : () => _setPageLayoutOrientation(
+                        pane,
+                        NotePdfOrientation.landscape,
+                        controller: controller,
+                      ),
+              ),
+            ],
+          ),
+        ),
+        if (controller.building)
+          const Padding(
+            padding: EdgeInsets.only(left: 5),
+            child: CupertinoActivityIndicator(radius: 6),
+          )
+        else if (controller.error != null)
+          CupertinoButton(
+            key: focused
+                ? const Key('note-page-retry')
+                : Key('note-page-retry-${pane.paneId}'),
+            minimumSize: const Size(24, 24),
+            padding: const EdgeInsets.only(left: 4),
+            onPressed: controller.retry,
+            child: const Tooltip(
+              message: '分页失败，点击重试',
+              child: Icon(CupertinoIcons.exclamationmark_triangle, size: 14),
+            ),
+          ),
+      ],
     );
   }
 
@@ -1185,15 +1458,6 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
             label: '阅读',
             icon: CupertinoIcons.book,
           ),
-          if (_controller.supportsPdfExport)
-            _paneModeButton(
-              pane: pane,
-              focused: focused,
-              mode: NoteMode.print,
-              label: '打印',
-              icon: CupertinoIcons.doc_text_viewfinder,
-              enabled: _canExportPdf(pane, session),
-            ),
         ],
       ),
     );
@@ -1210,7 +1474,6 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
     final suffix = switch (mode) {
       NoteMode.source => 'source',
       NoteMode.reading => 'reading',
-      NoteMode.print => 'print',
     };
     final button = PaneModeIconAction(
       key: Key('note-mode-$suffix-${pane.paneId}'),
@@ -1230,9 +1493,6 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
   }
 
   Future<void> _setPaneMode(SplitLeaf pane, NoteMode mode) async {
-    if (mode == NoteMode.print) {
-      await _codeMirrorEditorStates[pane.paneId]?.flush();
-    }
     if (!mounted || _splitWorkspaceController.pane(pane.paneId) == null) {
       return;
     }
@@ -1251,6 +1511,7 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
     required PaneEditorContext editorContext,
     required bool focused,
     required NoteFindController findController,
+    required NotePageLayoutController? pageLayoutController,
   }) {
     findController.setExternalSearch(true, notify: false);
     final hub = _editorDocumentHubFor(session);
@@ -1284,6 +1545,7 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
       mode: pane.mode == NoteMode.reading
           ? CodeMirrorDocumentMode.reading
           : CodeMirrorDocumentMode.editing,
+      pageLayout: _editorPageLayoutFor(pane, pageLayoutController),
       focused: focused,
       enabled:
           !_busy &&
@@ -1352,6 +1614,26 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
           _controller.detachDocumentSurface(paneId: pane.paneId, owner: state);
         }
       },
+    );
+  }
+
+  EditorPageLayout _editorPageLayoutFor(
+    SplitLeaf pane,
+    NotePageLayoutController? controller,
+  ) {
+    if (pane.mode != NoteMode.source || controller == null) {
+      return EditorPageLayout.empty;
+    }
+    return EditorPageLayout(
+      boundaries: [
+        for (final boundary in controller.boundaries)
+          if (boundary.kind == NotePdfPageBoundaryKind.automatic)
+            EditorPageBoundary(
+              pageIndex: boundary.pageIndex,
+              sourceOffset: boundary.sourceOffset,
+            ),
+      ],
+      stale: controller.hasStaleResult,
     );
   }
 
@@ -1771,7 +2053,7 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
     SplitLeaf? pane,
     List<OutlineNode> outlineNodes = const [],
     NoteFindController? findController,
-    NotePrintLayoutController? printController,
+    NotePageLayoutController? pageLayoutController,
   }) {
     final resolvedSession = pane == null ? session ?? _activeSession : session;
     final resolvedPane = pane ?? _focusedPane;
@@ -1804,9 +2086,7 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
               ),
         },
         child: GestureDetector(
-          key: focused
-              ? const Key('note-editor-paste-target')
-              : resolvedPane == null
+          key: resolvedPane == null
               ? const Key('note-editor-paste-target')
               : Key('note-editor-paste-target-${resolvedPane.paneId}'),
           behavior: HitTestBehavior.opaque,
@@ -1854,7 +2134,7 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
                     findController:
                         findController ??
                         _findControllerFor(resolvedPane!, resolvedSession),
-                    printController: printController,
+                    pageLayoutController: pageLayoutController,
                     outlineNodes: outlineNodes,
                     outlineNavigationController:
                         widget.outlineNavigationController,
@@ -1915,9 +2195,18 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
                     previewBuilder:
                         (
                           markdown, {
+                          imageBlockStart,
+                          selectedImageSrc,
+                          imageRenderState,
+                          imageTapRegionGroupId,
                           onImageTap,
+                          onImageTapDown,
+                          onImageTapCancel,
                           onImageSecondaryTapUp,
                           onImageAvailabilityChanged,
+                          onImageMoveDragStarted,
+                          onImageMoveDragUpdate,
+                          onImageMoveDragEnded,
                           tableSelected,
                           tableSelectionTargetKey,
                           onTableFrameTap,
@@ -1926,10 +2215,19 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
                         }) => _markdownRenderer.buildLivePreviewBlock(
                           markdown,
                           editorContext: editorContext!,
+                          imageBlockStart: imageBlockStart,
+                          selectedImageSrc: selectedImageSrc,
+                          imageRenderState: imageRenderState,
+                          imageTapRegionGroupId: imageTapRegionGroupId,
                           onImageTap: onImageTap,
+                          onImageTapDown: onImageTapDown,
+                          onImageTapCancel: onImageTapCancel,
                           onImageSecondaryTapUp: onImageSecondaryTapUp,
                           onImageAvailabilityChanged:
                               onImageAvailabilityChanged,
+                          onImageMoveDragStarted: onImageMoveDragStarted,
+                          onImageMoveDragUpdate: onImageMoveDragUpdate,
+                          onImageMoveDragEnded: onImageMoveDragEnded,
                           tableSelected: tableSelected ?? false,
                           tableSelectionTargetKey: tableSelectionTargetKey,
                           onTableFrameTap: onTableFrameTap,

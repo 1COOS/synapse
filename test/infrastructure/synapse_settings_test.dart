@@ -1,4 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:synapse/application/exports/note_pdf_export.dart';
 import 'package:synapse/application/settings/synapse_settings.dart';
 import 'package:synapse/infrastructure/config/synapse_settings_codec.dart';
 
@@ -14,6 +15,9 @@ void main() {
     expect(preferences.autoSaveDelayMillis, 1000);
     expect(preferences.accentColor, WorkspaceAccentColor.blue);
     expect(preferences.noteFontSize, 14);
+    expect(preferences.pdfMarginPreset, NotePdfMarginPreset.standard);
+    expect(preferences.pdfMarginPreset.millimeters, 15);
+    expect(preferences.pdfFooterEnabled, isTrue);
   });
 
   test('serializes settings without exposing the provider api key', () {
@@ -36,11 +40,13 @@ void main() {
         autoSaveDelayMillis: 1500,
         accentColor: WorkspaceAccentColor.purple,
         noteFontSize: 28,
+        pdfMarginPreset: NotePdfMarginPreset.wide,
+        pdfFooterEnabled: false,
       ),
     );
 
     final json = codec.encode(settings);
-    expect(json['schemaVersion'], 2);
+    expect(json['schemaVersion'], 3);
     expect(json['providerConfig'], isNot(containsPair('apiKey', anything)));
 
     final restored = codec.decode({
@@ -64,6 +70,8 @@ void main() {
     expect(restored.preferences.autoSaveDelayMillis, 1500);
     expect(restored.preferences.accentColor, WorkspaceAccentColor.purple);
     expect(restored.preferences.noteFontSize, 28);
+    expect(restored.preferences.pdfMarginPreset, NotePdfMarginPreset.wide);
+    expect(restored.preferences.pdfFooterEnabled, isFalse);
   });
 
   test('migrates legacy settings to edit mode by default', () {
@@ -100,7 +108,7 @@ void main() {
   });
 
   test(
-    'uses default appearance when older settings omit appearance fields',
+    'uses default appearance and PDF layout when older settings omit fields',
     () {
       final restored = codec.decode({
         'schemaVersion': 2,
@@ -114,8 +122,35 @@ void main() {
 
       expect(restored.preferences.accentColor, WorkspaceAccentColor.blue);
       expect(restored.preferences.noteFontSize, 14);
+      expect(
+        restored.preferences.pdfMarginPreset,
+        NotePdfMarginPreset.standard,
+      );
+      expect(restored.preferences.pdfFooterEnabled, isTrue);
     },
   );
+
+  test('restores invalid PDF layout values and reports recovery messages', () {
+    final decoded = codec.decode({
+      'schemaVersion': 3,
+      'preferences': {
+        'defaultNoteMode': WorkspaceDefaultNoteMode.source.name,
+        'semanticSearchEnabled': true,
+        'pastedImageWidth': 480,
+        'autoSaveDelayMillis': 1000,
+        'pdfMarginPreset': 'extra-wide',
+        'pdfFooterEnabled': 'sometimes',
+      },
+    });
+
+    expect(
+      decoded.settings.preferences.pdfMarginPreset,
+      NotePdfMarginPreset.standard,
+    );
+    expect(decoded.settings.preferences.pdfFooterEnabled, isTrue);
+    expect(decoded.recoveryMessages, contains(contains('PDF 页边距')));
+    expect(decoded.recoveryMessages, contains(contains('PDF 页码页脚')));
+  });
 
   test('normalizes invalid appearance values from settings json', () {
     final decoded = codec.decode({
@@ -219,6 +254,8 @@ void main() {
           pastedImageWidth: 720,
           accentColor: WorkspaceAccentColor.purple,
           noteFontSize: 20,
+          pdfMarginPreset: NotePdfMarginPreset.compact,
+          pdfFooterEnabled: false,
         ),
       ),
     );
@@ -226,6 +263,7 @@ void main() {
     expect(preferencesOnly.autoSaveDelayChanged, isTrue);
     expect(preferencesOnly.pastedImageWidthChanged, isTrue);
     expect(preferencesOnly.appearanceChanged, isTrue);
+    expect(preferencesOnly.pdfLayoutChanged, isTrue);
     expect(preferencesOnly.providerChanged, isFalse);
     expect(preferencesOnly.semanticSearchChanged, isFalse);
     expect(preferencesOnly.vaultLocationChanged, isFalse);

@@ -1,5 +1,6 @@
 import 'provider_config.dart';
 import 'vault_location.dart';
+import '../exports/note_pdf_export.dart';
 
 export 'provider_config.dart';
 export 'settings_capabilities.dart';
@@ -17,6 +18,8 @@ final class WorkspacePreferences {
     required this.autoSaveDelayMillis,
     this.accentColor = WorkspaceAccentColor.blue,
     this.noteFontSize = defaultNoteFontSize,
+    this.pdfMarginPreset = NotePdfMarginPreset.standard,
+    this.pdfFooterEnabled = true,
   });
 
   static const minAutoSaveDelayMillis = 250;
@@ -33,6 +36,8 @@ final class WorkspacePreferences {
   final int autoSaveDelayMillis;
   final WorkspaceAccentColor accentColor;
   final int noteFontSize;
+  final NotePdfMarginPreset pdfMarginPreset;
+  final bool pdfFooterEnabled;
 
   static const defaults = WorkspacePreferences(
     defaultNoteMode: WorkspaceDefaultNoteMode.source,
@@ -41,6 +46,8 @@ final class WorkspacePreferences {
     autoSaveDelayMillis: 1000,
     accentColor: WorkspaceAccentColor.blue,
     noteFontSize: defaultNoteFontSize,
+    pdfMarginPreset: NotePdfMarginPreset.standard,
+    pdfFooterEnabled: true,
   );
 
   WorkspacePreferences copyWith({
@@ -50,6 +57,8 @@ final class WorkspacePreferences {
     int? autoSaveDelayMillis,
     WorkspaceAccentColor? accentColor,
     int? noteFontSize,
+    NotePdfMarginPreset? pdfMarginPreset,
+    bool? pdfFooterEnabled,
   }) {
     return WorkspacePreferences(
       defaultNoteMode: defaultNoteMode ?? this.defaultNoteMode,
@@ -59,6 +68,8 @@ final class WorkspacePreferences {
       autoSaveDelayMillis: autoSaveDelayMillis ?? this.autoSaveDelayMillis,
       accentColor: accentColor ?? this.accentColor,
       noteFontSize: clampNoteFontSize(noteFontSize ?? this.noteFontSize),
+      pdfMarginPreset: pdfMarginPreset ?? this.pdfMarginPreset,
+      pdfFooterEnabled: pdfFooterEnabled ?? this.pdfFooterEnabled,
     );
   }
 
@@ -79,7 +90,9 @@ final class WorkspacePreferences {
         other.pastedImageWidth == pastedImageWidth &&
         other.autoSaveDelayMillis == autoSaveDelayMillis &&
         other.accentColor == accentColor &&
-        other.noteFontSize == noteFontSize;
+        other.noteFontSize == noteFontSize &&
+        other.pdfMarginPreset == pdfMarginPreset &&
+        other.pdfFooterEnabled == pdfFooterEnabled;
   }
 
   @override
@@ -90,6 +103,8 @@ final class WorkspacePreferences {
     autoSaveDelayMillis,
     accentColor,
     noteFontSize,
+    pdfMarginPreset,
+    pdfFooterEnabled,
   );
 }
 
@@ -149,6 +164,7 @@ final class SettingsChangeSet {
     required this.autoSaveDelayChanged,
     required this.pastedImageWidthChanged,
     required this.appearanceChanged,
+    required this.pdfLayoutChanged,
     required this.vaultLocationChanged,
   });
 
@@ -173,6 +189,11 @@ final class SettingsChangeSet {
       appearanceChanged:
           previous.preferences.accentColor != next.preferences.accentColor ||
           previous.preferences.noteFontSize != next.preferences.noteFontSize,
+      pdfLayoutChanged:
+          previous.preferences.pdfMarginPreset !=
+              next.preferences.pdfMarginPreset ||
+          previous.preferences.pdfFooterEnabled !=
+              next.preferences.pdfFooterEnabled,
       vaultLocationChanged: previous.vaultLocation != next.vaultLocation,
     );
   }
@@ -183,6 +204,7 @@ final class SettingsChangeSet {
   final bool autoSaveDelayChanged;
   final bool pastedImageWidthChanged;
   final bool appearanceChanged;
+  final bool pdfLayoutChanged;
   final bool vaultLocationChanged;
 
   bool get requiresRuntimeReplacement =>
@@ -194,5 +216,6 @@ final class SettingsChangeSet {
       autoSaveDelayChanged ||
       pastedImageWidthChanged ||
       appearanceChanged ||
+      pdfLayoutChanged ||
       vaultLocationChanged;
 }

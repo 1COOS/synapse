@@ -813,10 +813,17 @@ void main() {
       );
       capturedLockedPreview.onWidthChanged(480);
       capturedSecondPreview.onImageDropped(
-        PreviewImageDragData(sourceId: lockedSource.id, src: lockedSrc),
         PreviewImageDragData(
+          noteId: alpha.id,
+          sourceId: lockedSource.id,
+          src: lockedSrc,
+          blockStart: capturedLockedPreview.blockStart!,
+        ),
+        PreviewImageDragData(
+          noteId: alpha.id,
           sourceId: secondAlphaSource.id,
           src: secondAlphaSrc,
+          blockStart: capturedSecondPreview.blockStart!,
         ),
         ImageDropSide.after,
       );
@@ -827,8 +834,18 @@ void main() {
       capturedBetaPreview.onTap();
       capturedBetaPreview.onWidthChanged(480);
       capturedSecondBetaPreview.onImageDropped(
-        PreviewImageDragData(sourceId: betaSource.id, src: betaSrc),
-        PreviewImageDragData(sourceId: secondBetaSource.id, src: secondBetaSrc),
+        PreviewImageDragData(
+          noteId: beta.id,
+          sourceId: betaSource.id,
+          src: betaSrc,
+          blockStart: capturedBetaPreview.blockStart!,
+        ),
+        PreviewImageDragData(
+          noteId: beta.id,
+          sourceId: secondBetaSource.id,
+          src: secondBetaSrc,
+          blockStart: capturedSecondBetaPreview.blockStart!,
+        ),
         ImageDropSide.after,
       );
       await tester.pump();

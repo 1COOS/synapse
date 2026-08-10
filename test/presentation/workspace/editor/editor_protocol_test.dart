@@ -70,6 +70,25 @@ void main() {
     );
   });
 
+  test('serializes page layout boundaries without Markdown content', () {
+    final layout = EditorPageLayout(
+      boundaries: const [
+        EditorPageBoundary(pageIndex: 1, sourceOffset: 42),
+        EditorPageBoundary(pageIndex: 2, sourceOffset: 108),
+      ],
+      stale: true,
+    );
+
+    expect(layout.toJson(), {
+      'boundaries': [
+        {'pageIndex': 1, 'sourceOffset': 42},
+        {'pageIndex': 2, 'sourceOffset': 108},
+      ],
+      'stale': true,
+    });
+    expect(layout.toJson(), isNot(contains('markdown')));
+  });
+
   test('decodes clipboard requests with stable target information', () {
     final request = EditorClipboardRequest.fromJson({
       'requestId': 17,

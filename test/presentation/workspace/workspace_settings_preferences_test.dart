@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:synapse/application/exports/note_pdf_export.dart';
 import 'package:synapse/application/settings/synapse_settings.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
 import 'package:synapse/presentation/workspace/editor/live_markdown_editor.dart';
@@ -50,6 +51,15 @@ void main() {
       find.byKey(const Key('settings-pasted-image-width')),
       '720',
     );
+    final wideMargin = find.byKey(const Key('settings-pdf-margin-wide'));
+    await tester.ensureVisible(wideMargin);
+    await tester.tap(wideMargin);
+    final footerSwitch = find.descendant(
+      of: find.byKey(const Key('settings-pdf-footer-toggle')),
+      matching: find.byType(CupertinoSwitch),
+    );
+    await tester.ensureVisible(footerSwitch);
+    await tester.tap(footerSwitch);
     await tester.tap(find.byKey(const Key('settings-nav-search')));
     await tester.pumpAndSettle();
     final semanticSwitch = find.descendant(
@@ -66,6 +76,8 @@ void main() {
     expect(preferences.autoSaveDelayMillis, 1500);
     expect(preferences.pastedImageWidth, 720);
     expect(preferences.semanticSearchEnabled, isFalse);
+    expect(preferences.pdfMarginPreset, NotePdfMarginPreset.wide);
+    expect(preferences.pdfFooterEnabled, isFalse);
   });
 
   testWidgets('settings runtime rebuild disables note editing while saving', (

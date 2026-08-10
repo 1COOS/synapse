@@ -1,6 +1,7 @@
 import 'dart:typed_data';
 
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/gestures.dart';
 
 import '../../../domain/vault/vault_resource.dart';
 import '../../cupertino/workspace/workspace_theme.dart';
@@ -14,7 +15,31 @@ enum _ImageResizeSide { left, right }
 
 typedef PreviewImageSecondaryTapCallback =
     void Function(String sourceId, String src, TapUpDetails details);
+typedef PreviewImageTapCallback = void Function(String sourceId, String src);
 typedef PreviewImageAvailabilityChanged = void Function(bool available);
+
+final class PreviewImageRenderState {
+  const PreviewImageRenderState({
+    required this.blockStart,
+    required this.selectedImageSrc,
+    required this.selectedSourceId,
+  });
+
+  final int? blockStart;
+  final String? selectedImageSrc;
+  final String? selectedSourceId;
+
+  @override
+  bool operator ==(Object other) =>
+      other is PreviewImageRenderState &&
+      other.blockStart == blockStart &&
+      other.selectedImageSrc == selectedImageSrc &&
+      other.selectedSourceId == selectedSourceId;
+
+  @override
+  int get hashCode =>
+      Object.hash(blockStart, selectedImageSrc, selectedSourceId);
+}
 
 class BrokenImageReferenceLabel extends StatelessWidget {
   const BrokenImageReferenceLabel({super.key, required this.label});
@@ -40,10 +65,17 @@ class BrokenImageReferenceLabel extends StatelessWidget {
 }
 
 final class PreviewImageDragData {
-  const PreviewImageDragData({required this.sourceId, required this.src});
+  const PreviewImageDragData({
+    required this.noteId,
+    required this.sourceId,
+    required this.src,
+    required this.blockStart,
+  });
 
+  final String noteId;
   final String sourceId;
   final String src;
+  final int blockStart;
 }
 
 class PreviewImageBlock extends StatefulWidget {
@@ -52,13 +84,21 @@ class PreviewImageBlock extends StatefulWidget {
     required this.attachment,
     required this.src,
     required this.width,
+    required this.blockStart,
+    this.tapRegionGroupId,
     required this.editableControls,
     required this.selectedImageSrc,
+    this.selectedSourceId,
     required this.loadImageBytes,
     required this.failureLabel,
     this.onAvailabilityChanged,
     required this.onTap,
+    this.onTapDown,
+    this.onTapCancel,
     this.onSecondaryTapUp,
+    this.onMoveDragStarted,
+    this.onMoveDragUpdate,
+    this.onMoveDragEnded,
     required this.onWidthChanged,
     required this.onImageDropped,
   });
@@ -69,13 +109,21 @@ class PreviewImageBlock extends StatefulWidget {
   NoteAttachment get source => attachment;
   final String src;
   final double width;
+  final int? blockStart;
+  final Object? tapRegionGroupId;
   final bool editableControls;
   final String? selectedImageSrc;
+  final String? selectedSourceId;
   final Future<List<int>> Function() loadImageBytes;
   final String failureLabel;
   final PreviewImageAvailabilityChanged? onAvailabilityChanged;
   final VoidCallback onTap;
+  final VoidCallback? onTapDown;
+  final VoidCallback? onTapCancel;
   final GestureTapUpCallback? onSecondaryTapUp;
+  final VoidCallback? onMoveDragStarted;
+  final ValueChanged<DragUpdateDetails>? onMoveDragUpdate;
+  final VoidCallback? onMoveDragEnded;
   final ValueChanged<double> onWidthChanged;
   final void Function(
     PreviewImageDragData dragged,
@@ -106,6 +154,8 @@ class _PreviewImageBlockState extends State<PreviewImageBlock> {
   double get _effectiveWidth => _previewWidth ?? widget.width;
   bool get _selected =>
       widget.editableControls &&
+      (widget.selectedSourceId == null ||
+          widget.selectedSourceId == widget.attachment.id) &&
       widget.selectedImageSrc == normalizeImageSrc(widget.src);
 
   @override
@@ -231,7 +281,12 @@ class _PreviewImageBlockState extends State<PreviewImageBlock> {
     setState(() => _dropSide = null);
     widget.onImageDropped(
       details.data,
-      PreviewImageDragData(sourceId: widget.attachment.id, src: widget.src),
+      PreviewImageDragData(
+        noteId: widget.attachment.noteId,
+        sourceId: widget.attachment.id,
+        src: widget.src,
+        blockStart: widget.blockStart!,
+      ),
       side,
     );
   }
@@ -264,7 +319,7 @@ class _PreviewImageBlockState extends State<PreviewImageBlock> {
             );
           }
           final generation = _loadGeneration;
-          return SizedBox(
+          Widget content = SizedBox(
             width: displayWidth,
             child: Stack(
               clipBehavior: Clip.none,
@@ -272,23 +327,15 @@ class _PreviewImageBlockState extends State<PreviewImageBlock> {
                 DragTarget<PreviewImageDragData>(
                   onWillAcceptWithDetails: (details) =>
                       widget.editableControls &&
+                      widget.blockStart != null &&
+                      details.data.noteId == widget.attachment.noteId &&
+                      details.data.blockStart == widget.blockStart &&
                       details.data.sourceId != widget.attachment.id,
                   onMove: _handleDragMove,
                   onLeave: _handleDragLeave,
                   onAcceptWithDetails: _handleImageDrop,
                   builder: (context, candidateData, rejectedData) {
-                    final image = _buildImageBody(generation);
-                    return Draggable<PreviewImageDragData>(
-                      data: PreviewImageDragData(
-                        sourceId: widget.attachment.id,
-                        src: widget.src,
-                      ),
-                      maxSimultaneousDrags: widget.editableControls ? 1 : 0,
-                      dragAnchorStrategy: pointerDragAnchorStrategy,
-                      feedback: _PreviewImageDragFeedback(width: displayWidth),
-                      childWhenDragging: Opacity(opacity: 0.45, child: image),
-                      child: image,
-                    );
+                    return _buildImageBody(generation);
                   },
                 ),
                 if (widget.editableControls && (_selected || _dragging)) ...[
@@ -298,6 +345,31 @@ class _PreviewImageBlockState extends State<PreviewImageBlock> {
               ],
             ),
           );
+          final blockStart = widget.blockStart;
+          if (blockStart == null) {
+            return content;
+          }
+          content = _PreviewImageMoveHandlePortal(
+            key: ValueKey((
+              'preview-image-move-handle',
+              widget.attachment.noteId,
+              widget.attachment.id,
+            )),
+            data: PreviewImageDragData(
+              noteId: widget.attachment.noteId,
+              sourceId: widget.attachment.id,
+              src: widget.src,
+              blockStart: blockStart,
+            ),
+            enabled: _selected,
+            feedback: _PreviewImageDragFeedback(width: displayWidth),
+            tapRegionGroupId: widget.tapRegionGroupId,
+            onDragStarted: widget.onMoveDragStarted,
+            onDragUpdate: widget.onMoveDragUpdate,
+            onDragEnded: widget.onMoveDragEnded,
+            child: content,
+          );
+          return content;
         },
       ),
     );
@@ -392,6 +464,8 @@ class _PreviewImageBlockState extends State<PreviewImageBlock> {
       child: GestureDetector(
         key: Key('preview-image-tap-${widget.attachment.id}'),
         behavior: HitTestBehavior.opaque,
+        onTapDown: (_) => widget.onTapDown?.call(),
+        onTapCancel: widget.onTapCancel,
         onTap: widget.onTap,
         onSecondaryTapUp: widget.onSecondaryTapUp,
         child: DecoratedBox(
@@ -503,6 +577,269 @@ class _PreviewImageBlockState extends State<PreviewImageBlock> {
       widget.onAvailabilityChanged?.call(available);
     });
   }
+}
+
+class _PreviewImageMoveHandlePortal extends StatefulWidget {
+  const _PreviewImageMoveHandlePortal({
+    super.key,
+    required this.data,
+    required this.enabled,
+    required this.feedback,
+    this.tapRegionGroupId,
+    this.onDragStarted,
+    this.onDragUpdate,
+    this.onDragEnded,
+    required this.child,
+  });
+
+  final PreviewImageDragData data;
+  final bool enabled;
+  final Widget feedback;
+  final Object? tapRegionGroupId;
+  final VoidCallback? onDragStarted;
+  final ValueChanged<DragUpdateDetails>? onDragUpdate;
+  final VoidCallback? onDragEnded;
+  final Widget child;
+
+  @override
+  State<_PreviewImageMoveHandlePortal> createState() =>
+      _PreviewImageMoveHandlePortalState();
+}
+
+class _PreviewImageMoveHandlePortalState
+    extends State<_PreviewImageMoveHandlePortal> {
+  final _layerLink = LayerLink();
+  final _overlayController = OverlayPortalController(
+    debugLabel: 'preview-image-move-handle',
+  );
+  var _dragging = false;
+  var _showHint = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _overlayController.show();
+  }
+
+  @override
+  void didUpdateWidget(covariant _PreviewImageMoveHandlePortal oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!widget.enabled) {
+      _dragging = false;
+      _showHint = false;
+    }
+  }
+
+  void _handleDragStarted() {
+    setState(() {
+      _dragging = true;
+      _showHint = false;
+    });
+    widget.onDragStarted?.call();
+  }
+
+  void _handleDragEnded() {
+    if (mounted) {
+      setState(() => _dragging = false);
+    }
+    widget.onDragEnded?.call();
+  }
+
+  void _handleRejectedDragEnded(DraggableDetails details) {
+    if (!details.wasAccepted) {
+      _handleDragEnded();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return OverlayPortal(
+      controller: _overlayController,
+      overlayChildBuilder: (context) => !widget.enabled
+          ? const SizedBox.shrink()
+          : Positioned(
+              top: 0,
+              left: 0,
+              child: CompositedTransformFollower(
+                link: _layerLink,
+                showWhenUnlinked: false,
+                targetAnchor: Alignment.topLeft,
+                followerAnchor: Alignment.topRight,
+                offset: const Offset(-4, 0),
+                child: TapRegion(
+                  groupId: widget.tapRegionGroupId,
+                  child: Draggable<PreviewImageDragData>(
+                    key: ValueKey((
+                      'preview-image-draggable',
+                      widget.data.noteId,
+                      widget.data.blockStart,
+                      widget.data.sourceId,
+                    )),
+                    data: widget.data,
+                    dragAnchorStrategy: pointerDragAnchorStrategy,
+                    rootOverlay: true,
+                    maxSimultaneousDrags: widget.enabled ? 1 : 0,
+                    feedback: widget.feedback,
+                    onDragStarted: _handleDragStarted,
+                    onDragUpdate: widget.onDragUpdate,
+                    onDragCompleted: _handleDragEnded,
+                    onDragEnd: _handleRejectedDragEnded,
+                    childWhenDragging: _PreviewImageMoveHandle(
+                      sourceId: widget.data.sourceId,
+                      dragging: true,
+                      showHint: false,
+                    ),
+                    child: _PreviewImageMoveHandle(
+                      sourceId: widget.data.sourceId,
+                      dragging: false,
+                      showHint: _showHint,
+                      onEnter: (_) {
+                        if (!_dragging && !_showHint) {
+                          setState(() => _showHint = true);
+                        }
+                      },
+                      onExit: (_) {
+                        if (_showHint) {
+                          setState(() => _showHint = false);
+                        }
+                      },
+                    ),
+                  ),
+                ),
+              ),
+            ),
+      child: CompositedTransformTarget(
+        link: _layerLink,
+        child: Opacity(opacity: _dragging ? 0.45 : 1, child: widget.child),
+      ),
+    );
+  }
+}
+
+class _PreviewImageMoveHandle extends StatelessWidget {
+  const _PreviewImageMoveHandle({
+    required this.sourceId,
+    required this.dragging,
+    required this.showHint,
+    this.onEnter,
+    this.onExit,
+  });
+
+  final String sourceId;
+  final bool dragging;
+  final bool showHint;
+  final void Function(PointerEnterEvent)? onEnter;
+  final void Function(PointerExitEvent)? onExit;
+
+  @override
+  Widget build(BuildContext context) {
+    final accentColor = WorkspaceAppearanceScope.of(context).accentColor;
+    return Semantics(
+      label: '拖动图片',
+      child: MouseRegion(
+        cursor: dragging
+            ? SystemMouseCursors.grabbing
+            : SystemMouseCursors.grab,
+        onEnter: onEnter,
+        onExit: onExit,
+        child: SizedBox.square(
+          key: Key('image-move-handle-$sourceId'),
+          dimension: 28,
+          child: Stack(
+            clipBehavior: Clip.none,
+            fit: StackFit.expand,
+            children: [
+              DecoratedBox(
+                decoration: BoxDecoration(
+                  color: dragging
+                      ? accentColor.withValues(alpha: 0.14)
+                      : workspaceSurfaceColor.withValues(alpha: 0.98),
+                  border: Border.all(
+                    color: accentColor.withValues(alpha: dragging ? 1 : 0.65),
+                  ),
+                  borderRadius: BorderRadius.circular(7),
+                  boxShadow: const [
+                    BoxShadow(
+                      color: Color(0x1F000000),
+                      blurRadius: 6,
+                      offset: Offset(0, 2),
+                    ),
+                  ],
+                ),
+                child: CustomPaint(
+                  painter: _PreviewImageMoveGripPainter(color: accentColor),
+                ),
+              ),
+              if (showHint)
+                Positioned(
+                  top: 34,
+                  left: 0,
+                  child: IgnorePointer(
+                    child: DecoratedBox(
+                      decoration: BoxDecoration(
+                        color: const Color(0xEB252525),
+                        borderRadius: BorderRadius.circular(5),
+                        boxShadow: const [
+                          BoxShadow(
+                            color: Color(0x26000000),
+                            blurRadius: 5,
+                            offset: Offset(0, 2),
+                          ),
+                        ],
+                      ),
+                      child: const Padding(
+                        padding: EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 5,
+                        ),
+                        child: Text(
+                          '拖动图片',
+                          key: Key('image-move-hint'),
+                          maxLines: 1,
+                          style: TextStyle(
+                            color: CupertinoColors.white,
+                            fontSize: 12,
+                            fontWeight: FontWeight.w500,
+                            decoration: TextDecoration.none,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _PreviewImageMoveGripPainter extends CustomPainter {
+  const _PreviewImageMoveGripPainter({required this.color});
+
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()..color = color;
+    const spacing = 5.0;
+    final startX = (size.width - spacing) / 2;
+    final startY = (size.height - spacing * 2) / 2;
+    for (var row = 0; row < 3; row += 1) {
+      for (var column = 0; column < 2; column += 1) {
+        canvas.drawCircle(
+          Offset(startX + column * spacing, startY + row * spacing),
+          1.35,
+          paint,
+        );
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(_PreviewImageMoveGripPainter oldDelegate) =>
+      color != oldDelegate.color;
 }
 
 class _PreviewImageDragFeedback extends StatelessWidget {

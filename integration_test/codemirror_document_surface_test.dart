@@ -30,6 +30,7 @@ void main() {
             paneId: 'pane-1',
             hub: hub,
             mode: mode,
+            pageLayout: EditorPageLayout.empty,
             focused: true,
             enabled: true,
             appearance: WorkspaceAppearance.defaults,
@@ -117,6 +118,136 @@ void main() {
     },
   );
 
+  testWidgets('CodeMirror updates page overlays without mutating the document', (
+    tester,
+  ) async {
+    const markdown = '# Heading\n\nFirst page\n\nSecond page';
+    final session = _session(markdown);
+    final hub = EditorDocumentHub(session);
+    CodeMirrorDocumentSurfaceState? surface;
+    var pageLayout = EditorPageLayout(
+      boundaries: [
+        EditorPageBoundary(
+          pageIndex: 1,
+          sourceOffset: markdown.indexOf('Second'),
+        ),
+      ],
+      stale: false,
+    );
+
+    Widget app() => CupertinoApp(
+      home: SizedBox.expand(
+        child: CodeMirrorDocumentSurface(
+          key: const ValueKey('integration-page-layout'),
+          paneId: 'pane-page-layout',
+          hub: hub,
+          mode: CodeMirrorDocumentMode.editing,
+          pageLayout: pageLayout,
+          focused: true,
+          enabled: true,
+          appearance: WorkspaceAppearance.defaults,
+          loadAttachment: (_) async => null,
+          onImageAction: (_) async {},
+          onPastedImage: (_) async {},
+          onCommandRequest: (_) async {},
+          onOutlineChanged: (_) {},
+          onFocusPane: () {},
+          onStateChanged: (state, attached) {
+            surface = attached ? state : null;
+          },
+        ),
+      ),
+    );
+
+    await tester.pumpWidget(app());
+    await _pumpUntil(tester, () => surface?.debugReady == true);
+    await _pumpUntilAsync(
+      tester,
+      () async =>
+          jsonDecode(
+            await surface!.debugRunJavaScriptReturningResult(
+                  'JSON.stringify(window.synapseTest.getPageLayout())',
+                )
+                as String,
+          )['boundaries'].length ==
+          1,
+    );
+    await _pumpUntilAsync(
+      tester,
+      () async =>
+          (await surface!.debugRunJavaScriptReturningResult(
+                'document.querySelectorAll(".synapse-page-boundary").length',
+              )
+              as num) ==
+          1,
+    );
+
+    expect(
+      await surface!.debugRunJavaScriptReturningResult(
+        'document.querySelectorAll(".synapse-page-boundary").length',
+      ),
+      1,
+    );
+    expect(
+      await surface!.debugRunJavaScriptReturningResult(
+        'document.querySelector(".synapse-page-boundary-label").textContent',
+      ),
+      '第 1 页结束 / 第 2 页开始',
+    );
+    final selectionBefore = await surface!.debugRunJavaScriptReturningResult(
+      'JSON.stringify(window.synapseTest.getSelection())',
+    );
+
+    pageLayout = EditorPageLayout(
+      boundaries: pageLayout.boundaries,
+      stale: true,
+    );
+    await tester.pumpWidget(app());
+    await _pumpUntilAsync(
+      tester,
+      () async =>
+          await surface!.debugRunJavaScriptReturningResult(
+            'document.querySelector(".synapse-page-layout").classList.contains("synapse-page-layout-stale")',
+          ) ==
+          true,
+    );
+    expect(
+      await surface!.debugRunJavaScriptReturningResult(
+        'document.querySelector(".synapse-page-layout").classList.contains("synapse-page-layout-stale")',
+      ),
+      isTrue,
+    );
+
+    pageLayout = EditorPageLayout.empty;
+    await tester.pumpWidget(app());
+    await _pumpUntilAsync(
+      tester,
+      () async =>
+          (await surface!.debugRunJavaScriptReturningResult(
+                'document.querySelectorAll(".synapse-page-boundary").length',
+              )
+              as num) ==
+          0,
+    );
+    expect(
+      await surface!.debugRunJavaScriptReturningResult(
+        'document.querySelectorAll(".synapse-page-boundary").length',
+      ),
+      0,
+    );
+    expect(session.controller.text, markdown);
+    expect(
+      await surface!.debugRunJavaScriptReturningResult(
+        'JSON.stringify(window.synapseTest.getSelection())',
+      ),
+      selectionBefore,
+    );
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    hub.dispose();
+    session.dispose();
+  });
+
   testWidgets('CodeMirror renders table and columns without changing source', (
     tester,
   ) async {
@@ -141,6 +272,7 @@ void main() {
             paneId: 'pane-structural',
             hub: hub,
             mode: CodeMirrorDocumentMode.reading,
+            pageLayout: EditorPageLayout.empty,
             focused: true,
             enabled: true,
             appearance: WorkspaceAppearance.defaults,
@@ -207,6 +339,7 @@ void main() {
                 paneId: 'pane-unfocused-table',
                 hub: hub,
                 mode: CodeMirrorDocumentMode.editing,
+                pageLayout: EditorPageLayout.empty,
                 focused: focused,
                 enabled: true,
                 appearance: WorkspaceAppearance.defaults,
@@ -283,7 +416,7 @@ void main() {
     session.dispose();
   });
 
-  testWidgets('CodeMirror loads local attachments through chunked blobs', (
+  testWidgets('CodeMirror loads and structurally selects local images', (
     tester,
   ) async {
     const markdown =
@@ -308,7 +441,8 @@ void main() {
           child: CodeMirrorDocumentSurface(
             paneId: 'pane-image',
             hub: hub,
-            mode: CodeMirrorDocumentMode.reading,
+            mode: CodeMirrorDocumentMode.editing,
+            pageLayout: EditorPageLayout.empty,
             focused: true,
             enabled: true,
             appearance: WorkspaceAppearance.defaults,
@@ -345,6 +479,47 @@ void main() {
       ),
       isTrue,
     );
+    expect(
+      await surface!.debugRunJavaScriptReturningResult(
+        'document.querySelectorAll(".synapse-image-move-handle, .synapse-image-resize").length',
+      ),
+      0,
+    );
+    await surface!.debugRunJavaScriptReturningResult(
+      'document.querySelector(".synapse-image-block").click(); true',
+    );
+    await _pumpUntilAsync(
+      tester,
+      () async =>
+          await surface!.debugRunJavaScriptReturningResult(
+            'document.querySelectorAll(".synapse-image-selected").length',
+          ) ==
+          1,
+    );
+    expect(
+      await surface!.debugRunJavaScriptReturningResult(
+        'document.querySelectorAll(".synapse-image-move-handle").length',
+      ),
+      1,
+    );
+    expect(
+      await surface!.debugRunJavaScriptReturningResult(
+        'document.querySelectorAll(".synapse-image-resize").length',
+      ),
+      2,
+    );
+    expect(
+      await surface!.debugRunJavaScriptReturningResult(
+        'document.querySelectorAll(".synapse-image-source").length',
+      ),
+      0,
+    );
+    expect(
+      await surface!.debugRunJavaScriptReturningResult(
+        'window.synapseTest.getText()',
+      ),
+      markdown,
+    );
 
     await tester.pumpWidget(const SizedBox.shrink());
     hub.dispose();
@@ -377,6 +552,7 @@ void main() {
             paneId: 'pane-controls',
             hub: hub,
             mode: CodeMirrorDocumentMode.editing,
+            pageLayout: EditorPageLayout.empty,
             focused: true,
             enabled: true,
             appearance: WorkspaceAppearance.defaults,
@@ -746,6 +922,7 @@ void main() {
               paneId: 'pane-table-block-drag',
               hub: hub,
               mode: CodeMirrorDocumentMode.editing,
+              pageLayout: EditorPageLayout.empty,
               focused: true,
               enabled: true,
               appearance: WorkspaceAppearance.defaults,
@@ -904,6 +1081,7 @@ void main() {
             paneId: 'pane-performance',
             hub: hub,
             mode: CodeMirrorDocumentMode.editing,
+            pageLayout: EditorPageLayout.empty,
             focused: true,
             enabled: true,
             appearance: WorkspaceAppearance.defaults,
@@ -1024,6 +1202,7 @@ void main() {
               paneId: 'pane-context-menu',
               hub: hub,
               mode: CodeMirrorDocumentMode.editing,
+              pageLayout: EditorPageLayout.empty,
               focused: true,
               enabled: true,
               appearance: WorkspaceAppearance.defaults,
@@ -1217,6 +1396,7 @@ void main() {
             paneId: 'pane-table-clipboard',
             hub: hub,
             mode: CodeMirrorDocumentMode.editing,
+            pageLayout: EditorPageLayout.empty,
             focused: true,
             enabled: true,
             appearance: WorkspaceAppearance.defaults,
@@ -1373,6 +1553,7 @@ void main() {
             paneId: 'pane-search',
             hub: hub,
             mode: CodeMirrorDocumentMode.editing,
+            pageLayout: EditorPageLayout.empty,
             focused: true,
             enabled: true,
             appearance: WorkspaceAppearance.defaults,
@@ -1440,6 +1621,7 @@ void main() {
                   paneId: 'pane-first',
                   hub: hub,
                   mode: CodeMirrorDocumentMode.editing,
+                  pageLayout: EditorPageLayout.empty,
                   focused: true,
                   enabled: true,
                   appearance: WorkspaceAppearance.defaults,
@@ -1459,6 +1641,7 @@ void main() {
                   paneId: 'pane-second',
                   hub: hub,
                   mode: CodeMirrorDocumentMode.reading,
+                  pageLayout: EditorPageLayout.empty,
                   focused: false,
                   enabled: true,
                   appearance: WorkspaceAppearance.defaults,

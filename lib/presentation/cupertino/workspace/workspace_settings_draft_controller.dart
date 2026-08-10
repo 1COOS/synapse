@@ -23,6 +23,8 @@ final class _SettingsDraftController extends ChangeNotifier {
            initialSettings.preferences.semanticSearchEnabled,
        accentColor = initialSettings.preferences.accentColor,
        noteFontSize = initialSettings.preferences.noteFontSize,
+       pdfMarginPreset = initialSettings.preferences.pdfMarginPreset,
+       pdfFooterEnabled = initialSettings.preferences.pdfFooterEnabled,
        baseUrlController = TextEditingController(
          text: initialSettings.providerConfig.baseUrl,
        ),
@@ -67,6 +69,8 @@ final class _SettingsDraftController extends ChangeNotifier {
   bool semanticSearchEnabled;
   WorkspaceAccentColor accentColor;
   int noteFontSize;
+  NotePdfMarginPreset pdfMarginPreset;
+  bool pdfFooterEnabled;
   bool apiKeyVisible = false;
   bool apiKeyClearConfirmed = false;
   bool isSaving = false;
@@ -159,6 +163,8 @@ final class _SettingsDraftController extends ChangeNotifier {
         autoSaveDelayMillis: int.parse(autoSaveDelayController.text.trim()),
         accentColor: accentColor,
         noteFontSize: noteFontSize,
+        pdfMarginPreset: pdfMarginPreset,
+        pdfFooterEnabled: pdfFooterEnabled,
       ),
     );
   }
@@ -213,6 +219,22 @@ final class _SettingsDraftController extends ChangeNotifier {
       return;
     }
     noteFontSize = normalized;
+    _changed();
+  }
+
+  void setPdfMarginPreset(NotePdfMarginPreset value) {
+    if (!canEdit || pdfMarginPreset == value) {
+      return;
+    }
+    pdfMarginPreset = value;
+    _changed();
+  }
+
+  void setPdfFooterEnabled(bool value) {
+    if (!canEdit || pdfFooterEnabled == value) {
+      return;
+    }
+    pdfFooterEnabled = value;
     _changed();
   }
 
@@ -279,6 +301,8 @@ final class _SettingsDraftController extends ChangeNotifier {
     semanticSearchEnabled = baseline.semanticSearchEnabled;
     accentColor = baseline.accentColor;
     noteFontSize = baseline.noteFontSize;
+    pdfMarginPreset = baseline.pdfMarginPreset;
+    pdfFooterEnabled = baseline.pdfFooterEnabled;
     apiKeyClearConfirmed = false;
     operationMessage = '';
     operationFailed = false;
@@ -344,6 +368,8 @@ final class _SettingsDraftController extends ChangeNotifier {
     semanticSearchEnabled: semanticSearchEnabled,
     accentColor: accentColor,
     noteFontSize: noteFontSize,
+    pdfMarginPreset: pdfMarginPreset,
+    pdfFooterEnabled: pdfFooterEnabled,
   );
 
   String? _numberError(
@@ -387,6 +413,8 @@ final class _SettingsDraftSnapshot {
     required this.semanticSearchEnabled,
     required this.accentColor,
     required this.noteFontSize,
+    required this.pdfMarginPreset,
+    required this.pdfFooterEnabled,
   });
 
   final String baseUrl;
@@ -400,6 +428,8 @@ final class _SettingsDraftSnapshot {
   final bool semanticSearchEnabled;
   final WorkspaceAccentColor accentColor;
   final int noteFontSize;
+  final NotePdfMarginPreset pdfMarginPreset;
+  final bool pdfFooterEnabled;
 
   @override
   bool operator ==(Object other) =>
@@ -414,7 +444,9 @@ final class _SettingsDraftSnapshot {
       other.defaultNoteMode == defaultNoteMode &&
       other.semanticSearchEnabled == semanticSearchEnabled &&
       other.accentColor == accentColor &&
-      other.noteFontSize == noteFontSize;
+      other.noteFontSize == noteFontSize &&
+      other.pdfMarginPreset == pdfMarginPreset &&
+      other.pdfFooterEnabled == pdfFooterEnabled;
 
   @override
   int get hashCode => Object.hash(
@@ -429,5 +461,7 @@ final class _SettingsDraftSnapshot {
     semanticSearchEnabled,
     accentColor,
     noteFontSize,
+    pdfMarginPreset,
+    pdfFooterEnabled,
   );
 }
