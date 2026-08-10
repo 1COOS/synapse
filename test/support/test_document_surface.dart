@@ -49,6 +49,7 @@ final class TestDocumentSurfaceFactory implements DocumentSurfaceFactory {
     focused: focused,
     enabled: enabled,
     appearance: appearance,
+    onImageAction: onImageAction,
     onClipboardRequest: onClipboardRequest,
     onFocusPane: onFocusPane,
     onPointerInteraction: onPointerInteraction,
@@ -69,6 +70,7 @@ final class TestDocumentSurface extends StatefulWidget {
     required this.focused,
     required this.enabled,
     required this.appearance,
+    required this.onImageAction,
     required this.onClipboardRequest,
     required this.onFocusPane,
     required this.onPointerInteraction,
@@ -85,6 +87,7 @@ final class TestDocumentSurface extends StatefulWidget {
   final bool focused;
   final bool enabled;
   final WorkspaceAppearance appearance;
+  final EditorImageActionHandler onImageAction;
   final EditorClipboardRequestHandler onClipboardRequest;
   final VoidCallback onFocusPane;
   final VoidCallback onPointerInteraction;
@@ -269,6 +272,42 @@ final class TestDocumentSurfaceState extends State<TestDocumentSurface>
           ),
         ),
       );
+
+  Future<void> resizeImage({
+    required String src,
+    required int from,
+    required int to,
+    required int width,
+    int? revision,
+  }) => widget.onImageAction(
+    EditorImageAction(
+      action: 'resize',
+      src: src,
+      revision: revision ?? widget.hub.revision,
+      from: from,
+      to: to,
+      width: width,
+    ),
+  );
+
+  Future<EditorClipboardResult> copySelection({
+    String? text,
+    int? revision,
+    int? generation,
+  }) => widget.onClipboardRequest(
+    EditorClipboardRequest(
+      requestId: ++_clipboardRequestId,
+      action: 'copy',
+      target: 'document',
+      revision: revision ?? widget.hub.revision,
+      generation: generation ?? widget.hub.generation,
+      selection: EditorSelection(
+        anchor: controller.selection.baseOffset,
+        head: controller.selection.extentOffset,
+      ),
+      text: text,
+    ),
+  );
 
   void requestFind() {
     final selection = controller.selection;

@@ -188,6 +188,57 @@ void main() {}
     },
   );
 
+  test('projects column selections to portable Markdown for clipboard use', () {
+    const markdown =
+        'Before <!-- keep:inline -->\n'
+        '<!-- synapse:columns ratio="40:60" -->\n'
+        'Left **bold**\n'
+        '<!-- synapse:column -->\n'
+        'Right [link](https://example.com)\n'
+        '<!-- synapse:columns-end -->\n'
+        '<!-- keep:block -->\n'
+        'After';
+
+    expect(
+      markdownColumnsClipboardText(
+        markdown: markdown,
+        start: 0,
+        end: markdown.length,
+      ),
+      'Before <!-- keep:inline -->\n'
+      'Left **bold**\n'
+      'Right [link](https://example.com)\n'
+      '<!-- keep:block -->\n'
+      'After',
+    );
+
+    final start = markdown.indexOf('**bold**');
+    final end = markdown.indexOf('[link]') + '[link]'.length;
+    expect(
+      markdownColumnsClipboardText(markdown: markdown, start: start, end: end),
+      '**bold**\nRight [link]',
+    );
+  });
+
+  test('clipboard projection ignores incomplete and fenced column markers', () {
+    const markdown =
+        '<!-- synapse:column -->\r\n'
+        '```markdown\r\n'
+        '<!-- synapse:columns ratio="50:50" -->\r\n'
+        '<!-- synapse:column -->\r\n'
+        '<!-- synapse:columns-end -->\r\n'
+        '```\r\n';
+
+    expect(
+      markdownColumnsClipboardText(
+        markdown: markdown,
+        start: 0,
+        end: markdown.length,
+      ),
+      markdown,
+    );
+  });
+
   test('finds and replaces the block containing a text offset', () {
     const markdown = '# Title\n\nold paragraph\n\n- first\n- second\n';
     final blocks = splitMarkdownLiveBlocks(markdown);

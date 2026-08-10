@@ -435,6 +435,7 @@ void main() {
     final session = _session(markdown, attachments: [attachment]);
     final hub = EditorDocumentHub(session);
     CodeMirrorDocumentSurfaceState? surface;
+    final imageActions = <EditorImageAction>[];
 
     await tester.pumpWidget(
       CupertinoApp(
@@ -453,7 +454,7 @@ void main() {
                 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
               ),
             ),
-            onImageAction: (_) async {},
+            onImageAction: (action) async => imageActions.add(action),
             onPastedImage: (_) async {},
             onCommandRequest: (_) async {},
             onOutlineChanged: (_) {},
@@ -486,9 +487,60 @@ void main() {
       ),
       0,
     );
-    await surface!.debugRunJavaScriptReturningResult(
-      'document.querySelector(".synapse-image-block").click(); true',
-    );
+    await surface!.debugRunJavaScriptReturningResult('''
+      (() => {
+        const image = document.querySelector('.synapse-image-block');
+        const bounds = image.getBoundingClientRect();
+        const clientX = bounds.left + Math.max(1, bounds.width / 2);
+        const clientY = bounds.top + Math.max(1, bounds.height / 2);
+        image.dispatchEvent(new PointerEvent('pointerdown', {
+          bubbles: true,
+          cancelable: true,
+          pointerId: 71,
+          pointerType: 'mouse',
+          isPrimary: true,
+          button: 0,
+          buttons: 1,
+          clientX,
+          clientY,
+        }));
+        image.dispatchEvent(new MouseEvent('mousedown', {
+          bubbles: true,
+          cancelable: true,
+          button: 0,
+          buttons: 1,
+          clientX,
+          clientY,
+        }));
+        image.dispatchEvent(new PointerEvent('pointerup', {
+          bubbles: true,
+          cancelable: true,
+          pointerId: 71,
+          pointerType: 'mouse',
+          isPrimary: true,
+          button: 0,
+          buttons: 0,
+          clientX,
+          clientY,
+        }));
+        image.dispatchEvent(new MouseEvent('mouseup', {
+          bubbles: true,
+          cancelable: true,
+          button: 0,
+          buttons: 0,
+          clientX,
+          clientY,
+        }));
+        image.dispatchEvent(new MouseEvent('click', {
+          bubbles: true,
+          cancelable: true,
+          button: 0,
+          clientX,
+          clientY,
+        }));
+        return true;
+      })()
+    ''');
     await _pumpUntilAsync(
       tester,
       () async =>
@@ -515,6 +567,23 @@ void main() {
       ),
       0,
     );
+    await surface!.debugRunJavaScriptReturningResult(
+      'window.synapseTest.setSelection(${markdown.length}, ${markdown.length}); true',
+    );
+    await _pumpUntilAsync(
+      tester,
+      () async =>
+          await surface!.debugRunJavaScriptReturningResult(
+            'document.querySelectorAll(".synapse-image-selected").length',
+          ) ==
+          1,
+    );
+    expect(
+      await surface!.debugRunJavaScriptReturningResult(
+        'document.querySelectorAll(".synapse-image-resize-right").length',
+      ),
+      1,
+    );
     expect(
       await surface!.debugRunJavaScriptReturningResult(
         """document.querySelector('script[src^="editor.js?v="]')
@@ -527,6 +596,113 @@ void main() {
         'window.synapseTest.getText()',
       ),
       markdown,
+    );
+
+    final resizeState =
+        jsonDecode(
+              await surface!.debugRunJavaScriptReturningResult('''
+                (() => {
+                  const selected = document.querySelector(
+                    '.synapse-image-selected',
+                  );
+                  const image = selected.querySelector('img');
+                  const handle = selected.querySelector(
+                    '.synapse-image-resize-right',
+                  );
+                  const imageBounds = image.getBoundingClientRect();
+                  const handleBounds = handle.getBoundingClientRect();
+                  const startX = handleBounds.left + handleBounds.width / 2;
+                  const startY = handleBounds.top + handleBounds.height / 2;
+                  const hit = document.elementFromPoint(startX, startY);
+                  const pointerDown = new PointerEvent('pointerdown', {
+                    bubbles: true,
+                    cancelable: true,
+                    pointerId: 81,
+                    pointerType: 'mouse',
+                    isPrimary: true,
+                    button: 0,
+                    buttons: 1,
+                    clientX: startX,
+                    clientY: startY,
+                  });
+                  handle.dispatchEvent(pointerDown);
+                  const mouseDown = new MouseEvent('mousedown', {
+                    bubbles: true,
+                    cancelable: true,
+                    button: 0,
+                    buttons: 1,
+                    clientX: startX,
+                    clientY: startY,
+                  });
+                  handle.dispatchEvent(mouseDown);
+                  window.dispatchEvent(new MouseEvent('mousemove', {
+                    bubbles: true,
+                    cancelable: true,
+                    button: 0,
+                    buttons: 1,
+                    clientX: startX + 80,
+                    clientY: startY,
+                  }));
+                  const previewWidth = image.getBoundingClientRect().width;
+                  window.dispatchEvent(new MouseEvent('mouseup', {
+                    bubbles: true,
+                    cancelable: true,
+                    button: 0,
+                    buttons: 0,
+                    clientX: startX + 80,
+                    clientY: startY,
+                  }));
+                  const click = new MouseEvent('click', {
+                    bubbles: true,
+                    cancelable: true,
+                    button: 0,
+                    clientX: startX + 80,
+                    clientY: startY,
+                  });
+                  handle.dispatchEvent(click);
+                  return JSON.stringify({
+                    startWidth: imageBounds.width,
+                    previewWidth,
+                    handleWidth: handleBounds.width,
+                    handleHeight: handleBounds.height,
+                    handleHit: hit === handle || handle.contains(hit),
+                    pointerPrevented: pointerDown.defaultPrevented,
+                    mousePrevented: mouseDown.defaultPrevented,
+                    clickPrevented: click.defaultPrevented,
+                    selected: document.querySelector(
+                      '.synapse-image-selected',
+                    ) != null,
+                  });
+                })()
+              ''')
+                  as String,
+            )
+            as Map<String, Object?>;
+    expect(
+      (resizeState['previewWidth']! as num).toDouble(),
+      greaterThan((resizeState['startWidth']! as num).toDouble()),
+    );
+    expect(resizeState['handleHit'], isTrue);
+    expect(
+      (resizeState['handleWidth']! as num).toDouble(),
+      greaterThanOrEqualTo(18),
+    );
+    expect(
+      (resizeState['handleHeight']! as num).toDouble(),
+      greaterThanOrEqualTo(18),
+    );
+    expect(resizeState['pointerPrevented'], isTrue);
+    expect(resizeState['mousePrevented'], isTrue);
+    expect(resizeState['clickPrevented'], isTrue);
+    expect(resizeState['selected'], isTrue);
+    await _pumpUntil(tester, () => imageActions.isNotEmpty);
+    expect(imageActions.single.action, 'resize');
+    expect(imageActions.single.src, 'Note.assets/attachments/pixel.png');
+    expect(imageActions.single.from, 0);
+    expect(imageActions.single.to, markdown.indexOf('\n'));
+    expect(
+      imageActions.single.width,
+      (resizeState['previewWidth']! as num).round(),
     );
 
     final dragFeedback =
@@ -657,6 +833,7 @@ void main() {
     final session = _session(markdown);
     final hub = EditorDocumentHub(session);
     CodeMirrorDocumentSurfaceState? surface;
+    final clipboardRequests = <EditorClipboardRequest>[];
 
     await tester.pumpWidget(
       CupertinoApp(
@@ -673,6 +850,17 @@ void main() {
             onImageAction: (_) async {},
             onPastedImage: (_) async {},
             onCommandRequest: (_) async {},
+            onClipboardRequest: (request) async {
+              clipboardRequests.add(request);
+              return EditorClipboardResult(
+                requestId: request.requestId,
+                revision: request.revision,
+                generation: request.generation,
+                outcome: 'success',
+                hasText: true,
+                hasImage: false,
+              );
+            },
             onOutlineChanged: (_) {},
             onFocusPane: () {},
             onStateChanged: (state, attached) {
@@ -747,6 +935,37 @@ void main() {
       ),
       isTrue,
     );
+    await surface!.debugRunJavaScriptReturningResult('''
+      (() => {
+        const content = document.querySelectorAll(
+          '.synapse-column .cm-content',
+        )[1];
+        const bounds = content.getBoundingClientRect();
+        content.dispatchEvent(new MouseEvent('contextmenu', {
+          bubbles: true,
+          cancelable: true,
+          clientX: bounds.left + Math.max(1, bounds.width / 2),
+          clientY: bounds.top + Math.max(1, bounds.height / 2),
+        }));
+        const copy = Array.from(document.querySelectorAll(
+          '.synapse-context-menu > button',
+        )).find((button) => button.querySelector(
+          '.synapse-context-label',
+        )?.textContent === '复制');
+        copy.click();
+        return true;
+      })()
+    ''');
+    await _pumpUntil(
+      tester,
+      () => clipboardRequests.any((request) => request.action == 'copy'),
+    );
+    final columnCopy = clipboardRequests.lastWhere(
+      (request) => request.action == 'copy',
+    );
+    expect(columnCopy.text, contains('edited'));
+    expect(columnCopy.text, contains('Right'));
+    expect(columnCopy.text, isNot(contains('synapse:column')));
 
     await surface!.debugRunJavaScriptReturningResult('''
       (() => {

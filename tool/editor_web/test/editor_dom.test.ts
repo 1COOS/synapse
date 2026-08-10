@@ -125,6 +125,24 @@ function clipboardRequest(action: string): Record<string, unknown> {
   ).at(-1)!;
 }
 
+function copiedPlainText(target: HTMLElement): string | undefined {
+  const values = new Map<string, string>();
+  const event = new Event('copy', {
+    bubbles: true,
+    cancelable: true,
+  }) as ClipboardEvent;
+  Object.defineProperty(event, 'clipboardData', {
+    value: {
+      setData(type: string, value: string) {
+        values.set(type, value);
+      },
+    },
+  });
+  target.dispatchEvent(event);
+  expect(event.defaultPrevented).toBe(true);
+  return values.get('text/plain');
+}
+
 function resolveClipboard(
   request: Record<string, unknown>,
   {
@@ -842,6 +860,98 @@ describe('CodeMirror live preview', () => {
     expect(window.synapseTest!.getSelectedSource()).toContain('B\n<!-- synapse:column -->\nRight');
   });
 
+  it('copies the exact single-column Markdown through native and menu copy', async () => {
+    const markdown = [
+      '<!-- synapse:columns ratio="50:50" -->',
+      'Left **bold** tail',
+      '<!-- synapse:column -->',
+      'Right [link](https://example.com)',
+      '<!-- synapse:columns-end -->',
+      '',
+    ].join('\n');
+    window.synapseHost!.receive(initialize(markdown, 'editing'));
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+
+    const contents = document.querySelectorAll<HTMLElement>(
+      '.synapse-column .cm-content',
+    );
+    window.synapseTest!.selectColumn('left', 5, 13);
+    expect(copiedPlainText(contents[0])).toBe('**bold**');
+
+    window.synapseTest!.selectColumn('right', 33, 6);
+    expect(copiedPlainText(contents[1])).toBe('[link](https://example.com)');
+    window.synapseTest!.selectColumn('right', 0, 33);
+    contents[1].dispatchEvent(new MouseEvent('contextmenu', {
+      bubbles: true,
+      cancelable: true,
+      clientX: 20,
+      clientY: 20,
+    }));
+    menuButton(
+      document.querySelector<HTMLElement>('.synapse-context-menu')!,
+      '复制',
+    ).click();
+    expect(clipboardRequest('copy')).toMatchObject({
+      target: 'document',
+      text: 'Right [link](https://example.com)',
+    });
+    expect(window.synapseTest!.getText()).toBe(markdown);
+  });
+
+  it('removes only valid column markers from portable Markdown copies', async () => {
+    const markdown = [
+      'Before <!-- keep:inline -->',
+      '<!-- synapse:columns ratio="50:50" -->',
+      'Left AB',
+      '<!-- synapse:column -->',
+      'Right CD',
+      '<!-- synapse:columns-end -->',
+      '<!-- keep:block -->',
+      'After',
+    ].join('\n');
+    window.synapseHost!.receive(initialize(markdown, 'editing'));
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+    const contents = document.querySelectorAll<HTMLElement>(
+      '.synapse-column .cm-content',
+    );
+
+    window.synapseTest!.selectAcrossColumns('left', 6, 'right', 6);
+    expect(copiedPlainText(contents[1])).toBe('B\nRight ');
+
+    window.synapseTest!.selectAcrossColumns('right', 6, 'left', 6);
+    expect(copiedPlainText(contents[0])).toBe('B\nRight ');
+
+    window.synapseTest!.setSelection(0, markdown.length);
+    expect(copiedPlainText(contents[1])).toBe([
+      'Before <!-- keep:inline -->',
+      'Left AB',
+      'Right CD',
+      '<!-- keep:block -->',
+      'After',
+    ].join('\n'));
+    expect(window.synapseTest!.getText()).toBe(markdown);
+  });
+
+  it('copies a real child selection while columns are read-only', async () => {
+    const markdown = [
+      '<!-- synapse:columns ratio="50:50" -->',
+      'Left reading text',
+      '<!-- synapse:column -->',
+      'Right reading text',
+      '<!-- synapse:columns-end -->',
+      '',
+    ].join('\n');
+    window.synapseHost!.receive(initialize(markdown, 'reading'));
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+    const right = document.querySelectorAll<HTMLElement>(
+      '.synapse-column .cm-content',
+    )[1];
+
+    window.synapseTest!.selectColumn('right', 6, 13);
+    expect(copiedPlainText(right)).toBe('reading');
+    expect(window.synapseTest!.getText()).toBe(markdown);
+  });
+
   it('keeps both column editors focused while mapping start middle and end carets', async () => {
     const markdown = [
       '<!-- synapse:columns ratio="50:50" -->',
@@ -960,6 +1070,101 @@ describe('CodeMirror live preview', () => {
     expect(document.querySelector('.synapse-image-selected')).toBeNull();
   });
 
+  it('selects an outer image after focus moves from a column editor', async () => {
+    const src = 'Note.assets/attachments/outer.png';
+    const markdown = [
+      `<img src="${src}" width="320">`,
+      '',
+      '<!-- synapse:columns ratio="50:50" -->',
+      'Left',
+      '<!-- synapse:column -->',
+      'Right',
+      '<!-- synapse:columns-end -->',
+      '',
+    ].join('\n');
+    window.synapseHost!.receive(initialize(markdown, 'editing'));
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+
+    const attachmentRequest = messages.find(
+      (message) =>
+        message.type === 'attachmentRequest' && message.src === src,
+    )!;
+    window.synapseHost!.receive({
+      protocolVersion: 2,
+      type: 'attachmentChunk',
+      requestId: attachmentRequest.requestId as string,
+      chunkIndex: 0,
+      chunkCount: 1,
+      mimeType: 'image/png',
+      data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M/wHwAF/gL+Xw3vWQAAAABJRU5ErkJggg==',
+    });
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+
+    const columnContent = document.querySelector<HTMLElement>(
+      '.synapse-column .cm-content',
+    )!;
+    columnContent.focus();
+    window.synapseTest!.selectColumn('left', 2, 2);
+    expect(document.activeElement).toBe(columnContent);
+
+    const outer = document.querySelector<HTMLElement>(
+      '.cm-editor > .cm-scroller > .cm-content .synapse-image-block',
+    )!;
+    outer.dispatchEvent(pointerEvent('pointerdown', 160, 90));
+    outer.dispatchEvent(new MouseEvent('mousedown', {
+      bubbles: true,
+      cancelable: true,
+      button: 0,
+      buttons: 1,
+      clientX: 160,
+      clientY: 90,
+    }));
+    outer.dispatchEvent(pointerEvent('pointerup', 160, 90));
+    outer.dispatchEvent(new MouseEvent('mouseup', {
+      bubbles: true,
+      cancelable: true,
+      button: 0,
+      buttons: 0,
+      clientX: 160,
+      clientY: 90,
+    }));
+    outer.dispatchEvent(new MouseEvent('click', {
+      bubbles: true,
+      cancelable: true,
+      button: 0,
+      clientX: 160,
+      clientY: 90,
+    }));
+    await Promise.resolve();
+
+    expect(document.activeElement).toBe(
+      document.querySelector('.cm-editor > .cm-scroller > .cm-content'),
+    );
+    expect(
+      document.querySelector('.synapse-image-selected')?.getAttribute(
+        'data-src',
+      ),
+    ).toBe(src);
+    expect(document.querySelector('.synapse-image-resize-right')).not.toBeNull();
+
+    window.synapseTest!.setSelection(markdown.length, markdown.length);
+    await Promise.resolve();
+
+    expect(
+      document.querySelector('.synapse-image-selected')?.getAttribute(
+        'data-src',
+      ),
+    ).toBe(src);
+    expect(document.querySelector('.synapse-image-resize-right')).not.toBeNull();
+
+    document.querySelector<HTMLElement>(
+      '.cm-editor > .cm-scroller > .cm-content',
+    )!.dispatchEvent(pointerEvent('pointerdown', 20, 260));
+    await Promise.resolve();
+
+    expect(document.querySelector('.synapse-image-selected')).toBeNull();
+  });
+
   it('selects only the clicked inline image without exposing img source', async () => {
     const first = '<img src="Note.assets/attachments/first.png" width="320">';
     const second = '<img src="Note.assets/attachments/second.png" width="360">';
@@ -996,6 +1201,126 @@ describe('CodeMirror live preview', () => {
     expect(window.synapseTest!.getText()).toContain(first);
     expect(window.synapseTest!.getText()).not.toContain(second);
     expect(window.synapseTest!.getText()).toContain(`${first} between  after`);
+  });
+
+  it('resizes a selected image from the right handle with mouse events', async () => {
+    const src = 'Note.assets/attachments/resize.png';
+    const markdown = `<img src="${src}" width="320">\n\nAfter`;
+    window.synapseHost!.receive(initialize(markdown, 'editing'));
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+
+    const attachmentRequest = messages.find(
+      (message) =>
+        message.type === 'attachmentRequest' && message.src === src,
+    )!;
+    window.synapseHost!.receive({
+      protocolVersion: 2,
+      type: 'attachmentChunk',
+      requestId: attachmentRequest.requestId as string,
+      chunkIndex: 0,
+      chunkCount: 1,
+      mimeType: 'image/png',
+      data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M/wHwAF/gL+Xw3vWQAAAABJRU5ErkJggg==',
+    });
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+
+    const imageRoot = document.querySelector<HTMLElement>(
+      '.synapse-image-block',
+    )!;
+    imageRoot.dispatchEvent(pointerEvent('pointerdown', 160, 90));
+    imageRoot.dispatchEvent(new MouseEvent('mousedown', {
+      bubbles: true,
+      cancelable: true,
+      button: 0,
+      buttons: 1,
+      clientX: 160,
+      clientY: 90,
+    }));
+    imageRoot.dispatchEvent(pointerEvent('pointerup', 160, 90));
+    imageRoot.dispatchEvent(new MouseEvent('mouseup', {
+      bubbles: true,
+      cancelable: true,
+      button: 0,
+      buttons: 0,
+      clientX: 160,
+      clientY: 90,
+    }));
+    imageRoot.dispatchEvent(new MouseEvent('click', {
+      bubbles: true,
+      cancelable: true,
+      button: 0,
+      clientX: 160,
+      clientY: 90,
+    }));
+    await Promise.resolve();
+
+    const selected = document.querySelector<HTMLElement>(
+      '.synapse-image-selected',
+    )!;
+    const image = selected.querySelector<HTMLImageElement>('img')!;
+    image.getBoundingClientRect = () => rect(
+      0,
+      0,
+      Number.parseFloat(image.style.width) || 320,
+      180,
+    );
+    const handle = selected.querySelector<HTMLElement>(
+      '.synapse-image-resize-right',
+    )!;
+    const handleStyle = getComputedStyle(handle);
+    expect(handleStyle.width).toBe('18px');
+    expect(handleStyle.height).toBe('18px');
+    expect(handleStyle.zIndex).toBe('6');
+    const pointerDown = pointerEvent('pointerdown', 320, 180);
+    handle.dispatchEvent(pointerDown);
+    const down = new MouseEvent('mousedown', {
+      bubbles: true,
+      cancelable: true,
+      button: 0,
+      buttons: 1,
+      clientX: 320,
+      clientY: 180,
+    });
+    handle.dispatchEvent(down);
+    window.dispatchEvent(new MouseEvent('mousemove', {
+      bubbles: true,
+      cancelable: true,
+      button: 0,
+      buttons: 1,
+      clientX: 400,
+      clientY: 180,
+    }));
+    window.dispatchEvent(new MouseEvent('mouseup', {
+      bubbles: true,
+      cancelable: true,
+      button: 0,
+      buttons: 0,
+      clientX: 400,
+      clientY: 180,
+    }));
+    const click = new MouseEvent('click', {
+      bubbles: true,
+      cancelable: true,
+      button: 0,
+      clientX: 400,
+      clientY: 180,
+    });
+    handle.dispatchEvent(click);
+
+    expect(pointerDown.defaultPrevented).toBe(true);
+    expect(down.defaultPrevented).toBe(true);
+    expect(click.defaultPrevented).toBe(true);
+    expect(document.querySelector('.synapse-image-selected')).not.toBeNull();
+    expect(image.style.width).toBe('400px');
+    expect(messages.filter((message) => message.type === 'imageAction').at(-1))
+      .toMatchObject({
+        action: 'resize',
+        src,
+        from: 0,
+        to: markdown.indexOf('\n'),
+        width: 400,
+      });
+    expect(window.synapseTest!.getText()).toBe(markdown);
   });
 
   it('moves a selected image to the document end from its handle', async () => {
@@ -1490,7 +1815,13 @@ describe('CodeMirror live preview', () => {
     const end = updated.indexOf('<!-- synapse:columns-end -->');
     expect(image).toBeGreaterThan(separator);
     expect(image).toBeLessThan(end);
-    const movedImage = document.querySelectorAll('.synapse-column')[1]
+    const movedColumns = document.querySelector<HTMLElement>(
+      '.synapse-columns',
+    );
+    expect(movedColumns, updated).not.toBeNull();
+    const movedSides = movedColumns!.querySelectorAll('.synapse-column');
+    expect(movedSides, updated).toHaveLength(2);
+    const movedImage = movedSides[1]
       .querySelector<HTMLElement>('.synapse-image-block')!;
     expect(movedImage).not.toBeNull();
     movedImage.click();

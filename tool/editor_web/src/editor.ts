@@ -81,6 +81,7 @@ interface ModeValue {
 const hostChange = Annotation.define<boolean>();
 const setMode = StateEffect.define<ModeValue>();
 const setSearchVisibility = StateEffect.define<boolean>();
+const setParentImageSelection = StateEffect.define<number | null>();
 const modeField = StateField.define<ModeValue>({
   create: () => ({ mode: 'reading', editable: false, focused: false }),
   update(value, transaction) {
@@ -97,6 +98,19 @@ const searchVisibilityField = StateField.define<boolean>({
       if (effect.is(setSearchVisibility)) return effect.value;
     }
     return value;
+  },
+});
+const parentImageSelectionField = StateField.define<number | null>({
+  create: () => null,
+  update(value, transaction) {
+    let next = value;
+    if (next != null && transaction.docChanged) {
+      next = transaction.changes.mapPos(next, 1);
+    }
+    for (const effect of transaction.effects) {
+      if (effect.is(setParentImageSelection)) return effect.value;
+    }
+    return next;
   },
 });
 
@@ -227,6 +241,16 @@ function handleSurfacePointerInteraction(event: PointerEvent): void {
     event.target instanceof Element &&
     event.target.closest('.synapse-context-menu')
   ) return;
+  if (view && event.target instanceof Element) {
+    const parentImage = event.target.closest(
+      '.synapse-image-block, .synapse-inline-image',
+    );
+    const insideColumns = event.target.closest('.synapse-columns') != null;
+    if ((!parentImage || insideColumns) &&
+        view.state.field(parentImageSelectionField, false) != null) {
+      view.dispatch({ effects: setParentImageSelection.of(null) });
+    }
+  }
   post({ type: 'pointerInteraction' });
 }
 
@@ -238,8 +262,19 @@ function selectionOf(state: EditorState): EditorSelection {
 function safeDispatchSelection(position: number): void {
   if (!view) return;
   const resolved = Math.max(0, Math.min(position, view.state.doc.length));
-  view.dispatch({ selection: { anchor: resolved }, scrollIntoView: true });
   if (runtime?.mode === 'editing' && runtime.editable) view.focus();
+  view.dispatch({ selection: { anchor: resolved }, scrollIntoView: true });
+}
+
+function selectParentImage(position: number): void {
+  if (!view) return;
+  const resolved = Math.max(0, Math.min(position, view.state.doc.length));
+  if (runtime?.mode === 'editing' && runtime.editable) view.focus();
+  view.dispatch({
+    selection: { anchor: resolved },
+    effects: setParentImageSelection.of(resolved),
+    scrollIntoView: true,
+  });
 }
 
 const markdownRangeDragType = 'application/x-synapse-markdown-range';
@@ -461,6 +496,7 @@ function moveImageRange(
   view.dispatch({
     changes,
     selection: { anchor: selectedOffset },
+    effects: setParentImageSelection.of(null),
     annotations: Transaction.userEvent.of('move.image'),
   });
   requestAnimationFrame(() => focusImageAtMarkdownOffset(selectedOffset));
@@ -471,22 +507,39 @@ function imageRemovalBounds(
   range: DraggedMarkdownRange,
 ): { from: number; to: number } {
   if (!view) return { from: range.from, to: range.to };
+  const doc = view.state.doc;
   let from = range.from;
   let to = range.to;
+  const sourceBlockFrom = range.sourceBlockFrom;
+  const sourceBlockTo = range.sourceBlockTo;
   const standalone =
-    range.sourceBlockFrom === range.from &&
-    range.sourceBlockTo === range.to;
-  if (standalone && view.state.doc.sliceString(to, to + 1) === '\n') {
+    sourceBlockFrom != null &&
+    sourceBlockTo != null &&
+    sourceBlockFrom <= range.from &&
+    sourceBlockTo >= range.to &&
+    doc.sliceString(sourceBlockFrom, range.from).trim().length === 0 &&
+    doc.sliceString(range.to, sourceBlockTo).trim().length === 0;
+  if (standalone) {
+    from = sourceBlockFrom;
+    to = sourceBlockTo;
+  }
+  const prefix = doc.sliceString(Math.max(0, from - 4), from);
+  const hasBlankLineBefore =
+    prefix.endsWith('\n\n') || prefix.endsWith('\r\n\r\n');
+  if (standalone && doc.sliceString(to, to + 2) === '\r\n') {
+    to += 2;
+  } else if (standalone && doc.sliceString(to, to + 1) === '\n') {
     to += 1;
   } else if (
     standalone &&
+    hasBlankLineBefore &&
     from > 0 &&
-    view.state.doc.sliceString(from - 1, from) === '\n'
+    doc.sliceString(from - 1, from) === '\n'
   ) {
     from -= 1;
     if (
       from > 0 &&
-      view.state.doc.sliceString(from - 1, from) === '\r'
+      doc.sliceString(from - 1, from) === '\r'
     ) {
       from -= 1;
     }
@@ -806,6 +859,7 @@ class PageBreakWidget extends WidgetType {
 
 class ImageWidget extends WidgetType {
   private disposeAttachment?: () => void;
+  private cancelResize?: () => void;
 
   constructor(
     readonly from: number,
@@ -816,6 +870,7 @@ class ImageWidget extends WidgetType {
     readonly selected: boolean,
     readonly editable: boolean,
     readonly activate?: () => void,
+    readonly structuralRange?: { from: number; to: number },
   ) { super(); }
 
   eq(other: ImageWidget): boolean {
@@ -825,7 +880,9 @@ class ImageWidget extends WidgetType {
       other.width === this.width &&
       other.block === this.block &&
       other.selected === this.selected &&
-      other.editable === this.editable;
+      other.editable === this.editable &&
+      other.structuralRange?.from === this.structuralRange?.from &&
+      other.structuralRange?.to === this.structuralRange?.to;
   }
 
   toDOM(): HTMLElement {
@@ -835,8 +892,8 @@ class ImageWidget extends WidgetType {
     root.className = this.block ? 'synapse-image-block' : 'synapse-inline-image';
     if (this.selected) root.classList.add('synapse-image-selected');
     root.dataset.src = this.src;
-    root.dataset.markdownFrom = String(this.from);
-    root.dataset.markdownTo = String(this.to);
+    root.dataset.markdownFrom = String(this.structuralRange?.from ?? this.from);
+    root.dataset.markdownTo = String(this.structuralRange?.to ?? this.to);
     root.draggable = false;
     const appendControls = (image?: HTMLImageElement) => {
       if (!this.selected || !this.editable) return;
@@ -848,7 +905,11 @@ class ImageWidget extends WidgetType {
         this.beginMove(event, root, moveHandle);
       });
       moveHandle.addEventListener('mousedown', (event) => {
-        if (activeImageDragSession) return;
+        if (activeImageDragSession) {
+          event.preventDefault();
+          event.stopPropagation();
+          return;
+        }
         this.beginMove(event, root, moveHandle);
       });
       root.append(moveHandle);
@@ -862,6 +923,14 @@ class ImageWidget extends WidgetType {
           `${side === 'left' ? '左侧' : '右侧'}缩放图片`,
         );
         resizeHandle.addEventListener('pointerdown', (event) => {
+          this.beginResize(event, image, side);
+        });
+        resizeHandle.addEventListener('mousedown', (event) => {
+          if (this.cancelResize) {
+            event.preventDefault();
+            event.stopPropagation();
+            return;
+          }
           this.beginResize(event, image, side);
         });
         root.append(resizeHandle);
@@ -894,7 +963,11 @@ class ImageWidget extends WidgetType {
     root.addEventListener('click', (event) => {
       if ((event.target as HTMLElement).closest(
         '.synapse-image-resize, .synapse-image-move-handle',
-      )) return;
+      )) {
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
       event.preventDefault();
       if (this.activate) this.activate();
       else safeDispatchSelection(this.from);
@@ -915,6 +988,7 @@ class ImageWidget extends WidgetType {
   }
 
   destroy(): void {
+    this.cancelResize?.();
     this.disposeAttachment?.();
   }
 
@@ -948,25 +1022,41 @@ class ImageWidget extends WidgetType {
   }
 
   private beginResize(
-    event: PointerEvent,
+    event: PointerEvent | MouseEvent,
     image: HTMLImageElement,
     side: 'left' | 'right',
   ): void {
+    if (!view || !runtime?.editable || !runtime.focused || event.button !== 0) {
+      return;
+    }
     event.preventDefault();
     event.stopPropagation();
     const startX = event.clientX;
     const startWidth = image.getBoundingClientRect().width;
-    const move = (next: PointerEvent) => {
+    const startedWithPointer = 'pointerId' in event &&
+      Number.isInteger(event.pointerId);
+    const pointerId = startedWithPointer ? event.pointerId : undefined;
+    const belongsToResize = (next: PointerEvent | MouseEvent) =>
+      startedWithPointer
+        ? !('pointerId' in next) || next.pointerId === pointerId
+        : !('pointerId' in next);
+    const move = (next: PointerEvent | MouseEvent) => {
+      if (!belongsToResize(next)) return;
       const delta = next.clientX - startX;
       const width = side === 'left' ? startWidth - delta : startWidth + delta;
       image.style.width = `${Math.max(120, Math.min(1600, width))}px`;
+      next.preventDefault();
     };
     const cleanup = () => {
-      window.removeEventListener('pointermove', move);
-      window.removeEventListener('pointerup', end);
-      window.removeEventListener('pointercancel', cancel);
+      window.removeEventListener('pointermove', move, true);
+      window.removeEventListener('mousemove', move, true);
+      window.removeEventListener('pointerup', end, true);
+      window.removeEventListener('mouseup', end, true);
+      window.removeEventListener('pointercancel', cancel, true);
+      if (this.cancelResize === cancel) this.cancelResize = undefined;
     };
-    const end = () => {
+    const end = (next: PointerEvent | MouseEvent) => {
+      if (!belongsToResize(next)) return;
       cleanup();
       const width = Math.round(image.getBoundingClientRect().width);
       flushPendingTransaction();
@@ -981,9 +1071,13 @@ class ImageWidget extends WidgetType {
       });
     };
     const cancel = () => cleanup();
-    window.addEventListener('pointermove', move);
-    window.addEventListener('pointerup', end, { once: true });
-    window.addEventListener('pointercancel', cancel, { once: true });
+    this.cancelResize?.();
+    this.cancelResize = cancel;
+    window.addEventListener('pointermove', move, true);
+    window.addEventListener('mousemove', move, true);
+    window.addEventListener('pointerup', end, true);
+    window.addEventListener('mouseup', end, true);
+    window.addEventListener('pointercancel', cancel, true);
   }
 }
 
@@ -2144,25 +2238,26 @@ function buildColumnDecorations(state: EditorState, runtimeState: ColumnSideRunt
       continue;
     }
     if (block.kind === 'image') {
-      const src = markdownImageSource(block.text);
-      if (src) {
+      const image = imageRanges(block)[0];
+      if (image) {
         const selected =
-          imageFocused && imageSelectionMatches(selection, block.from);
+          imageFocused && imageSelectionMatches(selection, image.from);
         ranges.push(Decoration.replace({
           widget: new ImageWidget(
-            absolute.from,
-            absolute.to,
-            src,
-            markdownImageWidth(block.text),
+            runtimeState.baseOffset + image.from,
+            runtimeState.baseOffset + image.to,
+            image.src,
+            image.width,
             true,
             selected,
             runtimeState.editable,
             () => {
               runtimeState.editorView.focus();
               runtimeState.editorView.dispatch({
-                selection: { anchor: block.from },
+                selection: { anchor: image.from },
               });
             },
+            { from: absolute.from, to: absolute.to },
           ),
           block: true,
         }).range(block.from, block.to));
@@ -2491,7 +2586,12 @@ function createColumnEditor(
             showContextMenu(
               event.clientX,
               event.clientY,
-              documentContextTarget(editorView, local, runtimeState.baseOffset),
+              documentContextTarget(
+                editorView,
+                local,
+                runtimeState.baseOffset,
+                runtimeState,
+              ),
             );
             return true;
           },
@@ -2934,7 +3034,7 @@ function focusImageAtMarkdownOffset(offset: number): void {
       return;
     }
   }
-  view?.focus();
+  selectParentImage(offset);
 }
 
 class ColumnsWidget extends WidgetType {
@@ -3091,20 +3191,29 @@ class ColumnsWidget extends WidgetType {
     };
     window.addEventListener('pointermove', state.pointerMove);
     window.addEventListener('pointerup', state.pointerUp);
-    const copySourceSelection = (event: ClipboardEvent, cut: boolean) => {
+    const copyPortableSelection = (event: ClipboardEvent) => {
+      const payload = columnClipboardPayload(
+        state,
+        columnSideForTarget(state, event.target),
+      );
+      if (!payload) return;
+      event.preventDefault();
+      event.clipboardData?.setData('text/plain', payload.text);
+    };
+    const cutSourceSelection = (event: ClipboardEvent) => {
       const selection = state.parentView.state.selection.main;
       if (selection.empty || selection.to <= state.widget.from || selection.from >= state.widget.to) return;
       event.preventDefault();
       event.clipboardData?.setData('text/plain', state.parentView.state.doc.sliceString(selection.from, selection.to));
-      if (cut && state.widget.editable) {
+      if (state.widget.editable) {
         state.parentView.dispatch({
           changes: { from: selection.from, to: selection.to, insert: '' },
           selection: { anchor: selection.from },
         });
       }
     };
-    root.addEventListener('copy', (event) => copySourceSelection(event, false), true);
-    root.addEventListener('cut', (event) => copySourceSelection(event, true), true);
+    root.addEventListener('copy', copyPortableSelection, true);
+    root.addEventListener('cut', cutSourceSelection, true);
     return root;
   }
 
@@ -3259,22 +3368,29 @@ function selectedImageRange(
   baseOffset = 0,
 ): SelectedImageRange | undefined {
   const selection = selectionOf(state);
-  if (selection.anchor !== selection.head) return undefined;
+  const explicitParentSelection = state.field(
+    parentImageSelectionField,
+    false,
+  );
+  const selectedFrom = explicitParentSelection ?? (
+    selection.anchor === selection.head ? selection.anchor : undefined
+  );
+  if (selectedFrom == null) return undefined;
   for (const block of splitMarkdownBlocks(state.doc.toString())) {
     if (block.kind === 'image') {
-      const src = markdownImageSource(block.text);
-      if (src && imageSelectionMatches(selection, block.from)) {
+      const image = imageRanges(block)[0];
+      if (image && selectedFrom === image.from) {
         return {
-          from: baseOffset + block.from,
-          to: baseOffset + block.to,
-          src,
+          from: baseOffset + image.from,
+          to: baseOffset + image.to,
+          src: image.src,
           block: absoluteBlock(block, baseOffset),
         };
       }
       continue;
     }
     const image = imageRanges(block).find((candidate) =>
-      imageSelectionMatches(selection, candidate.from));
+      selectedFrom === candidate.from);
     if (image) {
       return {
         from: baseOffset + image.from,
@@ -3345,6 +3461,7 @@ function buildDecorations(state: EditorState): DecorationSet {
   const mode = modeValue.mode;
   const editable = mode === 'editing' && modeValue.editable;
   const selection = selectionOf(state);
+  const explicitImageFrom = state.field(parentImageSelectionField);
   const blocks = splitMarkdownBlocks(doc);
   const active = activeBlockForSelection(blocks, selection);
   const ranges: Array<ReturnType<typeof Decoration.replace>['range'] extends never ? never : any> = [];
@@ -3362,16 +3479,21 @@ function buildDecorations(state: EditorState): DecorationSet {
       continue;
     }
     if (block.kind === 'image') {
-      const src = markdownImageSource(block.text);
-      if (src) ranges.push(Decoration.replace({
+      const image = imageRanges(block)[0];
+      if (image) ranges.push(Decoration.replace({
         widget: new ImageWidget(
-          block.from,
-          block.to,
-          src,
-          markdownImageWidth(block.text),
+          image.from,
+          image.to,
+          image.src,
+          image.width,
           true,
-          imageSelectionMatches(selection, block.from),
+          explicitImageFrom === image.from || (
+            explicitImageFrom == null &&
+            imageSelectionMatches(selection, image.from)
+          ),
           editable,
+          () => selectParentImage(image.from),
+          { from: block.from, to: block.to },
         ),
         block: true,
       }).range(block.from, block.to));
@@ -3383,7 +3505,10 @@ function buildDecorations(state: EditorState): DecorationSet {
     }
     const images = imageRanges(block);
     const selectedImage = images.find((image) =>
-      imageSelectionMatches(selection, image.from));
+      explicitImageFrom === image.from || (
+        explicitImageFrom == null &&
+        imageSelectionMatches(selection, image.from)
+      ));
     if (!activeBlock || selectedImage != null) {
       const overlapsImage = (from: number, to: number) =>
         images.some((image) => from < image.to && to > image.from);
@@ -3402,6 +3527,7 @@ function buildDecorations(state: EditorState): DecorationSet {
             false,
             selectedImage?.from === image.from,
             editable,
+            () => selectParentImage(image.from),
           ),
         }).range(image.from, image.to));
       }
@@ -3420,7 +3546,8 @@ const livePreview = StateField.define<DecorationSet>({
     if (
       transaction.docChanged ||
       transaction.selection ||
-      transaction.effects.some((effect) => effect.is(setMode))
+      transaction.effects.some((effect) =>
+        effect.is(setMode) || effect.is(setParentImageSelection))
     ) {
       return buildDecorations(transaction.state);
     }
@@ -3546,9 +3673,10 @@ function editorTheme(theme: EditorTheme) {
     '.synapse-image-move-handle': { position: 'absolute', left: '-7px', top: '-7px', zIndex: '3', width: '18px', height: '18px', borderRadius: '4px', color: theme.muted, backgroundColor: theme.surface, boxShadow: `0 0 0 1px ${theme.line}`, cursor: 'grab', userSelect: 'none' },
     '.synapse-image-move-handle::before': { content: '"⠿"', display: 'block', fontSize: '13px', lineHeight: '18px', textAlign: 'center' },
     '.synapse-image-handle-dragging': { cursor: 'grabbing !important' },
-    '.synapse-image-resize': { position: 'absolute', bottom: '-5px', width: '10px', height: '10px', borderRadius: '50%', backgroundColor: theme.accent },
-    '.synapse-image-resize-left': { left: '-5px', cursor: 'nesw-resize' },
-    '.synapse-image-resize-right': { right: '-5px', cursor: 'nwse-resize' },
+    '.synapse-image-resize': { position: 'absolute', bottom: '-9px', zIndex: '6', width: '18px', height: '18px', borderRadius: '50%', backgroundColor: 'transparent', userSelect: 'none' },
+    '.synapse-image-resize::after': { content: '""', position: 'absolute', left: '4px', top: '4px', width: '10px', height: '10px', borderRadius: '50%', backgroundColor: theme.accent, boxShadow: `0 0 0 1px ${theme.surface}` },
+    '.synapse-image-resize-left': { left: '-9px', cursor: 'nesw-resize' },
+    '.synapse-image-resize-right': { right: '-9px', cursor: 'nwse-resize' },
     '.synapse-image-block-drop-indicator': { position: 'fixed', zIndex: '2147483645', height: '2px', borderRadius: '2px', backgroundColor: theme.accent, boxShadow: `0 0 0 1px ${theme.background}`, pointerEvents: 'none', userSelect: 'none' },
     '.synapse-image-drag-preview.synapse-image-drop-invalid': { borderColor: theme.contextMenu.danger, opacity: '.62' },
     '.synapse-image-drop-target.synapse-image-drop-invalid': { borderColor: theme.contextMenu.danger, backgroundColor: `${theme.contextMenu.danger}12` },
@@ -3708,6 +3836,7 @@ function imageKeyBindings(baseOffsetValue: number | (() => number) = 0) {
     editorView.dispatch({
       changes: { from, to, insert: '' },
       selection: { anchor: from },
+      effects: setParentImageSelection.of(null),
       annotations: Transaction.userEvent.of('delete.image'),
     });
     return true;
@@ -3737,6 +3866,7 @@ function imageKeyBindings(baseOffsetValue: number | (() => number) = 0) {
             ? { from: localTo, to: localTo, insert }
             : undefined,
           selection: { anchor },
+          effects: setParentImageSelection.of(null),
           annotations: Transaction.userEvent.of('input.image-enter'),
         });
         return true;
@@ -3785,6 +3915,7 @@ function imageKeyBindings(baseOffsetValue: number | (() => number) = 0) {
         if (!image) return false;
         editorView.dispatch({
           selection: { anchor: image.to - baseOffset() },
+          effects: setParentImageSelection.of(null),
         });
         return true;
       },
@@ -3862,6 +3993,7 @@ function extensions(command: InitializeCommand) {
     ]),
     modeField.init(() => ({ mode: command.mode, editable: command.editable, focused: command.focused })),
     searchVisibilityField,
+    parentImageSelectionField,
     editableCompartment.of([EditorView.editable.of(command.editable), EditorState.readOnly.of(!command.editable)]),
     themeCompartment.of(editorTheme(command.theme)),
     livePreview,
@@ -4044,6 +4176,7 @@ function replaceDocument(command: Extract<HostCommand, { type: 'replaceDocument'
   view.dispatch({
     changes: { from: 0, to: view.state.doc.length, insert: command.markdown },
     selection: command.selection ? { anchor: command.selection.anchor, head: command.selection.head } : { anchor: Math.min(view.state.selection.main.head, command.markdown.length) },
+    effects: setParentImageSelection.of(null),
     annotations: [
       hostChange.of(true),
       Transaction.addToHistory.of(command.addToHistory ?? false),
@@ -4138,6 +4271,9 @@ function receive(command: HostCommand): void {
           effects: [
             setMode.of({ mode: command.mode, editable: command.editable, focused: command.focused }),
             editableCompartment.reconfigure([EditorView.editable.of(command.editable), EditorState.readOnly.of(!command.editable)]),
+            ...(!command.editable || !command.focused || command.mode !== 'editing'
+              ? [setParentImageSelection.of(null)]
+              : []),
           ],
         });
         if (command.focused && command.editable) {
@@ -4238,6 +4374,7 @@ interface DocumentContextTarget {
   editorView: EditorView;
   baseOffset: number;
   selection: EditorSelection;
+  clipboardText: string;
 }
 
 interface ImageContextTarget {
@@ -4390,11 +4527,153 @@ function orderedSelection(selection: EditorSelection): { from: number; to: numbe
     : { from: selection.head, to: selection.anchor };
 }
 
+function columnMarkerRanges(markdown: string): Array<{ from: number; to: number }> {
+  const blocks = splitMarkdownBlocks(markdown);
+  const ranges: Array<{ from: number; to: number }> = [];
+  for (let index = 0; index < blocks.length; index += 1) {
+    const start = blocks[index];
+    if (start.kind !== 'columnsStart') continue;
+    let separator: MarkdownBlock | undefined;
+    let end: MarkdownBlock | undefined;
+    let depth = 1;
+    let nested = false;
+    for (let cursor = index + 1; cursor < blocks.length; cursor += 1) {
+      const candidate = blocks[cursor];
+      if (candidate.kind === 'columnsStart') {
+        nested = true;
+        depth += 1;
+        continue;
+      }
+      if (candidate.kind === 'columnsSeparator' && depth === 1) {
+        if (separator) nested = true;
+        else separator = candidate;
+        continue;
+      }
+      if (candidate.kind !== 'columnsEnd') continue;
+      depth -= 1;
+      if (depth === 0) {
+        end = candidate;
+        break;
+      }
+    }
+    if (!nested && separator && end) {
+      ranges.push(
+        { from: start.from, to: start.to },
+        { from: separator.from, to: separator.to },
+        { from: end.from, to: end.to },
+      );
+    }
+    if (end) index = blocks.indexOf(end);
+  }
+  return ranges;
+}
+
+function portableMarkdownText(
+  markdown: string,
+  selection: EditorSelection,
+): string {
+  const range = orderedSelection(selection);
+  if (range.from === range.to) return '';
+  const parts: string[] = [];
+  let cursor = range.from;
+  for (const marker of columnMarkerRanges(markdown)) {
+    if (marker.to <= cursor || marker.from >= range.to) continue;
+    if (cursor < marker.from) {
+      parts.push(markdown.slice(cursor, Math.min(marker.from, range.to)));
+    }
+    cursor = Math.max(cursor, Math.min(marker.to, range.to));
+    if (cursor >= range.to) break;
+  }
+  if (cursor < range.to) parts.push(markdown.slice(cursor, range.to));
+  return parts.join('');
+}
+
+function columnSideForTarget(
+  state: ColumnsDomState,
+  target: EventTarget | null,
+): ColumnSideRuntime | undefined {
+  if (!(target instanceof Node)) return undefined;
+  if (state.left.host.contains(target)) return state.left;
+  if (state.right.host.contains(target)) return state.right;
+  return undefined;
+}
+
+function parentSelectionDrivesColumnCopy(state: ColumnsDomState): boolean {
+  const selection = selectionOf(state.parentView.state);
+  const range = orderedSelection(selection);
+  if (range.from === range.to) return false;
+  if (range.from < state.widget.from || range.to > state.widget.to) return true;
+  const anchorSide = sideAtOffset(state, selection.anchor);
+  const headSide = sideAtOffset(state, selection.head);
+  if (anchorSide && headSide && anchorSide !== headSide) return true;
+  return !state.left.editorView.state.selection.main.empty &&
+    !state.right.editorView.state.selection.main.empty;
+}
+
+function columnClipboardPayload(
+  state: ColumnsDomState,
+  preferredSide?: ColumnSideRuntime,
+): { selection: EditorSelection; text: string } | undefined {
+  const parentSelection = selectionOf(state.parentView.state);
+  if (parentSelectionDrivesColumnCopy(state)) {
+    return {
+      selection: parentSelection,
+      text: portableMarkdownText(
+        state.parentView.state.doc.toString(),
+        parentSelection,
+      ),
+    };
+  }
+  const focusedSide = state.left.host.contains(document.activeElement)
+    ? state.left
+    : state.right.host.contains(document.activeElement)
+      ? state.right
+      : undefined;
+  const side = preferredSide ?? focusedSide;
+  const local = side?.editorView.state.selection.main;
+  if (side && local && !local.empty) {
+    return {
+      selection: {
+        anchor: side.baseOffset + local.anchor,
+        head: side.baseOffset + local.head,
+      },
+      text: side.editorView.state.doc.sliceString(local.from, local.to),
+    };
+  }
+  if (parentSelection.anchor === parentSelection.head) return undefined;
+  return {
+    selection: parentSelection,
+    text: portableMarkdownText(
+      state.parentView.state.doc.toString(),
+      parentSelection,
+    ),
+  };
+}
+
 function documentContextTarget(
   editorView: EditorView,
   localPosition: number,
   baseOffset = 0,
+  columnSide?: ColumnSideRuntime,
 ): DocumentContextTarget {
+  const columnsState = columnSide?.columnsState;
+  if (columnsState && parentSelectionDrivesColumnCopy(columnsState)) {
+    const payload = columnClipboardPayload(columnsState, columnSide);
+    if (payload) {
+      const range = orderedSelection(payload.selection);
+      const absolutePosition = baseOffset + localPosition;
+      if (absolutePosition >= range.from && absolutePosition <= range.to) {
+        rememberTextSelection(payload.selection);
+        return {
+          kind: 'document',
+          editorView,
+          baseOffset,
+          selection: payload.selection,
+          clipboardText: payload.text,
+        };
+      }
+    }
+  }
   const current = editorView.state.selection.main;
   const preserve = !current.empty &&
     localPosition >= current.from &&
@@ -4411,6 +4690,12 @@ function documentContextTarget(
       anchor: baseOffset + selection.anchor,
       head: baseOffset + selection.head,
     },
+    clipboardText: baseOffset === 0
+      ? portableMarkdownText(editorView.state.doc.toString(), {
+          anchor: selection.anchor,
+          head: selection.head,
+        })
+      : editorView.state.doc.sliceString(selection.from, selection.to),
   };
   rememberTextSelection(target.selection);
   return target;
@@ -4916,7 +5201,10 @@ function showContextMenu(
     const state = documentMenuState(target);
     const range = orderedSelection(target.selection);
     action('复制', async () => {
-      await requestClipboard('copy', 'document', { selection: target.selection });
+      await requestClipboard('copy', 'document', {
+        selection: target.selection,
+        text: target.clipboardText,
+      });
     }, { enabled: state.hasSelection });
     action('剪切', async () => {
       await requestClipboard('cut', 'document', { selection: target.selection });

@@ -9,6 +9,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path/path.dart' as p;
 
 import '../../../application/exports/note_pdf_export.dart';
+import '../../../domain/markdown/markdown_columns.dart';
 import '../../../domain/markdown/markdown_document.dart';
 import '../../../domain/vault/vault_resource.dart';
 import '../../../infrastructure/input/image_input_service.dart';
@@ -1991,12 +1992,23 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
     if (start == end) {
       return result('unavailable');
     }
-    final copiedText = hub.markdown.substring(start, end);
+    final selectedSource = hub.markdown.substring(start, end);
+    final copiedText = request.action == 'copy'
+        ? request.text ??
+              markdownColumnsClipboardText(
+                markdown: hub.markdown,
+                start: start,
+                end: end,
+              )
+        : selectedSource;
+    if (copiedText.isEmpty) {
+      return result('unavailable');
+    }
     await Clipboard.setData(ClipboardData(text: copiedText));
     if (request.revision != hub.revision ||
         request.generation != hub.generation ||
         _controller.resolvePaneEditorContext(context) == null ||
-        hub.markdown.substring(start, end) != copiedText) {
+        hub.markdown.substring(start, end) != selectedSource) {
       return result('stale');
     }
     if (request.action == 'cut') {

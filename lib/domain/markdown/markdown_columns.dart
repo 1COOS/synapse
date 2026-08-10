@@ -127,6 +127,47 @@ List<MarkdownColumnsSourceLayout> findMarkdownColumnsSourceLayouts(
   return layouts;
 }
 
+String markdownColumnsClipboardText({
+  required String markdown,
+  required int start,
+  required int end,
+}) {
+  final lower = (start < end ? start : end).clamp(0, markdown.length).toInt();
+  final upper = (start < end ? end : start).clamp(0, markdown.length).toInt();
+  if (lower == upper) {
+    return '';
+  }
+
+  final markerRanges = <({int start, int end})>[
+    for (final layout in findMarkdownColumnsSourceLayouts(markdown)) ...[
+      (start: layout.start, end: layout.startMarkerEnd),
+      (start: layout.separatorStart, end: layout.separatorEnd),
+      (start: layout.endMarkerStart, end: layout.end),
+    ],
+  ]..sort((left, right) => left.start.compareTo(right.start));
+
+  final buffer = StringBuffer();
+  var cursor = lower;
+  for (final marker in markerRanges) {
+    if (marker.end <= cursor || marker.start >= upper) {
+      continue;
+    }
+    if (cursor < marker.start) {
+      buffer.write(
+        markdown.substring(cursor, marker.start.clamp(cursor, upper)),
+      );
+    }
+    cursor = marker.end.clamp(cursor, upper);
+    if (cursor >= upper) {
+      break;
+    }
+  }
+  if (cursor < upper) {
+    buffer.write(markdown.substring(cursor, upper));
+  }
+  return buffer.toString();
+}
+
 String updateMarkdownColumnsRatio({
   required String markdown,
   required int layoutStart,
