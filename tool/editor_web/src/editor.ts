@@ -256,6 +256,41 @@ interface DraggedMarkdownRange {
   sourceBlockTo?: number;
 }
 
+interface ImageDropBoundary {
+  sourceOffset: number;
+  blockFrom: number;
+  blockTo: number;
+  placement: 'before' | 'after';
+  blockRect: DOMRect;
+  surfaceRect: DOMRect;
+  valid: boolean;
+}
+
+interface ImageDragSession {
+  range: DraggedMarkdownRange;
+  pointerId: number;
+  clientX: number;
+  clientY: number;
+  active: boolean;
+  sourceRoot: HTMLElement;
+  sourceHandle: HTMLElement;
+  preview?: HTMLElement;
+  targetOverlay?: HTMLElement;
+  indicator?: HTMLElement;
+  target?: ImageDropBoundary;
+  feedbackFrame: number;
+  feedbackTimer: number;
+  autoScrollFrame: number;
+  autoScrollTimer: number;
+  move: (event: PointerEvent | MouseEvent) => void;
+  finish: (event: PointerEvent | MouseEvent) => void;
+  cancel: () => void;
+  keydown: (event: KeyboardEvent) => void;
+  scroll: () => void;
+}
+
+let activeImageDragSession: ImageDragSession | undefined;
+
 function writeDraggedMarkdownRange(
   event: DragEvent,
   from: number,
@@ -387,14 +422,15 @@ function moveImageRange(
   if (!view || range.src == null || !draggedRangeStillValid(range)) return false;
   const length = view.state.doc.length;
   const target = Math.max(0, Math.min(targetOffset, length));
-  if (target >= range.from && target <= range.to) return false;
   const source = view.state.doc.sliceString(range.from, range.to).trim();
   if (source.length === 0) return false;
-  const insertionOffset = target > range.to
-    ? target - (range.to - range.from)
+  const { from: removalFrom, to: removalTo } = imageRemovalBounds(range);
+  if (target >= removalFrom && target <= removalTo) return false;
+  const insertionOffset = target > removalTo
+    ? target - (removalTo - removalFrom)
     : target;
-  const remaining = `${view.state.doc.sliceString(0, range.from)}`
-    + `${view.state.doc.sliceString(range.to)}`;
+  const remaining = `${view.state.doc.sliceString(0, removalFrom)}`
+    + `${view.state.doc.sliceString(removalTo)}`;
   const before = remaining.slice(0, insertionOffset);
   const after = remaining.slice(insertionOffset);
   const leading = before.length === 0
@@ -412,13 +448,13 @@ function moveImageRange(
         ? '\n'
         : '\n\n';
   const insertion = `${leading}${source}${trailing}`;
-  const changes = target < range.from
+  const changes = target < removalFrom
     ? [
         { from: target, to: target, insert: insertion },
-        { from: range.from, to: range.to, insert: '' },
+        { from: removalFrom, to: removalTo, insert: '' },
       ]
     : [
-        { from: range.from, to: range.to, insert: '' },
+        { from: removalFrom, to: removalTo, insert: '' },
         { from: target, to: target, insert: insertion },
       ];
   const selectedOffset = insertionOffset + leading.length;
@@ -429,6 +465,261 @@ function moveImageRange(
   });
   requestAnimationFrame(() => focusImageAtMarkdownOffset(selectedOffset));
   return true;
+}
+
+function imageRemovalBounds(
+  range: DraggedMarkdownRange,
+): { from: number; to: number } {
+  if (!view) return { from: range.from, to: range.to };
+  let from = range.from;
+  let to = range.to;
+  const standalone =
+    range.sourceBlockFrom === range.from &&
+    range.sourceBlockTo === range.to;
+  if (standalone && view.state.doc.sliceString(to, to + 1) === '\n') {
+    to += 1;
+  } else if (
+    standalone &&
+    from > 0 &&
+    view.state.doc.sliceString(from - 1, from) === '\n'
+  ) {
+    from -= 1;
+    if (
+      from > 0 &&
+      view.state.doc.sliceString(from - 1, from) === '\r'
+    ) {
+      from -= 1;
+    }
+  }
+  return { from, to };
+}
+
+function pointerBelongsToImageDrag(
+  session: ImageDragSession,
+  event: PointerEvent | MouseEvent,
+): boolean {
+  const pointerId = 'pointerId' in event ? event.pointerId : undefined;
+  return !Number.isInteger(pointerId) || pointerId === session.pointerId;
+}
+
+function createImageDragPreview(session: ImageDragSession): HTMLElement {
+  const preview = document.createElement('div');
+  preview.className = 'synapse-image-drag-preview';
+  preview.setAttribute('aria-hidden', 'true');
+  const sourceImage = session.sourceRoot.querySelector<HTMLImageElement>('img');
+  if (sourceImage?.src) {
+    const image = document.createElement('img');
+    image.src = sourceImage.src;
+    image.alt = sourceImage.alt;
+    image.draggable = false;
+    preview.append(image);
+  } else {
+    const fallback = document.createElement('span');
+    fallback.className = 'synapse-image-drag-preview-fallback';
+    fallback.textContent = '图片';
+    preview.append(fallback);
+  }
+  return preview;
+}
+
+function clearImageDragTarget(session: ImageDragSession): void {
+  session.target = undefined;
+  session.targetOverlay?.remove();
+  session.targetOverlay = undefined;
+  session.indicator?.remove();
+  session.indicator = undefined;
+  session.preview?.classList.add('synapse-image-drop-invalid');
+}
+
+function renderImageDragFeedback(session: ImageDragSession): void {
+  if (activeImageDragSession !== session || !session.active || !view) return;
+  if (!session.preview) {
+    session.preview = createImageDragPreview(session);
+    view.dom.append(session.preview);
+  }
+  session.preview.style.transform =
+    `translate3d(${session.clientX + 14}px, ${session.clientY + 14}px, 0)`;
+  const target = imageDropBoundaryAtCoords(
+    session.range,
+    session.clientX,
+    session.clientY,
+  );
+  if (!target) {
+    clearImageDragTarget(session);
+    return;
+  }
+  session.target = target;
+  session.preview.classList.toggle('synapse-image-drop-invalid', !target.valid);
+  const overlay = session.targetOverlay ?? document.createElement('span');
+  overlay.className = 'synapse-image-drop-target';
+  overlay.classList.toggle('synapse-image-drop-invalid', !target.valid);
+  overlay.dataset.placement = target.placement;
+  overlay.style.left = `${target.blockRect.left}px`;
+  overlay.style.top = `${target.blockRect.top}px`;
+  overlay.style.width = `${Math.max(1, target.blockRect.width)}px`;
+  overlay.style.height = `${Math.max(2, target.blockRect.height)}px`;
+  if (!overlay.isConnected) view.dom.append(overlay);
+  session.targetOverlay = overlay;
+  const indicator = session.indicator ?? document.createElement('span');
+  indicator.className = 'synapse-image-block-drop-indicator';
+  indicator.classList.toggle('synapse-image-drop-invalid', !target.valid);
+  indicator.dataset.placement = target.placement;
+  indicator.style.left = `${target.surfaceRect.left}px`;
+  indicator.style.top = `${target.placement === 'before'
+    ? target.blockRect.top
+    : target.blockRect.bottom}px`;
+  indicator.style.width = `${Math.max(1, target.surfaceRect.width)}px`;
+  if (!indicator.isConnected) view.dom.append(indicator);
+  session.indicator = indicator;
+}
+
+function scheduleImageDragFeedback(session: ImageDragSession): void {
+  if (session.feedbackFrame || session.feedbackTimer) return;
+  const run = () => {
+    if (session.feedbackFrame) cancelAnimationFrame(session.feedbackFrame);
+    if (session.feedbackTimer) window.clearTimeout(session.feedbackTimer);
+    session.feedbackFrame = 0;
+    session.feedbackTimer = 0;
+    renderImageDragFeedback(session);
+  };
+  session.feedbackFrame = requestAnimationFrame(run);
+  session.feedbackTimer = window.setTimeout(run, 16);
+}
+
+function scheduleImageDragAutoScroll(session: ImageDragSession): void {
+  if (session.autoScrollFrame || session.autoScrollTimer) return;
+  const tick = () => {
+    if (session.autoScrollFrame) cancelAnimationFrame(session.autoScrollFrame);
+    if (session.autoScrollTimer) window.clearTimeout(session.autoScrollTimer);
+    session.autoScrollFrame = 0;
+    session.autoScrollTimer = 0;
+    if (activeImageDragSession !== session || !session.active || !view) return;
+    const bounds = view.scrollDOM.getBoundingClientRect();
+    let changed = false;
+    if (session.clientY < bounds.top + 32) {
+      const previous = view.scrollDOM.scrollTop;
+      view.scrollDOM.scrollTop -= 14;
+      changed = view.scrollDOM.scrollTop !== previous;
+    } else if (session.clientY > bounds.bottom - 32) {
+      const previous = view.scrollDOM.scrollTop;
+      view.scrollDOM.scrollTop += 14;
+      changed = view.scrollDOM.scrollTop !== previous;
+    }
+    if (!changed) return;
+    renderImageDragFeedback(session);
+    scheduleImageDragAutoScroll(session);
+  };
+  session.autoScrollFrame = requestAnimationFrame(tick);
+  session.autoScrollTimer = window.setTimeout(tick, 16);
+}
+
+function activateImageDrag(session: ImageDragSession): void {
+  if (session.active || !view) return;
+  session.active = true;
+  session.sourceRoot.classList.add('synapse-image-dragging');
+  session.sourceHandle.classList.add('synapse-image-handle-dragging');
+  view.dom.classList.add('synapse-image-drag-active');
+  renderImageDragFeedback(session);
+}
+
+function cleanupImageDrag(session: ImageDragSession): void {
+  if (session.feedbackFrame) cancelAnimationFrame(session.feedbackFrame);
+  if (session.feedbackTimer) window.clearTimeout(session.feedbackTimer);
+  if (session.autoScrollFrame) cancelAnimationFrame(session.autoScrollFrame);
+  if (session.autoScrollTimer) window.clearTimeout(session.autoScrollTimer);
+  session.feedbackFrame = 0;
+  session.feedbackTimer = 0;
+  session.autoScrollFrame = 0;
+  session.autoScrollTimer = 0;
+  window.removeEventListener('pointermove', session.move, true);
+  window.removeEventListener('mousemove', session.move, true);
+  window.removeEventListener('pointerup', session.finish, true);
+  window.removeEventListener('mouseup', session.finish, true);
+  window.removeEventListener('pointercancel', session.cancel, true);
+  window.removeEventListener('keydown', session.keydown, true);
+  view?.scrollDOM.removeEventListener('scroll', session.scroll);
+  session.sourceRoot.classList.remove('synapse-image-dragging');
+  session.sourceHandle.classList.remove('synapse-image-handle-dragging');
+  view?.dom.classList.remove('synapse-image-drag-active');
+  session.preview?.remove();
+  session.targetOverlay?.remove();
+  session.indicator?.remove();
+  session.preview = undefined;
+  session.targetOverlay = undefined;
+  session.indicator = undefined;
+  session.target = undefined;
+  if (activeImageDragSession === session) activeImageDragSession = undefined;
+}
+
+function cancelActiveImageDrag(): void {
+  const session = activeImageDragSession;
+  if (session) cleanupImageDrag(session);
+}
+
+function beginImageDrag(
+  event: PointerEvent | MouseEvent,
+  range: DraggedMarkdownRange,
+  sourceRoot: HTMLElement,
+  sourceHandle: HTMLElement,
+): void {
+  if (!view || !runtime?.editable || !runtime.focused || event.button !== 0) {
+    return;
+  }
+  event.preventDefault();
+  event.stopPropagation();
+  cancelActiveImageDrag();
+  const eventPointerId = 'pointerId' in event ? event.pointerId : undefined;
+  const pointerId = Number.isInteger(eventPointerId) ? eventPointerId! : 1;
+  const session = {} as ImageDragSession;
+  session.range = range;
+  session.pointerId = pointerId;
+  session.clientX = event.clientX;
+  session.clientY = event.clientY;
+  session.active = false;
+  session.sourceRoot = sourceRoot;
+  session.sourceHandle = sourceHandle;
+  session.feedbackFrame = 0;
+  session.feedbackTimer = 0;
+  session.autoScrollFrame = 0;
+  session.autoScrollTimer = 0;
+  session.move = (next) => {
+    if (!pointerBelongsToImageDrag(session, next)) return;
+    session.clientX = next.clientX;
+    session.clientY = next.clientY;
+    const alreadyActive = session.active;
+    activateImageDrag(session);
+    next.preventDefault();
+    if (alreadyActive) renderImageDragFeedback(session);
+    scheduleImageDragAutoScroll(session);
+  };
+  session.finish = (next) => {
+    if (!pointerBelongsToImageDrag(session, next)) return;
+    session.clientX = next.clientX;
+    session.clientY = next.clientY;
+    if (session.active) renderImageDragFeedback(session);
+    const shouldMove = session.active && session.target?.valid === true;
+    const targetOffset = session.target?.sourceOffset;
+    cleanupImageDrag(session);
+    if (shouldMove && targetOffset != null) moveImageRange(range, targetOffset);
+  };
+  session.cancel = () => cleanupImageDrag(session);
+  session.keydown = (keyEvent) => {
+    if (keyEvent.key !== 'Escape') return;
+    keyEvent.preventDefault();
+    cleanupImageDrag(session);
+  };
+  session.scroll = () => {
+    if (session.active) scheduleImageDragFeedback(session);
+  };
+  activeImageDragSession = session;
+  window.addEventListener('pointermove', session.move, true);
+  window.addEventListener('mousemove', session.move, true);
+  window.addEventListener('pointerup', session.finish, true);
+  window.addEventListener('mouseup', session.finish, true);
+  window.addEventListener('pointercancel', session.cancel, true);
+  window.addEventListener('keydown', session.keydown, true);
+  view.scrollDOM.addEventListener('scroll', session.scroll, { passive: true });
+  activateImageDrag(session);
 }
 
 function requestAttachment(src: string, listener: (url?: string) => void): () => void {
@@ -488,13 +779,17 @@ function evictAttachmentCache(): void {
 }
 
 class PageBreakWidget extends WidgetType {
-  constructor(readonly from: number) { super(); }
+  constructor(readonly from: number, readonly to: number) { super(); }
 
-  eq(other: PageBreakWidget): boolean { return other.from === this.from; }
+  eq(other: PageBreakWidget): boolean {
+    return other.from === this.from && other.to === this.to;
+  }
 
   toDOM(): HTMLElement {
     const root = document.createElement('div');
     root.className = 'synapse-page-break';
+    root.dataset.markdownFrom = String(this.from);
+    root.dataset.markdownTo = String(this.to);
     const line = document.createElement('span');
     const label = document.createElement('span');
     label.textContent = '分页符';
@@ -511,7 +806,6 @@ class PageBreakWidget extends WidgetType {
 
 class ImageWidget extends WidgetType {
   private disposeAttachment?: () => void;
-  private cancelDrag?: () => void;
 
   constructor(
     readonly from: number,
@@ -541,6 +835,8 @@ class ImageWidget extends WidgetType {
     root.className = this.block ? 'synapse-image-block' : 'synapse-inline-image';
     if (this.selected) root.classList.add('synapse-image-selected');
     root.dataset.src = this.src;
+    root.dataset.markdownFrom = String(this.from);
+    root.dataset.markdownTo = String(this.to);
     root.draggable = false;
     const appendControls = (image?: HTMLImageElement) => {
       if (!this.selected || !this.editable) return;
@@ -549,6 +845,10 @@ class ImageWidget extends WidgetType {
       moveHandle.title = '拖动图片';
       moveHandle.setAttribute('aria-label', '拖动图片');
       moveHandle.addEventListener('pointerdown', (event) => {
+        this.beginMove(event, root, moveHandle);
+      });
+      moveHandle.addEventListener('mousedown', (event) => {
+        if (activeImageDragSession) return;
         this.beginMove(event, root, moveHandle);
       });
       root.append(moveHandle);
@@ -615,14 +915,13 @@ class ImageWidget extends WidgetType {
   }
 
   destroy(): void {
-    this.cancelDrag?.();
     this.disposeAttachment?.();
   }
 
   ignoreEvent(): boolean { return true; }
 
   private beginMove(
-    event: PointerEvent,
+    event: PointerEvent | MouseEvent,
     root: HTMLElement,
     handle: HTMLElement,
   ): void {
@@ -645,105 +944,7 @@ class ImageWidget extends WidgetType {
       sourceBlockFrom: sourceBlock.from,
       sourceBlockTo: sourceBlock.to,
     };
-    const pointerId = Number.isInteger(event.pointerId) ? event.pointerId : 1;
-    const startX = event.clientX;
-    const startY = event.clientY;
-    let clientX = startX;
-    let clientY = startY;
-    let active = false;
-    let targetOffset: number | undefined;
-    let autoScrollFrame = 0;
-    let indicator: HTMLElement | undefined;
-    const updateTarget = () => {
-      targetOffset = markdownBlockBoundaryAtCoords(clientX, clientY);
-      if (targetOffset == null) return;
-      const coordinates = coordsAtMarkdownOffset(targetOffset);
-      indicator ??= document.createElement('span');
-      indicator.className = 'synapse-image-block-drop-indicator';
-      const editorBounds = view!.dom.getBoundingClientRect();
-      indicator.style.left = `${editorBounds.left}px`;
-      indicator.style.top = `${coordinates?.top ?? clientY}px`;
-      indicator.style.width = `${editorBounds.width}px`;
-      if (!indicator.isConnected) document.body.append(indicator);
-    };
-    const scheduleAutoScroll = () => {
-      if (autoScrollFrame) return;
-      const tick = () => {
-        autoScrollFrame = 0;
-        if (!active || !view) return;
-        const bounds = view.scrollDOM.getBoundingClientRect();
-        let changed = false;
-        if (clientY < bounds.top + 32) {
-          view.scrollDOM.scrollTop -= 14;
-          changed = true;
-        } else if (clientY > bounds.bottom - 32) {
-          view.scrollDOM.scrollTop += 14;
-          changed = true;
-        }
-        if (!changed) return;
-        updateTarget();
-        autoScrollFrame = requestAnimationFrame(tick);
-      };
-      autoScrollFrame = requestAnimationFrame(tick);
-    };
-    const cleanup = () => {
-      if (autoScrollFrame) cancelAnimationFrame(autoScrollFrame);
-      autoScrollFrame = 0;
-      window.removeEventListener('pointermove', move);
-      window.removeEventListener('pointerup', finish);
-      window.removeEventListener('pointercancel', cancel);
-      window.removeEventListener('keydown', keydown, true);
-      root.classList.remove('synapse-image-dragging');
-      handle.classList.remove('synapse-image-handle-dragging');
-      indicator?.remove();
-      indicator = undefined;
-      try {
-        if (handle.hasPointerCapture?.(pointerId)) {
-          handle.releasePointerCapture(pointerId);
-        }
-      } catch (_) {
-        // Global pointer listeners remain the WebKit fallback.
-      }
-      this.cancelDrag = undefined;
-    };
-    const move = (next: PointerEvent) => {
-      clientX = next.clientX;
-      clientY = next.clientY;
-      if (!active && Math.hypot(clientX - startX, clientY - startY) < 4) {
-        return;
-      }
-      if (!active) {
-        active = true;
-        root.classList.add('synapse-image-dragging');
-        handle.classList.add('synapse-image-handle-dragging');
-      }
-      next.preventDefault();
-      updateTarget();
-      scheduleAutoScroll();
-    };
-    const finish = () => {
-      const shouldMove = active;
-      const target = targetOffset;
-      cleanup();
-      if (shouldMove && target != null) moveImageRange(range, target);
-    };
-    const cancel = () => cleanup();
-    const keydown = (keyEvent: KeyboardEvent) => {
-      if (keyEvent.key !== 'Escape') return;
-      keyEvent.preventDefault();
-      cancel();
-    };
-    this.cancelDrag?.();
-    this.cancelDrag = cancel;
-    window.addEventListener('pointermove', move);
-    window.addEventListener('pointerup', finish, { once: true });
-    window.addEventListener('pointercancel', cancel, { once: true });
-    window.addEventListener('keydown', keydown, true);
-    try {
-      handle.setPointerCapture?.(pointerId);
-    } catch (_) {
-      // Global pointer listeners remain the WebKit fallback.
-    }
+    beginImageDrag(event, range, root, handle);
   }
 
   private beginResize(
@@ -1794,6 +1995,8 @@ class TableWidget extends WidgetType {
   toDOM(): HTMLElement {
     const frame = document.createElement('div');
     frame.className = 'synapse-table-frame';
+    frame.dataset.markdownFrom = String(this.block.from);
+    frame.dataset.markdownTo = String(this.block.to);
     frame.contentEditable = 'false';
     const model = parseTableModel(this.block.text);
     if (!model) {
@@ -1834,6 +2037,8 @@ class TableWidget extends WidgetType {
     ) return false;
     const selfCommit = state.committingMarkdown === this.block.text;
     state.widget = this;
+    dom.dataset.markdownFrom = String(this.block.from);
+    dom.dataset.markdownTo = String(this.block.to);
     state.model = cloneTableModel(next);
     if (next.width == null) state.table.style.removeProperty('width');
     else state.table.style.width = `${next.width}px`;
@@ -1935,7 +2140,7 @@ function buildColumnDecorations(state: EditorState, runtimeState: ColumnSideRunt
       active?.from === block.from;
     const absolute = absoluteBlock(block, runtimeState.baseOffset);
     if (block.kind === 'pageBreak' && !activeBlock) {
-      ranges.push(Decoration.replace({ widget: new PageBreakWidget(absolute.from), block: true }).range(block.from, block.to));
+      ranges.push(Decoration.replace({ widget: new PageBreakWidget(absolute.from, absolute.to), block: true }).range(block.from, block.to));
       continue;
     }
     if (block.kind === 'image') {
@@ -2396,100 +2601,288 @@ function markdownOffsetAtCoords(x: number, y: number): number | undefined {
   }
 }
 
-function blockBoundaryInEditor(
-  editorView: EditorView,
-  baseOffset: number,
-  x: number,
-  y: number,
-): number | undefined {
-  const doc = editorView.state.doc.toString();
-  const contentBounds = editorView.contentDOM.getBoundingClientRect();
-  if (y >= contentBounds.bottom && contentBounds.height > 0) {
-    return baseOffset + doc.length;
-  }
-  if (y <= contentBounds.top && contentBounds.height > 0) return baseOffset;
-  const pointed = typeof document.elementFromPoint === 'function'
-    ? document.elementFromPoint(x, y)
-    : null;
-  let position = editorView.posAtCoords({ x, y });
-  if (position == null) {
-    const line = pointed?.closest<HTMLElement>('.cm-line');
-    if (line && editorView.dom.contains(line)) {
-      try {
-        position = editorView.posAtDOM(
-          line,
-          x < line.getBoundingClientRect().left + line.getBoundingClientRect().width / 2
-            ? 0
-            : line.childNodes.length,
-        );
-      } catch (_) {
-        position = null;
-      }
-    }
-  }
-  if (position == null) return undefined;
-  const blocks = splitMarkdownBlocks(doc);
-  const block = blocks.find((candidate, index) =>
-    position >= candidate.from &&
-    (position < candidate.to ||
-      (index === blocks.length - 1 && position === candidate.to)));
-  if (!block) return baseOffset + position;
-  let top: number | undefined;
-  let bottom: number | undefined;
-  const structural = pointed?.closest<HTMLElement>(
-    '.synapse-image-block, .synapse-table-frame, .synapse-page-break',
-  );
-  if (structural && editorView.dom.contains(structural)) {
-    const bounds = structural.getBoundingClientRect();
-    if (bounds.height > 0) {
-      top = bounds.top;
-      bottom = bounds.bottom;
-    }
-  }
-  if (top == null || bottom == null) {
-    const start = editorView.coordsAtPos(block.from);
-    const end = editorView.coordsAtPos(Math.max(block.from, block.to - 1));
-    if (start && end) {
-      top = Math.min(start.top, end.top);
-      bottom = Math.max(start.bottom, end.bottom);
-    }
-  }
-  if (top == null || bottom == null || bottom <= top) {
-    const line = pointed?.closest<HTMLElement>('.cm-line');
-    const bounds = line?.getBoundingClientRect();
-    if (bounds && bounds.height > 0) {
-      top = bounds.top;
-      bottom = bounds.bottom;
-    }
-  }
-  const before = top == null || bottom == null
-    ? position <= block.from + (block.to - block.from) / 2
-    : y < top + (bottom - top) / 2;
-  return baseOffset + (before ? block.from : block.to);
+interface ImageDropSurface {
+  editorView: EditorView;
+  baseOffset: number;
+  host: HTMLElement;
+  rect: DOMRect;
+  parent: boolean;
 }
 
-function markdownBlockBoundaryAtCoords(x: number, y: number): number | undefined {
+interface ImageDropBlock {
+  from: number;
+  to: number;
+  rect: DOMRect;
+}
+
+function rectFromEdges(
+  left: number,
+  top: number,
+  right: number,
+  bottom: number,
+): DOMRect {
+  const width = Math.max(0, right - left);
+  const height = Math.max(0, bottom - top);
+  return {
+    x: left,
+    y: top,
+    left,
+    top,
+    right,
+    bottom,
+    width,
+    height,
+    toJSON: () => ({ left, top, right, bottom, width, height }),
+  } as DOMRect;
+}
+
+function horizontalDistance(x: number, rect: DOMRect): number {
+  if (x < rect.left) return rect.left - x;
+  if (x > rect.right) return x - rect.right;
+  return 0;
+}
+
+function imageDropSurfaceAtCoords(
+  x: number,
+  y: number,
+): ImageDropSurface | undefined {
+  if (!view) return undefined;
+  const scrollRect = view.scrollDOM.getBoundingClientRect();
+  if (
+    x < scrollRect.left || x > scrollRect.right ||
+    y < scrollRect.top || y > scrollRect.bottom
+  ) {
+    return undefined;
+  }
   for (const root of document.querySelectorAll<HTMLElement>('.synapse-columns')) {
-    const bounds = root.getBoundingClientRect();
-    if (x < bounds.left || x > bounds.right || y < bounds.top || y > bounds.bottom) {
+    const rootRect = root.getBoundingClientRect();
+    if (
+      x < rootRect.left || x > rootRect.right ||
+      y < rootRect.top || y > rootRect.bottom
+    ) {
       continue;
     }
     const state = columnsDomStates.get(root);
     if (!state) continue;
-    for (const side of [state.left, state.right]) {
-      const sideBounds = side.host.getBoundingClientRect();
-      if (
-        x >= sideBounds.left && x <= sideBounds.right &&
-        y >= sideBounds.top && y <= sideBounds.bottom
-      ) {
-        return blockBoundaryInEditor(side.editorView, side.baseOffset, x, y);
-      }
-    }
-    return y < bounds.top + bounds.height / 2
-      ? state.widget.from
-      : state.widget.to;
+    const sides = [state.left, state.right]
+      .map((side) => ({ side, rect: side.host.getBoundingClientRect() }))
+      .sort((left, right) =>
+        horizontalDistance(x, left.rect) - horizontalDistance(x, right.rect));
+    const chosen = sides[0];
+    if (!chosen) continue;
+    return {
+      editorView: chosen.side.editorView,
+      baseOffset: chosen.side.baseOffset,
+      host: chosen.side.host,
+      rect: chosen.rect,
+      parent: false,
+    };
   }
-  return view ? blockBoundaryInEditor(view, 0, x, y) : undefined;
+  const contentRect = view.contentDOM.getBoundingClientRect();
+  const rect = contentRect.width > 0 ? contentRect : view.dom.getBoundingClientRect();
+  return {
+    editorView: view,
+    baseOffset: 0,
+    host: view.dom,
+    rect,
+    parent: true,
+  };
+}
+
+function domLineAtPosition(
+  editorView: EditorView,
+  position: number,
+): HTMLElement | undefined {
+  try {
+    const resolved = editorView.domAtPos(
+      Math.max(0, Math.min(position, editorView.state.doc.length)),
+    );
+    const element = resolved.node instanceof Element
+      ? resolved.node
+      : resolved.node.parentElement;
+    return element?.closest<HTMLElement>('.cm-line') ?? undefined;
+  } catch (_) {
+    return undefined;
+  }
+}
+
+function structuralBlockElement(
+  surface: ImageDropSurface,
+  from: number,
+  to: number,
+): HTMLElement | undefined {
+  return Array.from(
+    surface.host.querySelectorAll<HTMLElement>(
+      '[data-markdown-from][data-markdown-to]',
+    ),
+  ).find((element) =>
+    Number(element.dataset.markdownFrom) === from &&
+    Number(element.dataset.markdownTo) === to);
+}
+
+function imageDropBlockRect(
+  surface: ImageDropSurface,
+  localBlock: MarkdownBlock,
+): DOMRect | undefined {
+  const from = surface.baseOffset + localBlock.from;
+  const to = surface.baseOffset + localBlock.to;
+  const structural = structuralBlockElement(surface, from, to);
+  const structuralRect = structural?.getBoundingClientRect();
+  if (structuralRect && structuralRect.width > 0 && structuralRect.height > 0) {
+    return structuralRect;
+  }
+  const firstLine = domLineAtPosition(surface.editorView, localBlock.from);
+  const lastLine = domLineAtPosition(
+    surface.editorView,
+    Math.max(localBlock.from, localBlock.to - 1),
+  );
+  const firstRect = firstLine?.getBoundingClientRect();
+  const lastRect = lastLine?.getBoundingClientRect();
+  if (
+    firstRect && lastRect &&
+    firstRect.height > 0 && lastRect.height > 0
+  ) {
+    return rectFromEdges(
+      surface.rect.left,
+      Math.min(firstRect.top, lastRect.top),
+      surface.rect.right,
+      Math.max(firstRect.bottom, lastRect.bottom),
+    );
+  }
+  const start = coordsAtEditorOffset(surface.editorView, localBlock.from);
+  const end = coordsAtEditorOffset(
+    surface.editorView,
+    Math.max(localBlock.from, localBlock.to - 1),
+  );
+  if (!start || !end) return undefined;
+  const top = Math.min(start.top, end.top);
+  const bottom = Math.max(start.bottom, end.bottom);
+  if (bottom <= top) return undefined;
+  return rectFromEdges(surface.rect.left, top, surface.rect.right, bottom);
+}
+
+function parentColumnRanges(): Array<{ from: number; to: number }> {
+  const ranges: Array<{ from: number; to: number }> = [];
+  for (const root of document.querySelectorAll<HTMLElement>('.synapse-columns')) {
+    const state = columnsDomStates.get(root);
+    if (state) ranges.push({ from: state.widget.from, to: state.widget.to });
+  }
+  return ranges;
+}
+
+function visibleImageDropBlocks(surface: ImageDropSurface): ImageDropBlock[] {
+  if (!view) return [];
+  const scrollRect = view.scrollDOM.getBoundingClientRect();
+  const columnRanges = surface.parent ? parentColumnRanges() : [];
+  const blocks: ImageDropBlock[] = [];
+  for (const block of splitMarkdownBlocks(surface.editorView.state.doc.toString())) {
+    if (
+      block.kind === 'blank' ||
+      block.kind === 'columnsStart' ||
+      block.kind === 'columnsSeparator' ||
+      block.kind === 'columnsEnd'
+    ) {
+      continue;
+    }
+    const absoluteFrom = surface.baseOffset + block.from;
+    const absoluteTo = surface.baseOffset + block.to;
+    if (
+      columnRanges.some((range) =>
+        absoluteFrom >= range.from && absoluteTo <= range.to)
+    ) {
+      continue;
+    }
+    const rect = imageDropBlockRect(surface, block);
+    if (!rect || rect.bottom < scrollRect.top || rect.top > scrollRect.bottom) {
+      continue;
+    }
+    blocks.push({ from: absoluteFrom, to: absoluteTo, rect });
+  }
+  if (surface.parent) {
+    for (const root of document.querySelectorAll<HTMLElement>('.synapse-columns')) {
+      const state = columnsDomStates.get(root);
+      if (!state) continue;
+      const rect = root.getBoundingClientRect();
+      if (rect.bottom < scrollRect.top || rect.top > scrollRect.bottom) continue;
+      blocks.push({ from: state.widget.from, to: state.widget.to, rect });
+    }
+  }
+  blocks.sort((left, right) =>
+    left.rect.top - right.rect.top || left.from - right.from);
+  return blocks;
+}
+
+function verticalDistance(y: number, rect: DOMRect): number {
+  if (y < rect.top) return rect.top - y;
+  if (y > rect.bottom) return y - rect.bottom;
+  return 0;
+}
+
+function imageDropBoundaryAtCoords(
+  range: DraggedMarkdownRange,
+  x: number,
+  y: number,
+): ImageDropBoundary | undefined {
+  if (!runtime?.editable || !runtime.focused || !draggedRangeStillValid(range)) {
+    return undefined;
+  }
+  const surface = imageDropSurfaceAtCoords(x, y);
+  if (!surface) return undefined;
+  const removal = imageRemovalBounds(range);
+  const validSourceOffset = (sourceOffset: number) =>
+    sourceOffset < removal.from || sourceOffset > removal.to;
+  const blocks = visibleImageDropBlocks(surface);
+  const docLength = surface.editorView.state.doc.length;
+  if (blocks.length === 0) {
+    const top = Math.max(surface.rect.top, view!.scrollDOM.getBoundingClientRect().top);
+    const blockRect = rectFromEdges(
+      surface.rect.left,
+      top,
+      surface.rect.right,
+      top + 24,
+    );
+    const sourceOffset = surface.baseOffset + docLength;
+    return {
+      sourceOffset,
+      blockFrom: sourceOffset,
+      blockTo: sourceOffset,
+      placement: 'after',
+      blockRect,
+      surfaceRect: surface.rect,
+      valid: validSourceOffset(sourceOffset),
+    };
+  }
+  let block = blocks[0];
+  for (const candidate of blocks.slice(1)) {
+    if (verticalDistance(y, candidate.rect) < verticalDistance(y, block.rect)) {
+      block = candidate;
+    }
+  }
+  let placement: 'before' | 'after';
+  let sourceOffset: number;
+  if (y < blocks[0].rect.top) {
+    block = blocks[0];
+    placement = 'before';
+    sourceOffset = surface.baseOffset;
+  } else if (y > blocks[blocks.length - 1].rect.bottom) {
+    block = blocks[blocks.length - 1];
+    placement = 'after';
+    sourceOffset = surface.baseOffset + docLength;
+  } else {
+    placement = y < block.rect.top + block.rect.height / 2
+      ? 'before'
+      : 'after';
+    sourceOffset = placement === 'before' ? block.from : block.to;
+  }
+  return {
+    sourceOffset,
+    blockFrom: block.from,
+    blockTo: block.to,
+    placement,
+    blockRect: block.rect,
+    surfaceRect: surface.rect,
+    valid: validSourceOffset(sourceOffset),
+  };
 }
 
 function coordsAtEditorOffset(editorView: EditorView, offset: number) {
@@ -2566,6 +2959,8 @@ class ColumnsWidget extends WidgetType {
   toDOM(parentView: EditorView): HTMLElement {
     const root = document.createElement('div');
     root.className = 'synapse-columns';
+    root.dataset.markdownFrom = String(this.from);
+    root.dataset.markdownTo = String(this.to);
     root.contentEditable = 'false';
     const content = document.createElement('div');
     content.className = 'synapse-columns-content';
@@ -2719,6 +3114,8 @@ class ColumnsWidget extends WidgetType {
     const state = columnsDomStates.get(dom);
     if (!state) return false;
     state.widget = this;
+    dom.dataset.markdownFrom = String(this.from);
+    dom.dataset.markdownTo = String(this.to);
     state.parentView = parentView;
     state.controls.hidden = !this.editable;
     state.root.classList.toggle('synapse-columns-editable', this.editable);
@@ -2961,7 +3358,7 @@ function buildDecorations(state: EditorState): DecorationSet {
     if (covered.some((range) => block.from >= range.from && block.to <= range.to)) continue;
     const activeBlock = mode === 'editing' && active?.from === block.from;
     if (block.kind === 'pageBreak' && !activeBlock) {
-      ranges.push(Decoration.replace({ widget: new PageBreakWidget(block.from), block: true }).range(block.from, block.to));
+      ranges.push(Decoration.replace({ widget: new PageBreakWidget(block.from, block.to), block: true }).range(block.from, block.to));
       continue;
     }
     if (block.kind === 'image') {
@@ -3139,6 +3536,11 @@ function editorTheme(theme: EditorTheme) {
     '.synapse-image-block img, .synapse-inline-image img': { display: 'block', height: 'auto', borderRadius: '6px', pointerEvents: 'none' },
     '.synapse-image-selected': { outline: `1px solid ${theme.accent}`, outlineOffset: '3px', borderRadius: '6px' },
     '.synapse-image-dragging': { opacity: '0.58' },
+    '&.synapse-image-drag-active, &.synapse-image-drag-active *': { cursor: 'grabbing !important' },
+    '.synapse-image-drag-preview': { position: 'fixed', left: '0', top: '0', zIndex: '2147483646', display: 'flex', alignItems: 'center', justifyContent: 'center', boxSizing: 'border-box', maxWidth: '180px', maxHeight: '120px', overflow: 'hidden', padding: '4px', border: `1px solid ${theme.accent}`, borderRadius: '8px', backgroundColor: theme.surface, boxShadow: '0 10px 28px rgba(0,0,0,.28)', opacity: '.86', pointerEvents: 'none', userSelect: 'none', willChange: 'transform' },
+    '.synapse-image-drag-preview img': { display: 'block', width: 'auto', height: 'auto', maxWidth: '172px', maxHeight: '112px', objectFit: 'contain', borderRadius: '5px' },
+    '.synapse-image-drag-preview-fallback': { minWidth: '72px', minHeight: '48px', display: 'flex', alignItems: 'center', justifyContent: 'center', color: theme.muted, font: '600 12px/1.2 -apple-system, BlinkMacSystemFont, sans-serif' },
+    '.synapse-image-drop-target': { position: 'fixed', zIndex: '2147483644', boxSizing: 'border-box', border: `1px solid ${theme.accent}`, borderRadius: '6px', backgroundColor: `${theme.accent}16`, pointerEvents: 'none', userSelect: 'none' },
     '.synapse-image-loading': { color: theme.muted, fontSize: '12px' },
     '.synapse-image-broken': { color: theme.muted, textDecoration: 'line-through' },
     '.synapse-image-move-handle': { position: 'absolute', left: '-7px', top: '-7px', zIndex: '3', width: '18px', height: '18px', borderRadius: '4px', color: theme.muted, backgroundColor: theme.surface, boxShadow: `0 0 0 1px ${theme.line}`, cursor: 'grab', userSelect: 'none' },
@@ -3147,7 +3549,10 @@ function editorTheme(theme: EditorTheme) {
     '.synapse-image-resize': { position: 'absolute', bottom: '-5px', width: '10px', height: '10px', borderRadius: '50%', backgroundColor: theme.accent },
     '.synapse-image-resize-left': { left: '-5px', cursor: 'nesw-resize' },
     '.synapse-image-resize-right': { right: '-5px', cursor: 'nwse-resize' },
-    '.synapse-image-block-drop-indicator': { position: 'fixed', zIndex: '2147483646', height: '2px', backgroundColor: theme.accent, pointerEvents: 'none' },
+    '.synapse-image-block-drop-indicator': { position: 'fixed', zIndex: '2147483645', height: '2px', borderRadius: '2px', backgroundColor: theme.accent, boxShadow: `0 0 0 1px ${theme.background}`, pointerEvents: 'none', userSelect: 'none' },
+    '.synapse-image-drag-preview.synapse-image-drop-invalid': { borderColor: theme.contextMenu.danger, opacity: '.62' },
+    '.synapse-image-drop-target.synapse-image-drop-invalid': { borderColor: theme.contextMenu.danger, backgroundColor: `${theme.contextMenu.danger}12` },
+    '.synapse-image-block-drop-indicator.synapse-image-drop-invalid': { backgroundColor: theme.contextMenu.danger },
     '.synapse-bold': { fontWeight: '700' },
     '.synapse-italic': { fontStyle: 'italic' },
     '.synapse-strike': { textDecoration: 'line-through' },
@@ -3208,6 +3613,7 @@ function editorTheme(theme: EditorTheme) {
 
 function updateListener(update: ViewUpdate): void {
   if (!runtime) return;
+  if (update.docChanged && activeImageDragSession) cancelActiveImageDrag();
   const external = update.transactions.every((transaction) => transaction.annotation(hostChange));
   if (update.docChanged && !external) {
     let composed: ChangeSet | undefined;
@@ -3561,6 +3967,7 @@ function extensions(command: InitializeCommand) {
 }
 
 function initialize(command: InitializeCommand): void {
+  cancelActiveImageDrag();
   clearPageLayout();
   pageLayoutBoundaries = [];
   pageLayoutStale = false;
@@ -3614,6 +4021,7 @@ function initialize(command: InitializeCommand): void {
 
 function applyChanges(command: Extract<HostCommand, { type: 'applyChanges' }>): void {
   if (!view || !runtime || command.generation !== runtime.generation) return;
+  cancelActiveImageDrag();
   flushPendingTransaction();
   if (command.baseRevision !== runtime.revision) {
     post({ type: 'error', message: `Revision mismatch: expected ${runtime.revision}, received ${command.baseRevision}` });
@@ -3632,6 +4040,7 @@ function applyChanges(command: Extract<HostCommand, { type: 'applyChanges' }>): 
 
 function replaceDocument(command: Extract<HostCommand, { type: 'replaceDocument' }>): void {
   if (!view || !runtime || command.generation !== runtime.generation) return;
+  cancelActiveImageDrag();
   view.dispatch({
     changes: { from: 0, to: view.state.doc.length, insert: command.markdown },
     selection: command.selection ? { anchor: command.selection.anchor, head: command.selection.head } : { anchor: Math.min(view.state.selection.main.head, command.markdown.length) },
@@ -3718,6 +4127,9 @@ function receive(command: HostCommand): void {
       case 'replaceDocument': replaceDocument(command); break;
       case 'setMode':
         if (!view || !runtime) break;
+        if (!command.editable || !command.focused || command.mode !== 'editing') {
+          cancelActiveImageDrag();
+        }
         flushPendingTransaction();
         runtime.mode = command.mode;
         runtime.editable = command.editable;
@@ -3780,6 +4192,7 @@ function receive(command: HostCommand): void {
       case 'attachmentError': receiveAttachmentError(command.requestId); break;
       case 'clipboardResult': receiveClipboardResult(command); break;
       case 'dispose':
+        cancelActiveImageDrag();
         flushPendingTransaction();
         clearPageLayout();
         view?.destroy();

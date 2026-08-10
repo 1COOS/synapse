@@ -1,5 +1,6 @@
 import { build } from 'esbuild';
-import { cp, mkdir, rm } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -23,4 +24,20 @@ await build({
   legalComments: 'none',
 });
 
-await cp(resolve(root, 'src/index.html'), resolve(output, 'index.html'));
+const editor = await readFile(resolve(output, 'editor.js'));
+const editorHash = createHash('sha256')
+  .update(editor)
+  .digest('hex')
+  .slice(0, 16);
+const indexTemplate = await readFile(
+  resolve(root, 'src/index.html'),
+  'utf8',
+);
+const hashPlaceholder = '__SYNAPSE_EDITOR_HASH__';
+if (!indexTemplate.includes(hashPlaceholder)) {
+  throw new Error(`Missing ${hashPlaceholder} in src/index.html`);
+}
+await writeFile(
+  resolve(output, 'index.html'),
+  indexTemplate.replaceAll(hashPlaceholder, editorHash),
+);

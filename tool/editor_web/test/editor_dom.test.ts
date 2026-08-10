@@ -1020,11 +1020,48 @@ describe('CodeMirror live preview', () => {
     setBounds(scroller, rect(0, 0, 640, 400));
     setBounds(content, rect(0, 0, 640, 220));
 
-    handle.dispatchEvent(pointerEvent('pointerdown', 12, 12));
-    window.dispatchEvent(pointerEvent('pointermove', 120, 300));
+    handle.dispatchEvent(new MouseEvent('mousedown', {
+      bubbles: true,
+      cancelable: true,
+      button: 0,
+      buttons: 1,
+      clientX: 12,
+      clientY: 12,
+    }));
+    expect(document.querySelector('.synapse-image-drag-preview')).not.toBeNull();
+    window.dispatchEvent(new MouseEvent('mousemove', {
+      bubbles: true,
+      cancelable: true,
+      buttons: 1,
+      clientX: 120,
+      clientY: 300,
+    }));
+    const preview = document.querySelector<HTMLElement>(
+      '.synapse-image-drag-preview',
+    )!;
+    expect(preview).not.toBeNull();
+    expect(preview.style.transform).toContain('translate3d(134px, 314px');
+    expect(document.querySelector('.synapse-image-drop-target')).not.toBeNull();
     expect(document.querySelector('.synapse-image-block-drop-indicator'))
       .not.toBeNull();
-    window.dispatchEvent(pointerEvent('pointerup', 120, 300));
+    selected.remove();
+    window.dispatchEvent(new MouseEvent('mousemove', {
+      bubbles: true,
+      cancelable: true,
+      buttons: 1,
+      clientX: 140,
+      clientY: 300,
+    }));
+    expect(document.querySelector('.synapse-image-drag-preview')).toBe(preview);
+    expect(preview.style.transform).toContain('translate3d(154px, 314px');
+    window.dispatchEvent(new MouseEvent('mouseup', {
+      bubbles: true,
+      cancelable: true,
+      button: 0,
+      buttons: 0,
+      clientX: 120,
+      clientY: 300,
+    }));
     await new Promise((resolve) => window.setTimeout(resolve, 20));
 
     const updated = window.synapseTest!.getText();
@@ -1034,6 +1071,291 @@ describe('CodeMirror live preview', () => {
     expect(updated).toMatch(/Paragraph\n\n<img src=/);
     expect(document.querySelector('.synapse-image-selected')).not.toBeNull();
     expect(document.querySelector('.synapse-image-source')).toBeNull();
+  });
+
+  it('auto-scrolls a document-level image drag and cleans up on cancel', async () => {
+    const imageMarkdown =
+      '<img src="Note.assets/attachments/scroll.png" width="320">';
+    const markdown = [
+      imageMarkdown,
+      '',
+      ...Array.from({ length: 80 }, (_, index) => `Paragraph ${index}`),
+    ].join('\n\n');
+    window.synapseHost!.receive(initialize(markdown, 'editing'));
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+    document.querySelector<HTMLElement>('.synapse-image-block')!.click();
+    await Promise.resolve();
+    const editor = document.querySelector<HTMLElement>('.cm-editor')!;
+    const scroller = document.querySelector<HTMLElement>('.cm-scroller')!;
+    const content = document.querySelector<HTMLElement>('.cm-content')!;
+    setBounds(editor, rect(0, 0, 1000, 800));
+    setBounds(scroller, rect(0, 0, 1000, 800));
+    setBounds(content, rect(0, 0, 1000, 2200));
+    scroller.scrollTop = 100;
+    const handle = document.querySelector<HTMLElement>(
+      '.synapse-image-move-handle',
+    )!;
+
+    handle.dispatchEvent(pointerEvent('pointerdown', 20, 20));
+    window.dispatchEvent(pointerEvent('pointermove', 120, 790));
+    await new Promise((resolve) => window.setTimeout(resolve, 10));
+
+    expect(scroller.scrollTop).toBeGreaterThan(100);
+    expect(document.querySelector('.synapse-image-drag-preview')).not.toBeNull();
+    window.dispatchEvent(new MouseEvent('pointercancel', {
+      bubbles: true,
+      cancelable: true,
+    }));
+    expect(window.synapseTest!.getText()).toBe(markdown);
+    expect(document.querySelector('.synapse-image-drag-preview')).toBeNull();
+    expect(document.querySelector('.synapse-image-drop-target')).toBeNull();
+  });
+
+  it('marks equivalent and outside image drops invalid and cleans feedback', async () => {
+    const imageMarkdown =
+      '<img src="Note.assets/attachments/invalid.png" width="320">';
+    const markdown = `${imageMarkdown}\n\nAfter`;
+    window.synapseHost!.receive(initialize(markdown, 'editing'));
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+
+    document.querySelector<HTMLElement>('.synapse-image-block')!.click();
+    await Promise.resolve();
+    const editor = document.querySelector<HTMLElement>('.cm-editor')!;
+    const scroller = document.querySelector<HTMLElement>('.cm-scroller')!;
+    const content = document.querySelector<HTMLElement>('.cm-content')!;
+    const selected = document.querySelector<HTMLElement>(
+      '.synapse-image-selected',
+    )!;
+    setBounds(editor, rect(0, 0, 640, 320));
+    setBounds(scroller, rect(0, 0, 640, 320));
+    setBounds(content, rect(0, 0, 640, 240));
+    setBounds(selected, rect(16, 40, 320, 100));
+    const after = Array.from(
+      document.querySelectorAll<HTMLElement>('.cm-line'),
+    ).find((line) => line.textContent === 'After')!;
+    setBounds(after, rect(16, 170, 608, 40));
+
+    let handle = selected.querySelector<HTMLElement>(
+      '.synapse-image-move-handle',
+    )!;
+    handle.dispatchEvent(pointerEvent('pointerdown', 20, 44));
+    window.dispatchEvent(pointerEvent('pointermove', 120, 70));
+    expect(document.querySelector('.synapse-image-drag-preview')?.classList
+      .contains('synapse-image-drop-invalid')).toBe(true);
+    expect(document.querySelector('.synapse-image-drop-target')?.classList
+      .contains('synapse-image-drop-invalid')).toBe(true);
+    window.dispatchEvent(pointerEvent('pointerup', 120, 70));
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+    expect(window.synapseTest!.getText()).toBe(markdown);
+    expect(document.querySelector('.synapse-image-drag-preview')).toBeNull();
+
+    handle = document.querySelector<HTMLElement>(
+      '.synapse-image-move-handle',
+    )!;
+    handle.dispatchEvent(pointerEvent('pointerdown', 20, 44));
+    window.dispatchEvent(pointerEvent('pointermove', 120, 174));
+    expect(document.querySelector('.synapse-image-drag-preview')?.classList
+      .contains('synapse-image-drop-invalid')).toBe(true);
+    expect(document.querySelector('.synapse-image-drop-target')?.classList
+      .contains('synapse-image-drop-invalid')).toBe(true);
+    window.dispatchEvent(pointerEvent('pointerup', 120, 174));
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+    expect(window.synapseTest!.getText()).toBe(markdown);
+
+    handle = document.querySelector<HTMLElement>(
+      '.synapse-image-move-handle',
+    )!;
+    handle.dispatchEvent(pointerEvent('pointerdown', 20, 44));
+    window.dispatchEvent(pointerEvent('pointermove', 700, 70));
+    expect(document.querySelector('.synapse-image-drag-preview')?.classList
+      .contains('synapse-image-drop-invalid')).toBe(true);
+    expect(document.querySelector('.synapse-image-drop-target')).toBeNull();
+    expect(document.querySelector('.synapse-image-block-drop-indicator'))
+      .toBeNull();
+    window.dispatchEvent(new KeyboardEvent('keydown', {
+      key: 'Escape',
+      bubbles: true,
+      cancelable: true,
+    }));
+    expect(window.synapseTest!.getText()).toBe(markdown);
+    expect(document.querySelector('.synapse-image-drag-preview')).toBeNull();
+    expect(document.querySelector('.synapse-image-drop-target')).toBeNull();
+  });
+
+  it('aborts image drag on mode and host revision changes', async () => {
+    const imageMarkdown =
+      '<img src="Note.assets/attachments/stale.png" width="320">';
+    const markdown = `${imageMarkdown}\n\nAfter`;
+    window.synapseHost!.receive(initialize(markdown, 'editing'));
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+    document.querySelector<HTMLElement>('.synapse-image-block')!.click();
+    await Promise.resolve();
+    const editor = document.querySelector<HTMLElement>('.cm-editor')!;
+    const scroller = document.querySelector<HTMLElement>('.cm-scroller')!;
+    const content = document.querySelector<HTMLElement>('.cm-content')!;
+    setBounds(editor, rect(0, 0, 640, 320));
+    setBounds(scroller, rect(0, 0, 640, 320));
+    setBounds(content, rect(0, 0, 640, 220));
+
+    let handle = document.querySelector<HTMLElement>(
+      '.synapse-image-move-handle',
+    )!;
+    handle.dispatchEvent(pointerEvent('pointerdown', 20, 20));
+    window.dispatchEvent(pointerEvent('pointermove', 120, 280));
+    expect(document.querySelector('.synapse-image-drag-preview')).not.toBeNull();
+    window.synapseHost!.receive({
+      protocolVersion: 2,
+      type: 'setMode',
+      mode: 'reading',
+      editable: false,
+      focused: true,
+    });
+    expect(document.querySelector('.synapse-image-drag-preview')).toBeNull();
+    window.dispatchEvent(pointerEvent('pointerup', 120, 280));
+    expect(window.synapseTest!.getText()).toBe(markdown);
+
+    window.synapseHost!.receive({
+      protocolVersion: 2,
+      type: 'setMode',
+      mode: 'editing',
+      editable: true,
+      focused: true,
+    });
+    document.querySelector<HTMLElement>('.synapse-image-block')!.click();
+    await Promise.resolve();
+    handle = document.querySelector<HTMLElement>(
+      '.synapse-image-move-handle',
+    )!;
+    handle.dispatchEvent(pointerEvent('pointerdown', 20, 20));
+    window.dispatchEvent(pointerEvent('pointermove', 120, 280));
+    window.synapseHost!.receive({
+      protocolVersion: 2,
+      type: 'applyChanges',
+      generation: 1,
+      baseRevision: 0,
+      revision: 1,
+      changes: [{ from: markdown.length, to: markdown.length, insert: '\n\nExternal' }],
+    });
+    expect(document.querySelector('.synapse-image-drag-preview')).toBeNull();
+    window.dispatchEvent(pointerEvent('pointerup', 120, 280));
+    expect(window.synapseTest!.getText()).toBe(`${markdown}\n\nExternal`);
+  });
+
+  it('selects before and after boundaries for every visible markdown block kind', async () => {
+    const source = '<img src="Note.assets/attachments/source.png" width="320">';
+    const targetImage =
+      '<img src="Note.assets/attachments/target.png" width="320">';
+    const markdown = [
+      source,
+      '',
+      '# Heading',
+      '',
+      'Paragraph',
+      '',
+      '- Item',
+      '',
+      '> Quote',
+      '',
+      '```',
+      'code',
+      '```',
+      '',
+      '| A | B |',
+      '| --- | --- |',
+      '| 1 | 2 |',
+      '',
+      targetImage,
+      '',
+      '<!-- synapse:page-break -->',
+      '',
+    ].join('\n');
+    window.synapseHost!.receive(initialize(markdown, 'editing'));
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+    document.querySelector<HTMLElement>('.synapse-image-block')!.click();
+    await Promise.resolve();
+
+    const editor = document.querySelector<HTMLElement>('.cm-editor')!;
+    const scroller = document.querySelector<HTMLElement>('.cm-scroller')!;
+    const content = document.querySelector<HTMLElement>('.cm-content')!;
+    setBounds(editor, rect(0, 0, 720, 640));
+    setBounds(scroller, rect(0, 0, 720, 640));
+    setBounds(content, rect(16, 0, 688, 620));
+    const selected = document.querySelector<HTMLElement>(
+      '.synapse-image-selected',
+    )!;
+    setBounds(selected, rect(16, 10, 240, 56));
+    const lines = Array.from(
+      document.querySelectorAll<HTMLElement>('.cm-line'),
+    );
+    const line = (text: string) => lines.find((candidate) =>
+      candidate.textContent?.includes(text))!;
+    const codeLine = line('code');
+    const codeLineIndex = lines.indexOf(codeLine);
+    const targets: Array<{
+      name: string;
+      element: HTMLElement | undefined;
+      bounds: DOMRect;
+    }> = [
+      { name: 'heading', element: line('Heading'), bounds: rect(16, 90, 688, 36) },
+      { name: 'paragraph', element: line('Paragraph'), bounds: rect(16, 140, 688, 36) },
+      { name: 'list', element: line('Item'), bounds: rect(16, 190, 688, 36) },
+      { name: 'quote', element: line('Quote'), bounds: rect(16, 240, 688, 36) },
+      { name: 'code', element: codeLine, bounds: rect(16, 290, 688, 76) },
+      {
+        name: 'table',
+        element: document.querySelector<HTMLElement>('.synapse-table-frame')!,
+        bounds: rect(16, 380, 688, 64),
+      },
+      {
+        name: 'image',
+        element: document.querySelectorAll<HTMLElement>(
+          '.synapse-image-block',
+        )[1],
+        bounds: rect(16, 460, 240, 56),
+      },
+      {
+        name: 'page-break',
+        element: document.querySelector<HTMLElement>('.synapse-page-break')!,
+        bounds: rect(16, 530, 688, 44),
+      },
+    ];
+    for (const target of targets) {
+      expect(target.element, target.name).toBeDefined();
+      setBounds(target.element!, target.bounds);
+    }
+    setBounds(lines[codeLineIndex - 1], rect(16, 290, 688, 22));
+    setBounds(codeLine, rect(16, 320, 688, 22));
+    setBounds(lines[codeLineIndex + 1], rect(16, 344, 688, 22));
+
+    const handle = selected.querySelector<HTMLElement>(
+      '.synapse-image-move-handle',
+    )!;
+    for (const target of targets) {
+      handle.dispatchEvent(pointerEvent('pointerdown', 20, 14));
+      window.dispatchEvent(pointerEvent(
+        'pointermove',
+        target.bounds.left + 20,
+        target.bounds.top + 4,
+      ));
+      expect(document.querySelector<HTMLElement>(
+        '.synapse-image-block-drop-indicator',
+      )?.dataset.placement).toBe('before');
+      window.dispatchEvent(pointerEvent(
+        'pointermove',
+        target.bounds.left + 20,
+        target.bounds.bottom - 4,
+      ));
+      await new Promise((resolve) => window.setTimeout(resolve, 0));
+      expect(document.querySelector<HTMLElement>(
+        '.synapse-image-block-drop-indicator',
+      )?.dataset.placement).toBe('after');
+      window.dispatchEvent(new MouseEvent('pointercancel', {
+        bubbles: true,
+        cancelable: true,
+      }));
+      expect(document.querySelector('.synapse-image-drag-preview')).toBeNull();
+    }
+    expect(window.synapseTest!.getText()).toBe(markdown);
   });
 
   it('drags an image between column editors without replacing the drag source', async () => {
@@ -1112,6 +1434,18 @@ describe('CodeMirror live preview', () => {
       sides[1].querySelectorAll<HTMLElement>('.cm-line'),
     ).find((line) => line.textContent === 'Right')!;
     setBounds(columns, rect(0, 0, 640, 280));
+    setBounds(
+      document.querySelector<HTMLElement>('.cm-editor')!,
+      rect(0, 0, 640, 320),
+    );
+    setBounds(
+      document.querySelector<HTMLElement>('.cm-scroller')!,
+      rect(0, 0, 640, 320),
+    );
+    setBounds(
+      document.querySelector<HTMLElement>('.cm-editor > .cm-scroller > .cm-content')!,
+      rect(0, 0, 640, 280),
+    );
     setBounds(sides[0], rect(0, 0, 310, 280));
     setBounds(sides[1], rect(330, 0, 310, 280));
     setBounds(
@@ -1133,6 +1467,8 @@ describe('CodeMirror live preview', () => {
     moveHandle.dispatchEvent(pointerEvent('pointerdown', 12, 12));
     window.dispatchEvent(pointerEvent('pointermove', 400, 130));
     expect(sourceImage.classList.contains('synapse-image-dragging')).toBe(true);
+    expect(document.querySelector('.synapse-image-drag-preview')).not.toBeNull();
+    expect(document.querySelector('.synapse-image-drop-target')).not.toBeNull();
     expect(document.querySelector('.synapse-image-block-drop-indicator'))
       .not.toBeNull();
     window.dispatchEvent(pointerEvent('pointerup', 400, 130));
@@ -1142,6 +1478,11 @@ describe('CodeMirror live preview', () => {
       Reflect.deleteProperty(document, 'elementFromPoint');
     }
     await new Promise((resolve) => window.setTimeout(resolve, 20));
+
+    expect(document.querySelector('.synapse-image-drag-preview')).toBeNull();
+    expect(document.querySelector('.synapse-image-drop-target')).toBeNull();
+    expect(document.querySelector('.synapse-image-block-drop-indicator'))
+      .toBeNull();
 
     const updated = window.synapseTest!.getText();
     const separator = updated.indexOf('<!-- synapse:column -->');

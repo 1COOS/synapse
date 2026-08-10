@@ -420,7 +420,8 @@ void main() {
     tester,
   ) async {
     const markdown =
-        '<img src="Note.assets/attachments/pixel.png" width="320">\n';
+        '<img src="Note.assets/attachments/pixel.png" width="320">\n\n'
+        'After';
     final attachment = NoteAttachment(
       id: 'attachment-1',
       noteId: 'note.md',
@@ -516,9 +517,121 @@ void main() {
     );
     expect(
       await surface!.debugRunJavaScriptReturningResult(
+        """document.querySelector('script[src^="editor.js?v="]')
+          ?.getAttribute('src') ?? ''""",
+      ),
+      matches(RegExp(r'^editor\.js\?v=[0-9a-f]{16}$')),
+    );
+    expect(
+      await surface!.debugRunJavaScriptReturningResult(
         'window.synapseTest.getText()',
       ),
       markdown,
+    );
+
+    final dragFeedback =
+        jsonDecode(
+              await surface!.debugRunJavaScriptReturningResult('''
+                (() => {
+                  const handle = document.querySelector(
+                    '.synapse-image-move-handle',
+                  );
+                  const target = Array.from(
+                    document.querySelectorAll('.cm-line'),
+                  ).find((line) => line.textContent === 'After');
+                  const handleBounds = handle.getBoundingClientRect();
+                  const targetBounds = target.getBoundingClientRect();
+                  handle.dispatchEvent(new MouseEvent('mousedown', {
+                    bubbles: true,
+                    cancelable: true,
+                    button: 0,
+                    buttons: 1,
+                    clientX: handleBounds.left + 4,
+                    clientY: handleBounds.top + 4,
+                  }));
+                  const previewOnPress = document.querySelectorAll(
+                    '.synapse-image-drag-preview',
+                  ).length;
+                  window.dispatchEvent(new MouseEvent('mousemove', {
+                    bubbles: true,
+                    cancelable: true,
+                    button: 0,
+                    buttons: 1,
+                    clientX: targetBounds.left + 12,
+                    clientY: targetBounds.bottom - 2,
+                  }));
+                  return JSON.stringify({
+                    previewOnPress,
+                    preview: document.querySelectorAll(
+                      '.synapse-image-drag-preview',
+                    ).length,
+                    target: document.querySelectorAll(
+                      '.synapse-image-drop-target',
+                    ).length,
+                    indicator: document.querySelectorAll(
+                      '.synapse-image-block-drop-indicator',
+                    ).length,
+                    placement: document.querySelector(
+                      '.synapse-image-block-drop-indicator',
+                    )?.dataset.placement,
+                    transform: document.querySelector(
+                      '.synapse-image-drag-preview',
+                    )?.style.transform,
+                    pointerX: targetBounds.left + 12,
+                    pointerY: targetBounds.bottom - 2,
+                  });
+                })()
+              ''')
+                  as String,
+            )
+            as Map<String, Object?>;
+    expect(dragFeedback['preview'], 1);
+    expect(dragFeedback['previewOnPress'], 1);
+    expect(dragFeedback['target'], 1);
+    expect(dragFeedback['indicator'], 1);
+    expect(dragFeedback['placement'], 'after');
+    expect(dragFeedback['transform'], contains('translate3d('));
+    await surface!.debugRunJavaScriptReturningResult('''
+      window.dispatchEvent(new MouseEvent('mouseup', {
+        bubbles: true,
+        cancelable: true,
+        button: 0,
+        buttons: 0,
+        clientX: ${dragFeedback['pointerX']},
+        clientY: ${dragFeedback['pointerY']},
+      }));
+      true
+    ''');
+    await surface!.flush();
+    await _pumpUntil(
+      tester,
+      () =>
+          session.controller.text ==
+          'After\n\n<img src="Note.assets/attachments/pixel.png" width="320">',
+    );
+    expect(
+      await surface!.debugRunJavaScriptReturningResult(
+        'document.querySelectorAll(".synapse-image-drag-preview, '
+        '.synapse-image-drop-target, '
+        '.synapse-image-block-drop-indicator").length',
+      ),
+      0,
+    );
+
+    await surface!.debugRunJavaScriptReturningResult(
+      'window.synapseTest.undo(); true',
+    );
+    await surface!.flush();
+    await _pumpUntil(tester, () => session.controller.text == markdown);
+    await surface!.debugRunJavaScriptReturningResult(
+      'window.synapseTest.redo(); true',
+    );
+    await surface!.flush();
+    await _pumpUntil(
+      tester,
+      () =>
+          session.controller.text ==
+          'After\n\n<img src="Note.assets/attachments/pixel.png" width="320">',
     );
 
     await tester.pumpWidget(const SizedBox.shrink());
