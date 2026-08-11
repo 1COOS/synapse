@@ -5,15 +5,51 @@ import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { InitializeCommand } from '../src/protocol';
 
 const messages: Array<Record<string, unknown>> = [];
+const resizeObservers: Array<{
+  callback: ResizeObserverCallback;
+  observed: Set<Element>;
+}> = [];
+const requestAnimationFrameMock = vi.fn((callback: FrameRequestCallback) =>
+  window.setTimeout(() => callback(performance.now()), 0));
+
+function notifyResize(target: Element): void {
+  for (const observer of resizeObservers) {
+    if (!observer.observed.has(target)) continue;
+    observer.callback(
+      [{ target } as ResizeObserverEntry],
+      observer as unknown as ResizeObserver,
+    );
+  }
+}
 
 beforeAll(async () => {
   vi.stubGlobal('ResizeObserver', class {
-    observe() {}
-    unobserve() {}
-    disconnect() {}
+    private readonly record: {
+      callback: ResizeObserverCallback;
+      observed: Set<Element>;
+    } = {
+      callback: (_entries: ResizeObserverEntry[]) => {},
+      observed: new Set<Element>(),
+    };
+
+    constructor(callback: ResizeObserverCallback) {
+      this.record.callback = callback;
+      resizeObservers.push(this.record);
+    }
+
+    observe(target: Element) {
+      this.record.observed.add(target);
+    }
+
+    unobserve(target: Element) {
+      this.record.observed.delete(target);
+    }
+
+    disconnect() {
+      this.record.observed.clear();
+    }
   });
-  vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) =>
-    window.setTimeout(() => callback(performance.now()), 0));
+  vi.stubGlobal('requestAnimationFrame', requestAnimationFrameMock);
   vi.stubGlobal('cancelAnimationFrame', (id: number) => window.clearTimeout(id));
   Range.prototype.getClientRects = () => [] as unknown as DOMRectList;
   Range.prototype.getBoundingClientRect = () => ({
@@ -46,6 +82,8 @@ beforeAll(async () => {
 beforeEach(() => {
   document.body.innerHTML = '<main id="editor"></main>';
   messages.length = 0;
+  resizeObservers.length = 0;
+  requestAnimationFrameMock.mockClear();
 });
 
 function pointerEvent(
@@ -256,6 +294,146 @@ describe('CodeMirror live preview', () => {
     expect(document.querySelector('.synapse-table-frame')).not.toBeNull();
     expect(document.querySelector('.synapse-columns')).not.toBeNull();
     expect(messages.some((message) => message.type === 'ready')).toBe(true);
+  });
+
+  it('remeasures parent and nested editors when dynamic blocks resize', async () => {
+    const markdown = [
+      '<img src="Note.assets/attachments/outer.png" width="320">',
+      '',
+      '<!-- synapse:columns ratio="50:50" -->',
+      'Left',
+      '<!-- synapse:column -->',
+      'Right',
+      '<!-- synapse:columns-end -->',
+      '',
+      'After',
+    ].join('\n');
+    window.synapseHost!.receive(initialize(markdown, 'editing'));
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+
+    const image = document.querySelector<HTMLElement>(
+      '.cm-editor > .cm-scroller > .cm-content .synapse-image-block',
+    )!;
+    const columns = document.querySelector<HTMLElement>('.synapse-columns')!;
+    expect(
+      resizeObservers.some((observer) => observer.observed.has(image)),
+    ).toBe(true);
+    expect(
+      resizeObservers.some((observer) => observer.observed.has(columns)),
+    ).toBe(true);
+
+    const imageMeasureRequests =
+      window.synapseTest!.getDynamicBlockMeasureRequests();
+    notifyResize(image);
+    expect(window.synapseTest!.getDynamicBlockMeasureRequests()).toBeGreaterThan(
+      imageMeasureRequests,
+    );
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+
+    const columnMeasureRequests =
+      window.synapseTest!.getDynamicBlockMeasureRequests();
+    notifyResize(columns);
+    expect(window.synapseTest!.getDynamicBlockMeasureRequests()).toBeGreaterThan(
+      columnMeasureRequests,
+    );
+  });
+
+  it('uses DOM caret positions for forward and reverse outer text drags', async () => {
+    const markdown = [
+      '<img src="Note.assets/attachments/outer.png" width="320">',
+      '',
+      'First line',
+      'Second line',
+    ].join('\n');
+    window.synapseHost!.receive(initialize(markdown, 'editing'));
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+
+    const lines = Array.from(document.querySelectorAll<HTMLElement>('.cm-line'));
+    const first = lines.find((line) => line.textContent === 'First line')!;
+    const second = lines.find((line) => line.textContent === 'Second line')!;
+    const firstText = document.createTreeWalker(
+      first,
+      NodeFilter.SHOW_TEXT,
+    ).nextNode() as Text;
+    const secondText = document.createTreeWalker(
+      second,
+      NodeFilter.SHOW_TEXT,
+    ).nextNode() as Text;
+    const original = Object.getOwnPropertyDescriptor(
+      document,
+      'caretRangeFromPoint',
+    );
+    Object.defineProperty(document, 'caretRangeFromPoint', {
+      configurable: true,
+      value: (_x: number, y: number) => {
+        const range = document.createRange();
+        if (y < 150) range.setStart(firstText, 0);
+        else range.setStart(secondText, secondText.length);
+        range.collapse(true);
+        return range;
+      },
+    });
+    const drag = (
+      start: HTMLElement,
+      startY: number,
+      endY: number,
+    ) => {
+      start.dispatchEvent(new MouseEvent('mousedown', {
+        bubbles: true,
+        cancelable: true,
+        detail: 1,
+        button: 0,
+        buttons: 1,
+        clientX: 20,
+        clientY: startY,
+      }));
+      document.dispatchEvent(new MouseEvent('mousemove', {
+        bubbles: true,
+        cancelable: true,
+        detail: 1,
+        button: 0,
+        buttons: 1,
+        clientX: 20,
+        clientY: endY,
+      }));
+      document.dispatchEvent(new MouseEvent('mouseup', {
+        bubbles: true,
+        cancelable: true,
+        detail: 1,
+        button: 0,
+        buttons: 0,
+        clientX: 20,
+        clientY: endY,
+      }));
+    };
+
+    try {
+      const firstFrom = markdown.indexOf('First line');
+      const secondTo = markdown.indexOf('Second line') + 'Second line'.length;
+      drag(first, 100, 200);
+      expect(window.synapseTest!.getSelection()).toEqual({
+        anchor: firstFrom,
+        head: secondTo,
+      });
+      expect(window.synapseTest!.getSelectedSource()).toBe(
+        'First line\nSecond line',
+      );
+
+      drag(second, 200, 100);
+      expect(window.synapseTest!.getSelection()).toEqual({
+        anchor: secondTo,
+        head: firstFrom,
+      });
+      expect(window.synapseTest!.getSelectedSource()).toBe(
+        'First line\nSecond line',
+      );
+    } finally {
+      if (original) {
+        Object.defineProperty(document, 'caretRangeFromPoint', original);
+      } else {
+        Reflect.deleteProperty(document, 'caretRangeFromPoint');
+      }
+    }
   });
 
   it('updates the same editor state when switching modes', async () => {
@@ -1075,6 +1253,13 @@ describe('CodeMirror live preview', () => {
     const markdown = [
       `<img src="${src}" width="320">`,
       '',
+      'Alpha first',
+      'Beta second',
+      '',
+      '| A | B |',
+      '| --- | --- |',
+      '| 1 | 2 |',
+      '',
       '<!-- synapse:columns ratio="50:50" -->',
       'Left',
       '<!-- synapse:column -->',
@@ -1157,11 +1342,82 @@ describe('CodeMirror live preview', () => {
     ).toBe(src);
     expect(document.querySelector('.synapse-image-resize-right')).not.toBeNull();
 
-    document.querySelector<HTMLElement>(
+    const parentContent = document.querySelector<HTMLElement>(
       '.cm-editor > .cm-scroller > .cm-content',
-    )!.dispatchEvent(pointerEvent('pointerdown', 20, 260));
+    )!;
+    const alphaFrom = markdown.indexOf('Alpha first');
+    const alphaTo = alphaFrom + 'Alpha first'.length;
+    parentContent.dispatchEvent(pointerEvent('pointerdown', 20, 260));
+    window.synapseTest!.setSelection(alphaFrom, alphaTo);
     await Promise.resolve();
 
+    expect(document.querySelector('.synapse-image-selected')).not.toBeNull();
+    expect(window.synapseTest!.getSelection()).toEqual({
+      anchor: alphaFrom,
+      head: alphaTo,
+    });
+    expect(window.synapseTest!.getSelectedSource()).toBe('Alpha first');
+
+    parentContent.dispatchEvent(pointerEvent('pointerup', 20, 260));
+    await Promise.resolve();
+
+    expect(document.querySelector('.synapse-image-selected')).toBeNull();
+    expect(window.synapseTest!.getSelection()).toEqual({
+      anchor: alphaFrom,
+      head: alphaTo,
+    });
+    expect(window.synapseTest!.getSelectedSource()).toBe('Alpha first');
+
+    document.querySelector<HTMLElement>('.synapse-image-block')!.click();
+    await Promise.resolve();
+    const betaTo = markdown.indexOf('Beta second') + 'Beta second'.length;
+    parentContent.dispatchEvent(pointerEvent('pointerdown', 20, 280));
+    window.synapseTest!.setSelection(betaTo, alphaFrom);
+    window.dispatchEvent(pointerEvent('pointerup', 20, 280));
+    await Promise.resolve();
+
+    expect(window.synapseTest!.getSelection()).toEqual({
+      anchor: betaTo,
+      head: alphaFrom,
+    });
+    expect(window.synapseTest!.getSelectedSource()).toBe(
+      'Alpha first\nBeta second',
+    );
+    expect(document.querySelector('.synapse-image-selected')).toBeNull();
+
+    document.querySelector<HTMLElement>('.synapse-image-block')!.click();
+    await Promise.resolve();
+    parentContent.dispatchEvent(pointerEvent('pointerdown', 20, 260));
+    window.synapseTest!.setSelection(alphaFrom, alphaTo);
+    parentContent.dispatchEvent(pointerEvent('pointercancel', 20, 260));
+    await Promise.resolve();
+
+    expect(document.querySelector('.synapse-image-selected')).not.toBeNull();
+    expect(window.synapseTest!.getSelection()).toEqual({
+      anchor: alphaFrom,
+      head: alphaTo,
+    });
+
+    columnContent.dispatchEvent(pointerEvent('pointerdown', 400, 360));
+    window.synapseTest!.selectColumn('right', 0, 5);
+    await Promise.resolve();
+    expect(document.querySelector('.synapse-image-selected')).not.toBeNull();
+    columnContent.dispatchEvent(pointerEvent('pointerup', 400, 360));
+    await Promise.resolve();
+    expect(document.querySelector('.synapse-image-selected')).toBeNull();
+
+    document.querySelector<HTMLElement>('.synapse-image-block')!.click();
+    await Promise.resolve();
+    expect(window.synapseTest!.getParentImageSelection()).toBe(0);
+    const cell = tableCell(1, 1);
+    cell.dispatchEvent(pointerEvent('pointerdown', 160, 320));
+    await Promise.resolve();
+    expect(window.synapseTest!.getPendingParentImageSelectionDismiss()).toBe(
+      true,
+    );
+    expect(document.querySelector('.synapse-image-selected')).not.toBeNull();
+    cell.dispatchEvent(pointerEvent('pointerup', 160, 320));
+    await Promise.resolve();
     expect(document.querySelector('.synapse-image-selected')).toBeNull();
   });
 

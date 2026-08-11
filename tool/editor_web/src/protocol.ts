@@ -264,7 +264,17 @@ declare global {
         hostChildren: number;
       };
       getPendingClipboardCount(): number;
+      getParentImageSelection(): number | null;
+      getPendingParentImageSelectionDismiss(): boolean;
+      getDynamicBlockMeasureRequests(): number;
       getSelection(): EditorSelection;
+      domPosAtCoords(x: number, y: number): number | null;
+      coordsAtPos(offset: number): {
+        left: number;
+        right: number;
+        top: number;
+        bottom: number;
+      } | null;
       insertText(text: string): void;
       measureInsert(text: string): number;
       undo(): boolean;

@@ -125,7 +125,9 @@ let outlineTimer = 0;
 let commandStateFrame = 0;
 let inputStartedAt: number | undefined;
 let pointerStartedAt: number | undefined;
-let pointerInteractionHost: HTMLElement | undefined;
+let pendingParentImageSelectionDismiss = false;
+let parentImageSelectionDismissToken = 0;
+let dynamicBlockMeasureRequests = 0;
 let pageLayoutHost: HTMLElement | undefined;
 let pageLayoutScrollHost: HTMLElement | undefined;
 let pageLayoutFrame = 0;
@@ -237,6 +239,8 @@ function renderPageLayout(): void {
 }
 
 function handleSurfacePointerInteraction(event: PointerEvent): void {
+  parentImageSelectionDismissToken += 1;
+  pendingParentImageSelectionDismiss = false;
   if (
     event.target instanceof Element &&
     event.target.closest('.synapse-context-menu')
@@ -246,12 +250,33 @@ function handleSurfacePointerInteraction(event: PointerEvent): void {
       '.synapse-image-block, .synapse-inline-image',
     );
     const insideColumns = event.target.closest('.synapse-columns') != null;
-    if ((!parentImage || insideColumns) &&
-        view.state.field(parentImageSelectionField, false) != null) {
-      view.dispatch({ effects: setParentImageSelection.of(null) });
-    }
+    pendingParentImageSelectionDismiss =
+      (!parentImage || insideColumns) &&
+      view.state.field(parentImageSelectionField, false) != null;
   }
   post({ type: 'pointerInteraction' });
+}
+
+function finishSurfacePointerInteraction(): void {
+  const shouldDismiss = pendingParentImageSelectionDismiss;
+  pendingParentImageSelectionDismiss = false;
+  if (!shouldDismiss) return;
+  const token = parentImageSelectionDismissToken;
+  const editorView = view;
+  queueMicrotask(() => {
+    if (
+      token === parentImageSelectionDismissToken &&
+      view === editorView &&
+      editorView?.state.field(parentImageSelectionField, false) != null
+    ) {
+      editorView.dispatch({ effects: setParentImageSelection.of(null) });
+    }
+  });
+}
+
+function cancelSurfacePointerInteraction(): void {
+  parentImageSelectionDismissToken += 1;
+  pendingParentImageSelectionDismiss = false;
 }
 
 function selectionOf(state: EditorState): EditorSelection {
@@ -2504,6 +2529,7 @@ function createColumnEditor(
         ]),
         runtimeState.themeCompartment.of(columnEditorTheme(runtime!.theme)),
         columnPreview(runtimeState),
+        dynamicBlockMeasurement,
         EditorView.lineWrapping,
         keymap.of([
           { key: 'Mod-z', preventDefault: true, run: () => view ? undo(view) : false },
@@ -3372,9 +3398,9 @@ function selectedImageRange(
     parentImageSelectionField,
     false,
   );
-  const selectedFrom = explicitParentSelection ?? (
-    selection.anchor === selection.head ? selection.anchor : undefined
-  );
+  const selectedFrom = explicitParentSelection === undefined
+    ? (selection.anchor === selection.head ? selection.anchor : undefined)
+    : explicitParentSelection ?? undefined;
   if (selectedFrom == null) return undefined;
   for (const block of splitMarkdownBlocks(state.doc.toString())) {
     if (block.kind === 'image') {
@@ -3487,10 +3513,7 @@ function buildDecorations(state: EditorState): DecorationSet {
           image.src,
           image.width,
           true,
-          explicitImageFrom === image.from || (
-            explicitImageFrom == null &&
-            imageSelectionMatches(selection, image.from)
-          ),
+          explicitImageFrom === image.from,
           editable,
           () => selectParentImage(image.from),
           { from: block.from, to: block.to },
@@ -3505,10 +3528,7 @@ function buildDecorations(state: EditorState): DecorationSet {
     }
     const images = imageRanges(block);
     const selectedImage = images.find((image) =>
-      explicitImageFrom === image.from || (
-        explicitImageFrom == null &&
-        imageSelectionMatches(selection, image.from)
-      ));
+      explicitImageFrom === image.from);
     if (!activeBlock || selectedImage != null) {
       const overlapsImage = (from: number, to: number) =>
         images.some((image) => from < image.to && to > image.from);
@@ -3738,6 +3758,228 @@ function editorTheme(theme: EditorTheme) {
     '.synapse-context-submenu[hidden]': { display: 'none' },
   });
 }
+
+const dynamicBlockMeasurementSelector = [
+  '.synapse-image-block',
+  '.synapse-inline-image',
+  '.synapse-table-frame',
+  '.synapse-columns',
+].join(', ');
+
+class DynamicBlockMeasurementPlugin {
+  private readonly observed = new Set<Element>();
+  private readonly resizeObserver?: ResizeObserver;
+  private readonly mutationObserver?: MutationObserver;
+  private refreshPending = false;
+  private destroyed = false;
+
+  constructor(private readonly editorView: EditorView) {
+    if (typeof ResizeObserver !== 'function') return;
+    this.resizeObserver = new ResizeObserver((entries) => {
+      if (
+        !this.destroyed &&
+        entries.some((entry) => this.observed.has(entry.target))
+      ) {
+        this.requestMeasure();
+      }
+    });
+    this.mutationObserver = new MutationObserver(() => {
+      this.scheduleRefresh();
+    });
+    this.mutationObserver.observe(editorView.contentDOM, {
+      childList: true,
+      subtree: true,
+    });
+    this.scheduleRefresh();
+  }
+
+  update(update: ViewUpdate): void {
+    if (update.docChanged || update.viewportChanged) this.scheduleRefresh();
+  }
+
+  destroy(): void {
+    this.destroyed = true;
+    this.mutationObserver?.disconnect();
+    this.resizeObserver?.disconnect();
+    this.observed.clear();
+  }
+
+  private scheduleRefresh(): void {
+    if (this.refreshPending || this.destroyed || !this.resizeObserver) return;
+    this.refreshPending = true;
+    queueMicrotask(() => {
+      this.refreshPending = false;
+      if (!this.destroyed) this.refreshObservedBlocks();
+    });
+  }
+
+  private refreshObservedBlocks(): void {
+    const next = new Set<Element>();
+    for (const element of this.editorView.contentDOM.querySelectorAll(
+      dynamicBlockMeasurementSelector,
+    )) {
+      if (element.closest('.cm-editor') === this.editorView.dom) {
+        next.add(element);
+      }
+    }
+    let changed = false;
+    for (const element of this.observed) {
+      if (next.has(element)) continue;
+      this.resizeObserver!.unobserve(element);
+      this.observed.delete(element);
+      changed = true;
+    }
+    for (const element of next) {
+      if (this.observed.has(element)) continue;
+      this.observed.add(element);
+      this.resizeObserver!.observe(element);
+      changed = true;
+    }
+    if (changed) this.requestMeasure();
+  }
+
+  private requestMeasure(): void {
+    dynamicBlockMeasureRequests += 1;
+    this.editorView.requestMeasure();
+  }
+}
+
+const dynamicBlockMeasurement = ViewPlugin.fromClass(
+  DynamicBlockMeasurementPlugin,
+);
+
+interface DomTextPosition {
+  pos: number;
+  assoc: -1 | 1;
+}
+
+function lineOwnedByEditor(
+  editorView: EditorView,
+  node: Node | null,
+): HTMLElement | undefined {
+  const element = node instanceof Element ? node : node?.parentElement;
+  const line = element?.closest<HTMLElement>('.cm-line');
+  return line?.closest('.cm-editor') === editorView.dom ? line : undefined;
+}
+
+function domTextPositionAtCoords(
+  editorView: EditorView,
+  x: number,
+  y: number,
+): DomTextPosition | undefined {
+  const ownerDocument = editorView.dom.ownerDocument as Document & {
+    caretRangeFromPoint?(x: number, y: number): Range | null;
+  };
+  const range = ownerDocument.caretRangeFromPoint?.(x, y);
+  if (range && lineOwnedByEditor(editorView, range.startContainer)) {
+    try {
+      const pos = Math.max(
+        0,
+        Math.min(
+          editorView.posAtDOM(range.startContainer, range.startOffset),
+          editorView.state.doc.length,
+        ),
+      );
+      const coordinates = editorView.coordsAtPos(pos);
+      const center = coordinates == null
+        ? x
+        : (coordinates.left + coordinates.right) / 2;
+      return { pos, assoc: x < center ? -1 : 1 };
+    } catch (_) {
+      // Fall through to the line-level fallback below.
+    }
+  }
+  const pointed = ownerDocument.elementFromPoint(x, y);
+  const line = lineOwnedByEditor(editorView, pointed);
+  if (!line) {
+    const fallback = editorView.posAndSideAtCoords({ x, y }, false);
+    return {
+      pos: fallback.pos,
+      assoc: fallback.assoc < 0 ? -1 : 1,
+    };
+  }
+  const bounds = line.getBoundingClientRect();
+  try {
+    const pos = editorView.posAtDOM(
+      line,
+      x < bounds.left + bounds.width / 2 ? 0 : line.childNodes.length,
+    );
+    return {
+      pos: Math.max(0, Math.min(pos, editorView.state.doc.length)),
+      assoc: x < bounds.left + bounds.width / 2 ? -1 : 1,
+    };
+  } catch (_) {
+    return undefined;
+  }
+}
+
+function domClickRange(
+  editorView: EditorView,
+  position: DomTextPosition,
+  clickCount: number,
+) {
+  if (clickCount === 2) {
+    return editorView.state.wordAt(position.pos) ??
+      CmSelection.cursor(position.pos, position.assoc);
+  }
+  if (clickCount >= 3) {
+    const line = editorView.state.doc.lineAt(position.pos);
+    const to = line.to < editorView.state.doc.length ? line.to + 1 : line.to;
+    return CmSelection.range(line.from, to);
+  }
+  return CmSelection.cursor(position.pos, position.assoc);
+}
+
+const domTextMouseSelection = EditorView.mouseSelectionStyle.of(
+  (editorView, event) => {
+    const target = event.target instanceof Node ? event.target : null;
+    if (event.button !== 0 || !lineOwnedByEditor(editorView, target)) {
+      return null;
+    }
+    const initialStart = domTextPositionAtCoords(
+      editorView,
+      event.clientX,
+      event.clientY,
+    );
+    if (!initialStart) return null;
+    let start: DomTextPosition = initialStart;
+    let startSelection = editorView.state.selection;
+    const clickCount = Math.max(1, event.detail);
+    return {
+      update(update: ViewUpdate) {
+        if (!update.docChanged) return;
+        start = {
+          ...start,
+          pos: update.changes.mapPos(start.pos),
+        };
+        startSelection = startSelection.map(update.changes);
+      },
+      get(current: MouseEvent, extend: boolean, multiple: boolean) {
+        const position = domTextPositionAtCoords(
+          editorView,
+          current.clientX,
+          current.clientY,
+        ) ?? start;
+        let range = domClickRange(editorView, position, clickCount);
+        if (start.pos !== position.pos && !extend) {
+          const startRange = domClickRange(editorView, start, clickCount);
+          const from = Math.min(startRange.from, range.from);
+          const to = Math.max(startRange.to, range.to);
+          range = from < range.from
+            ? CmSelection.range(from, to, range.assoc)
+            : CmSelection.range(to, from, range.assoc);
+        }
+        if (extend) {
+          return startSelection.replaceRange(
+            startSelection.main.extend(range.from, range.to, range.assoc),
+          );
+        }
+        if (multiple) return startSelection.addRange(range);
+        return CmSelection.create([range]);
+      },
+    };
+  },
+);
 
 function updateListener(update: ViewUpdate): void {
   if (!runtime) return;
@@ -3997,9 +4239,11 @@ function extensions(command: InitializeCommand) {
     editableCompartment.of([EditorView.editable.of(command.editable), EditorState.readOnly.of(!command.editable)]),
     themeCompartment.of(editorTheme(command.theme)),
     livePreview,
+    dynamicBlockMeasurement,
     searchHighlights,
     placeholder('选择或创建笔记后开始整理 Markdown'),
     EditorView.lineWrapping,
+    domTextMouseSelection,
     EditorView.updateListener.of(updateListener),
     ViewPlugin.fromClass(class {
       update(update: ViewUpdate) {
@@ -4100,6 +4344,8 @@ function extensions(command: InitializeCommand) {
 
 function initialize(command: InitializeCommand): void {
   cancelActiveImageDrag();
+  cancelSurfacePointerInteraction();
+  dynamicBlockMeasureRequests = 0;
   clearPageLayout();
   pageLayoutBoundaries = [];
   pageLayoutStale = false;
@@ -4126,15 +4372,6 @@ function initialize(command: InitializeCommand): void {
   };
   const parent = document.querySelector<HTMLElement>('#editor');
   if (!parent) throw new Error('Missing #editor host.');
-  if (pointerInteractionHost !== parent) {
-    pointerInteractionHost?.removeEventListener(
-      'pointerdown',
-      handleSurfacePointerInteraction,
-      true,
-    );
-    parent.addEventListener('pointerdown', handleSurfacePointerInteraction, true);
-    pointerInteractionHost = parent;
-  }
   parent.replaceChildren();
   view = new EditorView({
     parent,
@@ -4329,6 +4566,7 @@ function receive(command: HostCommand): void {
       case 'clipboardResult': receiveClipboardResult(command); break;
       case 'dispose':
         cancelActiveImageDrag();
+        cancelSurfacePointerInteraction();
         flushPendingTransaction();
         clearPageLayout();
         view?.destroy();
@@ -5457,7 +5695,19 @@ window.synapseTest = {
     hostChildren: pageLayoutHost?.childElementCount ?? 0,
   }),
   getPendingClipboardCount: () => clipboardRequests.size,
+  getParentImageSelection: () =>
+    view?.state.field(parentImageSelectionField, false) ?? null,
+  getPendingParentImageSelectionDismiss: () =>
+    pendingParentImageSelectionDismiss,
+  getDynamicBlockMeasureRequests: () => dynamicBlockMeasureRequests,
   getSelection: () => view ? selectionOf(view.state) : { anchor: 0, head: 0 },
+  domPosAtCoords: (x: number, y: number) =>
+    view == null ? null : domTextPositionAtCoords(view, x, y)?.pos ?? null,
+  coordsAtPos: (offset: number) => {
+    if (!view) return null;
+    const position = Math.max(0, Math.min(offset, view.state.doc.length));
+    return view.coordsAtPos(position) ?? null;
+  },
   insertText: (text: string) => {
     if (!view || !runtime?.editable) return;
     const selection = view.state.selection.main;
@@ -5545,6 +5795,9 @@ window.synapseTest = {
     );
   },
 };
+window.addEventListener('pointerdown', handleSurfacePointerInteraction, true);
+window.addEventListener('pointerup', finishSurfacePointerInteraction, true);
+window.addEventListener('pointercancel', cancelSurfacePointerInteraction, true);
 window.addEventListener('error', (event) => post({ type: 'error', message: event.message, stack: event.error?.stack }));
 window.addEventListener('unhandledrejection', (event) => {
   const error = event.reason instanceof Error ? event.reason : new Error(String(event.reason));

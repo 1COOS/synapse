@@ -481,6 +481,90 @@ void main() {
       ),
       isTrue,
     );
+    Future<Map<String, Object?>> trailingLineGeometry() async =>
+        jsonDecode(
+              await surface!.debugRunJavaScriptReturningResult('''
+                (() => {
+                  const text = window.synapseTest.getText();
+                  const offset = text.indexOf('After');
+                  const line = Array.from(document.querySelectorAll('.cm-line'))
+                    .find((candidate) => candidate.textContent === 'After');
+                  const bounds = line.getBoundingClientRect();
+                  const coordinates = window.synapseTest.coordsAtPos(offset);
+                  const hit = window.synapseTest.domPosAtCoords(
+                    bounds.left + 1,
+                    bounds.top + bounds.height / 2,
+                  );
+                  return JSON.stringify({
+                    offset,
+                    hit,
+                    lineTop: bounds.top,
+                    lineBottom: bounds.bottom,
+                    caretTop: coordinates?.top ?? null,
+                    caretBottom: coordinates?.bottom ?? null,
+                    aligned: coordinates != null &&
+                      coordinates.top >= bounds.top - 1 &&
+                      coordinates.bottom <= bounds.bottom + 1 &&
+                      hit >= offset && hit <= offset + 1,
+                  });
+                })()
+              ''')
+                  as String,
+            )
+            as Map<String, Object?>;
+    await _pumpUntilAsync(
+      tester,
+      () async => (await trailingLineGeometry())['aligned'] == true,
+    );
+    final geometry = await trailingLineGeometry();
+    expect(
+      geometry['hit']! as int,
+      inInclusiveRange(
+        geometry['offset']! as int,
+        (geometry['offset']! as int) + 1,
+      ),
+    );
+    expect(
+      (geometry['caretTop']! as num).toDouble(),
+      greaterThanOrEqualTo((geometry['lineTop']! as num).toDouble() - 1),
+    );
+    expect(
+      (geometry['caretBottom']! as num).toDouble(),
+      lessThanOrEqualTo((geometry['lineBottom']! as num).toDouble() + 1),
+    );
+    final clickedSelection =
+        jsonDecode(
+              await surface!.debugRunJavaScriptReturningResult('''
+                (() => {
+                  const line = Array.from(document.querySelectorAll('.cm-line'))
+                    .find((candidate) => candidate.textContent === 'After');
+                  const bounds = line.getBoundingClientRect();
+                  const options = {
+                    bubbles: true,
+                    cancelable: true,
+                    detail: 1,
+                    button: 0,
+                    clientX: bounds.left + 1,
+                    clientY: bounds.top + bounds.height / 2,
+                  };
+                  line.dispatchEvent(new MouseEvent('mousedown', {
+                    ...options,
+                    buttons: 1,
+                  }));
+                  document.dispatchEvent(new MouseEvent('mouseup', {
+                    ...options,
+                    buttons: 0,
+                  }));
+                  return JSON.stringify(window.synapseTest.getSelection());
+                })()
+              ''')
+                  as String,
+            )
+            as Map<String, Object?>;
+    expect(clickedSelection, {
+      'anchor': markdown.indexOf('After'),
+      'head': markdown.indexOf('After'),
+    });
     expect(
       await surface!.debugRunJavaScriptReturningResult(
         'document.querySelectorAll(".synapse-image-move-handle, .synapse-image-resize").length',
@@ -704,6 +788,10 @@ void main() {
       imageActions.single.width,
       (resizeState['previewWidth']! as num).round(),
     );
+    await _pumpUntilAsync(
+      tester,
+      () async => (await trailingLineGeometry())['aligned'] == true,
+    );
 
     final dragFeedback =
         jsonDecode(
@@ -808,6 +896,92 @@ void main() {
       () =>
           session.controller.text ==
           'After\n\n<img src="Note.assets/attachments/pixel.png" width="320">',
+    );
+    await surface!.debugRunJavaScriptReturningResult(
+      'document.querySelector(".synapse-image-block").click(); true',
+    );
+    await _pumpUntilAsync(
+      tester,
+      () async =>
+          await surface!.debugRunJavaScriptReturningResult(
+            'document.querySelectorAll(".synapse-image-selected").length',
+          ) ==
+          1,
+    );
+    final selectionDuringPointer =
+        jsonDecode(
+              await surface!.debugRunJavaScriptReturningResult('''
+                (() => {
+                  const line = Array.from(document.querySelectorAll(
+                    '.cm-line',
+                  )).find((candidate) => candidate.textContent === 'After');
+                  const bounds = line.getBoundingClientRect();
+                  line.dispatchEvent(new PointerEvent('pointerdown', {
+                    bubbles: true,
+                    cancelable: true,
+                    pointerId: 91,
+                    pointerType: 'mouse',
+                    isPrimary: true,
+                    button: 0,
+                    buttons: 1,
+                    clientX: bounds.left + 8,
+                    clientY: bounds.top + bounds.height / 2,
+                  }));
+                  window.synapseTest.setSelection(0, 5);
+                  return JSON.stringify({
+                    selected: document.querySelectorAll(
+                      '.synapse-image-selected',
+                    ).length,
+                    selection: window.synapseTest.getSelection(),
+                    source: window.synapseTest.getSelectedSource(),
+                  });
+                })()
+              ''')
+                  as String,
+            )
+            as Map<String, Object?>;
+    expect(selectionDuringPointer['selected'], 1);
+    expect(selectionDuringPointer['selection'], {'anchor': 0, 'head': 5});
+    expect(selectionDuringPointer['source'], 'After');
+    await surface!.debugRunJavaScriptReturningResult('''
+      (() => {
+        const line = Array.from(document.querySelectorAll(
+          '.cm-line',
+        )).find((candidate) => candidate.textContent === 'After');
+        const bounds = line.getBoundingClientRect();
+        line.dispatchEvent(new PointerEvent('pointerup', {
+          bubbles: true,
+          cancelable: true,
+          pointerId: 91,
+          pointerType: 'mouse',
+          isPrimary: true,
+          button: 0,
+          buttons: 0,
+          clientX: bounds.left + 8,
+          clientY: bounds.top + bounds.height / 2,
+        }));
+        return true;
+      })()
+    ''');
+    await _pumpUntilAsync(
+      tester,
+      () async =>
+          await surface!.debugRunJavaScriptReturningResult(
+            'document.querySelectorAll(".synapse-image-selected").length',
+          ) ==
+          0,
+    );
+    expect(
+      await surface!.debugRunJavaScriptReturningResult(
+        'JSON.stringify(window.synapseTest.getSelection())',
+      ),
+      '{"anchor":0,"head":5}',
+    );
+    expect(
+      await surface!.debugRunJavaScriptReturningResult(
+        'window.synapseTest.getSelectedSource()',
+      ),
+      'After',
     );
 
     await tester.pumpWidget(const SizedBox.shrink());
