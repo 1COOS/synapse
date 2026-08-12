@@ -102,6 +102,38 @@ function pointerEvent(
   });
 }
 
+function compositionInput(
+  data: string,
+  { composing, inputType }: {
+    composing: boolean;
+    inputType: string;
+  },
+): InputEvent {
+  const event = new InputEvent('input', {
+    bubbles: true,
+    inputType,
+    data,
+  });
+  Object.defineProperty(event, 'isComposing', { value: composing });
+  return event;
+}
+
+function webKitCompositionKey(
+  key: string,
+  { composing = false, keyCode = 0 } = {},
+): KeyboardEvent {
+  const event = new KeyboardEvent('keydown', {
+    key,
+    bubbles: true,
+    cancelable: true,
+  });
+  Object.defineProperties(event, {
+    isComposing: { value: composing },
+    keyCode: { value: keyCode },
+  });
+  return event;
+}
+
 function rect(
   left: number,
   top: number,
@@ -2094,7 +2126,7 @@ describe('CodeMirror live preview', () => {
     expect(document.querySelector('.synapse-image-source')).toBeNull();
   });
 
-  it('keeps table composition focused and reports it as composing', async () => {
+  it('keeps table IME preedit local until composition ends', async () => {
     const markdown = '| A | B |\n| --- | --- |\n| 1 | 2 |\n\nAfter';
     window.synapseHost!.receive(initialize(markdown, 'editing'));
     await new Promise((resolve) => window.setTimeout(resolve, 20));
@@ -2106,20 +2138,23 @@ describe('CodeMirror live preview', () => {
       'td .synapse-table-cell-editor',
     )!;
     cell.focus();
+    const processKey = webKitCompositionKey('Enter', { keyCode: 229 });
+    cell.dispatchEvent(processKey);
+    expect(processKey.defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(cell);
+
     cell.dispatchEvent(new CompositionEvent('compositionstart', {
       bubbles: true,
       data: '',
     }));
-    cell.textContent = '中文输入';
-    cell.dispatchEvent(new InputEvent('input', {
-      bubbles: true,
+    cell.textContent = 'zhongwen';
+    cell.dispatchEvent(compositionInput('zhongwen', {
+      composing: true,
       inputType: 'insertCompositionText',
-      data: '中文输入',
     }));
-    cell.dispatchEvent(new CompositionEvent('compositionend', {
-      bubbles: true,
-      data: '中文输入',
-    }));
+    const candidateKey = webKitCompositionKey('Enter', { composing: true });
+    cell.dispatchEvent(candidateKey);
+    expect(candidateKey.defaultPrevented).toBe(false);
     window.synapseHost!.receive({
       protocolVersion: 2,
       type: 'flush',
@@ -2129,11 +2164,124 @@ describe('CodeMirror live preview', () => {
 
     expect(document.querySelector('.synapse-table-frame table')).toBe(table);
     expect(document.activeElement).toBe(cell);
-    expect(window.synapseTest!.getText()).toContain('| 中文输入 | 2 |');
+    expect(cell.textContent).toBe('zhongwen');
+    expect(window.synapseTest!.getText()).toBe(markdown);
     expect(
-      messages.filter((message) => message.type === 'transaction').at(-1)!
-        .composing,
-    ).toBe(true);
+      messages.filter((message) => message.type === 'transaction'),
+    ).toHaveLength(0);
+    expect(messages).toContainEqual(expect.objectContaining({
+      type: 'flushAck',
+      requestId: 1,
+      revision: 0,
+    }));
+
+    cell.textContent = '中文输入';
+    cell.dispatchEvent(new CompositionEvent('compositionend', {
+      bubbles: true,
+      data: '中文输入',
+    }));
+    cell.dispatchEvent(compositionInput('中文输入', {
+      composing: false,
+      inputType: 'insertFromComposition',
+    }));
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+
+    expect(document.querySelector('.synapse-table-frame table')).toBe(table);
+    expect(document.activeElement).toBe(cell);
+    expect(window.synapseTest!.getText()).toContain('| 中文输入 | 2 |');
+    expect(window.synapseTest!.getText()).not.toContain('zhongwen');
+    const transactions = messages.filter(
+      (message) => message.type === 'transaction',
+    );
+    expect(transactions).toHaveLength(1);
+    expect(transactions[0].composing).toBe(false);
+    expect(window.synapseTest!.undo()).toBe(true);
+    expect(window.synapseTest!.getText()).toBe(markdown);
+  });
+
+  it('keeps nested table IME preedit local until composition ends', async () => {
+    const markdown = [
+      '<!-- synapse:columns ratio="50:50" -->',
+      '| A | B |',
+      '| --- | --- |',
+      '| 1 | 2 |',
+      '<!-- synapse:column -->',
+      'Right',
+      '<!-- synapse:columns-end -->',
+      '',
+    ].join('\n');
+    window.synapseHost!.receive(initialize(markdown, 'editing'));
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+
+    const table = document.querySelector<HTMLTableElement>(
+      '.synapse-column .synapse-table-frame table',
+    )!;
+    const cell = table.querySelector<HTMLElement>(
+      'td .synapse-table-cell-editor',
+    )!;
+    cell.focus();
+    cell.dispatchEvent(new CompositionEvent('compositionstart', {
+      bubbles: true,
+    }));
+    cell.textContent = 'zhongwen';
+    cell.dispatchEvent(compositionInput('zhongwen', {
+      composing: true,
+      inputType: 'insertCompositionText',
+    }));
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+
+    expect(window.synapseTest!.getText()).toBe(markdown);
+    expect(document.activeElement).toBe(cell);
+    expect(document.querySelector('.synapse-column .synapse-table-frame table'))
+      .toBe(table);
+
+    cell.textContent = '中文输入';
+    cell.dispatchEvent(new CompositionEvent('compositionend', {
+      bubbles: true,
+      data: '中文输入',
+    }));
+    cell.dispatchEvent(compositionInput('中文输入', {
+      composing: false,
+      inputType: 'insertFromComposition',
+    }));
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+
+    expect(window.synapseTest!.getText()).toContain('| 中文输入 | 2 |');
+    expect(window.synapseTest!.getText()).not.toContain('zhongwen');
+    expect(document.activeElement).toBe(cell);
+    expect(document.querySelector('.synapse-column .synapse-table-frame table'))
+      .toBe(table);
+  });
+
+  it('never serializes unfinished table IME preedit on a mode boundary', async () => {
+    const markdown = '| A | B |\n| --- | --- |\n| 1 | 2 |\n\nAfter';
+    window.synapseHost!.receive(initialize(markdown, 'editing'));
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+
+    const cell = tableCell(1, 0);
+    cell.focus();
+    cell.dispatchEvent(new CompositionEvent('compositionstart', {
+      bubbles: true,
+    }));
+    cell.textContent = 'zhongwen';
+    cell.dispatchEvent(compositionInput('zhongwen', {
+      composing: true,
+      inputType: 'insertCompositionText',
+    }));
+    window.synapseHost!.receive({
+      protocolVersion: 2,
+      type: 'setMode',
+      mode: 'reading',
+      editable: false,
+      focused: false,
+    });
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+
+    expect(window.synapseTest!.getText()).toBe(markdown);
+    expect(window.synapseTest!.getText()).not.toContain('zhongwen');
+    expect(
+      messages.filter((message) => message.type === 'transaction'),
+    ).toHaveLength(0);
   });
 
   it('batches column IME composition through the parent transaction', async () => {

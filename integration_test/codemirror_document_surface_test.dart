@@ -989,6 +989,221 @@ void main() {
     session.dispose();
   });
 
+  testWidgets('CodeMirror keeps table IME preedit local until composition ends', (
+    tester,
+  ) async {
+    final prefix = List.generate(
+      30,
+      (index) => 'Paragraph $index keeps the editor scrollable.',
+    ).join('\n\n');
+    final markdown =
+        '$prefix\n\n'
+        '| A | B |\n'
+        '| --- | --- |\n'
+        '| 1 | 2 |\n\n'
+        '<!-- synapse:columns ratio="50:50" -->\n'
+        '| C | D |\n'
+        '| --- | --- |\n'
+        '| 3 | 4 |\n'
+        '<!-- synapse:column -->\n'
+        'Right\n'
+        '<!-- synapse:columns-end -->\n\n'
+        'After';
+    final session = _session(markdown);
+    final hub = EditorDocumentHub(session);
+    CodeMirrorDocumentSurfaceState? surface;
+
+    await tester.pumpWidget(
+      CupertinoApp(
+        home: SizedBox.expand(
+          child: CodeMirrorDocumentSurface(
+            paneId: 'pane-table-ime',
+            hub: hub,
+            mode: CodeMirrorDocumentMode.editing,
+            pageLayout: EditorPageLayout.empty,
+            focused: true,
+            enabled: true,
+            appearance: WorkspaceAppearance.defaults,
+            loadAttachment: (_) async => null,
+            onImageAction: (_) async {},
+            onPastedImage: (_) async {},
+            onCommandRequest: (_) async {},
+            onOutlineChanged: (_) {},
+            onFocusPane: () {},
+            onStateChanged: (state, attached) {
+              surface = attached ? state : null;
+            },
+          ),
+        ),
+      ),
+    );
+    await _pumpUntil(tester, () => surface?.debugReady == true);
+
+    Future<Map<String, Object?>> beginComposition(
+      int offset, {
+      required bool nested,
+    }) async {
+      await surface!.revealRange(offset, offset, focus: true);
+      await _pumpUntilAsync(
+        tester,
+        () async =>
+            await surface!.debugRunJavaScriptReturningResult(
+              nested
+                  ? 'document.querySelector(".synapse-column .synapse-table-frame table") != null'
+                  : 'Array.from(document.querySelectorAll(".synapse-table-frame table")).some((table) => !table.closest(".synapse-column"))',
+            ) ==
+            true,
+      );
+      final result = await surface!.debugRunJavaScriptReturningResult('''
+        (() => {
+          try {
+            const table = $nested
+              ? document.querySelector(
+                  '.synapse-column .synapse-table-frame table',
+                )
+              : Array.from(document.querySelectorAll(
+                  '.synapse-table-frame table',
+                )).find((candidate) => !candidate.closest('.synapse-column'));
+            const cell = table.querySelector(
+              'td .synapse-table-cell-editor',
+            );
+            const scroller = document.querySelector('.cm-scroller');
+            cell.focus({ preventScroll: true });
+            window.__synapseImeTable = table;
+            window.__synapseImeScrollTop = scroller.scrollTop;
+            cell.dispatchEvent(new CompositionEvent('compositionstart', {
+              bubbles: true,
+              data: '',
+            }));
+            cell.textContent = 'zhongwen';
+            cell.dispatchEvent(new InputEvent('input', {
+              bubbles: true,
+              inputType: 'insertCompositionText',
+              data: 'zhongwen',
+            }));
+            const enter = new KeyboardEvent('keydown', {
+              key: 'Enter',
+              bubbles: true,
+              cancelable: true,
+            });
+            cell.dispatchEvent(enter);
+            return JSON.stringify({
+              enterPrevented: enter.defaultPrevented,
+              scrollTop: scroller.scrollTop,
+            });
+          } catch (error) {
+            return JSON.stringify({
+              error: String(error),
+              stack: error?.stack ?? '',
+            });
+          }
+        })()
+      ''');
+      final decoded = jsonDecode(result as String) as Map<String, Object?>;
+      if (decoded['error'] case final String error) {
+        fail('$error\n${decoded['stack']}');
+      }
+      return decoded;
+    }
+
+    Future<void> finishComposition() async {
+      await surface!.debugRunJavaScriptReturningResult('''
+        (() => {
+          const table = window.__synapseImeTable;
+          const cell = table.querySelector(
+            'td .synapse-table-cell-editor',
+          );
+          cell.textContent = '中文输入';
+          cell.dispatchEvent(new CompositionEvent('compositionend', {
+            bubbles: true,
+            data: '中文输入',
+          }));
+          cell.dispatchEvent(new InputEvent('input', {
+            bubbles: true,
+            inputType: 'insertFromComposition',
+            data: '中文输入',
+          }));
+          return true;
+        })()
+      ''');
+      await surface!.flush();
+      await _pumpUntil(tester, () => session.controller.text.contains('中文输入'));
+    }
+
+    Future<void> expectCompositionSurfaceStable() async {
+      expect(
+        await surface!.debugRunJavaScriptReturningResult('''
+          (() => {
+            const table = window.__synapseImeTable;
+            const cell = table.querySelector(
+              'td .synapse-table-cell-editor',
+            );
+            const scroller = document.querySelector('.cm-scroller');
+            return table.isConnected &&
+              document.activeElement === cell &&
+              Math.abs(scroller.scrollTop - window.__synapseImeScrollTop) <= 1;
+          })()
+        '''),
+        isTrue,
+      );
+    }
+
+    final regularStart = await beginComposition(
+      markdown.indexOf('| A |'),
+      nested: false,
+    );
+    expect(regularStart['enterPrevented'], isFalse);
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(await surface!.flush(), 0);
+    expect(session.controller.text, markdown);
+    expect(session.controller.text, isNot(contains('zhongwen')));
+    await expectCompositionSurfaceStable();
+
+    await finishComposition();
+    expect(session.controller.text, contains('| 中文输入 | 2 |'));
+    expect(session.controller.text, isNot(contains('zhongwen')));
+    await expectCompositionSurfaceStable();
+    expect(
+      await surface!.debugRunJavaScriptReturningResult(
+        'window.synapseTest.undo()',
+      ),
+      isTrue,
+    );
+    await surface!.flush();
+    await _pumpUntil(tester, () => session.controller.text == markdown);
+
+    final nestedStart = await beginComposition(
+      markdown.indexOf('| C |'),
+      nested: true,
+    );
+    expect(nestedStart['enterPrevented'], isFalse);
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(await surface!.flush(), 2);
+    expect(session.controller.text, markdown);
+    expect(session.controller.text, isNot(contains('zhongwen')));
+    await expectCompositionSurfaceStable();
+
+    await finishComposition();
+    expect(session.controller.text, contains('| 中文输入 | 4 |'));
+    expect(session.controller.text, isNot(contains('zhongwen')));
+    await expectCompositionSurfaceStable();
+    expect(
+      await surface!.debugRunJavaScriptReturningResult(
+        'window.synapseTest.undo()',
+      ),
+      isTrue,
+    );
+    await surface!.flush();
+    await _pumpUntil(tester, () => session.controller.text == markdown);
+
+    await surface!.debugRunJavaScriptReturningResult(
+      'document.activeElement?.blur(); true',
+    );
+    await tester.pumpWidget(const SizedBox.shrink());
+    hub.dispose();
+    session.dispose();
+  });
+
   testWidgets('CodeMirror table and columns interactions commit parent history', (
     tester,
   ) async {

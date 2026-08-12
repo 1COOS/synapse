@@ -1190,6 +1190,7 @@ interface TableDomState {
   pendingFrame: number;
   focusRestoreFrame: number;
   composing: boolean;
+  composingCell?: HTMLElement;
   contextMenuOpen: boolean;
   focusedCell?: HTMLElement;
   committingMarkdown?: string;
@@ -1339,7 +1340,7 @@ function commitTableModel(
   next: TableModel = state.model,
   userEvent = 'input.table',
 ): boolean {
-  if (!view || !state.widget.editable) return false;
+  if (!view || !state.widget.editable || state.composing) return false;
   if (state.pendingFrame) cancelAnimationFrame(state.pendingFrame);
   state.pendingFrame = 0;
   state.model = cloneTableModel(next);
@@ -1399,7 +1400,7 @@ function commitTableModel(
 }
 
 function scheduleTableCommit(state: TableDomState): void {
-  if (state.pendingFrame) return;
+  if (state.composing || state.pendingFrame) return;
   state.pendingFrame = requestAnimationFrame(() => {
     state.pendingFrame = 0;
     commitTableModel(state);
@@ -1911,25 +1912,47 @@ function buildTableDom(state: TableDomState): void {
           state.selectedColumn = columnIndex;
           state.focusedCell = editor;
         });
-        editor.addEventListener('input', () => {
+        editor.addEventListener('input', (event) => {
+          if (state.composing || (event as InputEvent).isComposing) {
+            state.composing = true;
+            state.composingCell = editor;
+            return;
+          }
           state.model = withTableCellValue(
             state.model,
             rowIndex,
             columnIndex,
             editorTableCellValue(editor),
           );
-          pendingNestedComposition = pendingNestedComposition || state.composing;
           scheduleTableCommit(state);
         });
         editor.addEventListener('compositionstart', () => {
+          if (state.pendingFrame) cancelAnimationFrame(state.pendingFrame);
+          if (state.focusRestoreFrame) {
+            cancelAnimationFrame(state.focusRestoreFrame);
+          }
+          state.pendingFrame = 0;
+          state.focusRestoreFrame = 0;
           state.composing = true;
-          pendingNestedComposition = true;
+          state.composingCell = editor;
         });
         editor.addEventListener('compositionend', () => {
+          if (state.composingCell !== editor) return;
           state.composing = false;
+          state.composingCell = undefined;
+          state.model = withTableCellValue(
+            state.model,
+            rowIndex,
+            columnIndex,
+            editorTableCellValue(editor),
+          );
           scheduleTableCommit(state);
         });
         editor.addEventListener('keydown', (event) => {
+          if (event.isComposing || event.keyCode === 229 || state.composing) {
+            event.stopPropagation();
+            return;
+          }
           const modifier = event.metaKey || event.ctrlKey;
           if (modifier && event.key.toLowerCase() === 'z') {
             event.preventDefault();
@@ -2168,7 +2191,10 @@ class TableWidget extends WidgetType {
         columnIndex += 1
       ) {
         const editor = state.cells[rowIndex][columnIndex];
-        if (selfCommit && document.activeElement === editor) continue;
+        if (
+          (selfCommit && document.activeElement === editor) ||
+          (state.composing && state.composingCell === editor)
+        ) continue;
         const value = displayTableCell(
           tableCellValue(next, rowIndex, columnIndex),
         );
