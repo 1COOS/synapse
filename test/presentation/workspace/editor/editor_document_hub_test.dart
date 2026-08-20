@@ -64,6 +64,38 @@ void main() {
     session.dispose();
   });
 
+  test('notifies update listeners including the origin transaction', () {
+    final session = _session('Alpha');
+    final hub = EditorDocumentHub(session);
+    final updates = <EditorDocumentUpdate>[];
+    void listener(EditorDocumentUpdate update) => updates.add(update);
+    hub.addUpdateListener(listener);
+
+    final result = hub.applyTransaction(
+      const EditorTransaction(
+        paneId: 'pane-1',
+        noteId: 'note.md',
+        generation: 1,
+        baseRevision: 0,
+        revision: 1,
+        clientSeq: 1,
+        changes: [EditorChange(from: 5, to: 5, insert: ' edited')],
+        selection: EditorSelection(anchor: 12, head: 12),
+        composing: false,
+        origin: 'input',
+      ),
+    );
+
+    expect(result, EditorTransactionResult.applied);
+    expect(updates.single.originPaneId, 'pane-1');
+    expect(updates.single.markdown, 'Alpha edited');
+    expect(updates.single.changes.single.insert, ' edited');
+
+    hub.removeUpdateListener(listener);
+    hub.dispose();
+    session.dispose();
+  });
+
   test('marks only user-triggered host mutations for shared history', () {
     final session = _session('Alpha');
     final hub = EditorDocumentHub(session);

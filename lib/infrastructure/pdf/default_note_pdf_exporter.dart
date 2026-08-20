@@ -30,7 +30,8 @@ final class NotePdfFontBytes {
   final Uint8List emoji;
 }
 
-final class DefaultNotePdfExporter implements NotePdfExporter {
+final class DefaultNotePdfExporter
+    implements NotePdfExporter, NotePdfPageLayouter {
   DefaultNotePdfExporter({NotePdfFontLoader? fontLoader})
     : _fontLoader = fontLoader ?? loadBundledNotePdfFonts;
 
@@ -44,6 +45,15 @@ final class DefaultNotePdfExporter implements NotePdfExporter {
   ) async {
     final fonts = await (_fonts ??= _fontLoader());
     return Isolate.run(() => buildNotePdf(snapshot, options, fonts));
+  }
+
+  @override
+  Future<NotePdfLayoutResult> layout(
+    NotePdfExportSnapshot snapshot,
+    NotePdfExportOptions options,
+  ) async {
+    final fonts = await (_fonts ??= _fontLoader());
+    return Isolate.run(() => layoutNotePdf(snapshot, options, fonts));
   }
 }
 
@@ -74,6 +84,46 @@ Future<NotePdfBuildResult> buildNotePdf(
   NotePdfExportOptions options,
   NotePdfFontBytes fontBytes,
 ) async {
+  final prepared = _prepareNotePdf(
+    snapshot,
+    options,
+    fontBytes,
+    embedImages: true,
+  );
+  final bytes = await prepared.document.save(enableEventLoopBalancing: true);
+  return NotePdfBuildResult(
+    bytes: bytes,
+    pageCount: prepared.pageCount,
+    warnings: prepared.warnings,
+    boundaries: prepared.boundaryCollector.build(prepared.pageCount),
+  );
+}
+
+Future<NotePdfLayoutResult> layoutNotePdf(
+  NotePdfExportSnapshot snapshot,
+  NotePdfExportOptions options,
+  NotePdfFontBytes fontBytes,
+) async {
+  final prepared = _prepareNotePdf(
+    snapshot,
+    options,
+    fontBytes,
+    embedImages: false,
+  );
+  prepared.page.postProcess(prepared.document);
+  return NotePdfLayoutResult(
+    pageCount: prepared.pageCount,
+    warnings: prepared.warnings,
+    boundaries: prepared.boundaryCollector.build(prepared.pageCount),
+  );
+}
+
+_PreparedNotePdf _prepareNotePdf(
+  NotePdfExportSnapshot snapshot,
+  NotePdfExportOptions options,
+  NotePdfFontBytes fontBytes, {
+  required bool embedImages,
+}) {
   final fonts = _PdfFonts(fontBytes);
   final warnings = <NotePdfExportWarning>[];
   final warningKeys = <String>{};
@@ -100,6 +150,7 @@ Future<NotePdfBuildResult> buildNotePdf(
     warnings: warnings,
     warningKeys: warningKeys,
     boundaryCollector: boundaryCollector,
+    embedImages: embedImages,
   );
   final widgets = renderer.build(snapshot.markdown);
   final document = pw.Document(
@@ -136,72 +187,82 @@ Future<NotePdfBuildResult> buildNotePdf(
         ),
       );
 
-  document.addPage(
-    pw.MultiPage(
-      pageFormat: pageFormat,
-      margin: pw.EdgeInsets.all(margin),
-      theme: theme,
-      maxPages: 1000,
-      header: (context) {
-        final title = _ellipsize(
-          snapshot.title,
-          font: fonts.regular.getFont(context),
-          fontSize: 8.5,
-          maxWidth: contentWidth,
-        );
-        return pw.Container(
-          height: headerHeight,
-          alignment: pw.Alignment.topLeft,
-          decoration: const pw.BoxDecoration(
-            border: pw.Border(
-              bottom: pw.BorderSide(color: PdfColors.grey300, width: 0.5),
-            ),
+  final page = pw.MultiPage(
+    pageFormat: pageFormat,
+    margin: pw.EdgeInsets.all(margin),
+    theme: theme,
+    maxPages: 1000,
+    header: (context) {
+      final title = _ellipsize(
+        snapshot.title,
+        font: fonts.regular.getFont(context),
+        fontSize: 8.5,
+        maxWidth: contentWidth,
+      );
+      return pw.Container(
+        height: headerHeight,
+        alignment: pw.Alignment.topLeft,
+        decoration: const pw.BoxDecoration(
+          border: pw.Border(
+            bottom: pw.BorderSide(color: PdfColors.grey300, width: 0.5),
           ),
-          child: pw.Text(
-            title,
-            maxLines: 1,
-            overflow: pw.TextOverflow.clip,
-            style: pw.TextStyle(
-              font: fonts.regular,
-              fontFallback: [fonts.emoji],
-              fontSize: 8.5,
-              color: PdfColors.grey600,
-            ),
+        ),
+        child: pw.Text(
+          title,
+          maxLines: 1,
+          overflow: pw.TextOverflow.clip,
+          style: pw.TextStyle(
+            font: fonts.regular,
+            fontFallback: [fonts.emoji],
+            fontSize: 8.5,
+            color: PdfColors.grey600,
           ),
-        );
-      },
-      footer: options.footerEnabled
-          ? (context) => pw.Container(
-              height: footerHeight,
-              alignment: pw.Alignment.bottomCenter,
-              child: pw.Text(
-                '${context.pageNumber} / ${context.pagesCount}',
-                style: pw.TextStyle(
-                  font: fonts.regular,
-                  fontSize: 8.5,
-                  color: PdfColors.grey600,
-                ),
+        ),
+      );
+    },
+    footer: options.footerEnabled
+        ? (context) => pw.Container(
+            height: footerHeight,
+            alignment: pw.Alignment.bottomCenter,
+            child: pw.Text(
+              '${context.pageNumber} / ${context.pagesCount}',
+              style: pw.TextStyle(
+                font: fonts.regular,
+                fontSize: 8.5,
+                color: PdfColors.grey600,
               ),
-            )
-          : null,
-      build: (_) => widgets.isEmpty
-          ? [
-              pw.Text(
-                '',
-                style: pw.TextStyle(font: fonts.regular, fontSize: 11),
-              ),
-            ]
-          : widgets,
-    ),
+            ),
+          )
+        : null,
+    build: (_) => widgets.isEmpty
+        ? [pw.Text('', style: pw.TextStyle(font: fonts.regular, fontSize: 11))]
+        : widgets,
   );
-  final bytes = await document.save(enableEventLoopBalancing: true);
+  document.addPage(page);
   final pageCount = document.document.pdfPageList.pages.length;
-  return NotePdfBuildResult(
-    bytes: bytes,
+  return _PreparedNotePdf(
+    document: document,
+    page: page,
     pageCount: pageCount,
     warnings: warnings,
-    boundaries: boundaryCollector.build(pageCount),
+    boundaryCollector: boundaryCollector,
   );
+}
+
+final class _PreparedNotePdf {
+  const _PreparedNotePdf({
+    required this.document,
+    required this.page,
+    required this.pageCount,
+    required this.warnings,
+    required this.boundaryCollector,
+  });
+
+  final pw.Document document;
+  final pw.MultiPage page;
+  final int pageCount;
+  final List<NotePdfExportWarning> warnings;
+  final _PageBoundaryCollector boundaryCollector;
 }
 
 final class _PdfFonts {
@@ -226,6 +287,7 @@ final class _MarkdownPdfRenderer {
     required this.warnings,
     required this.warningKeys,
     required this.boundaryCollector,
+    required this.embedImages,
   }) : _assets = _indexAssets(snapshot.assets),
        _sourceCursor = _SourceCursor(snapshot.markdown);
 
@@ -236,6 +298,7 @@ final class _MarkdownPdfRenderer {
   final List<NotePdfExportWarning> warnings;
   final Set<String> warningKeys;
   final _PageBoundaryCollector boundaryCollector;
+  final bool embedImages;
   final Map<String, NotePdfExportAsset> _assets;
   final _SourceCursor _sourceCursor;
 
@@ -416,17 +479,17 @@ final class _MarkdownPdfRenderer {
       return 0;
     }
     final asset = _assets[_normalizeSource(imageSource)];
-    final decoded = asset?.bytes == null
+    final imageSize = asset?.bytes == null
         ? null
-        : image_lib.decodeImage(asset!.bytes!);
-    if (decoded == null || decoded.width <= 0 || decoded.height <= 0) {
+        : _readImageSize(asset!.bytes!);
+    if (imageSize == null || imageSize.width <= 0 || imageSize.height <= 0) {
       return 110;
     }
     final width = math.min(
       columnWidth,
       sourceWidth == null ? 360.0 : math.max(60.0, sourceWidth * 0.75),
     );
-    final naturalHeight = width * decoded.height / decoded.width;
+    final naturalHeight = width * imageSize.height / imageSize.width;
     return math.min(contentHeight * 0.86, naturalHeight) + 14;
   }
 
@@ -904,8 +967,14 @@ final class _MarkdownPdfRenderer {
       );
       return _tagged(_missingImage(label), sourceOffset);
     }
-    final decoded = image_lib.decodeImage(asset!.bytes!);
-    if (decoded == null || decoded.width <= 0 || decoded.height <= 0) {
+    final imageBytes = asset!.bytes!;
+    final decoded = embedImages ? _decodeImage(imageBytes) : null;
+    final imageSize = embedImages
+        ? decoded == null
+              ? null
+              : (width: decoded.width, height: decoded.height)
+        : _readImageSize(imageBytes);
+    if (imageSize == null || imageSize.width <= 0 || imageSize.height <= 0) {
       final label = alt.trim().isEmpty ? asset.title : alt.trim();
       _warn(
         'unreadable-image-$normalized',
@@ -918,24 +987,44 @@ final class _MarkdownPdfRenderer {
       contentWidth,
       sourceWidth == null ? 360.0 : math.max(60.0, sourceWidth * 0.75),
     );
-    final naturalHeight = width * decoded.height / decoded.width;
+    final naturalHeight = width * imageSize.height / imageSize.width;
     final height = math.min(contentHeight * 0.86, naturalHeight);
-    final memoryImage = pw.MemoryImage(_optimizedImageBytes(decoded, asset));
-    return _tagged(
-      pw.Padding(
-        padding: const pw.EdgeInsets.symmetric(vertical: 7),
-        child: pw.Align(
-          alignment: pw.Alignment.centerLeft,
-          child: pw.Image(
-            memoryImage,
+    final image = embedImages
+        ? pw.Image(
+            pw.MemoryImage(_optimizedImageBytes(decoded!, asset)),
             width: width,
             height: height,
             fit: pw.BoxFit.contain,
-          ),
-        ),
+          )
+        : pw.SizedBox(width: width, height: height);
+    return _tagged(
+      pw.Padding(
+        padding: const pw.EdgeInsets.symmetric(vertical: 7),
+        child: pw.Align(alignment: pw.Alignment.centerLeft, child: image),
       ),
       sourceOffset,
     );
+  }
+
+  ({int width, int height})? _readImageSize(Uint8List bytes) {
+    try {
+      final decoder = image_lib.findDecoderForData(bytes);
+      final info = decoder?.startDecode(bytes);
+      if (info == null) {
+        return null;
+      }
+      return (width: info.width, height: info.height);
+    } on Object {
+      return null;
+    }
+  }
+
+  image_lib.Image? _decodeImage(Uint8List bytes) {
+    try {
+      return image_lib.decodeImage(bytes);
+    } on Object {
+      return null;
+    }
   }
 
   pw.Widget _tagged(pw.Widget child, int sourceOffset) => _PageTaggedWidget(

@@ -129,6 +129,43 @@ void main() {
     },
   );
 
+  test('unreadable image remains a warning in layout and export', () async {
+    final snapshot = NotePdfExportSnapshot(
+      noteId: 'note-1',
+      title: '损坏图片',
+      markdown: '# 损坏图片\n\n![坏图](损坏图片.assets/broken.png)',
+      assets: [
+        NotePdfExportAsset(
+          source: '损坏图片.assets/broken.png',
+          title: 'broken.png',
+          mimeType: 'image/png',
+          bytes: Uint8List.fromList([137, 80, 78, 71]),
+        ),
+      ],
+    );
+
+    final layout = await layoutNotePdf(
+      snapshot,
+      const NotePdfExportOptions(),
+      fonts,
+    );
+    final exported = await buildNotePdf(
+      snapshot,
+      const NotePdfExportOptions(),
+      fonts,
+    );
+
+    expect(
+      layout.warnings.single.code,
+      NotePdfExportWarningCode.unreadableImage,
+    );
+    expect(
+      exported.warnings.single.code,
+      NotePdfExportWarningCode.unreadableImage,
+    );
+    expect(exported.bytes.take(4), '%PDF'.codeUnits);
+  });
+
   test('oversized table rows use the lossless fallback layout', () async {
     final oversized = List.filled(300, '很长的内容').join();
     final result = await buildNotePdf(
@@ -174,6 +211,26 @@ void main() {
       NotePdfMarginPreset.standard,
     );
   });
+
+  test(
+    'layouter returns layout metadata while exporter returns PDF bytes',
+    () async {
+      final exporter = DefaultNotePdfExporter(fontLoader: () async => fonts);
+
+      final layout = await exporter.layout(
+        _snapshot('# 轻量分页\n\n正文'),
+        const NotePdfExportOptions(),
+      );
+      expect(layout.pageCount, 1);
+      expect(layout, isA<NotePdfLayoutResult>());
+
+      final exported = await exporter.build(
+        _snapshot('# 完整导出\n\n正文'),
+        const NotePdfExportOptions(),
+      );
+      expect(exported.bytes.take(4), '%PDF'.codeUnits);
+    },
+  );
 
   test('disabling the footer releases its body layout space', () async {
     final body = List.generate(
@@ -300,6 +357,79 @@ void main() {
         ).markdown.substring(boundary.sourceOffset),
         startsWith('final value'),
       );
+    }
+  });
+
+  test('lightweight layout matches exported PDF boundaries', () async {
+    final image = image_lib.Image(width: 180, height: 360);
+    image_lib.fill(image, color: image_lib.ColorRgb8(36, 94, 168));
+    final imageBytes = Uint8List.fromList(image_lib.encodePng(image));
+    final left = List.generate(45, (index) => '左栏第 $index 段').join('\n\n');
+    final right = List.generate(65, (index) => '右栏第 $index 段').join('\n\n');
+    final code = List.generate(
+      80,
+      (index) => 'final item$index = "第 $index 行";',
+    ).join('\n');
+    final rows = List.generate(
+      55,
+      (index) => '| $index | 第 $index 行表格 |',
+    ).join('\n');
+    final snapshot = NotePdfExportSnapshot(
+      noteId: 'note-1',
+      title: '一致性',
+      markdown:
+          '# 一致性\n\n'
+          '![竖图](一致性.assets/tall.png)\n\n'
+          '<!-- synapse:columns ratio="40:60" -->\n\n'
+          '$left\n\n'
+          '<!-- synapse:column -->\n\n'
+          '$right\n\n'
+          '<!-- synapse:columns-end -->\n\n'
+          '<!-- synapse:page-break -->\n\n'
+          '```dart\n$code\n```\n\n'
+          '| 序号 | 内容 |\n| --- | --- |\n$rows',
+      assets: [
+        NotePdfExportAsset(
+          source: '一致性.assets/tall.png',
+          title: 'tall.png',
+          mimeType: 'image/png',
+          bytes: imageBytes,
+        ),
+      ],
+    );
+
+    for (final options in [
+      const NotePdfExportOptions(),
+      const NotePdfExportOptions(
+        orientation: NotePdfOrientation.landscape,
+        marginPreset: NotePdfMarginPreset.compact,
+        footerEnabled: false,
+      ),
+      const NotePdfExportOptions(marginPreset: NotePdfMarginPreset.wide),
+    ]) {
+      final layout = await layoutNotePdf(snapshot, options, fonts);
+      final exported = await buildNotePdf(snapshot, options, fonts);
+
+      expect(layout.pageCount, exported.pageCount);
+      expect(
+        layout.boundaries
+            .map(
+              (boundary) =>
+                  (boundary.pageIndex, boundary.sourceOffset, boundary.kind),
+            )
+            .toList(),
+        exported.boundaries
+            .map(
+              (boundary) =>
+                  (boundary.pageIndex, boundary.sourceOffset, boundary.kind),
+            )
+            .toList(),
+      );
+      expect(
+        layout.warnings.map((warning) => warning.code),
+        exported.warnings.map((warning) => warning.code),
+      );
+      expect(exported.bytes.take(4), '%PDF'.codeUnits);
     }
   });
 

@@ -3,14 +3,15 @@ import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:synapse/application/exports/note_pdf_export.dart';
+import 'package:synapse/presentation/workspace/editor/codemirror/editor_protocol.dart';
 import 'package:synapse/presentation/workspace/editor/note_page_layout_controller.dart';
 
 void main() {
   testWidgets('stays idle until page layout is explicitly activated', (
     tester,
   ) async {
-    final exporter = _ControlledExporter();
-    final controller = NotePageLayoutController(exporter: exporter);
+    final layouter = _ControlledLayouter();
+    final controller = NotePageLayoutController(layouter: layouter);
     addTearDown(controller.dispose);
 
     controller.bindSnapshot(_snapshot('# 初始'));
@@ -26,25 +27,24 @@ void main() {
 
     expect(controller.active, isFalse);
     expect(controller.building, isFalse);
-    expect(exporter.snapshots, isEmpty);
+    expect(layouter.snapshots, isEmpty);
 
     controller.setActive(true);
-    expect(exporter.snapshots, hasLength(1));
-    expect(exporter.snapshots.single.markdown, '# 已修改');
-    expect(exporter.options.single.orientation, NotePdfOrientation.landscape);
+    expect(layouter.snapshots, hasLength(1));
+    expect(layouter.snapshots.single.markdown, '# 已修改');
+    expect(layouter.options.single.orientation, NotePdfOrientation.landscape);
   });
 
   testWidgets('debounces live edits and keeps only the latest document', (
     tester,
   ) async {
-    final exporter = _ControlledExporter();
-    final controller = NotePageLayoutController(exporter: exporter);
+    final layouter = _ControlledLayouter();
+    final controller = NotePageLayoutController(layouter: layouter);
     addTearDown(controller.dispose);
     controller.setActive(true);
 
     controller.bindSnapshot(_snapshot('# 初始'));
-    expect(exporter.snapshots, hasLength(1));
-    exporter.complete(0, _result(1, marker: 1));
+    layouter.complete(0, _result(1));
     await tester.pump();
 
     controller.updateDocument(
@@ -58,108 +58,262 @@ void main() {
       markdown: '# 第二次',
     );
     await tester.pump(const Duration(milliseconds: 399));
-    expect(exporter.snapshots, hasLength(1));
+    expect(layouter.snapshots, hasLength(1));
 
     await tester.pump(const Duration(milliseconds: 1));
-    expect(exporter.snapshots, hasLength(2));
-    expect(exporter.snapshots.last.markdown, '# 第二次');
+    expect(layouter.snapshots, hasLength(2));
+    expect(layouter.snapshots.last.markdown, '# 第二次');
   });
 
-  testWidgets('drops stale option builds and exposes the newest boundaries', (
+  testWidgets('runs one layout flight and starts only the latest pending key', (
     tester,
   ) async {
-    final exporter = _ControlledExporter();
+    final layouter = _ControlledLayouter();
     final controller = NotePageLayoutController(
-      exporter: exporter,
+      layouter: layouter,
       debounce: Duration.zero,
     );
     addTearDown(controller.dispose);
     controller.setActive(true);
 
-    controller.bindSnapshot(_snapshot('# 文档'));
-    controller.setOptions(
-      const NotePdfExportOptions(orientation: NotePdfOrientation.landscape),
+    controller.bindSnapshot(_snapshot('# 第一版'));
+    controller.updateDocument(
+      noteId: 'note-1',
+      title: '第二版',
+      markdown: '# 第二版',
     );
-    expect(exporter.snapshots, hasLength(2));
+    controller.updateDocument(
+      noteId: 'note-1',
+      title: '第三版',
+      markdown: '# 第三版',
+    );
 
-    exporter.complete(
-      1,
+    expect(layouter.snapshots, hasLength(1));
+    expect(layouter.maxActiveFlights, 1);
+    layouter.complete(0, _result(9));
+    await tester.pump();
+
+    expect(layouter.snapshots, hasLength(2));
+    expect(layouter.snapshots.last.markdown, '# 第三版');
+    expect(layouter.maxActiveFlights, 1);
+
+    layouter.complete(1, _result(2));
+    await tester.pump();
+    expect(controller.pageCount, 2);
+    expect(controller.building, isFalse);
+  });
+
+  testWidgets('projects boundaries through insertion with right association', (
+    tester,
+  ) async {
+    final layouter = _ControlledLayouter();
+    final controller = NotePageLayoutController(
+      layouter: layouter,
+      debounce: Duration.zero,
+    );
+    addTearDown(controller.dispose);
+    controller.setActive(true);
+    const markdown = 'Alpha\nBeta\nGamma';
+    final betaOffset = markdown.indexOf('Beta');
+
+    controller.bindSnapshot(_snapshot(markdown));
+    layouter.complete(
+      0,
       _result(
         2,
-        marker: 2,
-        boundaries: const [
+        boundaries: [
           NotePdfPageBoundary(
             pageIndex: 1,
-            sourceOffset: 2,
+            sourceOffset: betaOffset,
             kind: NotePdfPageBoundaryKind.automatic,
           ),
         ],
       ),
     );
     await tester.pump();
-    exporter.complete(0, _result(9, marker: 1));
-    await tester.pump();
 
-    expect(controller.pageCount, 2);
-    expect(controller.boundaries.single.sourceOffset, 2);
-    expect(controller.options.orientation, NotePdfOrientation.landscape);
+    const inserted = '新增\n';
+    final edited = markdown.replaceRange(betaOffset, betaOffset, inserted);
+    controller.updateDocument(
+      noteId: 'note-1',
+      title: 'edited',
+      markdown: edited,
+      changes: [
+        EditorChange(from: betaOffset, to: betaOffset, insert: inserted),
+      ],
+    );
+
+    expect(controller.hasStaleResult, isTrue);
+    expect(
+      controller.boundaries.single.sourceOffset,
+      betaOffset + inserted.length,
+    );
+    expect(
+      edited.substring(controller.boundaries.single.sourceOffset),
+      startsWith('Beta'),
+    );
   });
 
-  testWidgets('reuses bytes only for the exact built snapshot and options', (
+  testWidgets('hides replaced boundaries and maps multiple change ranges', (
     tester,
   ) async {
-    final exporter = _ControlledExporter();
+    final layouter = _ControlledLayouter();
     final controller = NotePageLayoutController(
-      exporter: exporter,
+      layouter: layouter,
       debounce: Duration.zero,
     );
     addTearDown(controller.dispose);
     controller.setActive(true);
-    final snapshot = _snapshot('# 文档');
+    const markdown = 'AAAA BBBB CCCC DDDD';
+    final offsets = [
+      markdown.indexOf('BBBB'),
+      markdown.indexOf('CCCC'),
+      markdown.indexOf('DDDD'),
+    ];
 
-    controller.bindSnapshot(snapshot);
-    final result = _result(1, marker: 7);
-    exporter.complete(0, result);
+    controller.bindSnapshot(_snapshot(markdown));
+    layouter.complete(
+      0,
+      _result(
+        4,
+        boundaries: [
+          for (var index = 0; index < offsets.length; index += 1)
+            NotePdfPageBoundary(
+              pageIndex: index + 1,
+              sourceOffset: offsets[index],
+              kind: NotePdfPageBoundaryKind.automatic,
+            ),
+        ],
+      ),
+    );
     await tester.pump();
 
-    expect(
-      controller.reusableResultFor(snapshot, const NotePdfExportOptions()),
-      same(result),
+    const changes = [
+      EditorChange(from: 0, to: 0, insert: 'X'),
+      EditorChange(from: 5, to: 14, insert: 'Y'),
+      EditorChange(from: 19, to: 19, insert: 'ZZ'),
+    ];
+    final edited = applyEditorChanges(markdown, changes);
+    controller.updateDocument(
+      noteId: 'note-1',
+      title: 'edited',
+      markdown: edited,
+      changes: changes,
     );
+
+    expect(controller.boundaries, hasLength(1));
+    expect(controller.boundaries.single.pageIndex, 3);
     expect(
-      controller.reusableResultFor(
-        _snapshot('# 已修改'),
-        const NotePdfExportOptions(),
-      ),
-      isNull,
-    );
-    expect(
-      controller.reusableResultFor(
-        snapshot,
-        const NotePdfExportOptions(marginPreset: NotePdfMarginPreset.compact),
-      ),
-      isNull,
-    );
-    expect(
-      controller.reusableResultFor(
-        snapshot,
-        const NotePdfExportOptions(footerEnabled: false),
-      ),
-      isNull,
+      edited.substring(controller.boundaries.single.sourceOffset),
+      startsWith('DDDDZZ'),
     );
   });
 
-  testWidgets('suspends layout work and refreshes immediately when resumed', (
+  testWidgets('falls back to UTF-16 safe rebase without usable changes', (
     tester,
   ) async {
-    final exporter = _ControlledExporter();
-    final controller = NotePageLayoutController(exporter: exporter);
+    final layouter = _ControlledLayouter();
+    final controller = NotePageLayoutController(
+      layouter: layouter,
+      debounce: Duration.zero,
+    );
+    addTearDown(controller.dispose);
+    controller.setActive(true);
+    const markdown = '开头😀结尾';
+    final boundaryOffset = markdown.indexOf('结尾');
+
+    controller.bindSnapshot(_snapshot(markdown));
+    layouter.complete(
+      0,
+      _result(
+        2,
+        boundaries: [
+          NotePdfPageBoundary(
+            pageIndex: 1,
+            sourceOffset: boundaryOffset,
+            kind: NotePdfPageBoundaryKind.automatic,
+          ),
+        ],
+      ),
+    );
+    await tester.pump();
+
+    const prefix = '补充😀';
+    final edited = '$prefix$markdown';
+    controller.updateDocument(
+      noteId: 'note-1',
+      title: 'edited',
+      markdown: edited,
+    );
+
+    final projected = controller.boundaries.single.sourceOffset;
+    expect(edited.substring(projected), startsWith('结尾'));
+    expect(
+      projected > 0 &&
+          projected < edited.length &&
+          _isHighSurrogate(edited.codeUnitAt(projected - 1)) &&
+          _isLowSurrogate(edited.codeUnitAt(projected)),
+      isFalse,
+    );
+  });
+
+  testWidgets('keeps stale boundaries after failure and supports retry', (
+    tester,
+  ) async {
+    final layouter = _ControlledLayouter();
+    final controller = NotePageLayoutController(
+      layouter: layouter,
+      debounce: Duration.zero,
+    );
     addTearDown(controller.dispose);
     controller.setActive(true);
 
     controller.bindSnapshot(_snapshot('# 第一版'));
-    final first = _result(2, marker: 1);
-    exporter.complete(0, first);
+    layouter.complete(
+      0,
+      _result(
+        2,
+        boundaries: const [
+          NotePdfPageBoundary(
+            pageIndex: 1,
+            sourceOffset: 3,
+            kind: NotePdfPageBoundaryKind.automatic,
+          ),
+        ],
+      ),
+    );
+    await tester.pump();
+
+    controller.updateDocument(
+      noteId: 'note-1',
+      title: '第二版',
+      markdown: '# 第二版',
+    );
+    layouter.fail(1, StateError('layout failed'));
+    await tester.pump();
+
+    expect(controller.boundaries, hasLength(1));
+    expect(controller.hasStaleResult, isTrue);
+    expect(controller.error, isA<StateError>());
+
+    controller.retry();
+    layouter.complete(2, _result(1));
+    await tester.pump();
+    expect(controller.boundaries, isEmpty);
+    expect(controller.hasStaleResult, isFalse);
+    expect(controller.error, isNull);
+  });
+
+  testWidgets('suspends work and resumes only when the key changed', (
+    tester,
+  ) async {
+    final layouter = _ControlledLayouter();
+    final controller = NotePageLayoutController(layouter: layouter);
+    addTearDown(controller.dispose);
+    controller.setActive(true);
+
+    controller.bindSnapshot(_snapshot('# 第一版'));
+    layouter.complete(0, _result(2));
     await tester.pump();
 
     controller.setActive(false);
@@ -168,181 +322,98 @@ void main() {
       title: '第二版',
       markdown: '# 第二版',
     );
-    controller.setOptions(
-      const NotePdfExportOptions(
-        orientation: NotePdfOrientation.landscape,
-        marginPreset: NotePdfMarginPreset.wide,
-        footerEnabled: false,
-      ),
-    );
     await tester.pump(const Duration(seconds: 1));
-
-    expect(controller.active, isFalse);
-    expect(controller.result, same(first));
-    expect(controller.building, isFalse);
-    expect(exporter.snapshots, hasLength(1));
+    expect(layouter.snapshots, hasLength(1));
 
     controller.setActive(true);
-    expect(controller.active, isTrue);
-    expect(exporter.snapshots, hasLength(2));
-    expect(exporter.snapshots.last.markdown, '# 第二版');
-    expect(exporter.options.last, controller.options);
-
-    final refreshed = _result(1, marker: 2);
-    exporter.complete(1, refreshed);
+    expect(layouter.snapshots, hasLength(2));
+    layouter.complete(1, _result(1));
     await tester.pump();
-    expect(controller.result, same(refreshed));
-    expect(controller.hasStaleResult, isFalse);
 
     controller.setActive(false);
     controller.setActive(true);
-    expect(exporter.snapshots, hasLength(2));
-    expect(controller.result, same(refreshed));
+    expect(layouter.snapshots, hasLength(2));
+    expect(controller.pageCount, 1);
   });
 
-  testWidgets(
-    'keeps the last boundaries visible while rebuilding and failing',
-    (tester) async {
-      final exporter = _ControlledExporter();
-      final controller = NotePageLayoutController(
-        exporter: exporter,
-        debounce: Duration.zero,
-      );
-      addTearDown(controller.dispose);
-      controller.setActive(true);
+  testWidgets('restores authoritative boundaries when edits return to cache', (
+    tester,
+  ) async {
+    final layouter = _ControlledLayouter();
+    final controller = NotePageLayoutController(layouter: layouter);
+    addTearDown(controller.dispose);
+    controller.setActive(true);
+    const markdown = 'Alpha\nBeta';
+    final betaOffset = markdown.indexOf('Beta');
 
-      controller.bindSnapshot(_snapshot('# 第一版'));
-      final first = _result(
+    controller.bindSnapshot(_snapshot(markdown));
+    layouter.complete(
+      0,
+      _result(
         2,
-        marker: 1,
-        boundaries: const [
+        boundaries: [
           NotePdfPageBoundary(
             pageIndex: 1,
-            sourceOffset: 3,
+            sourceOffset: betaOffset,
             kind: NotePdfPageBoundaryKind.automatic,
           ),
         ],
-      );
-      exporter.complete(0, first);
-      await tester.pump();
+      ),
+    );
+    await tester.pump();
 
-      controller.updateDocument(
-        noteId: 'note-1',
-        title: '第二版',
-        markdown: '# 第二版',
-      );
-      expect(controller.result, same(first));
-      expect(controller.hasStaleResult, isTrue);
+    const insertion = 'X';
+    controller.updateDocument(
+      noteId: 'note-1',
+      title: 'edited',
+      markdown: '$insertion$markdown',
+      changes: const [EditorChange(from: 0, to: 0, insert: insertion)],
+    );
+    expect(controller.boundaries.single.sourceOffset, betaOffset + 1);
 
-      exporter.fail(1, StateError('layout failed'));
-      await tester.pump();
-      expect(controller.result, same(first));
-      expect(controller.boundaries, hasLength(1));
-      expect(controller.boundaries.single.pageIndex, 1);
-      expect(
-        controller.boundaries.single.kind,
-        NotePdfPageBoundaryKind.automatic,
-      );
-      expect(controller.error, isA<StateError>());
-      expect(controller.hasStaleResult, isFalse);
+    controller.updateDocument(
+      noteId: 'note-1',
+      title: markdown,
+      markdown: markdown,
+      changes: const [EditorChange(from: 0, to: 1, insert: '')],
+    );
 
-      controller.retry();
-      expect(controller.hasStaleResult, isTrue);
-      final recovered = _result(1, marker: 2);
-      exporter.complete(2, recovered);
-      await tester.pump();
-      expect(controller.result, same(recovered));
-      expect(controller.error, isNull);
-    },
-  );
+    expect(controller.building, isFalse);
+    expect(controller.hasStaleResult, isFalse);
+    expect(controller.boundaries.single.sourceOffset, betaOffset);
+    expect(layouter.snapshots, hasLength(1));
+  });
 
-  testWidgets(
-    'drops stale attachment builds and matches reusable bytes exactly',
-    (tester) async {
-      final exporter = _ControlledExporter();
-      final controller = NotePageLayoutController(
-        exporter: exporter,
-        debounce: Duration.zero,
-      );
-      addTearDown(controller.dispose);
-      controller.setActive(true);
-      final first = _snapshotWithAsset(1);
-      final second = _snapshotWithAsset(2);
-
-      controller.bindSnapshot(first);
-      controller.bindSnapshot(second);
-      expect(exporter.snapshots, hasLength(2));
-
-      exporter.complete(0, _result(9, marker: 1));
-      await tester.pump();
-      expect(controller.result, isNull);
-      expect(controller.building, isTrue);
-
-      final latest = _result(2, marker: 2);
-      exporter.complete(1, latest);
-      await tester.pump();
-      expect(controller.result, same(latest));
-      expect(
-        controller.reusableResultFor(second, const NotePdfExportOptions()),
-        same(latest),
-      );
-      expect(
-        controller.reusableResultFor(first, const NotePdfExportOptions()),
-        isNull,
-      );
-    },
-  );
-
-  testWidgets('rebases stale page boundaries across live source edits', (
+  testWidgets('drops stale attachment layout and keeps one active flight', (
     tester,
   ) async {
-    final exporter = _ControlledExporter();
+    final layouter = _ControlledLayouter();
     final controller = NotePageLayoutController(
-      exporter: exporter,
+      layouter: layouter,
       debounce: Duration.zero,
     );
     addTearDown(controller.dispose);
     controller.setActive(true);
-    const original = '# 标题\n\n第一段\n\n第二段\n\n第三段';
-    final snapshot = _snapshot(original);
 
-    controller.bindSnapshot(snapshot);
-    final originalOffset = original.indexOf('第三段');
-    exporter.complete(
-      0,
-      _result(
-        2,
-        marker: 1,
-        boundaries: [
-          NotePdfPageBoundary(
-            pageIndex: 1,
-            sourceOffset: originalOffset,
-            kind: NotePdfPageBoundaryKind.automatic,
-          ),
-        ],
-      ),
-    );
+    controller.bindSnapshot(_snapshotWithAsset(1));
+    controller.bindSnapshot(_snapshotWithAsset(2));
+    expect(layouter.snapshots, hasLength(1));
+
+    layouter.complete(0, _result(9));
     await tester.pump();
+    expect(layouter.snapshots, hasLength(2));
+    expect(layouter.snapshots.last.assets.single.bytes, [2]);
+    expect(layouter.maxActiveFlights, 1);
 
-    const insertion = '补充内容\n\n';
-    final edited = original.replaceFirst('第二段', '$insertion第二段');
-    controller.updateDocument(
-      noteId: snapshot.noteId,
-      title: snapshot.title,
-      markdown: edited,
-    );
-
-    expect(controller.hasStaleResult, isTrue);
-    expect(
-      controller.boundaries.single.sourceOffset,
-      originalOffset + insertion.length,
-    );
-    expect(
-      edited.substring(controller.boundaries.single.sourceOffset),
-      startsWith('第三段'),
-    );
+    layouter.complete(1, _result(2));
+    await tester.pump();
+    expect(controller.pageCount, 2);
   });
 }
+
+bool _isHighSurrogate(int codeUnit) => codeUnit >= 0xD800 && codeUnit <= 0xDBFF;
+
+bool _isLowSurrogate(int codeUnit) => codeUnit >= 0xDC00 && codeUnit <= 0xDFFF;
 
 NotePdfExportSnapshot _snapshot(String markdown) => NotePdfExportSnapshot(
   noteId: 'note-1',
@@ -365,39 +436,43 @@ NotePdfExportSnapshot _snapshotWithAsset(int marker) => NotePdfExportSnapshot(
   ],
 );
 
-NotePdfBuildResult _result(
+NotePdfLayoutResult _result(
   int pageCount, {
-  required int marker,
   List<NotePdfPageBoundary> boundaries = const [],
-}) => NotePdfBuildResult(
-  bytes: Uint8List.fromList([37, 80, 68, 70, marker]),
+}) => NotePdfLayoutResult(
   pageCount: pageCount,
   warnings: const [],
   boundaries: boundaries,
 );
 
-final class _ControlledExporter implements NotePdfExporter {
+final class _ControlledLayouter implements NotePdfPageLayouter {
   final snapshots = <NotePdfExportSnapshot>[];
   final options = <NotePdfExportOptions>[];
-  final _completers = <Completer<NotePdfBuildResult>>[];
+  final completers = <Completer<NotePdfLayoutResult>>[];
+  var activeFlights = 0;
+  var maxActiveFlights = 0;
 
   @override
-  Future<NotePdfBuildResult> build(
+  Future<NotePdfLayoutResult> layout(
     NotePdfExportSnapshot snapshot,
     NotePdfExportOptions options,
   ) {
     snapshots.add(snapshot);
     this.options.add(options);
-    final completer = Completer<NotePdfBuildResult>();
-    _completers.add(completer);
-    return completer.future;
+    final completer = Completer<NotePdfLayoutResult>();
+    completers.add(completer);
+    activeFlights += 1;
+    if (activeFlights > maxActiveFlights) {
+      maxActiveFlights = activeFlights;
+    }
+    return completer.future.whenComplete(() => activeFlights -= 1);
   }
 
-  void complete(int index, NotePdfBuildResult result) {
-    _completers[index].complete(result);
+  void complete(int index, NotePdfLayoutResult result) {
+    completers[index].complete(result);
   }
 
   void fail(int index, Object error) {
-    _completers[index].completeError(error);
+    completers[index].completeError(error);
   }
 }

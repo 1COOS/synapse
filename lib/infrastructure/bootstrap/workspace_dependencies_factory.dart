@@ -33,6 +33,7 @@ WorkspaceDependencies createWorkspaceDependencies({
   VaultBackend? initialVault,
   ImageInputService? imageInput,
   NotePdfExporter? notePdfExporter,
+  NotePdfPageLayouter? notePdfPageLayouter,
   NotePdfPreviewRasterizer? notePdfPreviewRasterizer,
   NotePdfFileSaver? notePdfFileSaver,
   SettingsStore? settingsStore,
@@ -62,6 +63,16 @@ WorkspaceDependencies createWorkspaceDependencies({
   WorkspaceBackgroundTaskErrorReporter? backgroundTaskErrorReporter,
   WorkspaceRuntimeCleanupErrorReporter? searchCacheErrorReporter,
 }) {
+  final resolvedNotePdfExporter = notePdfExporter ?? DefaultNotePdfExporter();
+  final NotePdfPageLayouter resolvedNotePdfPageLayouter;
+  if (notePdfPageLayouter != null) {
+    resolvedNotePdfPageLayouter = notePdfPageLayouter;
+  } else if (resolvedNotePdfExporter is NotePdfPageLayouter) {
+    resolvedNotePdfPageLayouter =
+        resolvedNotePdfExporter as NotePdfPageLayouter;
+  } else {
+    resolvedNotePdfPageLayouter = DefaultNotePdfExporter();
+  }
   SettingsStore? resolvedSettingsStore =
       settingsStore ??
       _legacySettingsStore(
@@ -97,7 +108,8 @@ WorkspaceDependencies createWorkspaceDependencies({
   return WorkspaceDependencies(
     initialVault: initialVault,
     imageInput: imageInput ?? const PlatformImageInputService(),
-    notePdfExporter: notePdfExporter ?? DefaultNotePdfExporter(),
+    notePdfExporter: resolvedNotePdfExporter,
+    notePdfPageLayouter: resolvedNotePdfPageLayouter,
     notePdfPreviewRasterizer:
         notePdfPreviewRasterizer ?? const PrintingNotePdfPreviewRasterizer(),
     notePdfFileSaver: notePdfFileSaver ?? const PlatformNotePdfFileSaver(),

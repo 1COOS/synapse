@@ -164,7 +164,7 @@ H1 自动改名和右键笔记重命名必须把 Markdown save、严格 rename�
 ### 5.4 PDF 导出
 
 - `NotePdfExportSnapshot` 是 flush 成功后复制的不可变快照；生成与预览不得继续读取 live session 或 Vault；
-- `NotePageLayoutController` 默认 inactive；未显式启用不得调用 `captureNotePdfPreview`、读取附件或生成 PDF。启用后使用无保存的当前正文和附件快照，不得为显示辅助线而 flush，并负责 400 ms 防抖、方向/全局页边距/页脚/附件立即刷新、generation token、阅读态暂停、旧结果保留和精确 bytes 复用；正文变更期间必须把旧分页 offset 重定位到当前 UTF-16 source，不能直接使用编辑前偏移；
+- `NotePageLayoutController` 默认 inactive；未显式启用不得调用 `captureNotePdfPreview`、读取附件或创建排版任务。启用后使用无保存的当前正文和附件快照，不得为显示辅助线而 flush；正文 transaction 必须立即投影旧分页 offset 并隐藏被替换范围内的边界，缺少有效 change 时才使用 UTF-16 安全的共同前后缀回退。控制器负责 400 ms 防抖、方向/全局页边距/页脚/附件立即刷新、单 flight latest-wins、阅读态暂停和 stale 结果保留；编辑态只能返回 `NotePdfLayoutResult`，不得序列化或缓存 PDF bytes；
 - `NotePdfBuildResult.boundaries` 必须来自生成最终 PDF 的同一次排版，以 Markdown UTF-16 offset 表示每页首个可见内容；自动边界显示为编辑器 overlay，手动边界继续由持久化分页符显示；
 - CodeMirror `setPageLayout` 只传自动边界的 `pageIndex/sourceOffset` 和 stale 状态；滚动、viewport、geometry 和双栏内部坐标变化必须刷新 overlay，禁止产生 document transaction；
 - PDF 生成只能在后台 isolate 运行，方向、页边距和页脚变化必须通过 generation token 丢弃过期结果；预览只栅格化可见页附近并限制缓存；

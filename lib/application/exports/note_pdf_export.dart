@@ -122,6 +122,26 @@ final class NotePdfBuildResult {
   final List<NotePdfPageBoundary> boundaries;
 }
 
+final class NotePdfLayoutResult {
+  NotePdfLayoutResult({
+    required this.pageCount,
+    required List<NotePdfExportWarning> warnings,
+    List<NotePdfPageBoundary> boundaries = const [],
+  }) : warnings = List<NotePdfExportWarning>.unmodifiable(warnings),
+       boundaries = List<NotePdfPageBoundary>.unmodifiable(boundaries);
+
+  final int pageCount;
+  final List<NotePdfExportWarning> warnings;
+  final List<NotePdfPageBoundary> boundaries;
+}
+
+abstract interface class NotePdfPageLayouter {
+  Future<NotePdfLayoutResult> layout(
+    NotePdfExportSnapshot snapshot,
+    NotePdfExportOptions options,
+  );
+}
+
 abstract interface class NotePdfExporter {
   Future<NotePdfBuildResult> build(
     NotePdfExportSnapshot snapshot,

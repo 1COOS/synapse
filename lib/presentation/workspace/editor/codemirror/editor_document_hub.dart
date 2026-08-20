@@ -40,6 +40,8 @@ final class EditorDocumentHub {
 
   final NoteDocumentSession session;
   final Set<EditorDocumentClient> _clients = <EditorDocumentClient>{};
+  final Set<ValueChanged<EditorDocumentUpdate>> _updateListeners =
+      <ValueChanged<EditorDocumentUpdate>>{};
   String _markdown;
   TextSelection _selection;
   int _revision = 0;
@@ -71,6 +73,15 @@ final class EditorDocumentHub {
 
   void detach(EditorDocumentClient client) {
     _clients.remove(client);
+  }
+
+  void addUpdateListener(ValueChanged<EditorDocumentUpdate> listener) {
+    _ensureActive();
+    _updateListeners.add(listener);
+  }
+
+  void removeUpdateListener(ValueChanged<EditorDocumentUpdate> listener) {
+    _updateListeners.remove(listener);
   }
 
   EditorTransactionResult applyTransaction(EditorTransaction transaction) {
@@ -218,6 +229,11 @@ final class EditorDocumentHub {
   }
 
   void _publish(EditorDocumentUpdate update) {
+    for (final listener in List<ValueChanged<EditorDocumentUpdate>>.of(
+      _updateListeners,
+    )) {
+      listener(update);
+    }
     for (final client in List<EditorDocumentClient>.of(_clients)) {
       if (client.paneId == update.originPaneId) {
         continue;
@@ -233,6 +249,7 @@ final class EditorDocumentHub {
     _disposed = true;
     session.controller.removeListener(_handleSessionControllerChanged);
     _clients.clear();
+    _updateListeners.clear();
   }
 
   void _ensureActive() {

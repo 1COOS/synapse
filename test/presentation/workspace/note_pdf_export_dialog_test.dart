@@ -135,34 +135,35 @@ void main() {
     expect(find.byKey(const Key('note-pdf-build-error')), findsNothing);
   });
 
-  testWidgets('accepts a matching edit-layout result without rebuilding', (
-    tester,
-  ) async {
-    final exporter = _ControlledPdfExporter();
-    final initialResult = _result(2, marker: 8);
-    const initialOptions = NotePdfExportOptions(
-      orientation: NotePdfOrientation.landscape,
-      marginPreset: NotePdfMarginPreset.compact,
-    );
+  testWidgets(
+    'accepts an explicitly supplied initial result without rebuilding',
+    (tester) async {
+      final exporter = _ControlledPdfExporter();
+      final initialResult = _result(2, marker: 8);
+      const initialOptions = NotePdfExportOptions(
+        orientation: NotePdfOrientation.landscape,
+        marginPreset: NotePdfMarginPreset.compact,
+      );
 
-    await _pumpDialog(
-      tester,
-      exporter: exporter,
-      rasterizer: _RecordingRasterizer(),
-      saver: _RecordingFileSaver(),
-      initialOptions: initialOptions,
-      initialResult: initialResult,
-    );
-    await tester.pump();
+      await _pumpDialog(
+        tester,
+        exporter: exporter,
+        rasterizer: _RecordingRasterizer(),
+        saver: _RecordingFileSaver(),
+        initialOptions: initialOptions,
+        initialResult: initialResult,
+      );
+      await tester.pump();
 
-    expect(exporter.options, isEmpty);
-    expect(find.text('A4 · 2 页'), findsOneWidget);
-    final orientation = tester
-        .widget<CupertinoSlidingSegmentedControl<NotePdfOrientation>>(
-          find.byKey(const Key('note-pdf-orientation')),
-        );
-    expect(orientation.groupValue, NotePdfOrientation.landscape);
-  });
+      expect(exporter.options, isEmpty);
+      expect(find.text('A4 · 2 页'), findsOneWidget);
+      final orientation = tester
+          .widget<CupertinoSlidingSegmentedControl<NotePdfOrientation>>(
+            find.byKey(const Key('note-pdf-orientation')),
+          );
+      expect(orientation.groupValue, NotePdfOrientation.landscape);
+    },
+  );
 }
 
 Future<void> _pumpDialog(

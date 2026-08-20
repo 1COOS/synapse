@@ -3,21 +3,22 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 
 import '../../../application/exports/note_pdf_export.dart';
+import 'codemirror/editor_protocol.dart';
 
 final class NotePageLayoutController extends ChangeNotifier {
   NotePageLayoutController({
-    required NotePdfExporter exporter,
+    required NotePdfPageLayouter layouter,
     this.debounce = const Duration(milliseconds: 400),
-  }) : _exporter = exporter;
+  }) : _layouter = layouter;
 
-  final NotePdfExporter _exporter;
+  final NotePdfPageLayouter _layouter;
   final Duration debounce;
 
   NotePdfExportOptions _options = const NotePdfExportOptions();
   NotePdfExportOptions get options => _options;
 
-  NotePdfBuildResult? _result;
-  NotePdfBuildResult? get result => _result;
+  NotePdfLayoutResult? _result;
+  NotePdfLayoutResult? get result => _result;
 
   Object? _error;
   Object? get error => _error;
@@ -25,7 +26,9 @@ final class NotePageLayoutController extends ChangeNotifier {
   bool _preparing = false;
   bool _building = false;
   bool get building => _preparing || _building;
-  bool get hasStaleResult => building && _result != null;
+
+  bool _boundariesStale = false;
+  bool get hasStaleResult => _boundariesStale;
 
   bool _active = false;
   bool get active => _active;
@@ -37,24 +40,17 @@ final class NotePageLayoutController extends ChangeNotifier {
   List<NotePdfExportAsset> _assets = const [];
   var _assetsBound = false;
   var _assetGeneration = 0;
-  var _buildGeneration = 0;
+  var _lifecycleGeneration = 0;
   Timer? _timer;
   _NotePageBuildKey? _lastCompletedKey;
-  NotePdfExportSnapshot? _lastBuiltSnapshot;
-  NotePdfExportOptions? _lastBuiltOptions;
+  List<NotePdfPageBoundary> _boundaries = const [];
+  List<NotePdfPageBoundary> _lastCompletedBoundaries = const [];
 
-  List<NotePdfPageBoundary> get boundaries {
-    final result = _result;
-    final builtSnapshot = _lastBuiltSnapshot;
-    if (result == null || builtSnapshot == null) {
-      return const [];
-    }
-    return _rebasePageBoundaries(
-      result.boundaries,
-      fromMarkdown: builtSnapshot.markdown,
-      toMarkdown: _markdown,
-    );
-  }
+  _NotePageBuildKey? _pendingKey;
+  bool _pendingReady = false;
+  bool _flightRunning = false;
+
+  List<NotePdfPageBoundary> get boundaries => _boundaries;
 
   int? get pageCount => _result?.pageCount;
 
@@ -71,8 +67,9 @@ final class NotePageLayoutController extends ChangeNotifier {
       _result = null;
       _error = null;
       _lastCompletedKey = null;
-      _lastBuiltSnapshot = null;
-      _lastBuiltOptions = null;
+      _boundaries = const [];
+      _lastCompletedBoundaries = const [];
+      _boundariesStale = false;
     }
     _schedule(immediate: true);
   }
@@ -81,6 +78,7 @@ final class NotePageLayoutController extends ChangeNotifier {
     required String noteId,
     required String title,
     required String markdown,
+    List<EditorChange> changes = const [],
   }) {
     if (_noteId != null && _noteId != noteId) {
       resetForNote(noteId);
@@ -90,6 +88,17 @@ final class NotePageLayoutController extends ChangeNotifier {
     if (_title == title && _markdown == markdown) {
       return;
     }
+
+    final previousMarkdown = _markdown;
+    if (previousMarkdown != markdown && _boundaries.isNotEmpty) {
+      _boundaries = _projectPageBoundaries(
+        _boundaries,
+        fromMarkdown: previousMarkdown,
+        toMarkdown: markdown,
+        changes: changes,
+      );
+      _boundariesStale = true;
+    }
     _title = title;
     _markdown = markdown;
     _schedule();
@@ -97,7 +106,7 @@ final class NotePageLayoutController extends ChangeNotifier {
 
   void resetForNote(String noteId) {
     _timer?.cancel();
-    _buildGeneration += 1;
+    _lifecycleGeneration += 1;
     _noteId = noteId;
     _title = '';
     _markdown = '';
@@ -109,8 +118,11 @@ final class NotePageLayoutController extends ChangeNotifier {
     _preparing = false;
     _building = false;
     _lastCompletedKey = null;
-    _lastBuiltSnapshot = null;
-    _lastBuiltOptions = null;
+    _boundaries = const [];
+    _lastCompletedBoundaries = const [];
+    _boundariesStale = false;
+    _pendingKey = null;
+    _pendingReady = false;
     notifyListeners();
   }
 
@@ -139,10 +151,12 @@ final class NotePageLayoutController extends ChangeNotifier {
     }
     _active = active;
     _timer?.cancel();
-    _buildGeneration += 1;
+    _lifecycleGeneration += 1;
     if (!active) {
       _preparing = false;
       _building = false;
+      _pendingKey = null;
+      _pendingReady = false;
       notifyListeners();
       return;
     }
@@ -152,6 +166,8 @@ final class NotePageLayoutController extends ChangeNotifier {
     }
     if (_currentKey() == _lastCompletedKey) {
       _building = false;
+      _boundaries = _lastCompletedBoundaries;
+      _boundariesStale = false;
       _error = null;
       notifyListeners();
       return;
@@ -161,26 +177,11 @@ final class NotePageLayoutController extends ChangeNotifier {
 
   void retry() => _schedule(immediate: true, force: true);
 
-  NotePdfBuildResult? reusableResultFor(
-    NotePdfExportSnapshot snapshot,
-    NotePdfExportOptions options,
-  ) {
-    final builtSnapshot = _lastBuiltSnapshot;
-    if (_result == null ||
-        builtSnapshot == null ||
-        _lastBuiltOptions != options ||
-        builtSnapshot.noteId != snapshot.noteId ||
-        builtSnapshot.title != snapshot.title ||
-        builtSnapshot.markdown != snapshot.markdown ||
-        !_sameAssets(builtSnapshot.assets, snapshot.assets)) {
-      return null;
-    }
-    return _result;
-  }
-
   void _schedule({bool immediate = false, bool force = false}) {
     if (!_active) {
       _timer?.cancel();
+      _pendingKey = null;
+      _pendingReady = false;
       _building = false;
       notifyListeners();
       return;
@@ -190,21 +191,50 @@ final class NotePageLayoutController extends ChangeNotifier {
     }
     final key = _currentKey();
     if (!force && key == _lastCompletedKey) {
+      _timer?.cancel();
+      _pendingKey = null;
+      _pendingReady = false;
+      _building = false;
+      _boundaries = _lastCompletedBoundaries;
+      _boundariesStale = false;
+      _error = null;
+      notifyListeners();
       return;
     }
+
     _timer?.cancel();
-    final generation = ++_buildGeneration;
+    _pendingKey = key;
+    _pendingReady = immediate || debounce == Duration.zero;
     _building = true;
     _error = null;
+    if (_boundaries.isNotEmpty) {
+      _boundariesStale = true;
+    }
     notifyListeners();
-    if (immediate || debounce == Duration.zero) {
-      unawaited(_build(generation, key));
+
+    if (_pendingReady) {
+      _startPendingIfReady();
       return;
     }
-    _timer = Timer(debounce, () => unawaited(_build(generation, key)));
+    _timer = Timer(debounce, () {
+      _pendingReady = true;
+      _startPendingIfReady();
+    });
   }
 
-  Future<void> _build(int generation, _NotePageBuildKey key) async {
+  void _startPendingIfReady() {
+    if (_flightRunning || !_pendingReady || _pendingKey == null || !_active) {
+      return;
+    }
+    final key = _pendingKey!;
+    _pendingKey = null;
+    _pendingReady = false;
+    _flightRunning = true;
+    final lifecycleGeneration = _lifecycleGeneration;
+    unawaited(_build(key, lifecycleGeneration));
+  }
+
+  Future<void> _build(_NotePageBuildKey key, int lifecycleGeneration) async {
     final snapshot = NotePdfExportSnapshot(
       noteId: key.noteId,
       title: key.title,
@@ -212,24 +242,39 @@ final class NotePageLayoutController extends ChangeNotifier {
       assets: _assets,
     );
     try {
-      final result = await _exporter.build(snapshot, key.options);
-      if (generation != _buildGeneration || key != _currentKey()) {
-        return;
+      final result = await _layouter.layout(snapshot, key.options);
+      if (_active &&
+          lifecycleGeneration == _lifecycleGeneration &&
+          key == _currentKey()) {
+        _result = result;
+        _lastCompletedKey = key;
+        _boundaries = result.boundaries;
+        _lastCompletedBoundaries = result.boundaries;
+        _boundariesStale = false;
+        _building = false;
+        _error = null;
+        if (_pendingKey == key) {
+          _pendingKey = null;
+          _pendingReady = false;
+        }
+        notifyListeners();
       }
-      _result = result;
-      _lastCompletedKey = key;
-      _lastBuiltSnapshot = snapshot;
-      _lastBuiltOptions = key.options;
-      _building = false;
-      _error = null;
-      notifyListeners();
     } catch (error) {
-      if (generation != _buildGeneration || key != _currentKey()) {
-        return;
+      if (_active &&
+          lifecycleGeneration == _lifecycleGeneration &&
+          key == _currentKey()) {
+        _building = _pendingKey != null;
+        _error = error;
+        if (_boundaries.isNotEmpty) {
+          _boundariesStale = true;
+        }
+        notifyListeners();
       }
-      _building = false;
-      _error = error;
-      notifyListeners();
+    } finally {
+      _flightRunning = false;
+      if (_pendingKey != null && _pendingReady) {
+        _startPendingIfReady();
+      }
     }
   }
 
@@ -244,7 +289,7 @@ final class NotePageLayoutController extends ChangeNotifier {
   @override
   void dispose() {
     _timer?.cancel();
-    _buildGeneration += 1;
+    _lifecycleGeneration += 1;
     super.dispose();
   }
 }
@@ -278,24 +323,79 @@ final class _NotePageBuildKey {
       Object.hash(noteId, title, markdown, options, assetGeneration);
 }
 
-bool _sameAssets(
-  List<NotePdfExportAsset> left,
-  List<NotePdfExportAsset> right,
+List<NotePdfPageBoundary> _projectPageBoundaries(
+  List<NotePdfPageBoundary> boundaries, {
+  required String fromMarkdown,
+  required String toMarkdown,
+  required List<EditorChange> changes,
+}) {
+  if (boundaries.isEmpty || fromMarkdown == toMarkdown) {
+    return boundaries;
+  }
+  if (_changesProduceMarkdown(fromMarkdown, toMarkdown, changes)) {
+    return _projectPageBoundariesThroughChanges(
+      boundaries,
+      toMarkdown: toMarkdown,
+      changes: changes,
+    );
+  }
+  return _rebasePageBoundaries(
+    boundaries,
+    fromMarkdown: fromMarkdown,
+    toMarkdown: toMarkdown,
+  );
+}
+
+bool _changesProduceMarkdown(
+  String fromMarkdown,
+  String toMarkdown,
+  List<EditorChange> changes,
 ) {
-  if (left.length != right.length) {
+  if (changes.isEmpty) {
     return false;
   }
-  for (var index = 0; index < left.length; index += 1) {
-    final a = left[index];
-    final b = right[index];
-    if (a.source != b.source ||
-        a.title != b.title ||
-        a.mimeType != b.mimeType ||
-        !listEquals(a.bytes, b.bytes)) {
-      return false;
-    }
+  try {
+    return applyEditorChanges(fromMarkdown, changes) == toMarkdown;
+  } on Object {
+    return false;
   }
-  return true;
+}
+
+List<NotePdfPageBoundary> _projectPageBoundariesThroughChanges(
+  List<NotePdfPageBoundary> boundaries, {
+  required String toMarkdown,
+  required List<EditorChange> changes,
+}) {
+  int? projectOffset(int sourceOffset) {
+    var delta = 0;
+    for (final change in changes) {
+      final replacedLength = change.to - change.from;
+      if (replacedLength == 0) {
+        if (sourceOffset >= change.from) {
+          delta += change.insert.length;
+        }
+        continue;
+      }
+      if (sourceOffset < change.from) {
+        break;
+      }
+      if (sourceOffset < change.to) {
+        return null;
+      }
+      delta += change.insert.length - replacedLength;
+    }
+    return _clampUtf16Offset(toMarkdown, sourceOffset + delta);
+  }
+
+  return List<NotePdfPageBoundary>.unmodifiable([
+    for (final boundary in boundaries)
+      if (projectOffset(boundary.sourceOffset) case final offset?)
+        NotePdfPageBoundary(
+          pageIndex: boundary.pageIndex,
+          sourceOffset: offset,
+          kind: boundary.kind,
+        ),
+  ]);
 }
 
 List<NotePdfPageBoundary> _rebasePageBoundaries(

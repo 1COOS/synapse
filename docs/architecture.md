@@ -197,13 +197,13 @@ CodeMirror 是唯一正文编辑器：活动区域显示 Markdown marker，失�
 
 ### 6.4 PDF 导出管线
 
-`application/exports/note_pdf_export.dart` 定义 `NotePdfExportSnapshot`、`NotePdfExportOptions`、`NotePdfBuildResult`、`NotePdfPageBoundary`、结构化 warning 以及 exporter/rasterizer/file-saver ports。`NotePdfPageBoundary` 使用 Markdown UTF-16 offset 标识每个新 PDF 页面首个可见源码位置，并区分自动和手动分页。真实实现位于 `infrastructure/pdf/`：`DefaultNotePdfExporter` 使用 `pdf` 在后台 isolate 构建文档，在同一次真实排版的绘制阶段采集分页映射；`PrintingNotePdfPreviewRasterizer` 按需将指定页栅格化，`PlatformNotePdfFileSaver` 继续通过 `file_selector` 保存。Noto Sans SC、JetBrains Mono、Noto Emoji 及其 OFL 许可证随应用 assets 离线打包，不允许运行时下载字体。
+`application/exports/note_pdf_export.dart` 定义 `NotePdfExportSnapshot`、`NotePdfExportOptions`、`NotePdfLayoutResult`、`NotePdfBuildResult`、`NotePdfPageBoundary`、结构化 warning，以及 page-layouter/exporter/rasterizer/file-saver ports。`NotePdfPageBoundary` 使用 Markdown UTF-16 offset 标识每个新 PDF 页面首个可见源码位置，并区分自动和手动分页。真实实现位于 `infrastructure/pdf/`：`DefaultNotePdfExporter` 的轻量 layout 与完整 build 在后台 isolate 共享同一套 Markdown renderer、字体、页面参数和绘制探针；layout 完成 `MultiPage` generate/post-process 但不序列化 PDF stream，图片只绘制等尺寸占位，build 才嵌入图片并输出字节。`PrintingNotePdfPreviewRasterizer` 按需将指定页栅格化，`PlatformNotePdfFileSaver` 继续通过 `file_selector` 保存。Noto Sans SC、JetBrains Mono、Noto Emoji 及其 OFL 许可证随应用 assets 离线打包，不允许运行时下载字体。
 
 窗格在 await 前捕获 `PaneEditorContext`，`prepareNotePdfExport` 先通过 `NoteSaveCoordinator.flush` 保存指定 session，再复制正文和图片附件得到不可变快照。flush 失败、中途 stale、workspace busy、迁移、`reloadRequired` 或 note lock 都不得进入生成。弹窗只持有快照和当前 preview bytes，并只允许切换方向；页边距和页脚状态继承 `WorkspacePreferences`。方向更新使用 generation token，过期 build 结果直接丢弃，缩略图按页懒加载并限制缓存；弹窗方向变化同时写回当前 pane 会话，取消弹窗不回滚。
 
-编辑态分页由 pane 级 `NotePageLayoutController` 驱动，但默认 inactive。pane-note 启用状态与 pane 方向分别保存在视图会话中；未启用时不创建排版任务、不调用 `captureNotePdfPreview`、不读取附件。用户点击标题栏“显示分页线”后，控制器才读取当前 session 正文和附件并立即生成；启用期间正文变化 400 ms 防抖，方向、全局页边距、页脚和附件代次变化立即刷新，所有异步结果都以 build generation 与快照 key 丢弃过期值。
+编辑态分页由 pane 级 `NotePageLayoutController` 驱动，但默认 inactive。pane-note 启用状态与 pane 方向分别保存在视图会话中；未启用时不创建排版任务、不调用 `captureNotePdfPreview`、不读取附件。用户点击标题栏“显示分页线”后，控制器才读取当前 session 正文和附件并立即执行轻量 layout。启用期间 `EditorDocumentHub` 把真实 `EditorChange` 同步给控制器，未受影响的旧边界立即按 UTF-16 transaction 投影，被替换范围内的边界隐藏；正文变化 400 ms 防抖后校准，方向、全局页边距、页脚和附件代次变化立即刷新。每个 pane 同时至多一个排版 flight，过期 flight 完成后只启动最新已稳定 key。
 
-关闭分页线会取消防抖和在途 generation，但保留最后成功结果；完全相同的正文、附件和参数可在当前笔记会话内直接恢复缓存。切到阅读态只暂停，返回同一笔记编辑态按缓存匹配情况恢复或刷新；切换笔记或关闭窗格清除启用状态，pane 方向继续保留。旧结果的源码 offset 必须按当前正文的共同前后缀重定位。导出始终是独立显式操作，不会启用编辑态分页；只有 note id、标题、正文、附件字节、方向、页边距和页脚状态全部相同时才允许复用 PDF bytes。
+关闭分页线会取消防抖并使在途结果失效，但保留最后成功结果；完全相同的正文、附件和参数可在当前笔记会话内直接恢复布局缓存。切到阅读态只暂停，返回同一笔记编辑态按缓存匹配情况恢复或刷新；切换笔记或关闭窗格清除启用状态，pane 方向继续保留。缺少有效 transaction 时，旧结果的源码 offset 回退到共同前后缀重定位，并保证 UTF-16 代理对安全。导出始终是独立显式操作，不会启用编辑态分页，也不复用编辑态 layout 的 PDF bytes。
 
 macOS CodeMirror 通过协议 v2 的 `setPageLayout` 接收 `pageIndex/sourceOffset` 和 stale 状态，在绝对 overlay 中结合主编辑器或双栏子编辑器坐标、scroll、viewport 与 geometry 更新位置；overlay 使用 `pointer-events: none` 和 `aria-hidden`。阅读态和无可写 surface 平台发送空布局。手动分页仍由现有分页符 block 显示，避免同一位置出现两条线，协议和显示层都不得修改 Markdown。
 

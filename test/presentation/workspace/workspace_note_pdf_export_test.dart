@@ -135,7 +135,7 @@ void main() {
 
       expect(find.byKey(const Key('note-mode-print-pane-1')), findsNothing);
       expect(find.byKey(const Key('note-print-toolbar')), findsNothing);
-      expect(exporter.snapshots, isEmpty);
+      expect(exporter.layoutSnapshots, isEmpty);
       expect(
         find.byKey(const Key('note-page-layout-toggle-pane-1')),
         findsOneWidget,
@@ -146,7 +146,7 @@ void main() {
       await tester.tap(find.byKey(const Key('note-page-layout-toggle-pane-1')));
       await tester.pump();
       await tester.pump();
-      expect(exporter.snapshots, hasLength(1));
+      expect(exporter.layoutSnapshots, hasLength(1));
       expect(find.byKey(const Key('note-page-orientation')), findsOneWidget);
       expect(
         testDocumentSurfaceState(tester).pageLayout.boundaries,
@@ -160,17 +160,17 @@ void main() {
         testDocumentSurfaceState(tester).pageLayout.boundaries,
         hasLength(1),
       );
-      final buildsBeforeDebounce = exporter.snapshots.length;
+      final buildsBeforeDebounce = exporter.layoutSnapshots.length;
       await tester.pump(const Duration(milliseconds: 399));
-      expect(exporter.snapshots.length, buildsBeforeDebounce);
+      expect(exporter.layoutSnapshots.length, buildsBeforeDebounce);
       expect(
         testDocumentSurfaceState(tester).pageLayout.boundaries,
         hasLength(1),
       );
       await tester.pump(const Duration(milliseconds: 1));
       await tester.pump();
-      expect(exporter.snapshots.length, buildsBeforeDebounce + 1);
-      expect(exporter.snapshots.last.markdown, contains('第二段'));
+      expect(exporter.layoutSnapshots.length, buildsBeforeDebounce + 1);
+      expect(exporter.layoutSnapshots.last.markdown, contains('第二段'));
       expect(
         testDocumentSurfaceState(tester).pageLayout.boundaries,
         hasLength(1),
@@ -181,14 +181,17 @@ void main() {
         find.byKey(const Key('note-page-orientation-landscape')),
       );
       await tester.pump();
-      expect(exporter.options.last.orientation, NotePdfOrientation.landscape);
+      expect(
+        exporter.layoutOptions.last.orientation,
+        NotePdfOrientation.landscape,
+      );
 
       final buildsBeforeExport = exporter.snapshots.length;
       await tester.tap(find.byKey(const Key('note-export-pdf-pane-1')));
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 300));
       expect(find.byKey(const Key('note-pdf-export-dialog')), findsOneWidget);
-      expect(exporter.snapshots.length, buildsBeforeExport);
+      expect(exporter.snapshots.length, buildsBeforeExport + 1);
 
       await tester.tap(find.text('纵向'));
       await tester.pump();
@@ -207,21 +210,21 @@ void main() {
       await tester.pump();
       expect(find.byKey(const Key('note-page-orientation')), findsNothing);
       expect(testDocumentSurfaceState(tester).pageLayout.boundaries, isEmpty);
-      final buildsWhileReading = exporter.snapshots.length;
+      final buildsWhileReading = exporter.layoutSnapshots.length;
       await tester.pump(const Duration(seconds: 1));
-      expect(exporter.snapshots, hasLength(buildsWhileReading));
+      expect(exporter.layoutSnapshots, hasLength(buildsWhileReading));
 
       await tester.tap(find.byKey(const Key('note-mode-source-pane-1')));
       await tester.pump();
       await tester.pump();
       expect(find.byKey(const Key('note-page-orientation')), findsOneWidget);
-      expect(exporter.snapshots.length, buildsWhileReading);
+      expect(exporter.layoutSnapshots.length, buildsWhileReading);
       expect(
         testDocumentSurfaceState(tester).pageLayout.boundaries,
         hasLength(1),
       );
 
-      final buildsBeforeCachedToggle = exporter.snapshots.length;
+      final buildsBeforeCachedToggle = exporter.layoutSnapshots.length;
       await tester.tap(find.byKey(const Key('note-page-layout-toggle-pane-1')));
       await tester.pump();
       expect(find.byKey(const Key('note-page-orientation')), findsNothing);
@@ -229,7 +232,7 @@ void main() {
       await tester.tap(find.byKey(const Key('note-page-layout-toggle-pane-1')));
       await tester.pump();
       await tester.pump();
-      expect(exporter.snapshots, hasLength(buildsBeforeCachedToggle));
+      expect(exporter.layoutSnapshots, hasLength(buildsBeforeCachedToggle));
       expect(
         testDocumentSurfaceState(tester).pageLayout.boundaries,
         hasLength(1),
@@ -237,18 +240,18 @@ void main() {
 
       await tester.tap(find.byKey(const Key('note-page-layout-toggle-pane-1')));
       await tester.pump();
-      final buildsWhileDisabled = exporter.snapshots.length;
+      final buildsWhileDisabled = exporter.layoutSnapshots.length;
       await enterTextInTestDocumentBlock(tester, '# Disabled\n第一段\n\n第二段');
       await tester.pump(const Duration(milliseconds: 500));
-      expect(exporter.snapshots, hasLength(buildsWhileDisabled));
+      expect(exporter.layoutSnapshots, hasLength(buildsWhileDisabled));
       expect(find.byKey(const Key('note-page-orientation')), findsNothing);
       expect(testDocumentSurfaceState(tester).pageLayout.boundaries, isEmpty);
 
       await tester.tap(find.byKey(const Key('note-page-layout-toggle-pane-1')));
       await tester.pump();
       await tester.pump();
-      expect(exporter.snapshots, hasLength(buildsWhileDisabled + 1));
-      expect(exporter.snapshots.last.markdown, startsWith('# Disabled'));
+      expect(exporter.layoutSnapshots, hasLength(buildsWhileDisabled + 1));
+      expect(exporter.layoutSnapshots.last.markdown, startsWith('# Disabled'));
     },
   );
 
@@ -273,13 +276,13 @@ void main() {
     final attachmentReadsBeforeIdle = vault.attachmentReadCalls;
     await tester.pump(const Duration(milliseconds: 500));
     expect(vault.attachmentReadCalls, attachmentReadsBeforeIdle);
-    expect(exporter.snapshots, isEmpty);
+    expect(exporter.layoutSnapshots, isEmpty);
 
     await tester.tap(find.byKey(const Key('note-page-layout-toggle-pane-1')));
     await tester.pump();
     await tester.pump();
     expect(vault.attachmentReadCalls, attachmentReadsBeforeIdle + 1);
-    expect(exporter.snapshots, hasLength(1));
+    expect(exporter.layoutSnapshots, hasLength(1));
   });
 
   testWidgets(
@@ -345,7 +348,7 @@ void main() {
     await tester.tap(find.byKey(const Key('note-page-layout-toggle-pane-2')));
     await tester.pump();
     await tester.pump();
-    expect(exporter.snapshots, hasLength(2));
+    expect(exporter.layoutSnapshots, hasLength(2));
     expect(
       tester
           .widget<PaneModeIconAction>(
@@ -364,11 +367,11 @@ void main() {
     );
     await tester.tap(find.byKey(const Key('note-page-orientation-landscape')));
     await tester.pump();
-    expect(exporter.snapshots, hasLength(3));
+    expect(exporter.layoutSnapshots, hasLength(3));
 
     await tester.tap(find.byKey(Key('resource-row-${beta.id}')));
     await tester.pump(const Duration(milliseconds: 250));
-    expect(exporter.snapshots, hasLength(3));
+    expect(exporter.layoutSnapshots, hasLength(3));
     expect(
       tester
           .widget<PaneModeIconAction>(
@@ -389,9 +392,12 @@ void main() {
     await tester.tap(find.byKey(const Key('note-page-layout-toggle-pane-2')));
     await tester.pump();
     await tester.pump();
-    expect(exporter.snapshots, hasLength(4));
-    expect(exporter.snapshots.last.noteId, beta.id);
-    expect(exporter.options.last.orientation, NotePdfOrientation.landscape);
+    expect(exporter.layoutSnapshots, hasLength(4));
+    expect(exporter.layoutSnapshots.last.noteId, beta.id);
+    expect(
+      exporter.layoutOptions.last.orientation,
+      NotePdfOrientation.landscape,
+    );
   });
 
   testWidgets('page layout errors retain boundaries and support retry', (
@@ -415,8 +421,7 @@ void main() {
     expect(exporter.completers, hasLength(1));
     exporter.complete(
       0,
-      NotePdfBuildResult(
-        bytes: Uint8List.fromList([37, 80, 68, 70, 45, 49]),
+      NotePdfLayoutResult(
         pageCount: 2,
         warnings: const [],
         boundaries: const [
@@ -449,14 +454,7 @@ void main() {
     await tester.tap(find.byKey(const Key('note-page-retry')));
     await tester.pump();
     expect(exporter.completers, hasLength(3));
-    exporter.complete(
-      2,
-      NotePdfBuildResult(
-        bytes: Uint8List.fromList([37, 80, 68, 70, 45, 50]),
-        pageCount: 1,
-        warnings: const [],
-      ),
-    );
+    exporter.complete(2, NotePdfLayoutResult(pageCount: 1, warnings: const []));
     await tester.pump();
     expect(find.byKey(const Key('note-page-retry')), findsNothing);
   });
@@ -479,13 +477,16 @@ void main() {
       ),
     );
     await tester.pump();
-    expect(exporter.options, isEmpty);
+    expect(exporter.layoutOptions, isEmpty);
     await tester.tap(find.byKey(const Key('note-page-layout-toggle-pane-1')));
     await tester.pump();
     await tester.pump();
-    expect(exporter.options.last.marginPreset, NotePdfMarginPreset.standard);
-    expect(exporter.options.last.footerEnabled, isTrue);
-    final buildsBeforeSave = exporter.options.length;
+    expect(
+      exporter.layoutOptions.last.marginPreset,
+      NotePdfMarginPreset.standard,
+    );
+    expect(exporter.layoutOptions.last.footerEnabled, isTrue);
+    final buildsBeforeSave = exporter.layoutOptions.length;
 
     await tester.tap(find.byKey(const Key('settings-button')));
     await tester.pumpAndSettle();
@@ -510,9 +511,9 @@ void main() {
       settingsStore.savedSettings.last.preferences.pdfFooterEnabled,
       isFalse,
     );
-    expect(exporter.options.length, greaterThan(buildsBeforeSave));
+    expect(exporter.layoutOptions.length, greaterThan(buildsBeforeSave));
     expect(
-      exporter.options.last,
+      exporter.layoutOptions.last,
       const NotePdfExportOptions(
         marginPreset: NotePdfMarginPreset.wide,
         footerEnabled: false,
@@ -573,13 +574,13 @@ void main() {
       expect(toggle.selected, isFalse);
       expect(find.byKey(const Key('note-page-orientation')), findsNothing);
 
-      final buildsBeforeEnable = exporter.snapshots.length;
+      final buildsBeforeEnable = exporter.layoutSnapshots.length;
       await tester.tap(find.byKey(const Key('note-page-layout-toggle-pane-1')));
       await tester.pump();
       await tester.pump();
-      expect(exporter.snapshots, hasLength(buildsBeforeEnable + 1));
+      expect(exporter.layoutSnapshots, hasLength(buildsBeforeEnable + 1));
       expect(
-        exporter.options.last,
+        exporter.layoutOptions.last,
         const NotePdfExportOptions(
           orientation: NotePdfOrientation.landscape,
           marginPreset: NotePdfMarginPreset.wide,
@@ -609,7 +610,7 @@ void main() {
       vault: vault,
       dependencies: _dependencies(vault, exporter: exporter),
     );
-    expect(exporter.snapshots, isEmpty);
+    expect(exporter.layoutSnapshots, isEmpty);
     await tester.tap(find.byKey(const Key('note-page-layout-toggle-pane-1')));
     await tester.pump();
     await tester.runAsync(
@@ -622,8 +623,10 @@ void main() {
       tester,
     ).pageLayout.boundaries.length;
     final boundaryOffset =
-        exporter.results.single.boundaries.first.sourceOffset;
-    final blocks = splitMarkdownLiveBlocks(exporter.snapshots.single.markdown);
+        exporter.layoutResults.single.boundaries.first.sourceOffset;
+    final blocks = splitMarkdownLiveBlocks(
+      exporter.layoutSnapshots.single.markdown,
+    );
     final boundaryBlockIndex = markdownBlockIndexForOffset(
       blocks,
       boundaryOffset,
@@ -681,7 +684,8 @@ WorkspaceDependencies _dependencies(
   );
 }
 
-final class _RecordingPdfExporter implements NotePdfExporter {
+final class _RecordingPdfExporter
+    implements NotePdfExporter, NotePdfPageLayouter {
   _RecordingPdfExporter({this.resultBuilder});
 
   final NotePdfBuildResult Function(
@@ -691,6 +695,8 @@ final class _RecordingPdfExporter implements NotePdfExporter {
   resultBuilder;
   final snapshots = <NotePdfExportSnapshot>[];
   final options = <NotePdfExportOptions>[];
+  final layoutSnapshots = <NotePdfExportSnapshot>[];
+  final layoutOptions = <NotePdfExportOptions>[];
 
   @override
   Future<NotePdfBuildResult> build(
@@ -706,6 +712,21 @@ final class _RecordingPdfExporter implements NotePdfExporter {
           warnings: const [],
         );
   }
+
+  @override
+  Future<NotePdfLayoutResult> layout(
+    NotePdfExportSnapshot snapshot,
+    NotePdfExportOptions options,
+  ) async {
+    layoutSnapshots.add(snapshot);
+    layoutOptions.add(options);
+    final buildResult = resultBuilder?.call(snapshot, options);
+    return NotePdfLayoutResult(
+      pageCount: buildResult?.pageCount ?? 1,
+      warnings: buildResult?.warnings ?? const [],
+      boundaries: buildResult?.boundaries ?? const [],
+    );
+  }
 }
 
 final class _CountingPdfAttachmentVault extends CountingUpdateVaultBackend {
@@ -720,20 +741,35 @@ final class _CountingPdfAttachmentVault extends CountingUpdateVaultBackend {
   }
 }
 
-final class _ControlledWorkspacePdfExporter implements NotePdfExporter {
-  final completers = <Completer<NotePdfBuildResult>>[];
+final class _ControlledWorkspacePdfExporter
+    implements NotePdfExporter, NotePdfPageLayouter {
+  final completers = <Completer<NotePdfLayoutResult>>[];
 
   @override
   Future<NotePdfBuildResult> build(
     NotePdfExportSnapshot snapshot,
     NotePdfExportOptions options,
   ) {
-    final completer = Completer<NotePdfBuildResult>();
+    return Future.value(
+      NotePdfBuildResult(
+        bytes: Uint8List.fromList([37, 80, 68, 70]),
+        pageCount: 1,
+        warnings: const [],
+      ),
+    );
+  }
+
+  @override
+  Future<NotePdfLayoutResult> layout(
+    NotePdfExportSnapshot snapshot,
+    NotePdfExportOptions options,
+  ) {
+    final completer = Completer<NotePdfLayoutResult>();
     completers.add(completer);
     return completer.future;
   }
 
-  void complete(int index, NotePdfBuildResult result) {
+  void complete(int index, NotePdfLayoutResult result) {
     completers[index].complete(result);
   }
 
@@ -742,12 +778,15 @@ final class _ControlledWorkspacePdfExporter implements NotePdfExporter {
   }
 }
 
-final class _ResultRecordingPdfExporter implements NotePdfExporter {
+final class _ResultRecordingPdfExporter
+    implements NotePdfExporter, NotePdfPageLayouter {
   _ResultRecordingPdfExporter(this.delegate);
 
   final NotePdfExporter delegate;
   final snapshots = <NotePdfExportSnapshot>[];
   final results = <NotePdfBuildResult>[];
+  final layoutSnapshots = <NotePdfExportSnapshot>[];
+  final layoutResults = <NotePdfLayoutResult>[];
 
   @override
   Future<NotePdfBuildResult> build(
@@ -757,6 +796,20 @@ final class _ResultRecordingPdfExporter implements NotePdfExporter {
     snapshots.add(snapshot);
     final result = await delegate.build(snapshot, options);
     results.add(result);
+    return result;
+  }
+
+  @override
+  Future<NotePdfLayoutResult> layout(
+    NotePdfExportSnapshot snapshot,
+    NotePdfExportOptions options,
+  ) async {
+    layoutSnapshots.add(snapshot);
+    final result = await (delegate as NotePdfPageLayouter).layout(
+      snapshot,
+      options,
+    );
+    layoutResults.add(result);
     return result;
   }
 }

@@ -1001,6 +1001,8 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
   bool get supportsPdfExport => _dependencies.supportsPdfExport;
 
   NotePdfExporter get notePdfExporter => _dependencies.notePdfExporter;
+  NotePdfPageLayouter get notePdfPageLayouter =>
+      _dependencies.notePdfPageLayouter;
 
   NotePdfPreviewRasterizer get notePdfPreviewRasterizer =>
       _dependencies.notePdfPreviewRasterizer;

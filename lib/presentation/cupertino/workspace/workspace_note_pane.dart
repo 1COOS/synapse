@@ -75,8 +75,9 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
   final Map<String, String> _pageLayoutLoadingSignatures = {};
   final Map<String, int> _pageLayoutSnapshotGenerations = {};
   final Set<String> _pageLayoutRefreshScheduled = {};
-  final Map<String, TextEditingController> _pageLayoutDocuments = {};
-  final Map<String, VoidCallback> _pageLayoutDocumentListeners = {};
+  final Map<String, EditorDocumentHub> _pageLayoutDocumentHubs = {};
+  final Map<String, ValueChanged<EditorDocumentUpdate>>
+  _pageLayoutDocumentListeners = {};
   var _paneStatePruneScheduled = false;
   Future<PaneEditorCommandOutcome>? _pasteIntoNoteOperation;
 
@@ -155,10 +156,10 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
     }
     _pageLayoutEnabledNoteIds.clear();
     _pageLayoutOrientations.clear();
-    for (final entry in _pageLayoutDocuments.entries) {
+    for (final entry in _pageLayoutDocumentHubs.entries) {
       final listener = _pageLayoutDocumentListeners[entry.key];
       if (listener != null) {
-        entry.value.removeListener(listener);
+        entry.value.removeUpdateListener(listener);
       }
     }
     for (final hub in _editorDocumentHubs.values) {
@@ -300,7 +301,7 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
       controller = null;
     }
     controller ??= NotePageLayoutController(
-      exporter: _controller.notePdfExporter,
+      layouter: _controller.notePdfPageLayouter,
     );
     _pageLayoutControllers[pane.paneId] = controller;
     controller.setOptions(
@@ -320,12 +321,13 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
     NoteDocumentSession session,
     NotePageLayoutController controller,
   ) {
-    final current = _pageLayoutDocuments[pane.paneId];
-    if (identical(current, session.controller)) {
+    final hub = _editorDocumentHubFor(session);
+    final current = _pageLayoutDocumentHubs[pane.paneId];
+    if (identical(current, hub)) {
       return;
     }
     _unbindPageLayoutDocument(pane.paneId);
-    void listener() {
+    void listener(EditorDocumentUpdate update) {
       final currentPane = _splitWorkspaceController.pane(pane.paneId);
       if (!mounted ||
           currentPane?.mode != NoteMode.source ||
@@ -333,24 +335,25 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
           !identical(_pageLayoutControllers[pane.paneId], controller)) {
         return;
       }
-      final markdown = session.controller.text;
+      final markdown = update.markdown;
       controller.updateDocument(
         noteId: session.noteId,
         title: noteTitleFromMarkdownBody(markdown),
         markdown: markdown,
+        changes: update.changes,
       );
     }
 
-    _pageLayoutDocuments[pane.paneId] = session.controller;
+    _pageLayoutDocumentHubs[pane.paneId] = hub;
     _pageLayoutDocumentListeners[pane.paneId] = listener;
-    session.controller.addListener(listener);
+    hub.addUpdateListener(listener);
   }
 
   void _unbindPageLayoutDocument(String paneId) {
-    final document = _pageLayoutDocuments.remove(paneId);
+    final hub = _pageLayoutDocumentHubs.remove(paneId);
     final listener = _pageLayoutDocumentListeners.remove(paneId);
-    if (document != null && listener != null) {
-      document.removeListener(listener);
+    if (hub != null && listener != null) {
+      hub.removeUpdateListener(listener);
     }
   }
 
@@ -845,15 +848,10 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
     if (!mounted || snapshot == null) {
       return;
     }
-    final pageLayoutController = _pageLayoutControllers[pane.paneId];
     final initialOptions = NotePdfExportOptions(
       orientation: _pageLayoutOrientationFor(pane.paneId),
       marginPreset: _workspace.preferences.pdfMarginPreset,
       footerEnabled: _workspace.preferences.pdfFooterEnabled,
-    );
-    final initialResult = pageLayoutController?.reusableResultFor(
-      snapshot,
-      initialOptions,
     );
     await showCupertinoDialog<void>(
       context: context,
@@ -867,7 +865,6 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
             rasterizer: _controller.notePdfPreviewRasterizer,
             fileSaver: _controller.notePdfFileSaver,
             initialOptions: initialOptions,
-            initialResult: initialResult,
             onOptionsChanged: (options) {
               _setPageLayoutOrientation(
                 pane,

@@ -55,6 +55,7 @@ final class WorkspaceDependencies {
     required this.initialVault,
     required this.imageInput,
     required this.notePdfExporter,
+    required this.notePdfPageLayouter,
     required this.notePdfPreviewRasterizer,
     required this.notePdfFileSaver,
     required this.settingsStore,
@@ -88,6 +89,7 @@ final class WorkspaceDependencies {
   final VaultBackend? initialVault;
   final ImageInputService imageInput;
   final NotePdfExporter notePdfExporter;
+  final NotePdfPageLayouter notePdfPageLayouter;
   final NotePdfPreviewRasterizer notePdfPreviewRasterizer;
   final NotePdfFileSaver notePdfFileSaver;
   final Future<SettingsStore> Function() settingsStore;
