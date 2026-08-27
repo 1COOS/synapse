@@ -328,6 +328,118 @@ describe('CodeMirror live preview', () => {
     expect(messages.some((message) => message.type === 'ready')).toBe(true);
   });
 
+  it('keeps unordered and ordered list markers visible after another block becomes active', async () => {
+    const markdown = [
+      '- Alpha',
+      '  * Nested',
+      '3) Ordered',
+      '',
+      'After',
+    ].join('\n');
+    window.synapseHost!.receive(initialize(markdown, 'editing'));
+
+    const markerSummary = () => Array.from(
+      document.querySelectorAll<HTMLElement>('.synapse-list-marker'),
+    ).map((marker) => ({
+      kind: marker.dataset.kind,
+      label: marker.textContent,
+    }));
+
+    expect(markerSummary()).toEqual([
+      { kind: 'unordered', label: '•' },
+      { kind: 'unordered', label: '•' },
+      { kind: 'ordered', label: '3)' },
+    ]);
+    expect(
+      Array.from(document.querySelectorAll<HTMLElement>('.cm-line'))
+        .some((line) => line.textContent === '  •Nested'),
+    ).toBe(true);
+    expect(window.synapseTest!.getText()).toBe(markdown);
+    expect(window.synapseTest!.getSelection()).toEqual({
+      anchor: markdown.length,
+      head: markdown.length,
+    });
+
+    window.synapseTest!.setSelection(2, 2);
+    expect(document.querySelectorAll('.synapse-list-marker')).toHaveLength(0);
+    expect(document.querySelector<HTMLElement>('.cm-line')?.textContent)
+      .toBe('- Alpha');
+
+    window.synapseTest!.setSelection(markdown.length, markdown.length);
+    expect(markerSummary()).toEqual([
+      { kind: 'unordered', label: '•' },
+      { kind: 'unordered', label: '•' },
+      { kind: 'ordered', label: '3)' },
+    ]);
+    expect(window.synapseTest!.getText()).toBe(markdown);
+  });
+
+  it('renders ordered, unordered, and task list states without interactive controls', () => {
+    const markdown = [
+      '- [ ] Todo',
+      '- [x] Done',
+      '',
+      '1. One',
+      '2) Two',
+      '',
+      '+ Bullet',
+    ].join('\n');
+    window.synapseHost!.receive(initialize(markdown, 'reading'));
+
+    const taskMarkers = Array.from(
+      document.querySelectorAll<HTMLElement>('.synapse-list-marker-task'),
+    );
+    expect(taskMarkers).toHaveLength(2);
+    expect(taskMarkers.map((marker) =>
+      marker.querySelector<HTMLElement>('.synapse-task-checkbox')
+        ?.dataset.checked)).toEqual(['false', 'true']);
+    expect(taskMarkers.every((marker) =>
+      marker.getAttribute('aria-hidden') === 'true')).toBe(true);
+    expect(document.querySelector('.synapse-list-marker input')).toBeNull();
+    expect(
+      Array.from(
+        document.querySelectorAll<HTMLElement>('.synapse-list-marker-ordered'),
+      ).map((marker) => marker.textContent),
+    ).toEqual(['1.', '2)']);
+    expect(document.querySelector<HTMLElement>(
+      '.synapse-list-marker-unordered',
+    )?.textContent).toBe('•');
+    expect(window.synapseTest!.getText()).toBe(markdown);
+  });
+
+  it('uses the same list preview markers inside both column editors', async () => {
+    const markdown = [
+      '<!-- synapse:columns ratio="50:50" -->',
+      '- Left',
+      '  4. Nested',
+      '<!-- synapse:column -->',
+      '- [X] Complete',
+      '+ Right',
+      '<!-- synapse:columns-end -->',
+      '',
+    ].join('\n');
+    window.synapseHost!.receive(initialize(markdown, 'reading'));
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+
+    const markers = Array.from(
+      document.querySelectorAll<HTMLElement>(
+        '.synapse-column .synapse-list-marker',
+      ),
+    );
+    expect(markers.map((marker) => marker.dataset.kind)).toEqual([
+      'unordered',
+      'ordered',
+      'task',
+      'unordered',
+    ]);
+    expect(markers[1].textContent).toBe('4.');
+    expect(
+      markers[2].querySelector<HTMLElement>('.synapse-task-checkbox')
+        ?.dataset.checked,
+    ).toBe('true');
+    expect(window.synapseTest!.getText()).toBe(markdown);
+  });
+
   it('remeasures parent and nested editors when dynamic blocks resize', async () => {
     const markdown = [
       '<img src="Note.assets/attachments/outer.png" width="320">',

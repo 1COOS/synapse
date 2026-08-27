@@ -882,6 +882,40 @@ class PageBreakWidget extends WidgetType {
   ignoreEvent(): boolean { return false; }
 }
 
+type ListMarkerKind = 'unordered' | 'ordered' | 'task';
+
+class ListMarkerWidget extends WidgetType {
+  constructor(
+    readonly kind: ListMarkerKind,
+    readonly label: string,
+    readonly checked: boolean,
+  ) { super(); }
+
+  eq(other: ListMarkerWidget): boolean {
+    return other.kind === this.kind &&
+      other.label === this.label &&
+      other.checked === this.checked;
+  }
+
+  toDOM(): HTMLElement {
+    const root = document.createElement('span');
+    root.className = `synapse-list-marker synapse-list-marker-${this.kind}`;
+    root.dataset.kind = this.kind;
+    root.setAttribute('aria-hidden', 'true');
+    if (this.kind === 'task') {
+      const checkbox = document.createElement('span');
+      checkbox.className = 'synapse-task-checkbox';
+      checkbox.dataset.checked = String(this.checked);
+      root.append(checkbox);
+    } else {
+      root.textContent = this.label;
+    }
+    return root;
+  }
+
+  ignoreEvent(): boolean { return true; }
+}
+
 class ImageWidget extends WidgetType {
   private disposeAttachment?: () => void;
   private cancelResize?: () => void;
@@ -2326,11 +2360,7 @@ function buildColumnDecorations(state: EditorState, runtimeState: ColumnSideRunt
     if (!activeBlock || selectedImage != null) {
       const overlapsImage = (from: number, to: number) =>
         images.some((image) => from < image.to && to > image.from);
-      for (const marker of markerRanges(block)) {
-        if (!overlapsImage(marker.from, marker.to) && marker.from < marker.to) {
-          ranges.push(Decoration.replace({}).range(marker.from, marker.to));
-        }
-      }
+      appendPreviewMarkers(ranges, block, overlapsImage);
       for (const style of inlineStyleDecorations(block)) ranges.push(style);
       for (const image of images) {
         ranges.push(Decoration.replace({
@@ -3328,8 +3358,14 @@ function focusPendingColumn(): boolean {
   return false;
 }
 
-function markerRanges(block: MarkdownBlock): Array<{ from: number; to: number }> {
-  const result: Array<{ from: number; to: number }> = [];
+interface PreviewMarker {
+  from: number;
+  to: number;
+  widget?: WidgetType;
+}
+
+function previewMarkers(block: MarkdownBlock): PreviewMarker[] {
+  const result: PreviewMarker[] = [];
   const text = block.text;
   if (block.kind === 'heading') {
     const match = /^(#{1,6}\s+)/.exec(text);
@@ -3337,8 +3373,40 @@ function markerRanges(block: MarkdownBlock): Array<{ from: number; to: number }>
   }
   let lineOffset = 0;
   for (const line of text.split('\n')) {
-    const match = /^(\s*(?:>\s?|[-*+]\s+|\d+[.)]\s+))/.exec(line);
-    if (match) result.push({ from: block.from + lineOffset, to: block.from + lineOffset + match[1].length });
+    const task = /^(\s*)[-*+]\s+\[([ xX])\]\s+/.exec(line);
+    const unordered = task == null
+      ? /^(\s*)[-*+]\s+/.exec(line)
+      : null;
+    const ordered = task == null && unordered == null
+      ? /^(\s*)(\d+[.)])\s+/.exec(line)
+      : null;
+    const list = task ?? unordered ?? ordered;
+    if (list) {
+      const kind: ListMarkerKind = task
+        ? 'task'
+        : unordered
+          ? 'unordered'
+          : 'ordered';
+      const indentLength = list[1].length;
+      const label = ordered?.[2] ?? (unordered ? '•' : '');
+      result.push({
+        from: block.from + lineOffset + indentLength,
+        to: block.from + lineOffset + list[0].length,
+        widget: new ListMarkerWidget(
+          kind,
+          label,
+          task != null && task[2].toLowerCase() === 'x',
+        ),
+      });
+    } else {
+      const quote = /^(\s*>\s?)/.exec(line);
+      if (quote) {
+        result.push({
+          from: block.from + lineOffset,
+          to: block.from + lineOffset + quote[1].length,
+        });
+      }
+    }
     lineOffset += line.length + 1;
   }
   const paired = /(?:\*\*|__|~~|==|`)/g;
@@ -3356,6 +3424,23 @@ function markerRanges(block: MarkdownBlock): Array<{ from: number; to: number }>
     });
   }
   return result;
+}
+
+function appendPreviewMarkers(
+  ranges: any[],
+  block: MarkdownBlock,
+  overlapsImage: (from: number, to: number) => boolean,
+): void {
+  for (const marker of previewMarkers(block)) {
+    if (overlapsImage(marker.from, marker.to) || marker.from >= marker.to) {
+      continue;
+    }
+    ranges.push(
+      Decoration.replace(
+        marker.widget ? { widget: marker.widget } : {},
+      ).range(marker.from, marker.to),
+    );
+  }
 }
 
 function inlineStyleDecorations(block: MarkdownBlock) {
@@ -3558,10 +3643,7 @@ function buildDecorations(state: EditorState): DecorationSet {
     if (!activeBlock || selectedImage != null) {
       const overlapsImage = (from: number, to: number) =>
         images.some((image) => from < image.to && to > image.from);
-      for (const marker of markerRanges(block)) {
-        if (overlapsImage(marker.from, marker.to)) continue;
-        if (marker.from < marker.to) ranges.push(Decoration.replace({}).range(marker.from, marker.to));
-      }
+      appendPreviewMarkers(ranges, block, overlapsImage);
       for (const style of inlineStyleDecorations(block)) ranges.push(style);
       for (const image of images) {
         ranges.push(Decoration.replace({
@@ -3698,6 +3780,12 @@ function editorTheme(theme: EditorTheme) {
     '.synapse-heading-4': { fontSize: '1.15em' },
     '.synapse-blockquote': { borderLeft: `3px solid ${theme.line}`, paddingLeft: '12px', color: theme.muted },
     '.synapse-code-block': { backgroundColor: theme.codeBackground, fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace' },
+    '.synapse-list-marker': { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', boxSizing: 'border-box', width: '1.35em', color: theme.muted, pointerEvents: 'none', userSelect: 'none', verticalAlign: 'baseline' },
+    '.synapse-list-marker-ordered': { justifyContent: 'flex-end', width: 'auto', minWidth: '1.65em', paddingRight: '.35em' },
+    '.synapse-list-marker-task': { width: '1.45em' },
+    '.synapse-task-checkbox': { position: 'relative', display: 'inline-block', boxSizing: 'border-box', width: '.82em', height: '.82em', border: `1.5px solid ${theme.muted}`, borderRadius: '3px', backgroundColor: 'transparent' },
+    '.synapse-task-checkbox[data-checked="true"]': { borderColor: theme.accent, backgroundColor: theme.accent },
+    '.synapse-task-checkbox[data-checked="true"]::after': { content: '"✓"', position: 'absolute', left: '50%', top: '50%', transform: 'translate(-50%, -53%)', color: theme.background, fontSize: '.7em', fontWeight: '700', lineHeight: '1' },
     '.synapse-page-break': { display: 'flex', alignItems: 'center', gap: '10px', color: theme.muted, fontSize: '12px', padding: '10px 0' },
     '.synapse-page-break > span:first-child, .synapse-page-break > span:last-child': { height: '1px', backgroundColor: theme.line, flex: '1' },
     '.synapse-page-layout': { position: 'absolute', top: '0', zIndex: '5', pointerEvents: 'none', userSelect: 'none' },
