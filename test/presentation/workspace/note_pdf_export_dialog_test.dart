@@ -20,6 +20,7 @@ void main() {
       const inheritedOptions = NotePdfExportOptions(
         marginPreset: NotePdfMarginPreset.compact,
         footerEnabled: false,
+        bodyFontSizePoints: 15,
       );
 
       await _pumpDialog(
@@ -46,6 +47,7 @@ void main() {
           orientation: NotePdfOrientation.landscape,
           marginPreset: NotePdfMarginPreset.compact,
           footerEnabled: false,
+          bodyFontSizePoints: 15,
         ),
       );
 

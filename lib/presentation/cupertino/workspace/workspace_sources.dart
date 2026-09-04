@@ -170,6 +170,7 @@ class _ImageSourceTileState extends State<ImageSourceTile> {
         final size = MediaQuery.sizeOf(context);
         return Center(
           child: CupertinoPopupSurface(
+            key: const Key('full-image-preview'),
             child: ConstrainedBox(
               constraints: BoxConstraints(
                 maxWidth: size.width * 0.88,

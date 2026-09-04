@@ -265,14 +265,14 @@ SearchIndex _createSearchIndex(
 
 String _searchIndexProfile(AiProvider provider, bool semanticSearchEnabled) {
   if (!semanticSearchEnabled) {
-    return 'full-text-v2';
+    return 'keyword-v3';
   }
   if (provider is OpenAICompatibleProvider) {
     final config = provider.config;
-    return 'semantic-v2:${config.normalizedBaseUrl}:'
+    return 'semantic-v3:${config.normalizedBaseUrl}:'
         '${config.embeddingModel.trim()}';
   }
-  return 'semantic-v2:${provider.runtimeType}';
+  return 'semantic-v3:${provider.runtimeType}';
 }
 
 AiProvider _createAiProvider(ProviderConfig config) {
@@ -288,11 +288,11 @@ Future<String> _testProviderModelCapability(
   _validateProviderTestConfig(config, capability);
   final provider = OpenAICompatibleProvider(config: config);
   try {
-    return switch (capability) {
+    return await (switch (capability) {
       ModelCapability.chat => _testChatCapability(provider),
       ModelCapability.vision => _testVisionCapability(provider),
       ModelCapability.embedding => _testEmbeddingCapability(provider),
-    };
+    });
   } finally {
     provider.dispose();
   }

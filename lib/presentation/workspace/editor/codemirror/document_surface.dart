@@ -76,6 +76,8 @@ abstract interface class EditorDocumentSurfaceController {
 
   Future<void> revealRange(int from, int to, {bool focus = false});
 
+  Future<void> revealSearchHit(int from, int to);
+
   Future<void> setSearch(EditorSearchQuery query);
 
   Future<void> navigateSearch({required bool forward});

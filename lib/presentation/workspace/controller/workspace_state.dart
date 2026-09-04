@@ -42,6 +42,7 @@ final class WorkspaceState {
     required List<VaultResourceNode> resources,
     required this.selectedResourceId,
     required List<SearchResult> searchResults,
+    SearchSessionState? searchSession,
     required Map<String, NoteMaterialsSnapshot> materials,
     required this.splitRoot,
     required this.focusedPaneId,
@@ -70,6 +71,9 @@ final class WorkspaceState {
        searchResults = List<SearchResult>.unmodifiable(
          searchResults.map(_freezeSearchResult),
        ),
+       searchSession = _freezeSearchSession(
+         searchSession ?? _searchSessionFromLegacy(searchResults),
+       ),
        materials = Map<String, NoteMaterialsSnapshot>.unmodifiable(materials),
        sessionNoteIds = Set<String>.unmodifiable(sessionNoteIds),
        savingNoteIds = Set<String>.unmodifiable(savingNoteIds),
@@ -80,6 +84,7 @@ final class WorkspaceState {
   final List<VaultResourceNode> resources;
   final String? selectedResourceId;
   final List<SearchResult> searchResults;
+  final SearchSessionState searchSession;
   final Map<String, NoteMaterialsSnapshot> materials;
   final SplitNode splitRoot;
   final String focusedPaneId;
@@ -124,6 +129,7 @@ final class WorkspaceState {
     List<VaultResourceNode>? resources,
     Object? selectedResourceId = _unset,
     List<SearchResult>? searchResults,
+    SearchSessionState? searchSession,
     Map<String, NoteMaterialsSnapshot>? materials,
     SplitNode? splitRoot,
     String? focusedPaneId,
@@ -153,6 +159,7 @@ final class WorkspaceState {
           ? this.selectedResourceId
           : selectedResourceId as String?,
       searchResults: searchResults ?? this.searchResults,
+      searchSession: searchSession ?? this.searchSession,
       materials: materials ?? this.materials,
       splitRoot: splitRoot ?? this.splitRoot,
       focusedPaneId: focusedPaneId ?? this.focusedPaneId,
@@ -195,6 +202,81 @@ SearchResult _freezeSearchResult(SearchResult result) {
     text: result.text,
     score: result.score,
     reasons: List<SearchMatchReason>.unmodifiable(result.reasons),
+  );
+}
+
+SearchSessionState _freezeSearchSession(SearchSessionState state) {
+  return SearchSessionState(
+    query: state.query,
+    phase: state.phase,
+    totalHitCount: state.totalHitCount,
+    semanticStatus: state.semanticStatus,
+    message: state.message,
+    groups: [
+      for (final group in state.groups)
+        SearchGroup(
+          noteId: group.noteId,
+          noteTitle: group.noteTitle,
+          notePath: group.notePath,
+          totalHitCount: group.totalHitCount,
+          score: group.score,
+          hits: [
+            for (final hit in group.hits)
+              SearchHit(
+                id: hit.id,
+                noteId: hit.noteId,
+                sourceType: hit.sourceType,
+                sourceId: hit.sourceId,
+                noteTitle: hit.noteTitle,
+                notePath: hit.notePath,
+                sourceTitle: hit.sourceTitle,
+                headingPath: hit.headingPath,
+                snippet: hit.snippet,
+                snippetMatches: List.unmodifiable(hit.snippetMatches),
+                sourceStart: hit.sourceStart,
+                sourceEnd: hit.sourceEnd,
+                score: hit.score,
+                reason: hit.reason,
+              ),
+          ],
+        ),
+    ],
+  );
+}
+
+SearchSessionState _searchSessionFromLegacy(List<SearchResult> results) {
+  if (results.isEmpty) return const SearchSessionState();
+  return SearchSessionState(
+    phase: SearchSessionPhase.ready,
+    totalHitCount: results.length,
+    groups: [
+      for (final result in results)
+        SearchGroup(
+          noteId: result.noteId,
+          noteTitle: result.title,
+          notePath: '',
+          totalHitCount: 1,
+          score: result.score,
+          hits: [
+            SearchHit(
+              id: result.id,
+              noteId: result.noteId,
+              sourceType: SearchSourceType.note,
+              sourceId: result.noteId,
+              noteTitle: result.title,
+              notePath: '',
+              sourceTitle: result.title,
+              headingPath: null,
+              snippet: result.text,
+              snippetMatches: const [],
+              sourceStart: null,
+              sourceEnd: null,
+              score: result.score,
+              reason: result.reasons.firstOrNull ?? SearchMatchReason.fullText,
+            ),
+          ],
+        ),
+    ],
   );
 }
 

@@ -268,7 +268,8 @@ void main() {
     await tester.tap(find.byKey(const Key('left-pane-mode-search')));
     await tester.pump();
 
-    expect(find.byKey(Key('search-result-${hidden.id}')), findsNothing);
+    expect(find.byKey(Key('search-result-${hidden.id}')), findsOneWidget);
+    expect(find.textContaining('Renamed/Hidden.md'), findsOneWidget);
   });
 
   testWidgets(

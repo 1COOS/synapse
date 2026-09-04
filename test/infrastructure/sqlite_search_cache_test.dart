@@ -124,10 +124,24 @@ void main() {
 
     final verified = sqlite3.open(databasePath);
     addTearDown(verified.dispose);
-    final columns = verified
-        .select('PRAGMA table_info(documents)')
+    final tables = verified
+        .select(
+          "SELECT name FROM sqlite_master WHERE type IN ('table', 'view')",
+        )
         .map((row) => row['name'])
         .toSet();
-    expect(columns, contains('fingerprint'));
+    expect(
+      tables,
+      containsAll(['search_sources', 'search_chunks', 'search_chunks_fts']),
+    );
+    expect(tables, isNot(contains('documents')));
+    expect(
+      verified
+          .select(
+            "SELECT value FROM cache_metadata WHERE key = 'schema_profile'",
+          )
+          .single['value'],
+      startsWith('search-v3:'),
+    );
   });
 }

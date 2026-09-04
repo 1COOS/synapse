@@ -211,6 +211,14 @@ class CodeMirrorDocumentSurfaceState extends State<CodeMirrorDocumentSurface>
       });
 
   @override
+  Future<void> revealSearchHit(int from, int to) => _sendCommand({
+    'protocolVersion': synapseEditorProtocolVersion,
+    'type': 'revealSearchHit',
+    'from': from,
+    'to': to,
+  });
+
+  @override
   Future<void> setSearch(EditorSearchQuery query) {
     _searchQuery = query;
     return _sendCommand({

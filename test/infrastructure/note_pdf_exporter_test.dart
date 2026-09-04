@@ -212,6 +212,54 @@ void main() {
     );
   });
 
+  test('note font sizes convert to PDF points and survive option updates', () {
+    expect(noteFontSizeToPdfPoints(10), 7.5);
+    expect(noteFontSizeToPdfPoints(14), 10.5);
+    expect(noteFontSizeToPdfPoints(28), 21);
+
+    const options = NotePdfExportOptions(bodyFontSizePoints: 15);
+    final landscape = options.copyWith(
+      orientation: NotePdfOrientation.landscape,
+    );
+
+    expect(landscape.bodyFontSizePoints, 15);
+    expect(landscape, isNot(options));
+    expect(
+      landscape,
+      const NotePdfExportOptions(
+        orientation: NotePdfOrientation.landscape,
+        bodyFontSizePoints: 15,
+      ),
+    );
+  });
+
+  test('reading font size changes authoritative PDF pagination', () async {
+    final body = List.generate(
+      220,
+      (index) => '第 $index 段用于验证阅读态字号会改变真实 PDF 分页位置。',
+    ).join('\n\n');
+    final snapshot = _snapshot('# 字号分页\n\n$body');
+
+    final small = await layoutNotePdf(
+      snapshot,
+      const NotePdfExportOptions(bodyFontSizePoints: 7.5),
+      fonts,
+    );
+    final large = await layoutNotePdf(
+      snapshot,
+      const NotePdfExportOptions(bodyFontSizePoints: 21),
+      fonts,
+    );
+
+    expect(large.pageCount, greaterThan(small.pageCount));
+    expect(large.boundaries, isNotEmpty);
+    expect(small.boundaries, isNotEmpty);
+    expect(
+      large.boundaries.first.sourceOffset,
+      lessThan(small.boundaries.first.sourceOffset),
+    );
+  });
+
   test(
     'layouter returns layout metadata while exporter returns PDF bytes',
     () async {

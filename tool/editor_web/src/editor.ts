@@ -82,6 +82,7 @@ const hostChange = Annotation.define<boolean>();
 const setMode = StateEffect.define<ModeValue>();
 const setSearchVisibility = StateEffect.define<boolean>();
 const setParentImageSelection = StateEffect.define<number | null>();
+const setGlobalSearchHit = StateEffect.define<SearchMatchRange | null>();
 const modeField = StateField.define<ModeValue>({
   create: () => ({ mode: 'reading', editable: false, focused: false }),
   update(value, transaction) {
@@ -123,6 +124,7 @@ let pendingChanges: ChangeSet | undefined;
 let pendingFrame = 0;
 let outlineTimer = 0;
 let commandStateFrame = 0;
+let globalSearchHitTimer = 0;
 let inputStartedAt: number | undefined;
 let pointerStartedAt: number | undefined;
 let pendingParentImageSelectionDismiss = false;
@@ -1223,10 +1225,17 @@ interface TableDomState {
   selectedColumn: number;
   pendingFrame: number;
   focusRestoreFrame: number;
+  focusRestoreTimer: number;
+  selectionRestoreFrame: number;
+  compositionScrollFrame: number;
+  compositionScrollTimer: number;
+  compositionScroll?: TableScrollSnapshot;
   composing: boolean;
   composingCell?: HTMLElement;
   contextMenuOpen: boolean;
-  focusedCell?: HTMLElement;
+  activeCell?: HTMLElement;
+  activeCellSelection?: CellSelectionSnapshot;
+  activeCellSession: number;
   committingMarkdown?: string;
   drag?: TablePointerDrag;
 }
@@ -1258,8 +1267,243 @@ interface CellSelectionSnapshot {
   head: number;
 }
 
+interface TableScrollSnapshot {
+  editorTop: number;
+  editorLeft: number;
+  tableLeft: number;
+}
+
 const tableDomStates = new WeakMap<HTMLElement, TableDomState>();
 const mountedTableStates = new Set<TableDomState>();
+let tableSelectionChangeAttached = false;
+
+function fallbackCellSelection(editor: HTMLElement): CellSelectionSnapshot {
+  const offset = editor.textContent?.length ?? 0;
+  return { anchor: offset, head: offset };
+}
+
+function beginTableCellEditSession(
+  state: TableDomState,
+  editor: HTMLElement,
+): void {
+  if (state.activeCell !== editor) {
+    endTableCellEditSession(state);
+  }
+  state.activeCell = editor;
+  state.activeCellSelection = captureCellSelection(editor) ??
+    state.activeCellSelection ??
+    fallbackCellSelection(editor);
+}
+
+function rememberTableCellSelection(
+  state: TableDomState,
+  editor: HTMLElement,
+): void {
+  if (state.activeCell !== editor) return;
+  state.activeCellSelection = captureCellSelection(editor) ??
+    state.activeCellSelection ??
+    fallbackCellSelection(editor);
+}
+
+function endTableCellEditSession(state: TableDomState): void {
+  if (state.focusRestoreFrame) cancelAnimationFrame(state.focusRestoreFrame);
+  if (state.focusRestoreTimer) window.clearTimeout(state.focusRestoreTimer);
+  if (state.selectionRestoreFrame) {
+    cancelAnimationFrame(state.selectionRestoreFrame);
+  }
+  if (state.compositionScrollFrame) {
+    cancelAnimationFrame(state.compositionScrollFrame);
+  }
+  if (state.compositionScrollTimer) {
+    window.clearTimeout(state.compositionScrollTimer);
+  }
+  state.focusRestoreFrame = 0;
+  state.focusRestoreTimer = 0;
+  state.selectionRestoreFrame = 0;
+  state.compositionScrollFrame = 0;
+  state.compositionScrollTimer = 0;
+  state.compositionScroll = undefined;
+  state.activeCell = undefined;
+  state.activeCellSelection = undefined;
+  state.activeCellSession += 1;
+}
+
+function isTransientTableParentFocus(element: Element | null): boolean {
+  return element == null ||
+    element === document.body ||
+    element === view?.contentDOM ||
+    (element.classList.contains('cm-content') &&
+      view?.dom.contains(element) === true);
+}
+
+function activeTableCellForCommit(
+  state: TableDomState,
+): HTMLElement | undefined {
+  const editor = state.activeCell;
+  if (!editor?.isConnected || !state.frame.contains(editor)) {
+    if (editor) endTableCellEditSession(state);
+    return undefined;
+  }
+  const active = document.activeElement;
+  if (
+    active instanceof Element &&
+    !state.frame.contains(active) &&
+    !isTransientTableParentFocus(active)
+  ) {
+    endTableCellEditSession(state);
+    return undefined;
+  }
+  return editor;
+}
+
+function restoreTableCellEditSession(
+  state: TableDomState,
+  editor: HTMLElement,
+  selection: CellSelectionSnapshot,
+  session: number,
+): boolean {
+  if (
+    state.activeCellSession !== session ||
+    state.activeCell !== editor ||
+    !editor.isConnected ||
+    !state.frame.contains(editor)
+  ) return false;
+  const active = document.activeElement;
+  if (
+    active instanceof Element &&
+    active !== editor &&
+    !state.frame.contains(active) &&
+    !isTransientTableParentFocus(active)
+  ) return false;
+  restoreCellSelection(editor, selection, true);
+  state.activeCellSelection = selection;
+  return true;
+}
+
+function clearTableCellSessionsOutside(target: EventTarget | null): void {
+  const node = target instanceof Node ? target : null;
+  for (const state of mountedTableStates) {
+    if (!state.activeCell || (node && state.frame.contains(node))) continue;
+    endTableCellEditSession(state);
+  }
+}
+
+function clearTableCellSessions(): void {
+  for (const state of mountedTableStates) endTableCellEditSession(state);
+}
+
+function captureTableScroll(state: TableDomState): TableScrollSnapshot | undefined {
+  if (!view) return undefined;
+  return {
+    editorTop: view.scrollDOM.scrollTop,
+    editorLeft: view.scrollDOM.scrollLeft,
+    tableLeft: state.frame.scrollLeft,
+  };
+}
+
+function restoreTableScroll(
+  state: TableDomState,
+  snapshot: TableScrollSnapshot | undefined,
+): void {
+  if (!view || !snapshot || !state.frame.isConnected) return;
+  view.scrollDOM.scrollTop = snapshot.editorTop;
+  view.scrollDOM.scrollLeft = snapshot.editorLeft;
+  state.frame.scrollLeft = snapshot.tableLeft;
+}
+
+function beginTableCompositionScroll(state: TableDomState): void {
+  if (state.compositionScrollFrame) {
+    cancelAnimationFrame(state.compositionScrollFrame);
+  }
+  if (state.compositionScrollTimer) {
+    window.clearTimeout(state.compositionScrollTimer);
+  }
+  state.compositionScrollFrame = 0;
+  state.compositionScrollTimer = 0;
+  state.compositionScroll = captureTableScroll(state);
+}
+
+function scheduleTableCompositionScrollRestore(state: TableDomState): void {
+  const snapshot = state.compositionScroll;
+  if (!state.composing || !snapshot) return;
+  restoreTableScroll(state, snapshot);
+  if (state.compositionScrollFrame) {
+    cancelAnimationFrame(state.compositionScrollFrame);
+  }
+  if (state.compositionScrollTimer) {
+    window.clearTimeout(state.compositionScrollTimer);
+  }
+  state.compositionScrollFrame = requestAnimationFrame(() => {
+    state.compositionScrollFrame = 0;
+    if (!state.composing || state.compositionScroll !== snapshot) return;
+    restoreTableScroll(state, snapshot);
+  });
+  state.compositionScrollTimer = window.setTimeout(() => {
+    state.compositionScrollTimer = 0;
+    if (!state.composing || state.compositionScroll !== snapshot) return;
+    restoreTableScroll(state, snapshot);
+  }, 80);
+}
+
+function finishTableCompositionScroll(state: TableDomState): void {
+  const snapshot = state.compositionScroll;
+  if (state.compositionScrollFrame) {
+    cancelAnimationFrame(state.compositionScrollFrame);
+  }
+  if (state.compositionScrollTimer) {
+    window.clearTimeout(state.compositionScrollTimer);
+  }
+  state.compositionScrollFrame = 0;
+  state.compositionScrollTimer = 0;
+  restoreTableScroll(state, snapshot);
+  state.compositionScroll = undefined;
+}
+
+function handleTableSelectionChange(state: TableDomState): void {
+  const editor = state.activeCell;
+  if (
+    !editor ||
+    state.composing ||
+    document.activeElement !== editor ||
+    !editor.isConnected
+  ) return;
+  const selection = captureCellSelection(editor);
+  if (selection) {
+    state.activeCellSelection = selection;
+    return;
+  }
+  if (state.selectionRestoreFrame) return;
+  const session = state.activeCellSession;
+  const remembered = state.activeCellSelection ?? fallbackCellSelection(editor);
+  state.selectionRestoreFrame = requestAnimationFrame(() => {
+    state.selectionRestoreFrame = 0;
+    restoreTableCellEditSession(state, editor, remembered, session);
+  });
+}
+
+function handleMountedTableSelectionChange(): void {
+  for (const state of mountedTableStates) handleTableSelectionChange(state);
+}
+
+function mountTableState(state: TableDomState): void {
+  mountedTableStates.add(state);
+  if (tableSelectionChangeAttached) return;
+  document.addEventListener(
+    'selectionchange',
+    handleMountedTableSelectionChange,
+  );
+  tableSelectionChangeAttached = true;
+}
+
+function unmountTableState(state: TableDomState): void {
+  mountedTableStates.delete(state);
+  if (!tableSelectionChangeAttached || mountedTableStates.size > 0) return;
+  document.removeEventListener(
+    'selectionchange',
+    handleMountedTableSelectionChange,
+  );
+  tableSelectionChangeAttached = false;
+}
 
 function cloneTableModel(model: TableModel): TableModel {
   return {
@@ -1383,17 +1627,13 @@ function commitTableModel(
     markdown === state.widget.block.text ||
     markdown === state.committingMarkdown
   ) return false;
-  const activeElement = document.activeElement;
-  const parentRecoveredFocus = activeElement instanceof HTMLElement &&
-    activeElement.classList.contains('cm-content') &&
-    view.dom.contains(activeElement);
-  const focusedCell = state.focusedCell?.isConnected &&
-      (activeElement === state.focusedCell || parentRecoveredFocus)
-    ? state.focusedCell
+  const activeCell = activeTableCellForCommit(state);
+  const cellSelection = activeCell
+    ? captureCellSelection(activeCell) ??
+      state.activeCellSelection ??
+      fallbackCellSelection(activeCell)
     : undefined;
-  const cellSelection = focusedCell
-    ? captureCellSelection(focusedCell)
-    : undefined;
+  const activeCellSession = state.activeCellSession;
   const editorScrollTop = view.scrollDOM.scrollTop;
   const editorScrollLeft = view.scrollDOM.scrollLeft;
   const tableScrollLeft = state.frame.scrollLeft;
@@ -1406,29 +1646,49 @@ function commitTableModel(
     },
     annotations: Transaction.userEvent.of(userEvent),
   });
-  if (focusedCell?.isConnected && state.frame.contains(focusedCell)) {
-    restoreCellSelection(focusedCell, cellSelection, true);
+  if (
+    activeCell &&
+    cellSelection &&
+    restoreTableCellEditSession(
+      state,
+      activeCell,
+      cellSelection,
+      activeCellSession,
+    )
+  ) {
     view.scrollDOM.scrollTop = editorScrollTop;
     view.scrollDOM.scrollLeft = editorScrollLeft;
     state.frame.scrollLeft = tableScrollLeft;
     if (state.focusRestoreFrame) cancelAnimationFrame(state.focusRestoreFrame);
+    if (state.focusRestoreTimer) window.clearTimeout(state.focusRestoreTimer);
     state.focusRestoreFrame = requestAnimationFrame(() => {
       state.focusRestoreFrame = 0;
-      const active = document.activeElement;
-      const editorRecoveredFocus = active instanceof HTMLElement &&
-        active.classList.contains('cm-content') &&
-        view?.dom.contains(active);
-      if (
-        state.focusedCell !== focusedCell ||
-        (!editorRecoveredFocus && active !== focusedCell)
-      ) return;
-      restoreCellSelection(focusedCell, cellSelection, true);
+      if (!restoreTableCellEditSession(
+        state,
+        activeCell,
+        cellSelection,
+        activeCellSession,
+      )) return;
       if (view) {
         view.scrollDOM.scrollTop = editorScrollTop;
         view.scrollDOM.scrollLeft = editorScrollLeft;
       }
       state.frame.scrollLeft = tableScrollLeft;
     });
+    state.focusRestoreTimer = window.setTimeout(() => {
+      state.focusRestoreTimer = 0;
+      if (!restoreTableCellEditSession(
+        state,
+        activeCell,
+        cellSelection,
+        activeCellSession,
+      )) return;
+      if (view) {
+        view.scrollDOM.scrollTop = editorScrollTop;
+        view.scrollDOM.scrollLeft = editorScrollLeft;
+      }
+      state.frame.scrollLeft = tableScrollLeft;
+    }, 32);
   }
   return true;
 }
@@ -1496,7 +1756,7 @@ function focusPendingTable(): boolean {
     );
     const cell = state.cells[state.selectedRow]?.[state.selectedColumn];
     if (cell) {
-      state.focusedCell = cell;
+      beginTableCellEditSession(state, cell);
       cell.focus({ preventScroll: true });
     } else {
       safeDispatchSelection(state.widget.block.from);
@@ -1944,12 +2204,19 @@ function buildTableDom(state: TableDomState): void {
         editor.addEventListener('focus', () => {
           state.selectedRow = rowIndex;
           state.selectedColumn = columnIndex;
-          state.focusedCell = editor;
+          beginTableCellEditSession(state, editor);
+        });
+        editor.addEventListener('beforeinput', () => {
+          beginTableCellEditSession(state, editor);
+          rememberTableCellSelection(state, editor);
         });
         editor.addEventListener('input', (event) => {
+          beginTableCellEditSession(state, editor);
+          rememberTableCellSelection(state, editor);
           if (state.composing || (event as InputEvent).isComposing) {
             state.composing = true;
             state.composingCell = editor;
+            scheduleTableCompositionScrollRestore(state);
             return;
           }
           state.model = withTableCellValue(
@@ -1961,17 +2228,28 @@ function buildTableDom(state: TableDomState): void {
           scheduleTableCommit(state);
         });
         editor.addEventListener('compositionstart', () => {
+          beginTableCellEditSession(state, editor);
           if (state.pendingFrame) cancelAnimationFrame(state.pendingFrame);
           if (state.focusRestoreFrame) {
             cancelAnimationFrame(state.focusRestoreFrame);
           }
+          if (state.focusRestoreTimer) {
+            window.clearTimeout(state.focusRestoreTimer);
+          }
+          if (state.selectionRestoreFrame) {
+            cancelAnimationFrame(state.selectionRestoreFrame);
+          }
           state.pendingFrame = 0;
           state.focusRestoreFrame = 0;
+          state.focusRestoreTimer = 0;
+          state.selectionRestoreFrame = 0;
           state.composing = true;
           state.composingCell = editor;
+          beginTableCompositionScroll(state);
         });
         editor.addEventListener('compositionend', () => {
           if (state.composingCell !== editor) return;
+          finishTableCompositionScroll(state);
           state.composing = false;
           state.composingCell = undefined;
           state.model = withTableCellValue(
@@ -1980,11 +2258,17 @@ function buildTableDom(state: TableDomState): void {
             columnIndex,
             editorTableCellValue(editor),
           );
+          rememberTableCellSelection(state, editor);
           scheduleTableCommit(state);
         });
         editor.addEventListener('keydown', (event) => {
           if (event.isComposing || event.keyCode === 229 || state.composing) {
             event.stopPropagation();
+            scheduleTableCompositionScrollRestore(state);
+            return;
+          }
+          if (event.key === 'Tab') {
+            endTableCellEditSession(state);
             return;
           }
           const modifier = event.metaKey || event.ctrlKey;
@@ -2005,6 +2289,12 @@ function buildTableDom(state: TableDomState): void {
             commitTableModel(state);
             editor.blur();
           }
+        });
+        editor.addEventListener('keyup', () => {
+          rememberTableCellSelection(state, editor);
+        });
+        editor.addEventListener('mouseup', () => {
+          rememberTableCellSelection(state, editor);
         });
       }
       cell.append(editor);
@@ -2111,10 +2401,29 @@ function buildTableDom(state: TableDomState): void {
   });
   frame.addEventListener('focusout', () => {
     window.setTimeout(() => {
+      if (state.contextMenuOpen || frame.contains(document.activeElement)) {
+        return;
+      }
       if (
-        !state.contextMenuOpen &&
-        !frame.contains(document.activeElement)
-      ) commitTableModel(state);
+        state.activeCell &&
+        isTransientTableParentFocus(document.activeElement)
+      ) {
+        if (state.pendingFrame) return;
+        const editor = state.activeCell;
+        const selection = state.activeCellSelection ??
+          fallbackCellSelection(editor);
+        const session = state.activeCellSession;
+        if (state.focusRestoreFrame) {
+          cancelAnimationFrame(state.focusRestoreFrame);
+        }
+        state.focusRestoreFrame = requestAnimationFrame(() => {
+          state.focusRestoreFrame = 0;
+          restoreTableCellEditSession(state, editor, selection, session);
+        });
+        return;
+      }
+      endTableCellEditSession(state);
+      commitTableModel(state);
     }, 0);
   });
   frame.addEventListener('contextmenu', (event) => {
@@ -2189,11 +2498,16 @@ class TableWidget extends WidgetType {
       selectedColumn: 0,
       pendingFrame: 0,
       focusRestoreFrame: 0,
+      focusRestoreTimer: 0,
+      selectionRestoreFrame: 0,
+      compositionScrollFrame: 0,
+      compositionScrollTimer: 0,
       composing: false,
       contextMenuOpen: false,
+      activeCellSession: 0,
     };
     tableDomStates.set(frame, state);
-    mountedTableStates.add(state);
+    mountTableState(state);
     buildTableDom(state);
     return frame;
   }
@@ -2226,7 +2540,7 @@ class TableWidget extends WidgetType {
       ) {
         const editor = state.cells[rowIndex][columnIndex];
         if (
-          (selfCommit && document.activeElement === editor) ||
+          (selfCommit && state.activeCell === editor) ||
           (state.composing && state.composingCell === editor)
         ) continue;
         const value = displayTableCell(
@@ -2247,8 +2561,8 @@ class TableWidget extends WidgetType {
     if (!state) return;
     state.drag?.cancel();
     if (state.pendingFrame) cancelAnimationFrame(state.pendingFrame);
-    if (state.focusRestoreFrame) cancelAnimationFrame(state.focusRestoreFrame);
-    mountedTableStates.delete(state);
+    endTableCellEditSession(state);
+    unmountTableState(state);
     tableDomStates.delete(dom);
   }
 }
@@ -3727,6 +4041,25 @@ const searchHighlights = StateField.define<DecorationSet>({
   provide: (field) => EditorView.decorations.from(field),
 });
 
+const globalSearchHitHighlight = StateField.define<DecorationSet>({
+  create: () => Decoration.none,
+  update(value, transaction) {
+    let next = value.map(transaction.changes);
+    for (const effect of transaction.effects) {
+      if (!effect.is(setGlobalSearchHit)) continue;
+      const hit = effect.value;
+      next = hit == null
+        ? Decoration.none
+        : Decoration.set([
+          Decoration.mark({ class: 'synapse-global-search-hit' })
+            .range(hit.from, hit.to),
+        ]);
+    }
+    return next;
+  },
+  provide: (field) => EditorView.decorations.from(field),
+});
+
 function scheduleCommandState(): void {
   if (commandStateFrame) return;
   commandStateFrame = window.setTimeout(() => {
@@ -3822,6 +4155,7 @@ function editorTheme(theme: EditorTheme) {
     '.synapse-inline-code': { backgroundColor: theme.codeBackground, fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', borderRadius: '3px', padding: '1px 3px' },
     '.synapse-search-match': { backgroundColor: `${theme.highlight}a8`, borderRadius: '2px' },
     '.synapse-search-current': { outline: `1px solid ${theme.accent}`, backgroundColor: `${theme.accent}2e` },
+    '.synapse-global-search-hit': { outline: `1px solid ${theme.accent}`, backgroundColor: `${theme.highlight}d8`, borderRadius: '2px' },
     '.synapse-link': { color: theme.accent, textDecoration: 'underline', cursor: 'pointer' },
     '.synapse-table-frame': { position: 'relative', overflowX: 'auto', border: `1px solid ${theme.line}`, borderRadius: '7px', margin: '4px 0' },
     '.synapse-table-frame table': { minWidth: '100%', borderCollapse: 'collapse' },
@@ -4355,6 +4689,7 @@ function extensions(command: InitializeCommand) {
     livePreview,
     dynamicBlockMeasurement,
     searchHighlights,
+    globalSearchHitHighlight,
     placeholder('选择或创建笔记后开始整理 Markdown'),
     EditorView.lineWrapping,
     domTextMouseSelection,
@@ -4374,6 +4709,7 @@ function extensions(command: InitializeCommand) {
         return false;
       },
       pointerdown(event, editorView) {
+        clearTableCellSessionsOutside(event.target);
         pointerStartedAt = performance.now();
         if (event.button === 2) {
           const position = editorView.posAtCoords({
@@ -4471,8 +4807,10 @@ function initialize(command: InitializeCommand): void {
   pendingTableFocus = undefined;
   if (pendingFrame) cancelAnimationFrame(pendingFrame);
   if (commandStateFrame) window.clearTimeout(commandStateFrame);
+  if (globalSearchHitTimer) window.clearTimeout(globalSearchHitTimer);
   pendingFrame = 0;
   commandStateFrame = 0;
+  globalSearchHitTimer = 0;
   runtime = {
     paneId: command.paneId,
     noteId: command.noteId,
@@ -4602,6 +4940,24 @@ function closeSearch(): void {
   scheduleCommandState();
 }
 
+function revealSearchHit(from: number, to: number): void {
+  if (!view) return;
+  const start = Math.max(0, Math.min(from, view.state.doc.length));
+  const end = Math.max(start, Math.min(to, view.state.doc.length));
+  view.dispatch({
+    effects: setGlobalSearchHit.of({ from: start, to: end }),
+  });
+  view.dispatch({
+    selection: { anchor: start },
+    scrollIntoView: true,
+  });
+  if (globalSearchHitTimer) window.clearTimeout(globalSearchHitTimer);
+  globalSearchHitTimer = window.setTimeout(() => {
+    globalSearchHitTimer = 0;
+    view?.dispatch({ effects: setGlobalSearchHit.of(null) });
+  }, 1600);
+}
+
 function receive(command: HostCommand): void {
   try {
     if (command.protocolVersion !== protocolVersion) throw new Error(`Unsupported protocol ${command.protocolVersion}`);
@@ -4615,6 +4971,9 @@ function receive(command: HostCommand): void {
           cancelActiveImageDrag();
         }
         flushPendingTransaction();
+        if (!command.editable || !command.focused || command.mode !== 'editing') {
+          clearTableCellSessions();
+        }
         runtime.mode = command.mode;
         runtime.editable = command.editable;
         runtime.focused = command.focused;
@@ -4666,6 +5025,9 @@ function receive(command: HostCommand): void {
         view.dispatch({ selection: { anchor: command.from, head: command.to }, scrollIntoView: true });
         if (command.focus) view.focus();
         break;
+      case 'revealSearchHit':
+        revealSearchHit(command.from, command.to);
+        break;
       case 'setSearch': setSearch(command); break;
       case 'navigateSearch': navigateSearch(command.direction); break;
       case 'replaceSearch': replaceSearch(command.all); break;
@@ -4683,6 +5045,8 @@ function receive(command: HostCommand): void {
         cancelSurfacePointerInteraction();
         flushPendingTransaction();
         clearPageLayout();
+        if (globalSearchHitTimer) window.clearTimeout(globalSearchHitTimer);
+        globalSearchHitTimer = 0;
         view?.destroy();
         clearAttachmentState();
         clearClipboardRequests();

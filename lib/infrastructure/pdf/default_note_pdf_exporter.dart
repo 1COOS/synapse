@@ -145,6 +145,7 @@ _PreparedNotePdf _prepareNotePdf(
   final renderer = _MarkdownPdfRenderer(
     snapshot: snapshot,
     fonts: fonts,
+    bodyFontSizePoints: options.bodyFontSizePoints,
     contentWidth: contentWidth,
     contentHeight: contentHeight,
     warnings: warnings,
@@ -173,16 +174,18 @@ _PreparedNotePdf _prepareNotePdf(
           fontItalic: fonts.regular,
           fontBoldItalic: fonts.bold,
           fontFallback: [fonts.emoji],
-          fontSize: 11,
-          height: 1.5,
+          fontSize: options.bodyFontSizePoints,
+          height: 1.55,
           color: PdfColors.grey900,
         ),
         paragraphStyle: pw.TextStyle(
           font: fonts.regular,
           fontBold: fonts.bold,
+          fontItalic: fonts.regular,
+          fontBoldItalic: fonts.bold,
           fontFallback: [fonts.emoji],
-          fontSize: 11,
-          height: 1.5,
+          fontSize: options.bodyFontSizePoints,
+          height: 1.55,
           color: PdfColors.grey900,
         ),
       );
@@ -235,7 +238,15 @@ _PreparedNotePdf _prepareNotePdf(
           )
         : null,
     build: (_) => widgets.isEmpty
-        ? [pw.Text('', style: pw.TextStyle(font: fonts.regular, fontSize: 11))]
+        ? [
+            pw.Text(
+              '',
+              style: pw.TextStyle(
+                font: fonts.regular,
+                fontSize: options.bodyFontSizePoints,
+              ),
+            ),
+          ]
         : widgets,
   );
   document.addPage(page);
@@ -282,6 +293,7 @@ final class _MarkdownPdfRenderer {
   _MarkdownPdfRenderer({
     required this.snapshot,
     required this.fonts,
+    required this.bodyFontSizePoints,
     required this.contentWidth,
     required this.contentHeight,
     required this.warnings,
@@ -293,6 +305,7 @@ final class _MarkdownPdfRenderer {
 
   final NotePdfExportSnapshot snapshot;
   final _PdfFonts fonts;
+  final double bodyFontSizePoints;
   double contentWidth;
   final double contentHeight;
   final List<NotePdfExportWarning> warnings;
@@ -557,12 +570,9 @@ final class _MarkdownPdfRenderer {
   List<pw.Widget> _heading(md.Element element) {
     final level = int.tryParse(element.tag.substring(1)) ?? 1;
     final fontSize = switch (level) {
-      1 => 22.0,
-      2 => 18.0,
-      3 => 15.0,
-      4 => 13.0,
-      5 => 12.0,
-      _ => 11.0,
+      1 => bodyFontSizePoints * 20 / 14,
+      2 => bodyFontSizePoints * 17 / 14,
+      _ => bodyFontSizePoints * 15 / 14,
     };
     final top = level <= 2 ? 14.0 : 10.0;
     final bottom = level <= 2 ? 7.0 : 5.0;
@@ -575,7 +585,11 @@ final class _MarkdownPdfRenderer {
           text: pw.TextSpan(
             style: _bodyStyle(
               fontSize: fontSize,
-              height: level <= 2 ? 1.35 : 1.4,
+              height: switch (level) {
+                1 => 1.35,
+                2 => 1.4,
+                _ => 1.45,
+              },
               bold: true,
               color: PdfColors.grey900,
             ),
@@ -672,8 +686,8 @@ final class _MarkdownPdfRenderer {
                   style: pw.TextStyle(
                     font: fonts.monospace,
                     fontFallback: [fonts.regular, fonts.emoji],
-                    fontSize: 9.2,
-                    height: 1.45,
+                    fontSize: bodyFontSizePoints,
+                    height: 1.55,
                     color: PdfColors.grey900,
                   ),
                 ),
@@ -836,7 +850,7 @@ final class _MarkdownPdfRenderer {
           child: pw.RichText(
             overflow: pw.TextOverflow.span,
             text: pw.TextSpan(
-              style: _bodyStyle(fontSize: 9, height: 1.35, bold: rowIndex == 0),
+              style: _bodyStyle(height: 1.35, bold: rowIndex == 0),
               children: column < row.length
                   ? _inlineSpans(row[column], collectBoundaries: rowIndex != 0)
                   : const [],
@@ -887,11 +901,11 @@ final class _MarkdownPdfRenderer {
           pw.RichText(
             overflow: pw.TextOverflow.span,
             text: pw.TextSpan(
-              style: _bodyStyle(fontSize: 9.5, height: 1.4),
+              style: _bodyStyle(height: 1.35),
               children: [
                 pw.TextSpan(
                   text: '${_plainText(headers[column])}: ',
-                  style: _bodyStyle(fontSize: 9.5, height: 1.4, bold: true),
+                  style: _bodyStyle(height: 1.35, bold: true),
                 ),
                 if (column < rows[rowIndex].length)
                   ..._inlineSpans(rows[rowIndex][column]),
@@ -943,11 +957,14 @@ final class _MarkdownPdfRenderer {
           }
           return sum + 1;
         });
-        wrapped += math.max(1, (widthUnits * 9 / available).ceil());
+        wrapped += math.max(
+          1,
+          (widthUnits * bodyFontSizePoints / available).ceil(),
+        );
       }
       maxLines = math.max(maxLines, wrapped);
     }
-    return maxLines * 9 * 1.35 + 10;
+    return maxLines * bodyFontSizePoints * 1.35 + 10;
   }
 
   pw.Widget _image(String source, String alt, int? sourceWidth) {
@@ -1066,7 +1083,7 @@ final class _MarkdownPdfRenderer {
     ),
     child: pw.Text(
       label.isEmpty ? '图片不可用' : '图片不可用：$label',
-      style: _bodyStyle(fontSize: 9.5, color: PdfColors.grey600),
+      style: _bodyStyle(color: PdfColors.grey600),
     ),
   );
 
@@ -1135,7 +1152,6 @@ final class _MarkdownPdfRenderer {
         'code' => style.copyWith(
           font: fonts.monospace,
           fontFallback: [fonts.regular, fonts.emoji],
-          fontSize: 9.5,
           background: pw.BoxDecoration(color: PdfColor.fromHex('#F0F1F3')),
         ),
         'a' => style.copyWith(
@@ -1201,8 +1217,8 @@ final class _MarkdownPdfRenderer {
   }
 
   pw.TextStyle _bodyStyle({
-    double fontSize = 11,
-    double height = 1.5,
+    double? fontSize,
+    double height = 1.55,
     bool bold = false,
     PdfColor color = PdfColors.grey900,
   }) => pw.TextStyle(
@@ -1211,7 +1227,7 @@ final class _MarkdownPdfRenderer {
     fontItalic: fonts.regular,
     fontBoldItalic: fonts.bold,
     fontFallback: [fonts.emoji],
-    fontSize: fontSize,
+    fontSize: fontSize ?? bodyFontSizePoints,
     fontWeight: bold ? pw.FontWeight.bold : pw.FontWeight.normal,
     height: height,
     color: color,

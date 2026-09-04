@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import '../../domain/vault/vault_resource.dart';
 import 'memory_vault_note_store.dart';
 import 'memory_vault_paths.dart';
@@ -6,7 +8,7 @@ import 'memory_vault_resource_store.dart';
 import 'memory_vault_state.dart';
 import 'vault_backend.dart';
 
-class MemoryVaultBackend implements VaultBackend {
+class MemoryVaultBackend implements VaultBackend, VaultSearchChangeFeed {
   MemoryVaultBackend({bool seedExampleData = true}) {
     _state = MemoryVaultState();
     final paths = MemoryVaultPaths(_state);
@@ -29,6 +31,17 @@ class MemoryVaultBackend implements VaultBackend {
   late final MemoryVaultResourceStore _resources;
   late final MemoryVaultProposalStore _proposals;
   late final MemoryVaultState _state;
+  final StreamController<void> _searchChanges =
+      StreamController<void>.broadcast(sync: true);
+
+  @override
+  Stream<void> watchSearchRelevantChanges() => _searchChanges.stream;
+
+  void notifySearchRelevantExternalChange() => _searchChanges.add(null);
+
+  Future<T> _changed<T>(Future<T> operation) async {
+    return operation;
+  }
 
   @override
   Future<T> runMutationTransaction<T>({
@@ -60,7 +73,7 @@ class MemoryVaultBackend implements VaultBackend {
     required String parentPath,
     required String title,
   }) {
-    return _notes.createNote(parentPath: parentPath, title: title);
+    return _changed(_notes.createNote(parentPath: parentPath, title: title));
   }
 
   @override
@@ -71,7 +84,7 @@ class MemoryVaultBackend implements VaultBackend {
     required String noteId,
     required String markdown,
   }) {
-    return _notes.updateMarkdown(noteId: noteId, markdown: markdown);
+    return _changed(_notes.updateMarkdown(noteId: noteId, markdown: markdown));
   }
 
   @override
@@ -79,23 +92,23 @@ class MemoryVaultBackend implements VaultBackend {
     required String noteId,
     required String markdown,
   }) {
-    return _notes.appendMarkdown(noteId: noteId, markdown: markdown);
+    return _changed(_notes.appendMarkdown(noteId: noteId, markdown: markdown));
   }
 
   @override
-  Future<void> deleteNote(String noteId) => _notes.deleteNote(noteId);
+  Future<void> deleteNote(String noteId) => _changed(_notes.deleteNote(noteId));
 
   @override
   Future<VaultNote> renameNote({
     required String noteId,
     required String title,
   }) {
-    return _notes.renameNote(noteId: noteId, title: title);
+    return _changed(_notes.renameNote(noteId: noteId, title: title));
   }
 
   @override
   Future<VaultNote> copyNote({required String noteId}) {
-    return _notes.copyNote(noteId: noteId);
+    return _changed(_notes.copyNote(noteId: noteId));
   }
 
   @override
@@ -103,12 +116,12 @@ class MemoryVaultBackend implements VaultBackend {
     required String noteId,
     required String parentPath,
   }) {
-    return _notes.moveNote(noteId: noteId, parentPath: parentPath);
+    return _changed(_notes.moveNote(noteId: noteId, parentPath: parentPath));
   }
 
   @override
   Future<void> deleteFolder(String folderPath) {
-    return _notes.deleteFolder(folderPath);
+    return _changed(_notes.deleteFolder(folderPath));
   }
 
   @override
@@ -116,7 +129,7 @@ class MemoryVaultBackend implements VaultBackend {
     required String folderPath,
     required String title,
   }) {
-    return _notes.renameFolder(folderPath: folderPath, title: title);
+    return _changed(_notes.renameFolder(folderPath: folderPath, title: title));
   }
 
   @override
@@ -125,7 +138,9 @@ class MemoryVaultBackend implements VaultBackend {
     required String title,
     required String text,
   }) {
-    return _resources.addTextMaterial(noteId: noteId, title: title, text: text);
+    return _changed(
+      _resources.addTextMaterial(noteId: noteId, title: title, text: text),
+    );
   }
 
   @override
@@ -135,11 +150,13 @@ class MemoryVaultBackend implements VaultBackend {
     required String mimeType,
     required List<int> bytes,
   }) {
-    return _resources.addImageMaterial(
-      noteId: noteId,
-      filename: filename,
-      mimeType: mimeType,
-      bytes: bytes,
+    return _changed(
+      _resources.addImageMaterial(
+        noteId: noteId,
+        filename: filename,
+        mimeType: mimeType,
+        bytes: bytes,
+      ),
     );
   }
 
@@ -163,12 +180,12 @@ class MemoryVaultBackend implements VaultBackend {
 
   @override
   Future<AiMaterial> updateAiMaterial(AiMaterial material) {
-    return _resources.updateAiMaterial(material);
+    return _changed(_resources.updateAiMaterial(material));
   }
 
   @override
   Future<void> deleteAiMaterial(AiMaterial material) {
-    return _resources.deleteAiMaterial(material);
+    return _changed(_resources.deleteAiMaterial(material));
   }
 
   @override

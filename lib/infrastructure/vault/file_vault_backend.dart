@@ -13,7 +13,8 @@ import 'file_vault_resource_store.dart';
 import 'file_vault_transaction_journal.dart';
 import 'vault_backend.dart';
 
-class FileVaultBackend implements VaultBackend, VaultMigrationBackend {
+class FileVaultBackend
+    implements VaultBackend, VaultMigrationBackend, VaultSearchChangeFeed {
   FileVaultBackend(String rootPath) : root = Directory(rootPath) {
     _identityMigrator = FileVaultIdentityMigrator(rootPath: rootPath);
     final paths = FileVaultPaths(root, catalog: FileVaultCatalog());
@@ -64,6 +65,26 @@ class FileVaultBackend implements VaultBackend, VaultMigrationBackend {
   late final FileVaultIdentityMigrator _identityMigrator;
   late final FileVaultOperations _operations;
   VaultIdentityMigrationReport? _pendingMigration;
+
+  @override
+  Stream<void> watchSearchRelevantChanges() {
+    return root
+        .watch(recursive: true)
+        .where((event) => _isSearchRelevantPath(event.path))
+        .map((_) {});
+  }
+
+  bool _isSearchRelevantPath(String path) {
+    final normalized = path.replaceAll('\\', '/');
+    if (normalized.contains('/.synapse-cache/') ||
+        normalized.contains('/.synapse/transactions/') ||
+        normalized.contains('/attachments/')) {
+      return false;
+    }
+    return normalized.endsWith('.md') ||
+        normalized.endsWith('/materials.json') ||
+        normalized.endsWith('/sources.json');
+  }
 
   @override
   Future<VaultMigrationRequirement?> inspectMigration() async {

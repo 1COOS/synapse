@@ -127,6 +127,7 @@ void main() {
       addTearDown(container.dispose);
       await container.read(workspaceControllerProvider.future);
       final controller = container.read(workspaceControllerProvider.notifier);
+      await Future<void>.delayed(const Duration(milliseconds: 20));
 
       controller.setLeftMode(WorkspaceLeftMode.search);
       controller.setNarrowSection(WorkspaceSection.sources);
@@ -176,6 +177,7 @@ void main() {
       addTearDown(container.dispose);
       await container.read(workspaceControllerProvider.future);
       final controller = container.read(workspaceControllerProvider.notifier);
+      await Future<void>.delayed(const Duration(milliseconds: 40));
 
       expect(
         await controller.search('needle'),
@@ -186,6 +188,10 @@ void main() {
       final betaResult = searched.searchResults.singleWhere(
         (result) => result.noteId == beta.id,
       );
+      final betaHit = searched.searchSession.groups
+          .singleWhere((group) => group.noteId == beta.id)
+          .hits
+          .first;
 
       expect(
         await controller.openSearchResult(betaResult),
@@ -194,6 +200,14 @@ void main() {
       final opened = container.read(workspaceControllerProvider).requireValue;
       expect(opened.selectedResourceId, beta.id);
       expect(opened.narrowSection, WorkspaceSection.notes);
+
+      expect(
+        await controller.openSearchHit(betaHit, openInNewSplit: true),
+        WorkspaceActionResult.committed,
+      );
+      final split = container.read(workspaceControllerProvider).requireValue;
+      expect(split.splitRoot, isA<SplitBranch>());
+      expect(split.focusedPaneId, isNot(opened.focusedPaneId));
     });
 
     test('commits create note resources session and split together', () async {

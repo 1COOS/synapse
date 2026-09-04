@@ -418,6 +418,11 @@ final class TestDocumentSurfaceState extends State<TestDocumentSurface>
   }
 
   @override
+  Future<void> revealSearchHit(int from, int to) async {
+    setSelection(TextSelection(baseOffset: from, extentOffset: to));
+  }
+
+  @override
   Future<void> setSearch(EditorSearchQuery query) async {
     _search = query;
     _emitCommandState();

@@ -5,12 +5,14 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
 
+import '../../../application/search/search_index.dart';
 import '../../../domain/vault/vault_resource.dart';
 import '../../workspace/controller/workspace_controller.dart';
 import '../../workspace/editor/pane_editor_context.dart';
 import '../../workspace/editor/markdown_image_transform.dart';
 import '../../workspace/state/note_materials_registry.dart';
 import '../../workspace/state/split_workspace_controller.dart';
+import '../../workspace/search_navigation.dart';
 import 'workspace_controls.dart';
 import 'workspace_layout.dart';
 import 'workspace_sources.dart';
@@ -51,6 +53,7 @@ final class WorkspaceSourcesPane extends StatefulWidget {
     super.key,
     required this.workspace,
     required this.controller,
+    required this.searchNavigationController,
     required this.onDeleteSource,
     required this.onDeleteSources,
     required this.onDeleteAttachments,
@@ -60,6 +63,7 @@ final class WorkspaceSourcesPane extends StatefulWidget {
 
   final WorkspaceState workspace;
   final WorkspaceController controller;
+  final WorkspaceSearchNavigationController searchNavigationController;
   final SourceDeleteConfirmation onDeleteSource;
   final SourcesDeleteConfirmation onDeleteSources;
   final AttachmentDeleteConfirmation onDeleteAttachments;
@@ -79,6 +83,8 @@ final class _WorkspaceSourcesPaneState extends State<WorkspaceSourcesPane> {
   final _focusNode = FocusNode();
   final _proposalScrollController = ScrollController();
   final _attachmentScrollController = ScrollController();
+  final _sourcesScrollController = ScrollController();
+  final Map<String, GlobalKey> _sourceKeys = {};
   final Map<String, bool> _sourcesExpandedByNote = <String, bool>{};
   final Map<String, String> _expandedProposalByNote = <String, String>{};
   final Set<String> _selectedProposalIds = <String>{};
@@ -86,10 +92,32 @@ final class _WorkspaceSourcesPaneState extends State<WorkspaceSourcesPane> {
   String? _proposalBatchNoteId;
   bool _resizingSources = false;
   bool _generatingProposal = false;
+  String? _highlightedMaterialId;
+  Timer? _materialHighlightTimer;
+  int? _lastSearchNavigationSerial;
+
+  @override
+  void initState() {
+    super.initState();
+    widget.searchNavigationController.addListener(_handleSearchNavigation);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _handleSearchNavigation();
+    });
+  }
 
   @override
   void didUpdateWidget(covariant WorkspaceSourcesPane oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (!identical(
+      oldWidget.searchNavigationController,
+      widget.searchNavigationController,
+    )) {
+      oldWidget.searchNavigationController.removeListener(
+        _handleSearchNavigation,
+      );
+      widget.searchNavigationController.addListener(_handleSearchNavigation);
+      _lastSearchNavigationSerial = null;
+    }
     final oldNoteId = _focusedNoteId(oldWidget.workspace);
     final noteId = _focusedNoteId(widget.workspace);
     if (oldNoteId != noteId) {
@@ -99,6 +127,7 @@ final class _WorkspaceSourcesPaneState extends State<WorkspaceSourcesPane> {
     if (noteId == null) {
       return;
     }
+    _handleSearchNavigation();
     final proposals = widget.workspace.materialsFor(noteId).proposals;
     _selectedProposalIds.retainAll(
       proposals.map((proposal) => proposal.id).toSet(),
@@ -117,10 +146,48 @@ final class _WorkspaceSourcesPaneState extends State<WorkspaceSourcesPane> {
 
   @override
   void dispose() {
+    widget.searchNavigationController.removeListener(_handleSearchNavigation);
+    _materialHighlightTimer?.cancel();
     _focusNode.dispose();
     _proposalScrollController.dispose();
     _attachmentScrollController.dispose();
+    _sourcesScrollController.dispose();
     super.dispose();
+  }
+
+  void _handleSearchNavigation() {
+    final request = widget.searchNavigationController.request;
+    if (request == null ||
+        request.serial == _lastSearchNavigationSerial ||
+        request.hit.sourceType != SearchSourceType.aiMaterial ||
+        _focusedNoteId(widget.workspace) != request.hit.noteId) {
+      return;
+    }
+    _lastSearchNavigationSerial = request.serial;
+    _materialHighlightTimer?.cancel();
+    setState(() {
+      _sourcesExpandedByNote[request.hit.noteId] = true;
+      _highlightedMaterialId = request.hit.sourceId;
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final targetContext = _sourceKeys[request.hit.sourceId]?.currentContext;
+      if (targetContext != null) {
+        unawaited(
+          Scrollable.ensureVisible(
+            targetContext,
+            duration: const Duration(milliseconds: 220),
+            curve: Curves.easeOutCubic,
+            alignment: 0.15,
+          ),
+        );
+      }
+    });
+    _materialHighlightTimer = Timer(const Duration(milliseconds: 1600), () {
+      if (mounted && _highlightedMaterialId == request.hit.sourceId) {
+        setState(() => _highlightedMaterialId = null);
+      }
+    });
   }
 
   @override
@@ -580,6 +647,7 @@ final class _WorkspaceSourcesPaneState extends State<WorkspaceSourcesPane> {
       key: const Key('sources-expanded-content'),
       height: height,
       child: GridView.builder(
+        controller: _sourcesScrollController,
         padding: EdgeInsets.zero,
         itemCount: sources.length,
         gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
@@ -590,29 +658,53 @@ final class _WorkspaceSourcesPaneState extends State<WorkspaceSourcesPane> {
         ),
         itemBuilder: (context, index) {
           final source = sources[index];
-          return ImageSourceTile(
-            source: source,
-            selected: materials.selectedAiMaterialIds.contains(source.id),
-            busy: busy,
-            imageBytes: source.mediaKind == MediaKind.image
-                ? widget.controller.readAiMaterialContent(source)
-                : null,
-            onToggle: () {
-              final target = editorContext == null
-                  ? null
-                  : widget.controller.resolvePaneEditorContext(editorContext);
-              if (target != null) {
-                widget.controller.toggleAiMaterialSelection(
-                  target.noteId,
-                  source.id,
-                );
-              }
-            },
-            onDelete: editorContext == null
-                ? () {}
-                : () async {
-                    await widget.onDeleteSource(editorContext, source);
-                  },
+          final highlighted = _highlightedMaterialId == source.id;
+          return KeyedSubtree(
+            key: Key('source-search-target-${source.id}'),
+            child: AnimatedContainer(
+              key: _sourceKeys.putIfAbsent(source.id, GlobalKey.new),
+              duration: const Duration(milliseconds: 160),
+              padding: const EdgeInsets.all(2),
+              decoration: BoxDecoration(
+                color: highlighted
+                    ? WorkspaceAppearanceScope.of(
+                        context,
+                      ).accentColor.withValues(alpha: 0.14)
+                    : null,
+                border: highlighted
+                    ? Border.all(
+                        color: WorkspaceAppearanceScope.of(context).accentColor,
+                      )
+                    : null,
+                borderRadius: workspaceBorderRadius,
+              ),
+              child: ImageSourceTile(
+                source: source,
+                selected: materials.selectedAiMaterialIds.contains(source.id),
+                busy: busy,
+                imageBytes: source.mediaKind == MediaKind.image
+                    ? widget.controller.readAiMaterialContent(source)
+                    : null,
+                onToggle: () {
+                  final target = editorContext == null
+                      ? null
+                      : widget.controller.resolvePaneEditorContext(
+                          editorContext,
+                        );
+                  if (target != null) {
+                    widget.controller.toggleAiMaterialSelection(
+                      target.noteId,
+                      source.id,
+                    );
+                  }
+                },
+                onDelete: editorContext == null
+                    ? () {}
+                    : () async {
+                        await widget.onDeleteSource(editorContext, source);
+                      },
+              ),
+            ),
           );
         },
       ),

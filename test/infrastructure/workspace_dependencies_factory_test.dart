@@ -158,7 +158,7 @@ void main() {
     );
     addTearDown(runtime.dispose);
 
-    expect(runtime.searchCoordinator.supportsBackgroundIndexing, isFalse);
+    expect(runtime.searchCoordinator.supportsBackgroundIndexing, isTrue);
     expect(cacheErrors, hasLength(1));
   });
 

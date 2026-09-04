@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:synapse/application/exports/note_pdf_export.dart';
+import 'package:synapse/application/settings/synapse_settings.dart';
 import 'package:synapse/domain/markdown/markdown_document.dart';
 import 'package:synapse/domain/vault/vault_resource.dart';
 import 'package:synapse/infrastructure/bootstrap/workspace_dependencies_factory.dart';
@@ -44,6 +45,10 @@ void main() {
     expect(exporter.snapshots.length, greaterThan(buildsBeforeExport));
     expect(exporter.snapshots.last.markdown.trim(), '# Latest\nPDF body');
     expect(exporter.snapshots.last.title, 'Latest');
+    expect(
+      exporter.options.last.bodyFontSizePoints,
+      defaultNotePdfBodyFontSizePoints,
+    );
     expect(find.byKey(const Key('note-pdf-export-dialog')), findsOneWidget);
   });
 
@@ -465,7 +470,11 @@ void main() {
     final vault = MemoryVaultBackend(seedExampleData: false);
     await vault.createNote(parentPath: '', title: 'Settings layout');
     final exporter = _RecordingPdfExporter();
-    final settingsStore = FakeSettingsStore();
+    final settingsStore = FakeSettingsStore(
+      initialSettings: SynapseSettings(
+        preferences: WorkspacePreferences.defaults.copyWith(noteFontSize: 20),
+      ),
+    );
 
     await pumpWorkspace(
       tester,
@@ -486,6 +495,7 @@ void main() {
       NotePdfMarginPreset.standard,
     );
     expect(exporter.layoutOptions.last.footerEnabled, isTrue);
+    expect(exporter.layoutOptions.last.bodyFontSizePoints, 15);
     final buildsBeforeSave = exporter.layoutOptions.length;
 
     await tester.tap(find.byKey(const Key('settings-button')));
@@ -500,6 +510,13 @@ void main() {
     await tester.ensureVisible(footerSwitch);
     await tester.tap(footerSwitch);
     await tester.pump();
+    await tester.tap(find.byKey(const Key('settings-nav-appearance')));
+    await tester.pump();
+    final fontSizeSlider = tester.widget<CupertinoSlider>(
+      find.byKey(const Key('settings-note-font-size-slider')),
+    );
+    fontSizeSlider.onChanged!(22);
+    await tester.pump();
     await tester.tap(find.text('保存设置'));
     await tester.pumpAndSettle();
 
@@ -511,12 +528,14 @@ void main() {
       settingsStore.savedSettings.last.preferences.pdfFooterEnabled,
       isFalse,
     );
+    expect(settingsStore.savedSettings.last.preferences.noteFontSize, 22);
     expect(exporter.layoutOptions.length, greaterThan(buildsBeforeSave));
     expect(
       exporter.layoutOptions.last,
       const NotePdfExportOptions(
         marginPreset: NotePdfMarginPreset.wide,
         footerEnabled: false,
+        bodyFontSizePoints: 16.5,
       ),
     );
   });
@@ -527,7 +546,11 @@ void main() {
       final vault = MemoryVaultBackend(seedExampleData: false);
       await vault.createNote(parentPath: '', title: 'Idle layout');
       final exporter = _RecordingPdfExporter();
-      final settingsStore = FakeSettingsStore();
+      final settingsStore = FakeSettingsStore(
+        initialSettings: SynapseSettings(
+          preferences: WorkspacePreferences.defaults.copyWith(noteFontSize: 20),
+        ),
+      );
 
       await pumpWorkspace(
         tester,
@@ -563,6 +586,7 @@ void main() {
       expect(find.byKey(const Key('note-pdf-export-dialog')), findsOneWidget);
       expect(exporter.options.last.marginPreset, NotePdfMarginPreset.wide);
       expect(exporter.options.last.footerEnabled, isFalse);
+      expect(exporter.options.last.bodyFontSizePoints, 15);
       await tester.tap(find.text('横向'));
       await tester.pump();
       await tester.tap(find.byKey(const Key('note-pdf-cancel')));
@@ -585,6 +609,7 @@ void main() {
           orientation: NotePdfOrientation.landscape,
           marginPreset: NotePdfMarginPreset.wide,
           footerEnabled: false,
+          bodyFontSizePoints: 15,
         ),
       );
     },

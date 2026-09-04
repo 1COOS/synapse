@@ -1,10 +1,13 @@
-import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:synapse/application/ports/ai_provider.dart';
+import 'package:synapse/application/search/search_index.dart';
 import 'package:synapse/domain/vault/vault_resource.dart';
+import 'package:synapse/infrastructure/ai/mock_ai_provider.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
 import 'package:synapse/presentation/cupertino/workspace/workspace_titlebar.dart';
 
@@ -241,7 +244,151 @@ void main() {
     await tester.tap(find.byKey(Key('search-result-${beta.id}')));
     await tester.pumpAndSettle();
 
-    expect(find.textContaining('独特问题线索'), findsOneWidget);
+    expect(find.textContaining('独特问题线索'), findsWidgets);
+    final noteEditor = tester.widget<CupertinoTextField>(
+      find.byKey(const Key('note-editor')),
+    );
+    expect(
+      noteEditor.controller!.selection.textInside(noteEditor.controller!.text),
+      '独特问题',
+    );
+  });
+
+  testWidgets('searches AI materials without selecting them', (tester) async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: '素材笔记');
+    await vault.updateMarkdown(noteId: note.id, markdown: '# 素材笔记\n正文');
+    final material = await vault.addTextMaterial(
+      noteId: note.id,
+      title: '访谈摘录',
+      text: '独立素材命中内容',
+    );
+    await pumpWorkspace(tester, vault: vault);
+
+    await tester.tap(find.byKey(const Key('left-pane-mode-search')));
+    await tester.pump(const Duration(milliseconds: 250));
+    expect(find.byKey(const Key('workspace-search-mode')), findsOneWidget);
+    expect(find.byKey(const Key('workspace-search-scope')), findsOneWidget);
+    expect(
+      find.byKey(const Key('workspace-search-case-sensitive')),
+      findsOneWidget,
+    );
+    await tester.enterText(
+      find.byKey(const Key('workspace-search-field')),
+      '独立素材命中',
+    );
+    await tester.pump(const Duration(milliseconds: 250));
+    await tester.pumpAndSettle();
+
+    final hitKey = Key('search-hit-aiMaterial:${material.id}:0:0');
+    expect(find.byKey(hitKey), findsOneWidget);
+    await tester.tap(find.byKey(hitKey));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('right-pane-ai-content')), findsOneWidget);
+    expect(find.byKey(const Key('sources-expanded-content')), findsOneWidget);
+    expect(find.text('已选择 0 项'), findsOneWidget);
+  });
+
+  testWidgets('switches to semantic mode with an empty query', (tester) async {
+    await pumpWorkspace(tester, vault: MemoryVaultBackend());
+    await tester.tap(find.byKey(const Key('left-pane-mode-search')));
+    await tester.pump(const Duration(milliseconds: 250));
+
+    expect(
+      tester
+          .widget<CupertinoSlidingSegmentedControl<SearchMode>>(
+            find.byKey(const Key('workspace-search-mode')),
+          )
+          .groupValue,
+      SearchMode.keyword,
+    );
+    await tester.tap(find.text('语义'));
+    await tester.pump();
+
+    expect(
+      tester
+          .widget<CupertinoSlidingSegmentedControl<SearchMode>>(
+            find.byKey(const Key('workspace-search-mode')),
+          )
+          .groupValue,
+      SearchMode.semantic,
+    );
+    expect(
+      tester
+          .widget<CupertinoTextField>(
+            find.byKey(const Key('workspace-search-field')),
+          )
+          .placeholder,
+      '输入语义问题后按回车',
+    );
+  });
+
+  testWidgets('image OCR search restores AI pane and highlights thumbnail only', (
+    tester,
+  ) async {
+    final vault = MemoryVaultBackend(seedExampleData: false);
+    final note = await vault.createNote(parentPath: '', title: '图片笔记');
+    await vault.updateMarkdown(noteId: note.id, markdown: '# 图片笔记\n正文');
+    final created = await vault.addImageMaterial(
+      noteId: note.id,
+      filename: 'ocr.png',
+      mimeType: 'image/png',
+      bytes: base64Decode(
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII=',
+      ),
+    );
+    final material = await vault.updateAiMaterial(
+      created.copyWith(
+        processingState: MaterialProcessingState.processed,
+        extractedText: '图中独有 OCR 线索',
+        updatedAt: created.updatedAt.add(const Duration(seconds: 1)),
+      ),
+    );
+    final provider = _CountingOcrProvider();
+    await pumpWorkspace(tester, vault: vault, aiProvider: provider);
+
+    await tester.tap(find.bySemanticsLabel('ocr.png'));
+    await tester.pump();
+    expect(find.text('已选择 1 项'), findsOneWidget);
+    await tester.tap(find.byKey(const Key('right-pane-tab-attachments')));
+    await tester.pump(const Duration(milliseconds: 250));
+    await tester.tap(find.byKey(const Key('collapse-right-pane-button')));
+    await tester.pump(const Duration(milliseconds: 250));
+
+    await tester.tap(find.byKey(const Key('left-pane-mode-search')));
+    await tester.pump(const Duration(milliseconds: 250));
+    await tester.enterText(
+      find.byKey(const Key('workspace-search-field')),
+      '独有 OCR',
+    );
+    await tester.pump(const Duration(milliseconds: 250));
+    final hitKey = Key('search-hit-aiMaterial:${material.id}:0:0');
+    expect(find.byKey(hitKey), findsOneWidget);
+    await tester.tap(find.byKey(hitKey));
+    final targetKey = Key('source-search-target-${material.id}');
+    AnimatedContainer? highlightedTarget;
+    for (var attempt = 0; attempt < 20; attempt++) {
+      await tester.pump(const Duration(milliseconds: 50));
+      final target = find.descendant(
+        of: find.byKey(targetKey),
+        matching: find.byType(AnimatedContainer),
+      );
+      if (target.evaluate().isEmpty) continue;
+      final candidate = tester.widget<AnimatedContainer>(target);
+      if ((candidate.decoration! as BoxDecoration).border != null) {
+        highlightedTarget = candidate;
+        break;
+      }
+    }
+
+    expect(find.byKey(const Key('right-pane-ai-content')), findsOneWidget);
+    expect(find.byKey(const Key('sources-expanded-content')), findsOneWidget);
+    expect(find.byKey(targetKey), findsOneWidget);
+    expect(highlightedTarget, isNotNull);
+    expect(find.text('已选择 1 项'), findsOneWidget);
+    expect(find.byKey(const Key('full-image-preview')), findsNothing);
+    expect(provider.ocrCalls, 0);
   });
 
   testWidgets(
@@ -258,6 +405,9 @@ void main() {
         noteId: external.id,
         markdown: '# External\n外部新增线索',
       );
+      vault.notifySearchRelevantExternalChange();
+      await tester.pump(const Duration(milliseconds: 600));
+      await tester.pumpAndSettle();
 
       await tester.tap(find.byKey(const Key('left-pane-mode-search')));
       await tester.pump(const Duration(milliseconds: 250));
@@ -295,6 +445,9 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.byKey(Key('search-result-${deleted.id}')), findsOneWidget);
       await vault.deleteNote(deleted.id);
+      vault.notifySearchRelevantExternalChange();
+      await tester.pump(const Duration(milliseconds: 600));
+      await tester.pumpAndSettle();
 
       await tester.tap(find.byKey(const Key('workspace-search-submit-button')));
       await tester.pumpAndSettle();
@@ -309,8 +462,7 @@ void main() {
   testWidgets('rapid search submissions keep the newest final results', (
     tester,
   ) async {
-    final vault = _GatedSearchReadVault();
-    addTearDown(vault.releaseRead);
+    final vault = MemoryVaultBackend(seedExampleData: false);
     final older = await vault.createNote(parentPath: '', title: 'Older');
     await vault.updateMarkdown(noteId: older.id, markdown: '# Older\n111111');
     final newer = await vault.createNote(parentPath: '', title: 'Newer');
@@ -320,14 +472,9 @@ void main() {
     await tester.pump(const Duration(milliseconds: 250));
     final searchField = find.byKey(const Key('workspace-search-field'));
     await tester.enterText(searchField, '111111');
-    vault.gateNextRead();
-    await tester.tap(find.byKey(const Key('workspace-search-submit-button')));
-    await vault.readStarted.future;
-
+    await tester.pump(const Duration(milliseconds: 80));
     await tester.enterText(searchField, '999999');
-    tester.widget<CupertinoTextField>(searchField).onSubmitted!('999999');
-    await tester.pump();
-    vault.releaseRead();
+    await tester.pump(const Duration(milliseconds: 250));
     await tester.pumpAndSettle();
 
     expect(find.byKey(Key('search-result-${newer.id}')), findsOneWidget);
@@ -379,32 +526,20 @@ void main() {
   });
 }
 
-final class _GatedSearchReadVault extends MemoryVaultBackend {
-  _GatedSearchReadVault() : super(seedExampleData: false);
-
-  Completer<void> readStarted = Completer<void>();
-  Completer<void> _readRelease = Completer<void>();
-  bool _gateRead = false;
-
-  void gateNextRead() {
-    readStarted = Completer<void>();
-    _readRelease = Completer<void>();
-    _gateRead = true;
-  }
-
-  void releaseRead() {
-    if (!_readRelease.isCompleted) {
-      _readRelease.complete();
-    }
-  }
+final class _CountingOcrProvider extends MockAiProvider {
+  int ocrCalls = 0;
 
   @override
-  Future<VaultNoteContent> readNote(String noteId) async {
-    if (_gateRead) {
-      _gateRead = false;
-      readStarted.complete();
-      await _readRelease.future;
-    }
-    return super.readNote(noteId);
+  Future<ImageExtraction> extractImageText({
+    required String filename,
+    required String mimeType,
+    required List<int> bytes,
+  }) {
+    ocrCalls += 1;
+    return super.extractImageText(
+      filename: filename,
+      mimeType: mimeType,
+      bytes: bytes,
+    );
   }
 }

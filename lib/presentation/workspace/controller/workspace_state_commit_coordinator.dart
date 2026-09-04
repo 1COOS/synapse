@@ -9,12 +9,18 @@ import 'workspace_state.dart';
 
 typedef WorkspaceStateReader = WorkspaceState Function();
 typedef WorkspaceStatePublisher = void Function(WorkspaceState state);
+typedef WorkspaceSearchDeltaPublisher =
+    void Function(
+      Map<String, VaultNoteContent> upsertedNotes,
+      Set<String> removedNoteIds,
+    );
 
 final class WorkspaceStatePatch {
   const WorkspaceStatePatch({
     this.resources,
     this.selectedResourceId = _unset,
     this.searchResults,
+    this.searchSession,
     this.leftMode,
     this.narrowSection,
     this.message,
@@ -25,6 +31,7 @@ final class WorkspaceStatePatch {
   final List<VaultResourceNode>? resources;
   final Object? selectedResourceId;
   final List<SearchResult>? searchResults;
+  final SearchSessionState? searchSession;
   final WorkspaceLeftMode? leftMode;
   final WorkspaceSection? narrowSection;
   final String? message;
@@ -39,12 +46,14 @@ final class WorkspaceStateCommitCoordinator {
     required NoteMaterialsRegistry materials,
     required WorkspaceStateReader readState,
     required WorkspaceStatePublisher publishState,
+    WorkspaceSearchDeltaPublisher? publishSearchDelta,
     required WorkspaceCommitPhase? forcedFailure,
   }) : _sessions = sessions,
        _splits = splits,
        _materials = materials,
        _readState = readState,
        _publishState = publishState,
+       _searchDeltaPublisher = publishSearchDelta ?? _ignoreSearchDelta,
        _forcedFailure = forcedFailure;
 
   final NoteSessionRegistry _sessions;
@@ -52,6 +61,7 @@ final class WorkspaceStateCommitCoordinator {
   final NoteMaterialsRegistry _materials;
   final WorkspaceStateReader _readState;
   final WorkspaceStatePublisher _publishState;
+  final WorkspaceSearchDeltaPublisher _searchDeltaPublisher;
   final WorkspaceCommitPhase? _forcedFailure;
   Object _stateToken = Object();
 
@@ -79,6 +89,17 @@ final class WorkspaceStateCommitCoordinator {
     }
     final committedRemaps = remappedNoteIds ?? delta.remappedNoteIds;
     final committedRemovals = removedNoteIds ?? delta.removedNoteIds;
+    final searchUpserts = <String, VaultNoteContent>{
+      ...delta.refreshedNotesByNewId,
+      ...upsertedNotesById,
+      if (savedNoteCommit != null)
+        savedNoteCommit.savedNote.id: savedNoteCommit.savedNote,
+    };
+    final searchRemovals = <String>{
+      ...committedRemovals,
+      for (final entry in committedRemaps.entries)
+        if (entry.key != entry.value) entry.key,
+    };
     final preparedSessions = _sessions.prepareMutation(
       remappedNoteIds: committedRemaps,
       removedNoteIds: committedRemovals,
@@ -117,6 +138,7 @@ final class WorkspaceStateCommitCoordinator {
       resources: patch.resources ?? delta.resources ?? current.resources,
       selectedResourceId: selectedResourceId,
       searchResults: patch.searchResults,
+      searchSession: patch.searchSession,
       materials: preparedMaterials.nextSnapshots,
       splitRoot: preparedSplits.nextRoot,
       focusedPaneId: preparedSplits.nextFocusedPaneId,
@@ -140,6 +162,8 @@ final class WorkspaceStateCommitCoordinator {
         preparedToken: _stateToken,
         nextState: nextState,
         forcedFailure: _forcedFailure,
+        searchUpserts: searchUpserts,
+        searchRemovals: searchRemovals,
       ),
     );
   }
@@ -166,6 +190,14 @@ final class WorkspaceStateCommitCoordinator {
     _pendingState = null;
     _publishState(nextState);
   }
+
+  void _emitSearchDelta(
+    Map<String, VaultNoteContent> upserts,
+    Set<String> removals,
+  ) {
+    if (upserts.isEmpty && removals.isEmpty) return;
+    _searchDeltaPublisher(upserts, removals);
+  }
 }
 
 final class _PreparedWorkspaceStateMutation
@@ -175,15 +207,21 @@ final class _PreparedWorkspaceStateMutation
     required Object preparedToken,
     required WorkspaceState nextState,
     required WorkspaceCommitPhase? forcedFailure,
+    required Map<String, VaultNoteContent> searchUpserts,
+    required Set<String> searchRemovals,
   }) : _coordinator = coordinator,
        _preparedToken = preparedToken,
        _nextState = nextState,
-       _forcedFailure = forcedFailure;
+       _forcedFailure = forcedFailure,
+       _searchUpserts = searchUpserts,
+       _searchRemovals = searchRemovals;
 
   final WorkspaceStateCommitCoordinator _coordinator;
   final Object _preparedToken;
   final WorkspaceState _nextState;
   final WorkspaceCommitPhase? _forcedFailure;
+  final Map<String, VaultNoteContent> _searchUpserts;
+  final Set<String> _searchRemovals;
   Object? _appliedToken;
   bool _isApplied = false;
   bool _isPublished = false;
@@ -236,6 +274,7 @@ final class _PreparedWorkspaceStateMutation
       throw StateError('Forced workspace commit publish failure.');
     }
     _coordinator._publish(_appliedToken!);
+    _coordinator._emitSearchDelta(_searchUpserts, _searchRemovals);
     _isPublished = true;
   }
 }
@@ -253,3 +292,8 @@ String? _remappedSelection(
 }
 
 const Object _unset = Object();
+
+void _ignoreSearchDelta(
+  Map<String, VaultNoteContent> upserts,
+  Set<String> removals,
+) {}

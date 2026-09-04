@@ -11,47 +11,50 @@ import 'package:synapse/presentation/workspace/controller/workspace_search_coord
 
 void main() {
   group('WorkspaceSearchCoordinator', () {
-    test('serializes overlapping searches in invocation order', () async {
+    test('queries do not wait for background indexing', () async {
       final vault = MemoryVaultBackend(seedExampleData: false);
       await vault.createNote(parentPath: '', title: 'Alpha');
-      final index = _RecordingSearchIndex(blockSearch: true);
+      final index = _RecordingSearchIndex(blockIndexing: true);
       final coordinator = WorkspaceSearchCoordinator(index);
       addTearDown(coordinator.dispose);
 
-      final older = coordinator.searchVault(query: 'older', vault: vault);
-      await index.searchStarted.future;
-      final newer = coordinator.searchVault(query: 'newer', vault: vault);
-      await Future<void>.delayed(Duration.zero);
+      final indexing = coordinator.indexVault(vault: vault);
+      await index.indexStarted.future;
+      final results = await coordinator.searchVault(
+        query: 'query',
+        vault: vault,
+      );
 
-      expect(index.searchQueries, ['older']);
-
-      index.releaseSearch();
-      await older;
-      await newer;
-
-      expect(index.searchQueries, ['older', 'newer']);
+      expect(results, isEmpty);
+      expect(index.searchQueries, ['query']);
+      index.releaseIndexing();
+      await indexing;
     });
 
-    test('queued search begins on the replacement index', () async {
-      final vault = MemoryVaultBackend(seedExampleData: false);
-      await vault.createNote(parentPath: '', title: 'Alpha');
-      final oldIndex = _RecordingSearchIndex(blockSearch: true);
-      final replacement = _RecordingSearchIndex();
-      final coordinator = WorkspaceSearchCoordinator(oldIndex);
-      addTearDown(coordinator.dispose);
+    test(
+      'replacement invalidates in-flight search and serves later queries',
+      () async {
+        final vault = MemoryVaultBackend(seedExampleData: false);
+        await vault.createNote(parentPath: '', title: 'Alpha');
+        final oldIndex = _RecordingSearchIndex(blockSearch: true);
+        final replacement = _RecordingSearchIndex();
+        final coordinator = WorkspaceSearchCoordinator(oldIndex);
+        addTearDown(coordinator.dispose);
 
-      final invalidated = coordinator.searchVault(query: 'old', vault: vault);
-      await oldIndex.searchStarted.future;
-      final queued = coordinator.searchVault(query: 'new', vault: vault);
-      await Future<void>.delayed(Duration.zero);
-      coordinator.replaceIndex(replacement);
-      oldIndex.releaseSearch();
+        final invalidated = coordinator.searchVault(query: 'old', vault: vault);
+        await oldIndex.searchStarted.future;
+        coordinator.replaceIndex(replacement);
+        oldIndex.releaseSearch();
 
-      expect(await invalidated, isNull);
-      expect(await queued, isNotNull);
-      expect(oldIndex.searchQueries, ['old']);
-      expect(replacement.searchQueries, ['new']);
-    });
+        expect(await invalidated, isNull);
+        expect(
+          await coordinator.searchVault(query: 'new', vault: vault),
+          isNotNull,
+        );
+        expect(oldIndex.searchQueries, ['old']);
+        expect(replacement.searchQueries, ['new']);
+      },
+    );
 
     test(
       'restarts once when a note is renamed between list and read',
@@ -65,6 +68,7 @@ void main() {
         await coordinator.indexVault(vault: vault);
         vault.renameOnNextRead = true;
 
+        await coordinator.indexVault(vault: vault);
         final results = await coordinator.searchVault(
           query: 'Beta',
           vault: vault,
@@ -86,40 +90,37 @@ void main() {
         addTearDown(coordinator.dispose);
 
         await expectLater(
-          coordinator.searchVault(query: 'Alpha', vault: vault),
+          coordinator.indexVault(vault: vault),
           throwsA(same(error)),
         );
       },
     );
 
-    test('refreshes Vault inventory before each search', () async {
+    test('explicit reconciliation refreshes Vault inventory', () async {
       final vault = MemoryVaultBackend(seedExampleData: false);
       final index = _RecordingSearchIndex();
       final coordinator = WorkspaceSearchCoordinator(index);
       addTearDown(coordinator.dispose);
 
-      expect(
-        await coordinator.searchVault(query: 'external', vault: vault),
-        isEmpty,
-      );
+      await coordinator.indexVault(vault: vault);
       final note = await vault.createNote(parentPath: '', title: 'external');
 
-      await coordinator.searchVault(query: 'external', vault: vault);
+      await coordinator.indexVault(vault: vault);
 
       expect(index.indexedIds, [note.id]);
     });
 
-    test('refresh removes externally deleted notes before reading', () async {
+    test('explicit reconciliation removes externally deleted notes', () async {
       final vault = MemoryVaultBackend(seedExampleData: false);
       final note = await vault.createNote(parentPath: '', title: 'Alpha');
       final index = _RecordingSearchIndex();
       final coordinator = WorkspaceSearchCoordinator(index);
       addTearDown(coordinator.dispose);
 
-      await coordinator.searchVault(query: 'Alpha', vault: vault);
+      await coordinator.indexVault(vault: vault);
       await vault.deleteNote(note.id);
 
-      await coordinator.searchVault(query: 'Alpha', vault: vault);
+      await coordinator.indexVault(vault: vault);
 
       expect(index.removedIds, [note.id]);
     });
@@ -140,7 +141,7 @@ void main() {
         final first = WorkspaceSearchCoordinator(
           SqliteSearchCache(rootPath: root.path, aiProvider: MockAiProvider()),
         );
-        await first.searchVault(query: 'Persisted', vault: vault);
+        await first.indexVault(vault: vault);
         first.dispose();
         await vault.deleteNote(note.id);
 
@@ -151,6 +152,7 @@ void main() {
         final second = WorkspaceSearchCoordinator(reopenedIndex);
         addTearDown(second.dispose);
 
+        await second.indexVault(vault: vault);
         final results = await second.searchVault(
           query: 'Persisted',
           vault: vault,
@@ -175,11 +177,14 @@ void main() {
         final vault = MemoryVaultBackend(seedExampleData: false);
         await vault.createNote(parentPath: '', title: 'Persisted');
         final firstProvider = _CountingAiProvider();
-        final first = WorkspaceSearchCoordinator(
-          SqliteSearchCache(rootPath: root.path, aiProvider: firstProvider),
+        final firstIndex = SqliteSearchCache(
+          rootPath: root.path,
+          aiProvider: firstProvider,
         );
+        final first = WorkspaceSearchCoordinator(firstIndex);
 
         await first.indexVault(vault: vault);
+        await firstIndex.waitForSemanticIndexing();
         first.dispose();
         expect(firstProvider.embeddingCalls, 1);
 
@@ -271,12 +276,12 @@ void main() {
         final coordinator = WorkspaceSearchCoordinator(oldIndex);
         addTearDown(coordinator.dispose);
 
-        final search = coordinator.searchVault(query: 'Alpha', vault: vault);
+        final search = coordinator.indexVault(vault: vault);
         await oldIndex.indexStarted.future;
         coordinator.replaceIndex(replacement);
         oldIndex.releaseIndexing();
 
-        expect(await search, isNull);
+        expect(await search, isFalse);
         expect(replacement.indexedIds, isEmpty);
         expect(replacement.searchQueries, isEmpty);
       },

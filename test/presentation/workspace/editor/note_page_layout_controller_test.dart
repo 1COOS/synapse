@@ -21,7 +21,10 @@ void main() {
       markdown: '# 已修改',
     );
     controller.setOptions(
-      const NotePdfExportOptions(orientation: NotePdfOrientation.landscape),
+      const NotePdfExportOptions(
+        orientation: NotePdfOrientation.landscape,
+        bodyFontSizePoints: 15,
+      ),
     );
     await tester.pump(const Duration(seconds: 1));
 
@@ -33,6 +36,42 @@ void main() {
     expect(layouter.snapshots, hasLength(1));
     expect(layouter.snapshots.single.markdown, '# 已修改');
     expect(layouter.options.single.orientation, NotePdfOrientation.landscape);
+    expect(layouter.options.single.bodyFontSizePoints, 15);
+  });
+
+  testWidgets('font size changes invalidate active layout cache immediately', (
+    tester,
+  ) async {
+    final layouter = _ControlledLayouter();
+    final controller = NotePageLayoutController(layouter: layouter);
+    addTearDown(controller.dispose);
+    controller.setActive(true);
+
+    controller.bindSnapshot(_snapshot('# 字号'));
+    layouter.complete(0, _result(1));
+    await tester.pump();
+
+    controller.setOptions(
+      controller.options.copyWith(bodyFontSizePoints: 16.5),
+    );
+    expect(layouter.snapshots, hasLength(2));
+    expect(layouter.options.last.bodyFontSizePoints, 16.5);
+    layouter.complete(1, _result(2));
+    await tester.pump();
+
+    controller.setOptions(
+      controller.options.copyWith(bodyFontSizePoints: 16.5),
+    );
+    expect(layouter.snapshots, hasLength(2));
+
+    controller.setActive(false);
+    controller.setOptions(controller.options.copyWith(bodyFontSizePoints: 18));
+    await tester.pump(const Duration(seconds: 1));
+    expect(layouter.snapshots, hasLength(2));
+
+    controller.setActive(true);
+    expect(layouter.snapshots, hasLength(3));
+    expect(layouter.options.last.bodyFontSizePoints, 18);
   });
 
   testWidgets('debounces live edits and keeps only the latest document', (

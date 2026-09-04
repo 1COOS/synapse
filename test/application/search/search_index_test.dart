@@ -88,6 +88,76 @@ void main() {
         expect(results.single.id, 'doc-1');
         expect(results.single.reasons, [SearchMatchReason.fullText]);
       });
+
+      test(
+        '$implementation keeps full-text search available when embeddings fail',
+        () async {
+          final fixture = await _createIndex(
+            implementation,
+            aiProvider: _ThrowingEmbeddingAiProvider(),
+          );
+          addTearDown(fixture.dispose);
+
+          await fixture.index.indexDocument(
+            id: 'doc-1',
+            noteId: 'note-1.md',
+            title: 'Alpha',
+            text: '全文搜索目标',
+          );
+
+          final results = await fixture.index.search('全文搜索');
+
+          expect(results.single.id, 'doc-1');
+          expect(results.single.reasons, [SearchMatchReason.fullText]);
+        },
+      );
+
+      test(
+        '$implementation falls back when the query embedding fails',
+        () async {
+          final provider = _FailingQueryEmbeddingAiProvider();
+          final fixture = await _createIndex(
+            implementation,
+            aiProvider: provider,
+          );
+          addTearDown(fixture.dispose);
+
+          await fixture.index.indexDocument(
+            id: 'doc-1',
+            noteId: 'note-1.md',
+            title: 'Alpha',
+            text: '本地全文仍然可用',
+          );
+          provider.fail = true;
+
+          final results = await fixture.index.search('本地全文');
+
+          expect(results.single.id, 'doc-1');
+          expect(results.single.reasons, [SearchMatchReason.fullText]);
+        },
+      );
+
+      test(
+        '$implementation uses literal case-insensitive full-text matching',
+        () async {
+          final fixture = await _createIndex(
+            implementation,
+            aiProvider: _ThrowingEmbeddingAiProvider(),
+            semanticSearchEnabled: false,
+          );
+          addTearDown(fixture.dispose);
+
+          await fixture.index.indexDocument(
+            id: 'doc-1',
+            noteId: 'note-1.md',
+            title: 'Alpha Search',
+            text: '这里包含全文能力',
+          );
+
+          expect(await fixture.index.search('alpha'), hasLength(1));
+          expect(await fixture.index.search('全文搜索'), isEmpty);
+        },
+      );
     }
   });
 }
@@ -118,6 +188,36 @@ final class _ThrowingEmbeddingAiProvider implements AiProvider {
   @override
   Future<List<double>> createEmbedding(String text) {
     throw StateError('Embedding must not be called.');
+  }
+
+  @override
+  Future<String> createOutlineProposal({
+    required String noteTitle,
+    required String currentMarkdown,
+    required List<AiMaterial> materials,
+  }) {
+    throw UnimplementedError();
+  }
+
+  @override
+  Future<ImageExtraction> extractImageText({
+    required String filename,
+    required String mimeType,
+    required List<int> bytes,
+  }) {
+    throw UnimplementedError();
+  }
+}
+
+final class _FailingQueryEmbeddingAiProvider implements AiProvider {
+  bool fail = false;
+
+  @override
+  Future<List<double>> createEmbedding(String text) async {
+    if (fail) {
+      throw StateError('Query embedding failed.');
+    }
+    return const [1, 0];
   }
 
   @override

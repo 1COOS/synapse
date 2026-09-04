@@ -4,6 +4,15 @@ import 'package:synapse/domain/vault/vault_resource_name.dart';
 import 'package:synapse/infrastructure/vault/memory_vault_backend.dart';
 
 void main() {
+  test('emits explicitly reported external search changes', () async {
+    final backend = MemoryVaultBackend(seedExampleData: false);
+    final changed = backend.watchSearchRelevantChanges().first;
+
+    backend.notifySearchRelevantExternalChange();
+
+    await expectLater(changed, completes);
+  });
+
   test('creates nested folders and markdown notes without templates', () async {
     final backend = MemoryVaultBackend(seedExampleData: false);
     final folder = await backend.createFolder(parentPath: '', title: '读书');

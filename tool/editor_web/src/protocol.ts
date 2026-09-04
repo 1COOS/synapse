@@ -108,6 +108,12 @@ export type HostCommand =
       to: number;
       focus: boolean;
     }
+  | {
+      protocolVersion: number;
+      type: 'revealSearchHit';
+      from: number;
+      to: number;
+    }
   | ({ protocolVersion: number; type: 'setSearch' } & EditorSearchQuery)
   | {
       protocolVersion: number;

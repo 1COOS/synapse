@@ -1,6 +1,11 @@
 import 'dart:typed_data';
 
 const synapsePageBreakMarker = '<!-- synapse:page-break -->';
+const notePdfPointsPerLogicalPixel = 0.75;
+const defaultNotePdfBodyFontSizePoints = 10.5;
+
+double noteFontSizeToPdfPoints(double logicalPixels) =>
+    logicalPixels * notePdfPointsPerLogicalPixel;
 
 enum NotePdfOrientation { portrait, landscape }
 
@@ -79,20 +84,24 @@ final class NotePdfExportOptions {
     this.orientation = NotePdfOrientation.portrait,
     this.marginPreset = NotePdfMarginPreset.standard,
     this.footerEnabled = true,
-  });
+    this.bodyFontSizePoints = defaultNotePdfBodyFontSizePoints,
+  }) : assert(bodyFontSizePoints > 0);
 
   final NotePdfOrientation orientation;
   final NotePdfMarginPreset marginPreset;
   final bool footerEnabled;
+  final double bodyFontSizePoints;
 
   NotePdfExportOptions copyWith({
     NotePdfOrientation? orientation,
     NotePdfMarginPreset? marginPreset,
     bool? footerEnabled,
+    double? bodyFontSizePoints,
   }) => NotePdfExportOptions(
     orientation: orientation ?? this.orientation,
     marginPreset: marginPreset ?? this.marginPreset,
     footerEnabled: footerEnabled ?? this.footerEnabled,
+    bodyFontSizePoints: bodyFontSizePoints ?? this.bodyFontSizePoints,
   );
 
   @override
@@ -100,10 +109,12 @@ final class NotePdfExportOptions {
       other is NotePdfExportOptions &&
       other.orientation == orientation &&
       other.marginPreset == marginPreset &&
-      other.footerEnabled == footerEnabled;
+      other.footerEnabled == footerEnabled &&
+      other.bodyFontSizePoints == bodyFontSizePoints;
 
   @override
-  int get hashCode => Object.hash(orientation, marginPreset, footerEnabled);
+  int get hashCode =>
+      Object.hash(orientation, marginPreset, footerEnabled, bodyFontSizePoints);
 }
 
 final class NotePdfBuildResult {

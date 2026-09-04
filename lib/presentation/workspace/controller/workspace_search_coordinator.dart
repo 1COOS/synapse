@@ -1,6 +1,8 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:crypto/crypto.dart';
+import 'package:flutter/foundation.dart';
 
 import '../../../application/search/search_index.dart';
 import '../../../domain/markdown/markdown_document.dart';
@@ -12,12 +14,56 @@ final class WorkspaceSearchCoordinator {
 
   SearchIndex _index;
   final Map<String, String> _fingerprints = <String, String>{};
-  Future<void> _tail = Future<void>.value();
+  Future<void> _mutationTail = Future<void>.value();
   Future<bool>? _backgroundIndex;
+  StreamSubscription<void>? _changeSubscription;
+  Timer? _changeDebounce;
+  VaultBackend? _watchedVault;
+  VoidCallback? _onWatchedIndexChanged;
   int _generation = 0;
   bool _isDisposed = false;
 
-  bool get supportsBackgroundIndexing => _index is PersistentSearchIndex;
+  bool get supportsBackgroundIndexing =>
+      _index is GlobalSearchIndex || _index is PersistentSearchIndex;
+  bool get isIndexing => _backgroundIndex != null;
+
+  void watchVault(VaultBackend vault, {VoidCallback? onIndexChanged}) {
+    _ensureActive();
+    if (identical(_watchedVault, vault)) {
+      _onWatchedIndexChanged = onIndexChanged;
+      return;
+    }
+    _changeDebounce?.cancel();
+    unawaited(_changeSubscription?.cancel());
+    _watchedVault = vault;
+    _onWatchedIndexChanged = onIndexChanged;
+    final changeFeed = vault is VaultSearchChangeFeed
+        ? vault as VaultSearchChangeFeed
+        : null;
+    if (changeFeed == null) {
+      _changeSubscription = null;
+      return;
+    }
+    _changeSubscription = changeFeed.watchSearchRelevantChanges().listen(
+      (_) {
+        _changeDebounce?.cancel();
+        _changeDebounce = Timer(const Duration(milliseconds: 500), () {
+          if (!_isDisposed && identical(_watchedVault, vault)) {
+            unawaited(
+              indexVaultInBackground(vault: vault).then((changed) {
+                if (changed && !_isDisposed) _onWatchedIndexChanged?.call();
+              }, onError: (Object _, StackTrace _) {}),
+            );
+          }
+        });
+      },
+      onError: (Object _, StackTrace _) {
+        if (!_isDisposed && identical(_watchedVault, vault)) {
+          unawaited(indexVaultInBackground(vault: vault));
+        }
+      },
+    );
+  }
 
   Future<bool> indexVaultInBackground({required VaultBackend vault}) {
     _ensureActive();
@@ -44,7 +90,7 @@ final class WorkspaceSearchCoordinator {
 
   Future<bool> indexVault({required VaultBackend vault}) {
     _ensureActive();
-    return _enqueue(() {
+    return _enqueueMutation(() {
       if (_isDisposed) {
         return Future<bool>.value(false);
       }
@@ -54,37 +100,94 @@ final class WorkspaceSearchCoordinator {
     });
   }
 
+  Future<SearchResponse?> query(SearchQuery query) async {
+    _ensureActive();
+    final generation = _generation;
+    final index = _index;
+    final global = index is GlobalSearchIndex
+        ? index as GlobalSearchIndex
+        : null;
+    if (global == null) {
+      final legacy = await index.search(query.text);
+      if (!_isCurrent(generation, index)) return null;
+      return _legacyResponse(query, legacy);
+    }
+    final response = await global.query(query);
+    return _isCurrent(generation, index) ? response : null;
+  }
+
+  Future<SemanticIndexStatus> semanticStatus() async {
+    _ensureActive();
+    final index = _index;
+    final global = index is GlobalSearchIndex
+        ? index as GlobalSearchIndex
+        : null;
+    if (global == null) {
+      return const SemanticIndexStatus.disabled();
+    }
+    return global.semanticStatus();
+  }
+
+  Future<bool> upsertNote(VaultNoteContent note) {
+    _ensureActive();
+    return _enqueueMutation(() async {
+      if (_isDisposed) return false;
+      final generation = _generation;
+      final index = _index;
+      final global = index is GlobalSearchIndex
+          ? index as GlobalSearchIndex
+          : null;
+      final body = MarkdownDocument.parse(note.markdown).body.trimLeft();
+      final fingerprint = _searchFingerprint(note: note, body: body);
+      if (global != null) {
+        await global.upsertDocument(
+          _searchDocument(note: note, body: body, fingerprint: fingerprint),
+        );
+      } else {
+        await index.indexDocument(
+          id: note.id,
+          noteId: note.id,
+          title: note.title,
+          text: body,
+        );
+      }
+      if (!_isCurrent(generation, index)) return false;
+      _fingerprints[note.id] = fingerprint;
+      return true;
+    });
+  }
+
+  Future<bool> removeNote(String noteId) {
+    _ensureActive();
+    return _enqueueMutation(() async {
+      if (_isDisposed) return false;
+      final generation = _generation;
+      final index = _index;
+      final global = index is GlobalSearchIndex
+          ? index as GlobalSearchIndex
+          : null;
+      if (global != null) {
+        await global.removeNote(noteId);
+      } else {
+        await index.removeDocument(noteId);
+      }
+      if (!_isCurrent(generation, index)) return false;
+      _fingerprints.remove(noteId);
+      return true;
+    });
+  }
+
   Future<List<SearchResult>?> searchVault({
     required String query,
     required VaultBackend vault,
     String? noteId,
   }) {
     _ensureActive();
-    return _enqueue(() async {
-      if (_isDisposed) {
-        return null;
-      }
-      final generation = _generation;
-      final index = _index;
-      final indexed = await _indexVault(
-        vault: vault,
-        generation: generation,
-        index: index,
-      );
-      if (!indexed) {
-        return null;
-      }
-
-      try {
-        final results = await index.search(query, noteId: noteId);
-        return _isCurrent(generation, index) ? results : null;
-      } catch (_) {
-        if (!_isCurrent(generation, index)) {
-          return null;
-        }
-        rethrow;
-      }
-    });
+    final generation = _generation;
+    final index = _index;
+    return index
+        .search(query, noteId: noteId)
+        .then((results) => _isCurrent(generation, index) ? results : null);
   }
 
   void replaceIndex(SearchIndex replacement) {
@@ -95,6 +198,12 @@ final class WorkspaceSearchCoordinator {
     final previous = _index;
     _generation += 1;
     _backgroundIndex = null;
+    _changeDebounce?.cancel();
+    _changeDebounce = null;
+    unawaited(_changeSubscription?.cancel());
+    _changeSubscription = null;
+    _watchedVault = null;
+    _onWatchedIndexChanged = null;
     _index = replacement;
     _fingerprints.clear();
     previous.dispose();
@@ -107,6 +216,11 @@ final class WorkspaceSearchCoordinator {
     _isDisposed = true;
     _generation += 1;
     _backgroundIndex = null;
+    _changeDebounce?.cancel();
+    unawaited(_changeSubscription?.cancel());
+    _changeSubscription = null;
+    _watchedVault = null;
+    _onWatchedIndexChanged = null;
     _fingerprints.clear();
     _index.dispose();
   }
@@ -159,8 +273,18 @@ final class WorkspaceSearchCoordinator {
     final Set<String> indexedIds;
     final Map<String, String>? persistedFingerprints;
     try {
-      if (index is PersistentSearchIndex) {
-        persistedFingerprints = await index.documentFingerprints();
+      final global = index is GlobalSearchIndex
+          ? index as GlobalSearchIndex
+          : null;
+      if (global != null) {
+        persistedFingerprints = Map<String, String>.of(
+          await global.sourceFingerprints(),
+        );
+        indexedIds = persistedFingerprints.keys.toSet();
+      } else if (index is PersistentSearchIndex) {
+        persistedFingerprints = Map<String, String>.of(
+          await index.documentFingerprints(),
+        );
         indexedIds = persistedFingerprints.keys.toSet();
       } else {
         persistedFingerprints = null;
@@ -182,7 +306,14 @@ final class WorkspaceSearchCoordinator {
         return _IndexVaultOutcome.invalidated;
       }
       try {
-        await index.removeDocument(id);
+        final global = index is GlobalSearchIndex
+            ? index as GlobalSearchIndex
+            : null;
+        if (global != null) {
+          await global.removeNote(id);
+        } else {
+          await index.removeDocument(id);
+        }
       } catch (_) {
         if (!_isCurrent(generation, index)) {
           return _IndexVaultOutcome.invalidated;
@@ -221,7 +352,14 @@ final class WorkspaceSearchCoordinator {
         }
         if (indexedIds.contains(note.id)) {
           try {
-            await index.removeDocument(note.id);
+            final global = index is GlobalSearchIndex
+                ? index as GlobalSearchIndex
+                : null;
+            if (global != null) {
+              await global.removeNote(note.id);
+            } else {
+              await index.removeDocument(note.id);
+            }
           } catch (_) {
             if (!_isCurrent(generation, index)) {
               return _IndexVaultOutcome.invalidated;
@@ -243,8 +381,8 @@ final class WorkspaceSearchCoordinator {
         return _IndexVaultOutcome.invalidated;
       }
 
-      final body = MarkdownDocument.parse(loaded.markdown).body;
-      final fingerprint = _searchFingerprint(title: loaded.title, body: body);
+      final body = MarkdownDocument.parse(loaded.markdown).body.trimLeft();
+      final fingerprint = _searchFingerprint(note: loaded, body: body);
       final knownFingerprint =
           persistedFingerprints?[loaded.id] ?? _fingerprints[loaded.id];
       if (knownFingerprint == fingerprint && indexedIds.contains(loaded.id)) {
@@ -252,7 +390,14 @@ final class WorkspaceSearchCoordinator {
         continue;
       }
       try {
-        if (index is PersistentSearchIndex) {
+        final global = index is GlobalSearchIndex
+            ? index as GlobalSearchIndex
+            : null;
+        if (global != null) {
+          await global.upsertDocument(
+            _searchDocument(note: loaded, body: body, fingerprint: fingerprint),
+          );
+        } else if (index is PersistentSearchIndex) {
           await index.indexDocumentWithFingerprint(
             id: loaded.id,
             noteId: loaded.id,
@@ -304,9 +449,9 @@ final class WorkspaceSearchCoordinator {
     return _flattenNoteResources(resources).map((note) => note.id).toSet();
   }
 
-  Future<T> _enqueue<T>(Future<T> Function() operation) {
-    final result = _tail.then((_) => operation());
-    _tail = result.then<void>((_) {}, onError: (_, _) {});
+  Future<T> _enqueueMutation<T>(Future<T> Function() operation) {
+    final result = _mutationTail.then((_) => operation());
+    _mutationTail = result.then<void>((_) {}, onError: (_, _) {});
     return result;
   }
 
@@ -325,8 +470,80 @@ final class WorkspaceSearchCoordinator {
 
 enum _IndexVaultOutcome { completed, restart, invalidated }
 
-String _searchFingerprint({required String title, required String body}) {
-  return sha256.convert(utf8.encode('$title\u0000$body')).toString();
+String _searchFingerprint({
+  required VaultNoteContent note,
+  required String body,
+}) {
+  final materials = note.aiMaterials
+      .map(
+        (material) => [
+          material.id,
+          material.title,
+          material.searchableText,
+          material.processingState.name,
+          material.updatedAt.toUtc().toIso8601String(),
+        ].join('\u0000'),
+      )
+      .join('\u0001');
+  return sha256
+      .convert(
+        utf8.encode(
+          '${note.title}\u0000${note.path}\u0000$body\u0000$materials',
+        ),
+      )
+      .toString();
+}
+
+SearchDocument _searchDocument({
+  required VaultNoteContent note,
+  required String body,
+  required String fingerprint,
+}) {
+  return SearchDocument(
+    noteId: note.id,
+    noteTitle: note.title,
+    notePath: note.path,
+    markdownBody: body,
+    fingerprint: fingerprint,
+    aiMaterials: note.aiMaterials,
+  );
+}
+
+SearchResponse _legacyResponse(SearchQuery query, List<SearchResult> results) {
+  final groups = [
+    for (final result in results)
+      SearchGroup(
+        noteId: result.noteId,
+        noteTitle: result.title,
+        notePath: '',
+        totalHitCount: 1,
+        score: result.score,
+        hits: [
+          SearchHit(
+            id: result.id,
+            noteId: result.noteId,
+            sourceType: SearchSourceType.note,
+            sourceId: result.noteId,
+            noteTitle: result.title,
+            notePath: '',
+            sourceTitle: result.title,
+            headingPath: null,
+            snippet: result.text,
+            snippetMatches: const [],
+            sourceStart: null,
+            sourceEnd: null,
+            score: result.score,
+            reason: result.reasons.firstOrNull ?? SearchMatchReason.fullText,
+          ),
+        ],
+      ),
+  ];
+  return SearchResponse(
+    query: query,
+    groups: groups,
+    totalHitCount: groups.length,
+    semanticStatus: const SemanticIndexStatus.disabled(),
+  );
 }
 
 Iterable<VaultResourceNode> _flattenNoteResources(

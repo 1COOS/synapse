@@ -112,6 +112,7 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
       materials: _materials,
       readState: _requireState,
       publishState: _publishCommittedState,
+      publishSearchDelta: _scheduleSearchDelta,
       forcedFailure: _dependencies.workspaceCommitFailureForTesting,
     );
     _documents = WorkspaceDocumentCoordinator(
@@ -404,56 +405,166 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
   }
 
   Future<WorkspaceActionResult> search(String query) async {
+    final current = _requireState().searchSession.query;
+    return runSearch(current.copyWith(text: query));
+  }
+
+  void updateSearchQuery(SearchQuery query) {
+    final current = _requireState();
+    final queryIsEmpty = query.text.trim().isEmpty;
+    final normalized = current.searchSession.copyWith(
+      query: query,
+      phase: queryIsEmpty
+          ? SearchSessionPhase.idle
+          : current.searchSession.phase,
+      groups: queryIsEmpty ? const [] : current.searchSession.groups,
+      totalHitCount: queryIsEmpty ? 0 : current.searchSession.totalHitCount,
+      message: '',
+    );
+    _publish(
+      current.copyWith(
+        leftMode: WorkspaceLeftMode.search,
+        searchResults: queryIsEmpty ? const [] : current.searchResults,
+        searchSession: normalized,
+      ),
+    );
+  }
+
+  void clearSearch() {
+    _searchIntent += 1;
+    final current = _requireState();
+    _publish(
+      current.copyWith(
+        searchResults: const [],
+        searchSession: const SearchSessionState(),
+      ),
+    );
+  }
+
+  Future<WorkspaceActionResult> runSearch(SearchQuery query) async {
     if (_requireState().requiresMigration) {
       return WorkspaceActionResult.aborted;
     }
-    final normalized = query.trim();
-    if (normalized.isEmpty || _runtimeManager.current == null) {
+    final normalized = query.text.trim();
+    if (normalized.isEmpty) {
+      clearSearch();
       return WorkspaceActionResult.cancelled;
     }
-    final currentOperation = _requireState().activeOperation;
-    if (currentOperation != null &&
-        currentOperation != WorkspaceOperation.search) {
-      return WorkspaceActionResult.busy;
-    }
-    if (currentOperation == null) {
-      _beginOperation(WorkspaceOperation.search);
-    }
+    if (_runtimeManager.current == null) return WorkspaceActionResult.cancelled;
     final intent = ++_searchIntent;
+    final requested = query.copyWith(text: normalized);
+    final before = _requireState();
+    _publish(
+      before.copyWith(
+        leftMode: WorkspaceLeftMode.search,
+        searchSession: before.searchSession.copyWith(
+          query: requested,
+          phase: SearchSessionPhase.searching,
+          message: '',
+        ),
+      ),
+    );
     try {
       final capture = _runtimeManager.capture();
       if (capture == null) {
         return WorkspaceActionResult.cancelled;
       }
-      final results = await capture.runtime.searchCoordinator.searchVault(
-        query: normalized,
-        vault: capture.runtime.vault,
-      );
-      if (results == null ||
+      final response = await capture.runtime.searchCoordinator.query(requested);
+      if (response == null ||
           !_runtimeManager.isCurrent(capture) ||
           intent != _searchIntent) {
         return WorkspaceActionResult.aborted;
       }
       final current = _requireState();
+      final legacyResults = [
+        for (final group in response.groups)
+          if (group.hits.isNotEmpty)
+            SearchResult(
+              id: group.hits.first.id,
+              noteId: group.noteId,
+              title: group.noteTitle,
+              text: group.hits.first.snippet,
+              score: group.score,
+              reasons: [group.hits.first.reason],
+            ),
+      ];
       _publish(
         current.copyWith(
           leftMode: WorkspaceLeftMode.search,
-          searchResults: results,
-          message: _startup.semanticSearchEnabled
-              ? current.message
-              : _startup.semanticSearchFallbackMessage,
+          searchResults: legacyResults,
+          searchSession: SearchSessionState(
+            query: requested,
+            phase: SearchSessionPhase.ready,
+            groups: response.groups,
+            totalHitCount: response.totalHitCount,
+            semanticStatus: response.semanticStatus,
+          ),
         ),
       );
       return WorkspaceActionResult.committed;
     } catch (error) {
       if (intent == _searchIntent) {
-        _setMessage(error.toString());
+        final current = _requireState();
+        _publish(
+          current.copyWith(
+            searchSession: current.searchSession.copyWith(
+              query: requested,
+              phase: SearchSessionPhase.error,
+              message: error.toString(),
+            ),
+          ),
+        );
       }
       return WorkspaceActionResult.failed;
-    } finally {
-      if (intent == _searchIntent) {
-        _endOperation(WorkspaceOperation.search);
+    }
+  }
+
+  Future<WorkspaceActionResult> openSearchHit(
+    SearchHit hit, {
+    bool openInNewSplit = false,
+  }) async {
+    final currentOperation = _requireState().activeOperation;
+    if (currentOperation != null &&
+        currentOperation != WorkspaceOperation.editorCommand) {
+      return WorkspaceActionResult.busy;
+    }
+    final ownsOperation = currentOperation == null;
+    if (ownsOperation) _beginOperation(WorkspaceOperation.resourceMutation);
+    try {
+      if (!await _flushFocusedEditorSurface() ||
+          !await _flushFocusedSession()) {
+        return WorkspaceActionResult.aborted;
       }
+      final existing = _splits.panes
+          .where((pane) => pane.noteId == hit.noteId)
+          .firstOrNull;
+      if (openInNewSplit) {
+        _splits.splitFocused(SplitDirection.right);
+      } else if (existing != null) {
+        _splits.focus(existing.paneId);
+      }
+      final legacy = SearchResult(
+        id: hit.id,
+        noteId: hit.noteId,
+        title: hit.noteTitle,
+        text: hit.snippet,
+        score: hit.score,
+        reasons: [hit.reason],
+      );
+      final opened = await _resourceCoordinator.openSearchResult(
+        legacy,
+        resources: _requireState().resources,
+      );
+      return _applyResourceResult(
+        opened,
+        missingMessage: '搜索结果已失效：${hit.noteTitle}',
+        clearMaterialSelection: false,
+      );
+    } catch (error) {
+      _setMessage(error.toString());
+      return WorkspaceActionResult.failed;
+    } finally {
+      if (ownsOperation) _endOperation(WorkspaceOperation.resourceMutation);
     }
   }
 
@@ -481,6 +592,7 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
       return _applyResourceResult(
         opened,
         missingMessage: '搜索结果已失效：${result.title}',
+        clearMaterialSelection: false,
       );
     } catch (error) {
       _setMessage(error.toString());
@@ -929,7 +1041,7 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
         _setMessage('保存失败：$error');
         return null;
       }
-      return _captureNotePdfSnapshot(context, resolved.session.noteId);
+      return await _captureNotePdfSnapshot(context, resolved.session.noteId);
     } finally {
       _endOperation(WorkspaceOperation.pdfExport);
     }
@@ -1145,6 +1257,7 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
   WorkspaceActionResult _applyResourceResult(
     WorkspaceResourceResult result, {
     required String missingMessage,
+    bool clearMaterialSelection = true,
   }) {
     if (result is WorkspaceResourceStale) {
       return WorkspaceActionResult.aborted;
@@ -1163,7 +1276,9 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
     }
     _sessions.upsert(note);
     _materials.replaceProposals(note.id, snapshot.proposals);
-    _materials.clearSelection(note.id);
+    if (clearMaterialSelection) {
+      _materials.clearSelection(note.id);
+    }
     _splits.setPaneNote(_splits.focusedPaneId, note.id);
     _splits.setPaneMode(_splits.focusedPaneId, _startup.preferredNoteMode);
     final current = _requireState();
@@ -1228,6 +1343,7 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
         resources: current.resources,
         selectedResourceId: current.selectedResourceId,
         searchResults: current.searchResults,
+        searchSession: current.searchSession,
         materials: _materials.snapshots,
         splitRoot: _splits.root,
         focusedPaneId: _splits.focusedPaneId,
@@ -1317,9 +1433,45 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
     final indexing = runtime.searchCoordinator.indexVaultInBackground(
       vault: runtime.vault,
     );
+    runtime.searchCoordinator.watchVault(
+      runtime.vault,
+      onIndexChanged: _refreshActiveSearch,
+    );
+    final current = state.value;
+    if (current != null && current.searchSession.query.text.trim().isEmpty) {
+      _publish(
+        current.copyWith(
+          searchSession: current.searchSession.copyWith(
+            phase: SearchSessionPhase.indexing,
+          ),
+        ),
+      );
+    }
     unawaited(
       indexing.then<void>(
-        (_) {},
+        (_) async {
+          if (_isDisposed || !identical(_runtimeManager.current, runtime)) {
+            return;
+          }
+          final status = await runtime.searchCoordinator.semanticStatus();
+          if (_isDisposed || !identical(_runtimeManager.current, runtime)) {
+            return;
+          }
+          final latest = state.value;
+          if (latest == null) return;
+          if (latest.searchSession.query.text.trim().isEmpty) {
+            _publish(
+              latest.copyWith(
+                searchSession: latest.searchSession.copyWith(
+                  phase: SearchSessionPhase.idle,
+                  semanticStatus: status,
+                ),
+              ),
+            );
+          } else {
+            await runSearch(latest.searchSession.query);
+          }
+        },
         onError: (Object error, StackTrace stackTrace) {
           try {
             _dependencies.backgroundTaskErrorReporter(error, stackTrace);
@@ -1329,6 +1481,14 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
         },
       ),
     );
+  }
+
+  void _refreshActiveSearch() {
+    if (_isDisposed) return;
+    final query = state.value?.searchSession.query;
+    if (query != null && query.text.trim().isNotEmpty) {
+      unawaited(runSearch(query));
+    }
   }
 
   Future<VaultMigrationRequirement?> _inspectMigration(VaultBackend backend) {
@@ -1383,6 +1543,42 @@ final class WorkspaceController extends AsyncNotifier<WorkspaceState> {
   void _publishCommittedState(WorkspaceState next) {
     _resourceSnapshotToken = Object();
     _publish(next);
+  }
+
+  void _scheduleSearchDelta(
+    Map<String, VaultNoteContent> upsertedNotes,
+    Set<String> removedNoteIds,
+  ) {
+    final runtime = _runtimeManager.current;
+    if (_isDisposed || runtime == null || runtime.isDisposed) return;
+    unawaited(
+      Future<void>(() async {
+        for (final noteId in removedNoteIds) {
+          if (_isDisposed || !identical(_runtimeManager.current, runtime)) {
+            return;
+          }
+          await runtime.searchCoordinator.removeNote(noteId);
+        }
+        for (final note in upsertedNotes.values) {
+          if (_isDisposed || !identical(_runtimeManager.current, runtime)) {
+            return;
+          }
+          await runtime.searchCoordinator.upsertNote(note);
+        }
+        if (_isDisposed || !identical(_runtimeManager.current, runtime)) return;
+        final query = state.value?.searchSession.query;
+        if (query != null && query.text.trim().isNotEmpty) {
+          await runSearch(query);
+        }
+      }).catchError((Object error, StackTrace stackTrace) {
+        if (_isDisposed || runtime.isDisposed) return;
+        try {
+          _dependencies.backgroundTaskErrorReporter(error, stackTrace);
+        } catch (_) {
+          // Search synchronization failures do not invalidate Vault commits.
+        }
+      }),
+    );
   }
 
   VaultBackend _requireVault() =>

@@ -265,7 +265,7 @@ void main() {
       await tester.pump(const Duration(milliseconds: 1000));
       await tester.pump();
 
-      expect(find.byKey(Key('search-result-${note.id}')), findsNothing);
+      expect(find.byKey(Key('search-result-${note.id}')), findsOneWidget);
       expect(
         find.byKey(Key('proposal-${note.id}-title-rename-proposal')),
         findsOneWidget,

@@ -27,7 +27,7 @@ void main() {
     final longParagraph = List.generate(
       90,
       (index) =>
-          '第 ${index + 1} 句用于验证中文长段落能够按行自然跨页，并保持 11 pt 正文、1.5 倍行高和稳定的黑灰打印样式。',
+          '第 ${index + 1} 句用于验证中文长段落能够按行自然跨页，并保持阅读态 14 px 对应的 10.5 pt 正文、1.55 倍行高和稳定的黑灰打印样式。',
     ).join('');
     final code = List.generate(
       100,
@@ -48,11 +48,21 @@ void main() {
           '''
 # Synapse PDF 导出综合样例
 
-这是 **粗体**、*斜体*、~~删除线~~、==高亮==、[链接](https://example.com) 与常用符号：✓ ○ → ← ≤ ≥ ± × ÷ © ® ™。
+这是 **粗体**、*斜体语义*、~~删除线~~、==高亮==、[链接](https://example.com) 与常用符号：✓ ○ → ← ≤ ≥ ± × ÷ © ® ™。
+
+这是 **粗体中的 ~~删除线~~、==高亮== 与 `行内代码`**，用于验证嵌套格式不会被基础字号覆盖。
 
 > 引用内容用于验证黑灰打印样式，以及中文标点「」『』、顿号、破折号和省略号……。
 
 ## 嵌套列表与任务
+
+### 三级标题
+
+#### 四级标题
+
+##### 五级标题
+
+###### 六级标题
 
 - 一级项目
   - 二级项目
@@ -128,7 +138,7 @@ $tableRows
     );
     final result = await buildNotePdf(
       snapshot,
-      const NotePdfExportOptions(),
+      NotePdfExportOptions(bodyFontSizePoints: noteFontSizeToPdfPoints(14)),
       fonts,
     );
     final outputDirectory = Directory('output/pdf');

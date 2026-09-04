@@ -7,6 +7,10 @@ abstract interface class VaultMigrationBackend {
   Future<void> applyMigration();
 }
 
+abstract interface class VaultSearchChangeFeed {
+  Stream<void> watchSearchRelevantChanges();
+}
+
 abstract class VaultBackend {
   Future<T> runMutationTransaction<T>({
     required String label,

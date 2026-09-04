@@ -197,9 +197,9 @@ CodeMirror 是唯一正文编辑器：活动区域显示 Markdown marker，失�
 
 ### 6.4 PDF 导出管线
 
-`application/exports/note_pdf_export.dart` 定义 `NotePdfExportSnapshot`、`NotePdfExportOptions`、`NotePdfLayoutResult`、`NotePdfBuildResult`、`NotePdfPageBoundary`、结构化 warning，以及 page-layouter/exporter/rasterizer/file-saver ports。`NotePdfPageBoundary` 使用 Markdown UTF-16 offset 标识每个新 PDF 页面首个可见源码位置，并区分自动和手动分页。真实实现位于 `infrastructure/pdf/`：`DefaultNotePdfExporter` 的轻量 layout 与完整 build 在后台 isolate 共享同一套 Markdown renderer、字体、页面参数和绘制探针；layout 完成 `MultiPage` generate/post-process 但不序列化 PDF stream，图片只绘制等尺寸占位，build 才嵌入图片并输出字节。`PrintingNotePdfPreviewRasterizer` 按需将指定页栅格化，`PlatformNotePdfFileSaver` 继续通过 `file_selector` 保存。Noto Sans SC、JetBrains Mono、Noto Emoji 及其 OFL 许可证随应用 assets 离线打包，不允许运行时下载字体。
+`application/exports/note_pdf_export.dart` 定义 `NotePdfExportSnapshot`、`NotePdfExportOptions`、`NotePdfLayoutResult`、`NotePdfBuildResult`、`NotePdfPageBoundary`、结构化 warning，以及 page-layouter/exporter/rasterizer/file-saver ports。`NotePdfExportOptions.bodyFontSizePoints` 保存由当前阅读字号按 `1 logical px = 0.75 pt` 换算的正文纸面尺寸，并参与相等性、缓存键和分页；`NotePdfPageBoundary` 使用 Markdown UTF-16 offset 标识每个新 PDF 页面首个可见源码位置，并区分自动和手动分页。真实实现位于 `infrastructure/pdf/`：`DefaultNotePdfExporter` 的轻量 layout 与完整 build 在后台 isolate 共享同一套 Markdown renderer、字体、页面参数和绘制探针；layout 完成 `MultiPage` generate/post-process 但不序列化 PDF stream，图片只绘制等尺寸占位，build 才嵌入图片并输出字节。`PrintingNotePdfPreviewRasterizer` 按需将指定页栅格化，`PlatformNotePdfFileSaver` 继续通过 `file_selector` 保存。Noto Sans SC、JetBrains Mono、Noto Emoji 及其 OFL 许可证随应用 assets 离线打包，不允许运行时下载字体。
 
-窗格在 await 前捕获 `PaneEditorContext`，`prepareNotePdfExport` 先通过 `NoteSaveCoordinator.flush` 保存指定 session，再复制正文和图片附件得到不可变快照。flush 失败、中途 stale、workspace busy、迁移、`reloadRequired` 或 note lock 都不得进入生成。弹窗只持有快照和当前 preview bytes，并只允许切换方向；页边距和页脚状态继承 `WorkspacePreferences`。方向更新使用 generation token，过期 build 结果直接丢弃，缩略图按页懒加载并限制缓存；弹窗方向变化同时写回当前 pane 会话，取消弹窗不回滚。
+窗格在 await 前捕获 `PaneEditorContext`，`prepareNotePdfExport` 先通过 `NoteSaveCoordinator.flush` 保存指定 session，再复制正文和图片附件得到不可变快照。flush 失败、中途 stale、workspace busy、迁移、`reloadRequired` 或 note lock 都不得进入生成。弹窗只持有快照和当前 preview bytes，并只允许切换方向；页边距和页脚状态继承 `WorkspacePreferences`，正文 pt 字号来自当前 `WorkspaceAppearance.noteFontSize`。方向更新使用 generation token，过期 build 结果直接丢弃，缩略图按页懒加载并限制缓存；弹窗方向变化同时写回当前 pane 会话，取消弹窗不回滚。
 
 编辑态分页由 pane 级 `NotePageLayoutController` 驱动，但默认 inactive。pane-note 启用状态与 pane 方向分别保存在视图会话中；未启用时不创建排版任务、不调用 `captureNotePdfPreview`、不读取附件。用户点击标题栏“显示分页线”后，控制器才读取当前 session 正文和附件并立即执行轻量 layout。启用期间 `EditorDocumentHub` 把真实 `EditorChange` 同步给控制器，未受影响的旧边界立即按 UTF-16 transaction 投影，被替换范围内的边界隐藏；正文变化 400 ms 防抖后校准，方向、全局页边距、页脚和附件代次变化立即刷新。每个 pane 同时至多一个排版 flight，过期 flight 完成后只启动最新已稳定 key。
 
@@ -207,7 +207,7 @@ CodeMirror 是唯一正文编辑器：活动区域显示 Markdown marker，失�
 
 macOS CodeMirror 通过协议 v2 的 `setPageLayout` 接收 `pageIndex/sourceOffset` 和 stale 状态，在绝对 overlay 中结合主编辑器或双栏子编辑器坐标、scroll、viewport 与 geometry 更新位置；overlay 使用 `pointer-events: none` 和 `aria-hidden`。阅读态和无可写 surface 平台发送空布局。手动分页仍由现有分页符 block 显示，避免同一位置出现两条线，协议和显示层都不得修改 Markdown。
 
-导出器将 Markdown 转为独立打印块，不修改 Vault 数据模型。唯一新增正文契约是独占一行的 `<!-- synapse:page-break -->`；开头、结尾和连续标记折叠，fenced code 内保持字面量，`---` 继续解析为水平线。段落和长列表使用可跨页 RichText；代码块用逐行 table row 保证只在线之间分页；标题用 `NewPage(freeSpace: ...)` 防止孤立；普通表格按行分页并重复 header，超高行整表降级为可跨页字段布局；图片使用本地快照、等比 contain 和缺失占位。页眉按字体实际宽度省略标题；页脚开启时使用 `pageNumber / pagesCount`，关闭时不构建页脚并把原占用高度归还正文。编辑态边界和最终 PDF 始终来自同一套 A4、10/15/20 mm 页边距、方向与页脚参数。
+导出器将 Markdown 转为独立打印块，不修改 Vault 数据模型。唯一新增正文契约是独占一行的 `<!-- synapse:page-break -->`；开头、结尾和连续标记折叠，fenced code 内保持字面量，`---` 继续解析为水平线。正文、列表、引用、代码和表格共享阅读态换算后的基础字号与 1.55 倍行高，H1/H2/H3-H6 使用阅读态比例；粗体、删除线、高亮、链接与嵌套样式保留，浅色打印配色不跟随工作区主题。段落和长列表使用可跨页 RichText；代码块用逐行 table row 保证只在线之间分页；标题用 `NewPage(freeSpace: ...)` 防止孤立；普通表格按行分页并重复 header，超高行整表降级为可跨页字段布局；图片使用本地快照、等比 contain 和缺失占位。页眉按字体实际宽度省略标题；页脚开启时使用 `pageNumber / pagesCount`，关闭时不构建页脚并把原占用高度归还正文。编辑态边界和最终 PDF 始终来自同一套正文尺寸、A4、10/15/20 mm 页边距、方向与页脚参数。
 
 ### 6.5 File Vault mutation journal
 

@@ -416,6 +416,192 @@ void main() {
     session.dispose();
   });
 
+  testWidgets(
+    'CodeMirror keeps table cells focused through consecutive WebKit edits',
+    (tester) async {
+      const markdown =
+          '| A | B |\n'
+          '| --- | --- |\n'
+          '| 1 | 2 |\n\n'
+          '<!-- synapse:columns ratio="50:50" -->\n'
+          '| C | D |\n'
+          '| --- | --- |\n'
+          '| 3 | 4 |\n'
+          '<!-- synapse:column -->\n'
+          'Right\n'
+          '<!-- synapse:columns-end -->\n';
+      final session = _session(markdown);
+      final hub = EditorDocumentHub(session);
+      CodeMirrorDocumentSurfaceState? surface;
+
+      await tester.pumpWidget(
+        CupertinoApp(
+          home: SizedBox.expand(
+            child: CodeMirrorDocumentSurface(
+              paneId: 'pane-continuous-table-edit',
+              hub: hub,
+              mode: CodeMirrorDocumentMode.editing,
+              pageLayout: EditorPageLayout.empty,
+              focused: true,
+              enabled: true,
+              appearance: WorkspaceAppearance.defaults,
+              loadAttachment: (_) async => null,
+              onImageAction: (_) async {},
+              onPastedImage: (_) async {},
+              onCommandRequest: (_) async {},
+              onOutlineChanged: (_) {},
+              onFocusPane: () {},
+              onStateChanged: (state, attached) {
+                surface = attached ? state : null;
+              },
+            ),
+          ),
+        ),
+      );
+      await _pumpUntil(tester, () => surface?.debugReady == true);
+
+      Future<void> beginCell({required bool nested}) async {
+        expect(
+          await surface!.debugRunJavaScriptReturningResult('''
+            (() => {
+              const table = $nested
+                ? document.querySelector(
+                    '.synapse-column .synapse-table-frame table',
+                  )
+                : Array.from(document.querySelectorAll(
+                    '.synapse-table-frame table',
+                  )).find((candidate) => !candidate.closest('.synapse-column'));
+              const cell = table.querySelector(
+                'td .synapse-table-cell-editor',
+              );
+              const text = cell.firstChild ?? cell.appendChild(
+                document.createTextNode(''),
+              );
+              cell.focus({ preventScroll: true });
+              const selection = window.getSelection();
+              selection.setBaseAndExtent(
+                text,
+                text.textContent.length,
+                text,
+                text.textContent.length,
+              );
+              window.__synapseContinuousTable = table;
+              window.__synapseContinuousCell = cell;
+              window.__synapseContinuousScrollTop =
+                document.querySelector('.cm-scroller').scrollTop;
+              return document.activeElement === cell;
+            })()
+          '''),
+          isTrue,
+        );
+      }
+
+      Future<void> applyEdit({String? insert, bool delete = false}) async {
+        expect(insert != null || delete, isTrue);
+        expect(
+          await surface!.debugRunJavaScriptReturningResult('''
+            (() => {
+              const cell = window.__synapseContinuousCell;
+              const inputType = ${jsonEncode(delete ? 'deleteContentBackward' : 'insertText')};
+              const data = ${jsonEncode(delete ? null : insert)};
+              cell.dispatchEvent(new InputEvent('beforeinput', {
+                bubbles: true,
+                cancelable: true,
+                inputType,
+                data,
+              }));
+              const changed = ${delete ? "document.execCommand('delete')" : "document.execCommand('insertText', false, ${jsonEncode(insert)})"};
+              cell.dispatchEvent(new InputEvent('input', {
+                bubbles: true,
+                inputType,
+                data,
+              }));
+              document.body.tabIndex = -1;
+              document.body.focus({ preventScroll: true });
+              return changed;
+            })()
+          '''),
+          isTrue,
+        );
+        await surface!.flush();
+        await tester.pump(const Duration(milliseconds: 200));
+        final state =
+            jsonDecode(
+                  await surface!.debugRunJavaScriptReturningResult('''
+                (() => {
+                  const table = window.__synapseContinuousTable;
+                  const cell = window.__synapseContinuousCell;
+                  const scroller = document.querySelector('.cm-scroller');
+                  const selection = window.getSelection();
+                  return JSON.stringify({
+                    tableConnected: table.isConnected,
+                    cellConnected: cell.isConnected,
+                    focused: document.activeElement === cell,
+                    activeTag: document.activeElement?.tagName ?? null,
+                    activeClass: document.activeElement?.className ?? null,
+                    cellText: cell.textContent,
+                    sourceText: window.synapseTest.getText(),
+                    selectionNodeInside: cell.contains(selection?.focusNode),
+                    selectionOffset: selection?.focusOffset ?? null,
+                    scrollStable: Math.abs(
+                      scroller.scrollTop - window.__synapseContinuousScrollTop
+                    ) <= 1,
+                  });
+                })()
+              ''')
+                      as String,
+                )
+                as Map<String, Object?>;
+        expect(state['tableConnected'], isTrue, reason: '$state');
+        expect(state['cellConnected'], isTrue, reason: '$state');
+        expect(state['focused'], isTrue, reason: '$state');
+        expect(state['selectionNodeInside'], isTrue, reason: '$state');
+        expect(state['scrollStable'], isTrue, reason: '$state');
+      }
+
+      await beginCell(nested: false);
+      await applyEdit(insert: 'a');
+      await _pumpUntil(
+        tester,
+        () => session.controller.text.contains('| 1a | 2 |'),
+      );
+      await applyEdit(insert: 'b');
+      await _pumpUntil(
+        tester,
+        () => session.controller.text.contains('| 1ab | 2 |'),
+      );
+      await applyEdit(delete: true);
+      await _pumpUntil(
+        tester,
+        () => session.controller.text.contains('| 1a | 2 |'),
+      );
+
+      await beginCell(nested: true);
+      await applyEdit(insert: 'x');
+      await _pumpUntil(
+        tester,
+        () => session.controller.text.contains('| 3x | 4 |'),
+      );
+      await applyEdit(insert: 'y');
+      await _pumpUntil(
+        tester,
+        () => session.controller.text.contains('| 3xy | 4 |'),
+      );
+      await applyEdit(delete: true);
+      await _pumpUntil(
+        tester,
+        () => session.controller.text.contains('| 3x | 4 |'),
+      );
+
+      await surface!.debugRunJavaScriptReturningResult(
+        'document.activeElement?.blur(); true',
+      );
+      await tester.pumpWidget(const SizedBox.shrink());
+      hub.dispose();
+      session.dispose();
+    },
+  );
+
   testWidgets('CodeMirror loads and structurally selects local images', (
     tester,
   ) async {
@@ -1131,21 +1317,40 @@ void main() {
     }
 
     Future<void> expectCompositionSurfaceStable() async {
-      expect(
-        await surface!.debugRunJavaScriptReturningResult('''
+      final state =
+          jsonDecode(
+                await surface!.debugRunJavaScriptReturningResult('''
           (() => {
             const table = window.__synapseImeTable;
             const cell = table.querySelector(
               'td .synapse-table-cell-editor',
             );
             const scroller = document.querySelector('.cm-scroller');
-            return table.isConnected &&
-              document.activeElement === cell &&
-              Math.abs(scroller.scrollTop - window.__synapseImeScrollTop) <= 1;
+            const selection = window.getSelection();
+            return JSON.stringify({
+              tableConnected: table.isConnected,
+              focused: document.activeElement === cell,
+              activeTag: document.activeElement?.tagName ?? null,
+              activeClass: document.activeElement?.className ?? null,
+              cellText: cell.textContent,
+              selectionNodeInside: cell.contains(selection?.focusNode),
+              selectionOffset: selection?.focusOffset ?? null,
+              expectedScrollTop: window.__synapseImeScrollTop,
+              currentScrollTop: scroller.scrollTop,
+              scrollDelta:
+                scroller.scrollTop - window.__synapseImeScrollTop,
+              scrollStable: Math.abs(
+                scroller.scrollTop - window.__synapseImeScrollTop
+              ) <= 1,
+            });
           })()
-        '''),
-        isTrue,
-      );
+        ''')
+                    as String,
+              )
+              as Map<String, Object?>;
+      expect(state['tableConnected'], isTrue, reason: '$state');
+      expect(state['focused'], isTrue, reason: '$state');
+      expect(state['scrollStable'], isTrue, reason: '$state');
     }
 
     final regularStart = await beginComposition(

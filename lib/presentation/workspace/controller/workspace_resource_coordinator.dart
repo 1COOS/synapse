@@ -131,7 +131,7 @@ final class WorkspaceResourceCoordinator {
       final resources = refreshResources
           ? await _listResources(access)
           : const <VaultResourceNode>[];
-      return _loadNoteWithAccess(access, noteId, resources);
+      return await _loadNoteWithAccess(access, noteId, resources);
     } on _StaleRuntime {
       return const WorkspaceResourceStale();
     }
@@ -146,7 +146,7 @@ final class WorkspaceResourceCoordinator {
       return WorkspaceResourceMissing(resources: resources);
     }
     try {
-      return _loadNoteWithAccess(access, noteId, resources);
+      return await _loadNoteWithAccess(access, noteId, resources);
     } on _StaleRuntime {
       return const WorkspaceResourceStale();
     }

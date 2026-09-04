@@ -136,6 +136,9 @@ final class _FakeDocumentSurfaceState extends State<_FakeDocumentSurface>
   Future<void> revealRange(int from, int to, {bool focus = false}) async {}
 
   @override
+  Future<void> revealSearchHit(int from, int to) async {}
+
+  @override
   Future<void> setSearch(EditorSearchQuery query) async {}
 
   @override

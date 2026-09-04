@@ -251,6 +251,32 @@ function selectCellText(cell: HTMLElement, anchor: number, head: number): void {
   selection.addRange(range);
 }
 
+function editTableCellText(
+  cell: HTMLElement,
+  value: string,
+  inputType: string,
+  data: string | null,
+): void {
+  cell.dispatchEvent(new InputEvent('beforeinput', {
+    bubbles: true,
+    cancelable: true,
+    inputType,
+    data,
+  }));
+  cell.textContent = value;
+  selectCellText(cell, value.length, value.length);
+  cell.dispatchEvent(new InputEvent('input', {
+    bubbles: true,
+    inputType,
+    data,
+  }));
+}
+
+function moveFocusToTransientParent(): void {
+  document.body.tabIndex = -1;
+  document.body.focus();
+}
+
 function tableCell(row: number, column: number): HTMLElement {
   return document.querySelector<HTMLElement>(
     `.synapse-table-cell-editor[data-table-row="${row}"]`
@@ -873,6 +899,72 @@ describe('CodeMirror live preview', () => {
     expect(window.getSelection()!.focusNode).toBe(second.firstChild);
     expect(first.textContent).toBe('Edited');
     expect(window.synapseTest!.getText()).toContain('| Edited | 2 |');
+  });
+
+  it('keeps one table cell focused through consecutive insertions and deletion', async () => {
+    const markdown = '| A | B |\n| --- | --- |\n| 1 | 2 |\n\nAfter';
+    window.synapseHost!.receive(initialize(markdown, 'editing'));
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+
+    const table = document.querySelector<HTMLTableElement>(
+      '.synapse-table-frame table',
+    )!;
+    const cell = tableCell(1, 0);
+    selectCellText(cell, 1, 1);
+
+    const edit = async (
+      value: string,
+      inputType: string,
+      data: string | null,
+    ) => {
+      editTableCellText(cell, value, inputType, data);
+      moveFocusToTransientParent();
+      await new Promise((resolve) => window.setTimeout(resolve, 20));
+      expect(document.querySelector('.synapse-table-frame table')).toBe(table);
+      expect(document.activeElement).toBe(cell);
+      expect(window.getSelection()!.focusNode).toBe(cell.firstChild);
+      expect(window.getSelection()!.focusOffset).toBe(value.length);
+    };
+
+    await edit('1a', 'insertText', 'a');
+    expect(window.synapseTest!.getText()).toContain('| 1a | 2 |');
+    await edit('1ab', 'insertText', 'b');
+    expect(window.synapseTest!.getText()).toContain('| 1ab | 2 |');
+    await edit('1a', 'deleteContentBackward', null);
+    expect(window.synapseTest!.getText()).toContain('| 1a | 2 |');
+  });
+
+  it('keeps a nested table cell focused through consecutive edits', async () => {
+    const markdown = [
+      '<!-- synapse:columns ratio="50:50" -->',
+      '| A | B |',
+      '| --- | --- |',
+      '| 1 | 2 |',
+      '<!-- synapse:column -->',
+      'Right',
+      '<!-- synapse:columns-end -->',
+    ].join('\n');
+    window.synapseHost!.receive(initialize(markdown, 'editing'));
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+
+    const table = document.querySelector<HTMLTableElement>(
+      '.synapse-column .synapse-table-frame table',
+    )!;
+    const cell = table.querySelector<HTMLElement>(
+      'td .synapse-table-cell-editor',
+    )!;
+    selectCellText(cell, 1, 1);
+
+    for (const value of ['1a', '1ab']) {
+      editTableCellText(cell, value, 'insertText', value.at(-1)!);
+      moveFocusToTransientParent();
+      await new Promise((resolve) => window.setTimeout(resolve, 20));
+      expect(document.querySelector('.synapse-column .synapse-table-frame table'))
+        .toBe(table);
+      expect(document.activeElement).toBe(cell);
+      expect(window.getSelection()!.focusOffset).toBe(value.length);
+    }
+    expect(window.synapseTest!.getText()).toContain('| 1ab | 2 |');
   });
 
   it('flushes pending cell drafts before mode changes and structure commands', async () => {
@@ -2249,7 +2341,9 @@ describe('CodeMirror live preview', () => {
     const cell = table.querySelector<HTMLElement>(
       'td .synapse-table-cell-editor',
     )!;
+    const scroller = document.querySelector<HTMLElement>('.cm-scroller')!;
     cell.focus();
+    scroller.scrollTop = 120;
     const processKey = webKitCompositionKey('Enter', { keyCode: 229 });
     cell.dispatchEvent(processKey);
     expect(processKey.defaultPrevented).toBe(false);
@@ -2260,6 +2354,7 @@ describe('CodeMirror live preview', () => {
       data: '',
     }));
     cell.textContent = 'zhongwen';
+    scroller.scrollTop = 312;
     cell.dispatchEvent(compositionInput('zhongwen', {
       composing: true,
       inputType: 'insertCompositionText',
@@ -2277,6 +2372,7 @@ describe('CodeMirror live preview', () => {
     expect(document.querySelector('.synapse-table-frame table')).toBe(table);
     expect(document.activeElement).toBe(cell);
     expect(cell.textContent).toBe('zhongwen');
+    expect(scroller.scrollTop).toBe(120);
     expect(window.synapseTest!.getText()).toBe(markdown);
     expect(
       messages.filter((message) => message.type === 'transaction'),
@@ -2288,6 +2384,7 @@ describe('CodeMirror live preview', () => {
     }));
 
     cell.textContent = '中文输入';
+    scroller.scrollTop = 280;
     cell.dispatchEvent(new CompositionEvent('compositionend', {
       bubbles: true,
       data: '中文输入',
@@ -2300,6 +2397,7 @@ describe('CodeMirror live preview', () => {
 
     expect(document.querySelector('.synapse-table-frame table')).toBe(table);
     expect(document.activeElement).toBe(cell);
+    expect(scroller.scrollTop).toBe(120);
     expect(window.synapseTest!.getText()).toContain('| 中文输入 | 2 |');
     expect(window.synapseTest!.getText()).not.toContain('zhongwen');
     const transactions = messages.filter(
@@ -2331,11 +2429,14 @@ describe('CodeMirror live preview', () => {
     const cell = table.querySelector<HTMLElement>(
       'td .synapse-table-cell-editor',
     )!;
+    const scroller = document.querySelector<HTMLElement>('.cm-scroller')!;
     cell.focus();
+    scroller.scrollTop = 240;
     cell.dispatchEvent(new CompositionEvent('compositionstart', {
       bubbles: true,
     }));
     cell.textContent = 'zhongwen';
+    scroller.scrollTop = 432;
     cell.dispatchEvent(compositionInput('zhongwen', {
       composing: true,
       inputType: 'insertCompositionText',
@@ -2344,10 +2445,12 @@ describe('CodeMirror live preview', () => {
 
     expect(window.synapseTest!.getText()).toBe(markdown);
     expect(document.activeElement).toBe(cell);
+    expect(scroller.scrollTop).toBe(240);
     expect(document.querySelector('.synapse-column .synapse-table-frame table'))
       .toBe(table);
 
     cell.textContent = '中文输入';
+    scroller.scrollTop = 400;
     cell.dispatchEvent(new CompositionEvent('compositionend', {
       bubbles: true,
       data: '中文输入',
@@ -2361,6 +2464,7 @@ describe('CodeMirror live preview', () => {
     expect(window.synapseTest!.getText()).toContain('| 中文输入 | 2 |');
     expect(window.synapseTest!.getText()).not.toContain('zhongwen');
     expect(document.activeElement).toBe(cell);
+    expect(scroller.scrollTop).toBe(240);
     expect(document.querySelector('.synapse-column .synapse-table-frame table'))
       .toBe(table);
   });
@@ -2516,6 +2620,22 @@ describe('CodeMirror live preview', () => {
     expect(window.synapseTest!.getText()).toBe('Omega Omega Omega');
     expect(window.synapseTest!.undo()).toBe(true);
     expect(window.synapseTest!.getText()).toBe('Alpha alpha Alpha');
+  });
+
+  it('reveals a global search hit without opening local find', async () => {
+    window.synapseHost!.receive(initialize('Alpha Beta Gamma', 'reading'));
+    window.synapseHost!.receive({
+      protocolVersion: 2,
+      type: 'revealSearchHit',
+      from: 6,
+      to: 10,
+    });
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+
+    expect(document.querySelectorAll('.synapse-global-search-hit')).toHaveLength(1);
+    expect(document.querySelectorAll('.synapse-search-match')).toHaveLength(0);
+    expect(window.synapseTest!.getSelection()).toEqual({ anchor: 6, head: 6 });
+    expect(window.synapseTest!.getText()).toBe('Alpha Beta Gamma');
   });
 
   it('projects CodeMirror search highlights into both column subviews', async () => {

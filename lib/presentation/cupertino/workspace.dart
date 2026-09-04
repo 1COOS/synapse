@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../application/search/search_index.dart';
@@ -11,6 +12,7 @@ import '../workspace/editor/codemirror/document_surface.dart';
 import '../workspace/editor/codemirror/document_surface_factory.dart';
 import '../workspace/editor/pane_editor_context.dart';
 import '../workspace/outline_navigation.dart';
+import '../workspace/search_navigation.dart';
 import '../workspace/state/note_document_session.dart';
 import '../workspace/state/split_workspace_controller.dart';
 import 'browser_context_menu_guard.dart';
@@ -58,7 +60,9 @@ class SynapseWorkspace extends ConsumerStatefulWidget {
 
 class _SynapseWorkspaceState extends ConsumerState<SynapseWorkspace> {
   final _searchController = TextEditingController();
+  final _searchFocusNode = FocusNode(debugLabel: 'workspace-global-search');
   final _outlineNavigationController = WorkspaceOutlineNavigationController();
+  final _searchNavigationController = WorkspaceSearchNavigationController();
   final _contextMenuCoordinator = WorkspaceContextMenuCoordinator();
   bool _openingSettings = false;
 
@@ -72,7 +76,6 @@ class _SynapseWorkspaceState extends ConsumerState<SynapseWorkspace> {
 
   List<VaultResourceNode> get _resources => _workspace.resources;
   VaultResourceNode? get _selectedResource => _workspace.selectedResource;
-  List<SearchResult> get _searchResults => _workspace.searchResults;
   Set<String> get _collapsedFolderIds => _workspace.collapsedFolderIds;
   bool get _busy => _workspace.isBusy;
   bool get _autoSaving => _workspace.isAutoSaving;
@@ -150,7 +153,9 @@ class _SynapseWorkspaceState extends ConsumerState<SynapseWorkspace> {
   @override
   void dispose() {
     _searchController.dispose();
+    _searchFocusNode.dispose();
     _outlineNavigationController.dispose();
+    _searchNavigationController.dispose();
     _contextMenuCoordinator.dispose();
     super.dispose();
   }
@@ -362,12 +367,17 @@ class _SynapseWorkspaceState extends ConsumerState<SynapseWorkspace> {
     );
   }
 
-  Future<void> _search() async {
-    await _controller.search(_searchController.text);
-  }
-
-  Future<void> _openSearchResult(SearchResult result) async {
-    await _controller.openSearchResult(result);
+  Future<void> _openSearchHit(SearchHit hit, bool openInNewSplit) async {
+    final result = await _controller.openSearchHit(
+      hit,
+      openInNewSplit: openInNewSplit,
+    );
+    if (!mounted || result != WorkspaceActionResult.committed) return;
+    if (hit.sourceType == SearchSourceType.aiMaterial) {
+      _controller.setRightPaneCollapsed(false);
+      _controller.setRightTab(WorkspaceRightTab.ai);
+    }
+    _searchNavigationController.reveal(hit);
   }
 
   Future<void> _openSettings() async {
@@ -510,47 +520,67 @@ class _SynapseWorkspaceState extends ConsumerState<SynapseWorkspace> {
   }
 
   Widget _buildWorkspace(BuildContext context) {
-    return WorkspaceAppearanceScope(
-      appearance: _workspaceAppearance,
-      child: Stack(
-        children: [
-          CupertinoPageScaffold(
-            backgroundColor: workspaceBackgroundColor,
-            child: SafeArea(
-              top: false,
-              bottom: false,
-              child: LayoutBuilder(
-                builder: (context, constraints) {
-                  final narrow = constraints.maxWidth < 900;
-                  return Column(
-                    children: [
-                      WorkspaceChromeTitlebar(
-                        workspace: _workspace,
-                        controller: _controller,
-                        narrow: narrow,
-                        usesNativeMacTitlebar: _usesNativeMacTitlebar,
-                        onOpenSettings: _openSettings,
-                      ),
-                      Expanded(
-                        child: narrow
-                            ? _buildNarrowLayout()
-                            : _buildWideLayout(),
-                      ),
-                    ],
-                  );
-                },
+    return CallbackShortcuts(
+      bindings: {
+        const SingleActivator(LogicalKeyboardKey.keyF, meta: true, shift: true):
+            _focusGlobalSearch,
+        const SingleActivator(
+          LogicalKeyboardKey.keyF,
+          control: true,
+          shift: true,
+        ): _focusGlobalSearch,
+      },
+      child: WorkspaceAppearanceScope(
+        appearance: _workspaceAppearance,
+        child: Stack(
+          children: [
+            CupertinoPageScaffold(
+              backgroundColor: workspaceBackgroundColor,
+              child: SafeArea(
+                top: false,
+                bottom: false,
+                child: LayoutBuilder(
+                  builder: (context, constraints) {
+                    final narrow = constraints.maxWidth < 900;
+                    return Column(
+                      children: [
+                        WorkspaceChromeTitlebar(
+                          workspace: _workspace,
+                          controller: _controller,
+                          narrow: narrow,
+                          usesNativeMacTitlebar: _usesNativeMacTitlebar,
+                          onOpenSettings: _openSettings,
+                        ),
+                        Expanded(
+                          child: narrow
+                              ? _buildNarrowLayout()
+                              : _buildWideLayout(),
+                        ),
+                      ],
+                    );
+                  },
+                ),
               ),
             ),
-          ),
-          if (_openingSettings)
-            const Positioned.fill(
-              child: IgnorePointer(
-                child: Center(child: CupertinoActivityIndicator()),
+            if (_openingSettings)
+              const Positioned.fill(
+                child: IgnorePointer(
+                  child: Center(child: CupertinoActivityIndicator()),
+                ),
               ),
-            ),
-        ],
+          ],
+        ),
       ),
     );
+  }
+
+  void _focusGlobalSearch() {
+    _controller.setLeftPaneCollapsed(false);
+    _controller.setLeftMode(WorkspaceLeftMode.search);
+    _controller.setNarrowSection(WorkspaceSection.resources);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _searchFocusNode.requestFocus();
+    });
   }
 
   Widget _buildWideLayout() {
@@ -699,40 +729,20 @@ class _SynapseWorkspaceState extends ConsumerState<SynapseWorkspace> {
   }
 
   Widget _buildSearchPane() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        WorkspaceSearchField(
-          textFieldKey: const Key('workspace-search-field'),
-          submitButtonKey: const Key('workspace-search-submit-button'),
-          controller: _searchController,
-          busy: _busy || _autoSaving || !_hasVault || _migrationRequired,
-          onSearch: _search,
-        ),
-        const SizedBox(height: 12),
-        if (!_hasVault)
-          Expanded(
-            child: VaultLocationEmptyState(
-              onChooseVault: _busy ? null : _chooseVault,
-            ),
-          )
-        else if (_searchResults.isEmpty)
-          const Expanded(child: EmptyState(text: '输入关键词搜索整个仓库'))
-        else
-          Expanded(
-            child: ListView(
-              padding: EdgeInsets.zero,
-              children: [
-                for (final result in _searchResults)
-                  WorkspaceSearchResultRow(
-                    key: Key('search-result-${result.noteId}'),
-                    result: result,
-                    onTap: () => _openSearchResult(result),
-                  ),
-              ],
-            ),
-          ),
-      ],
+    if (!_hasVault) {
+      return VaultLocationEmptyState(
+        onChooseVault: _busy ? null : _chooseVault,
+      );
+    }
+    return WorkspaceSearchPane(
+      controller: _searchController,
+      fieldFocusNode: _searchFocusNode,
+      session: _workspace.searchSession,
+      busy: _busy || _autoSaving || _migrationRequired,
+      onQueryChanged: _controller.updateSearchQuery,
+      onSearch: (query) => unawaited(_controller.runSearch(query)),
+      onOpenHit: (hit, openInNewSplit) =>
+          unawaited(_openSearchHit(hit, openInNewSplit)),
     );
   }
 
@@ -963,6 +973,7 @@ class _SynapseWorkspaceState extends ConsumerState<SynapseWorkspace> {
       workspace: _workspace,
       controller: _controller,
       outlineNavigationController: _outlineNavigationController,
+      searchNavigationController: _searchNavigationController,
       documentSurfaceFactory: widget.documentSurfaceFactory,
       contextMenuCoordinator: _contextMenuCoordinator,
     );
@@ -975,6 +986,7 @@ class _SynapseWorkspaceState extends ConsumerState<SynapseWorkspace> {
     return WorkspaceSourcesPane(
       workspace: _workspace,
       controller: _controller,
+      searchNavigationController: _searchNavigationController,
       onDeleteSource: _deleteSource,
       onDeleteSources: _deleteSources,
       onDeleteAttachments: _deleteAttachments,

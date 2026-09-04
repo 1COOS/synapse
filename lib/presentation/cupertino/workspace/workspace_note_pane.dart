@@ -8,6 +8,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path/path.dart' as p;
 
+import '../../../application/search/search_index.dart';
 import '../../../application/exports/note_pdf_export.dart';
 import '../../../domain/markdown/markdown_columns.dart';
 import '../../../domain/markdown/markdown_document.dart';
@@ -27,6 +28,7 @@ import '../../workspace/editor/note_find_panel.dart';
 import '../../workspace/editor/note_page_layout_controller.dart';
 import '../../workspace/editor/pane_editor_context.dart';
 import '../../workspace/outline_navigation.dart';
+import '../../workspace/search_navigation.dart';
 import '../../workspace/state/note_document_session.dart';
 import '../../workspace/state/split_workspace_controller.dart';
 import 'workspace_controls.dart';
@@ -43,6 +45,7 @@ final class WorkspaceNotePane extends ConsumerStatefulWidget {
     required this.workspace,
     required this.controller,
     required this.outlineNavigationController,
+    required this.searchNavigationController,
     required this.contextMenuCoordinator,
     this.documentSurfaceFactory = const PlatformDocumentSurfaceFactory(),
   });
@@ -50,6 +53,7 @@ final class WorkspaceNotePane extends ConsumerStatefulWidget {
   final WorkspaceState workspace;
   final WorkspaceController controller;
   final WorkspaceOutlineNavigationController outlineNavigationController;
+  final WorkspaceSearchNavigationController searchNavigationController;
   final WorkspaceContextMenuCoordinator contextMenuCoordinator;
   final DocumentSurfaceFactory documentSurfaceFactory;
 
@@ -80,6 +84,7 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
   _pageLayoutDocumentListeners = {};
   var _paneStatePruneScheduled = false;
   Future<PaneEditorCommandOutcome>? _pasteIntoNoteOperation;
+  int? _lastSearchNavigationSerial;
 
   WorkspaceController get _controller => widget.controller;
   WorkspaceState get _workspace => widget.workspace;
@@ -114,6 +119,7 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
   void initState() {
     super.initState();
     widget.contextMenuCoordinator.register(this, _dismissFlutterContextMenus);
+    widget.searchNavigationController.addListener(_handleSearchNavigation);
   }
 
   @override
@@ -125,6 +131,17 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
     )) {
       oldWidget.contextMenuCoordinator.unregister(this);
       widget.contextMenuCoordinator.register(this, _dismissFlutterContextMenus);
+    }
+    if (!identical(
+      oldWidget.searchNavigationController,
+      widget.searchNavigationController,
+    )) {
+      oldWidget.searchNavigationController.removeListener(
+        _handleSearchNavigation,
+      );
+      widget.searchNavigationController.addListener(_handleSearchNavigation);
+      _lastSearchNavigationSerial = null;
+      _handleSearchNavigation();
     }
   }
 
@@ -140,6 +157,7 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
 
   @override
   void dispose() {
+    widget.searchNavigationController.removeListener(_handleSearchNavigation);
     widget.contextMenuCoordinator.unregister(this);
     for (final surface in _codeMirrorEditorStates.values) {
       widget.contextMenuCoordinator.unregister(surface);
@@ -166,6 +184,49 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
       hub.dispose();
     }
     super.dispose();
+  }
+
+  void _handleSearchNavigation() {
+    final request = widget.searchNavigationController.request;
+    if (request == null ||
+        request.serial == _lastSearchNavigationSerial ||
+        request.hit.sourceType != SearchSourceType.note ||
+        request.hit.sourceStart == null ||
+        request.hit.sourceEnd == null) {
+      return;
+    }
+    final candidates = _splitWorkspaceController.panes
+        .where((pane) => pane.noteId == request.hit.noteId)
+        .toList();
+    if (candidates.isEmpty) return;
+    final target = candidates.firstWhere(
+      (pane) => pane.paneId == _splitWorkspaceController.focusedPaneId,
+      orElse: () => candidates.first,
+    );
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final surface = _codeMirrorEditorStates[target.paneId];
+      if (surface != null) {
+        _lastSearchNavigationSerial = request.serial;
+        unawaited(
+          surface.revealSearchHit(
+            request.hit.sourceStart!,
+            request.hit.sourceEnd!,
+          ),
+        );
+        return;
+      }
+      final session = _noteSessionRegistry.sessionFor(request.hit.noteId);
+      if (session != null) {
+        _lastSearchNavigationSerial = request.serial;
+        session.setSelectionProgrammatically(
+          TextSelection(
+            baseOffset: request.hit.sourceStart!,
+            extentOffset: request.hit.sourceEnd!,
+          ),
+        );
+      }
+    });
   }
 
   @override
@@ -309,6 +370,9 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
         orientation: _pageLayoutOrientationFor(pane.paneId),
         marginPreset: _workspace.preferences.pdfMarginPreset,
         footerEnabled: _workspace.preferences.pdfFooterEnabled,
+        bodyFontSizePoints: noteFontSizeToPdfPoints(
+          _workspaceAppearance.noteFontSize,
+        ),
       ),
     );
     _bindPageLayoutDocument(pane, session, controller);
@@ -392,6 +456,9 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
           controller.options.copyWith(
             marginPreset: _workspace.preferences.pdfMarginPreset,
             footerEnabled: _workspace.preferences.pdfFooterEnabled,
+            bodyFontSizePoints: noteFontSizeToPdfPoints(
+              _workspaceAppearance.noteFontSize,
+            ),
           ),
         );
         return;
@@ -401,6 +468,9 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
           orientation: _pageLayoutOrientationFor(paneId),
           marginPreset: _workspace.preferences.pdfMarginPreset,
           footerEnabled: _workspace.preferences.pdfFooterEnabled,
+          bodyFontSizePoints: noteFontSizeToPdfPoints(
+            _workspaceAppearance.noteFontSize,
+          ),
         ),
       );
       controller.updateDocument(
@@ -852,6 +922,9 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
       orientation: _pageLayoutOrientationFor(pane.paneId),
       marginPreset: _workspace.preferences.pdfMarginPreset,
       footerEnabled: _workspace.preferences.pdfFooterEnabled,
+      bodyFontSizePoints: noteFontSizeToPdfPoints(
+        _workspaceAppearance.noteFontSize,
+      ),
     );
     await showCupertinoDialog<void>(
       context: context,
@@ -1583,6 +1656,7 @@ final class _WorkspaceNotePaneState extends ConsumerState<WorkspaceNotePane> {
             flush: state.flush,
           );
           _syncCodeMirrorSearch(pane.paneId, findController);
+          _handleSearchNavigation();
         } else if (identical(_codeMirrorEditorStates[pane.paneId], state)) {
           _codeMirrorEditorStates.remove(pane.paneId);
           widget.contextMenuCoordinator.unregister(state);
@@ -2066,6 +2140,7 @@ final class _SplitWorkspaceView {
   SplitNode get root => state.splitRoot;
   String get focusedPaneId => state.focusedPaneId;
   SplitLeaf? get focusedPane => pane(focusedPaneId);
+  Iterable<SplitLeaf> get panes => _splitPanes(root);
   SplitLeaf? pane(String paneId) => _findSplitLeaf(root, paneId);
   void setPaneMode(String paneId, NoteMode mode) =>
       controller.setPaneMode(paneId, mode);
@@ -2099,4 +2174,14 @@ Set<String> _splitPaneIds(SplitNode node) {
       ..._splitPaneIds(branch.second),
     },
   };
+}
+
+Iterable<SplitLeaf> _splitPanes(SplitNode node) sync* {
+  switch (node) {
+    case final SplitLeaf leaf:
+      yield leaf;
+    case final SplitBranch branch:
+      yield* _splitPanes(branch.first);
+      yield* _splitPanes(branch.second);
+  }
 }

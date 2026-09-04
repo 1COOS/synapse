@@ -51,6 +51,18 @@ void main() {
     expect(File('${root.path}/读书/佛学/心经.md').existsSync(), isTrue);
   });
 
+  test('emits search-relevant changes for external markdown edits', () async {
+    final backend = FileVaultBackend(root.path);
+    final note = await backend.createNote(parentPath: '', title: 'Watch');
+    final changed = backend.watchSearchRelevantChanges().first.timeout(
+      const Duration(seconds: 3),
+    );
+
+    await File(note.markdownPath).writeAsString('# Watch\nexternal change');
+
+    await expectLater(changed, completes);
+  });
+
   test('uses the visible first heading as the note title', () async {
     final backend = FileVaultBackend(root.path);
     final note = await backend.createNote(parentPath: '', title: '文件名标题');
