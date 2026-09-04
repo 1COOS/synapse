@@ -569,13 +569,27 @@ final class _MarkdownPdfRenderer {
 
   List<pw.Widget> _heading(md.Element element) {
     final level = int.tryParse(element.tag.substring(1)) ?? 1;
-    final fontSize = switch (level) {
-      1 => bodyFontSizePoints * 20 / 14,
-      2 => bodyFontSizePoints * 17 / 14,
-      _ => bodyFontSizePoints * 15 / 14,
+    final scale = switch (level) {
+      1 => 2.0,
+      2 => 1.7,
+      3 => 1.45,
+      4 => 1.25,
+      5 => 1.1,
+      _ => 1.0,
     };
+    final fontSize = bodyFontSizePoints * scale;
     final top = level <= 2 ? 14.0 : 10.0;
     final bottom = level <= 2 ? 7.0 : 5.0;
+    final headingStyle = _bodyStyle(
+      fontSize: fontSize,
+      height: switch (level) {
+        1 => 1.35,
+        2 => 1.4,
+        _ => 1.45,
+      },
+      bold: true,
+      color: PdfColors.grey900,
+    );
     return [
       pw.NewPage(freeSpace: fontSize * 1.35 + 36),
       pw.Padding(
@@ -583,17 +597,11 @@ final class _MarkdownPdfRenderer {
         child: pw.RichText(
           overflow: pw.TextOverflow.span,
           text: pw.TextSpan(
-            style: _bodyStyle(
-              fontSize: fontSize,
-              height: switch (level) {
-                1 => 1.35,
-                2 => 1.4,
-                _ => 1.45,
-              },
-              bold: true,
-              color: PdfColors.grey900,
+            style: headingStyle,
+            children: _inlineSpans(
+              element.children ?? const [],
+              inherited: headingStyle,
             ),
-            children: _inlineSpans(element.children ?? const []),
           ),
         ),
       ),
@@ -845,14 +853,19 @@ final class _MarkdownPdfRenderer {
             );
       final cells = <pw.Widget>[];
       for (var column = 0; column < columnCount; column += 1) {
+        final cellStyle = _bodyStyle(height: 1.35, bold: rowIndex == 0);
         pw.Widget cell = pw.Padding(
           padding: const pw.EdgeInsets.symmetric(horizontal: 6, vertical: 5),
           child: pw.RichText(
             overflow: pw.TextOverflow.span,
             text: pw.TextSpan(
-              style: _bodyStyle(height: 1.35, bold: rowIndex == 0),
+              style: cellStyle,
               children: column < row.length
-                  ? _inlineSpans(row[column], collectBoundaries: rowIndex != 0)
+                  ? _inlineSpans(
+                      row[column],
+                      inherited: cellStyle,
+                      collectBoundaries: rowIndex != 0,
+                    )
                   : const [],
             ),
           ),
@@ -893,6 +906,8 @@ final class _MarkdownPdfRenderer {
 
   List<pw.Widget> _fallbackTable(List<List<List<md.Node>>> rows) {
     final headers = rows.first;
+    final rowStyle = _bodyStyle(height: 1.35);
+    final headerStyle = _bodyStyle(height: 1.35, bold: true);
     return [
       pw.SizedBox(height: 7),
       for (var rowIndex = 1; rowIndex < rows.length; rowIndex += 1) ...[
@@ -901,14 +916,14 @@ final class _MarkdownPdfRenderer {
           pw.RichText(
             overflow: pw.TextOverflow.span,
             text: pw.TextSpan(
-              style: _bodyStyle(height: 1.35),
+              style: rowStyle,
               children: [
                 pw.TextSpan(
                   text: '${_plainText(headers[column])}: ',
-                  style: _bodyStyle(height: 1.35, bold: true),
+                  style: headerStyle,
                 ),
                 if (column < rows[rowIndex].length)
-                  ..._inlineSpans(rows[rowIndex][column]),
+                  ..._inlineSpans(rows[rowIndex][column], inherited: rowStyle),
               ],
             ),
           ),
@@ -1151,6 +1166,9 @@ final class _MarkdownPdfRenderer {
         ),
         'code' => style.copyWith(
           font: fonts.monospace,
+          fontBold: fonts.monospace,
+          fontItalic: fonts.monospace,
+          fontBoldItalic: fonts.monospace,
           fontFallback: [fonts.regular, fonts.emoji],
           background: pw.BoxDecoration(color: PdfColor.fromHex('#F0F1F3')),
         ),

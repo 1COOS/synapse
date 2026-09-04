@@ -207,7 +207,7 @@ CodeMirror 是唯一正文编辑器：活动区域显示 Markdown marker，失�
 
 macOS CodeMirror 通过协议 v2 的 `setPageLayout` 接收 `pageIndex/sourceOffset` 和 stale 状态，在绝对 overlay 中结合主编辑器或双栏子编辑器坐标、scroll、viewport 与 geometry 更新位置；overlay 使用 `pointer-events: none` 和 `aria-hidden`。阅读态和无可写 surface 平台发送空布局。手动分页仍由现有分页符 block 显示，避免同一位置出现两条线，协议和显示层都不得修改 Markdown。
 
-导出器将 Markdown 转为独立打印块，不修改 Vault 数据模型。唯一新增正文契约是独占一行的 `<!-- synapse:page-break -->`；开头、结尾和连续标记折叠，fenced code 内保持字面量，`---` 继续解析为水平线。正文、列表、引用、代码和表格共享阅读态换算后的基础字号与 1.55 倍行高，H1/H2/H3-H6 使用阅读态比例；粗体、删除线、高亮、链接与嵌套样式保留，浅色打印配色不跟随工作区主题。段落和长列表使用可跨页 RichText；代码块用逐行 table row 保证只在线之间分页；标题用 `NewPage(freeSpace: ...)` 防止孤立；普通表格按行分页并重复 header，超高行整表降级为可跨页字段布局；图片使用本地快照、等比 contain 和缺失占位。页眉按字体实际宽度省略标题；页脚开启时使用 `pageNumber / pagesCount`，关闭时不构建页脚并把原占用高度归还正文。编辑态边界和最终 PDF 始终来自同一套正文尺寸、A4、10/15/20 mm 页边距、方向与页脚参数。
+导出器将 Markdown 转为独立打印块，不修改 Vault 数据模型。唯一新增正文契约是独占一行的 `<!-- synapse:page-break -->`；开头、结尾和连续标记折叠，fenced code 内保持字面量，`---` 继续解析为水平线。正文、列表、引用、代码和表格共享阅读态换算后的基础字号与 1.55 倍行高；H1-H6 全部使用粗体，并依次采用正文的 `2.0/1.7/1.45/1.25/1.1/1.0` 倍。标题、表头和降级表格将完整容器样式传给内联子节点，粗体、删除线、高亮、链接、代码与嵌套样式只在继承样式上叠加，禁止回退为正文。浅色打印配色不跟随工作区主题。段落和长列表使用可跨页 RichText；代码块用逐行 table row 保证只在线之间分页；标题用 `NewPage(freeSpace: ...)` 防止孤立；普通表格按行分页并重复 header，超高行整表降级为可跨页字段布局；图片使用本地快照、等比 contain 和缺失占位。页眉按字体实际宽度省略标题；页脚开启时使用 `pageNumber / pagesCount`，关闭时不构建页脚并把原占用高度归还正文。编辑态边界和最终 PDF 始终来自同一套正文尺寸、A4、10/15/20 mm 页边距、方向与页脚参数。
 
 ### 6.5 File Vault mutation journal
 

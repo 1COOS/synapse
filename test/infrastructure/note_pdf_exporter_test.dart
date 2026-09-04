@@ -260,6 +260,37 @@ void main() {
     );
   });
 
+  test('all six heading levels keep distinct page boundaries', () async {
+    final firstPageHeadingCounts = <int>[];
+    for (var level = 1; level <= 6; level += 1) {
+      final prefix = '#' * level;
+      final markdown = List.generate(
+        360,
+        (index) => '$prefix 第 $index 个 $level 级标题',
+      ).join('\n\n');
+      final layout = await layoutNotePdf(
+        _snapshot(markdown),
+        const NotePdfExportOptions(),
+        fonts,
+      );
+      final firstBoundary = layout.boundaries.first.sourceOffset;
+      final firstHeadingOnNextPage = RegExp(
+        r'第 (\d+) 个',
+      ).firstMatch(markdown.substring(firstBoundary));
+      expect(firstHeadingOnNextPage, isNotNull);
+      firstPageHeadingCounts.add(int.parse(firstHeadingOnNextPage!.group(1)!));
+    }
+
+    expect(firstPageHeadingCounts, hasLength(6));
+    for (var index = 1; index < firstPageHeadingCounts.length; index += 1) {
+      expect(
+        firstPageHeadingCounts[index - 1],
+        lessThan(firstPageHeadingCounts[index]),
+        reason: 'H$index and H${index + 1} must remain visually distinct.',
+      );
+    }
+  });
+
   test(
     'layouter returns layout metadata while exporter returns PDF bytes',
     () async {
