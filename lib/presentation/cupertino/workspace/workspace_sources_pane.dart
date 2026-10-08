@@ -369,24 +369,32 @@ final class _WorkspaceSourcesPaneState extends State<WorkspaceSourcesPane> {
     final sourcesHeight = resizableSources
         ? _resolvedSourcesHeight(availableHeight)
         : null;
-    final sourcesContent = AnimatedSize(
-      duration: _resizingSources
-          ? Duration.zero
-          : const Duration(milliseconds: 180),
-      curve: Curves.easeOut,
-      alignment: Alignment.topCenter,
-      child: sourcesExpanded
-          ? _buildExpandedSources(
-              height: sourcesHeight ?? _minimumCompactSourcesHeight,
-              sources: sources,
-              materials: materials,
-              editorContext: editorContext,
-              busy: busy,
-            )
-          : _buildSelectedSourcesSummary(
-              sources: sources,
-              selectedSourceIds: materials.selectedAiMaterialIds,
-            ),
+    final sourcesContent = ConstrainedBox(
+      // Column gives non-flex children unbounded height. Bound the animation
+      // itself, not just its target, so a shrinking window cannot retain an
+      // oversized previous frame and push the proposal list out of the pane.
+      constraints: BoxConstraints(
+        maxHeight: math.max(0, availableHeight - _reservedProposalAreaHeight),
+      ),
+      child: AnimatedSize(
+        duration: _resizingSources
+            ? Duration.zero
+            : const Duration(milliseconds: 180),
+        curve: Curves.easeOut,
+        alignment: Alignment.topCenter,
+        child: sourcesExpanded
+            ? _buildExpandedSources(
+                height: sourcesHeight ?? _minimumCompactSourcesHeight,
+                sources: sources,
+                materials: materials,
+                editorContext: editorContext,
+                busy: busy,
+              )
+            : _buildSelectedSourcesSummary(
+                sources: sources,
+                selectedSourceIds: materials.selectedAiMaterialIds,
+              ),
+      ),
     );
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,

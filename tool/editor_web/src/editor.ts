@@ -1142,6 +1142,49 @@ class ImageWidget extends WidgetType {
   }
 }
 
+class ImageInsertBelowWidget extends WidgetType {
+  constructor(
+    readonly image: SelectedImageRange,
+    readonly editorView: () => EditorView,
+    readonly baseOffset: () => number,
+  ) { super(); }
+
+  eq(other: ImageInsertBelowWidget): boolean {
+    return other.image.from === this.image.from &&
+      other.image.to === this.image.to &&
+      other.image.block.from === this.image.block.from &&
+      other.image.block.to === this.image.block.to &&
+      other.baseOffset() === this.baseOffset();
+  }
+
+  toDOM(): HTMLElement {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'synapse-image-insert-below';
+    button.setAttribute('aria-label', '在图片下方开始输入');
+    button.title = '在图片下方开始输入';
+    const keepEditorFocused = (event: MouseEvent | PointerEvent) => {
+      if (event.button !== 0) return;
+      event.preventDefault();
+      event.stopPropagation();
+    };
+    button.addEventListener('pointerdown', keepEditorFocused);
+    button.addEventListener('mousedown', keepEditorFocused);
+    button.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      openParagraphAfterImage(
+        this.editorView(),
+        this.image,
+        this.baseOffset(),
+      );
+    });
+    return button;
+  }
+
+  ignoreEvent(): boolean { return true; }
+}
+
 interface TableModel {
   width?: number;
   header: string[];
@@ -2641,10 +2684,16 @@ function buildColumnDecorations(state: EditorState, runtimeState: ColumnSideRunt
       if (image) {
         const selected =
           imageFocused && imageSelectionMatches(selection, image.from);
+        const absoluteImage: SelectedImageRange = {
+          from: runtimeState.baseOffset + image.from,
+          to: runtimeState.baseOffset + image.to,
+          src: image.src,
+          block: absolute,
+        };
         ranges.push(Decoration.replace({
           widget: new ImageWidget(
-            runtimeState.baseOffset + image.from,
-            runtimeState.baseOffset + image.to,
+            absoluteImage.from,
+            absoluteImage.to,
             image.src,
             image.width,
             true,
@@ -2660,6 +2709,17 @@ function buildColumnDecorations(state: EditorState, runtimeState: ColumnSideRunt
           ),
           block: true,
         }).range(block.from, block.to));
+        if (runtimeState.editable) {
+          ranges.push(Decoration.widget({
+            widget: new ImageInsertBelowWidget(
+              absoluteImage,
+              () => runtimeState.editorView,
+              () => runtimeState.baseOffset,
+            ),
+            block: true,
+            side: 1,
+          }).range(block.to));
+        }
       }
       continue;
     }
@@ -2944,6 +3004,14 @@ function createColumnEditor(
           }
         }),
         EditorView.domEventHandlers({
+          beforeinput(event, editorView) {
+            inputStartedAt = performance.now();
+            return handleSelectedImageBeforeInput(
+              event,
+              editorView,
+              runtimeState.baseOffset,
+            );
+          },
           compositionstart() {
             pendingNestedComposition = true;
             return false;
@@ -3854,6 +3922,62 @@ function selectedImageRange(
   return undefined;
 }
 
+function openParagraphAfterImage(
+  editorView: EditorView,
+  image: SelectedImageRange,
+  baseOffset = 0,
+): boolean {
+  if (!runtime?.editable) return false;
+  const doc = editorView.state.doc.toString();
+  const localImageTo = image.to - baseOffset;
+  let insertionOffset = localImageTo;
+  let insert = '\n\n';
+  let anchor = insertionOffset + insert.length;
+
+  if (image.block.kind === 'image') {
+    const localBlockTo = image.block.to - baseOffset;
+    insertionOffset = localBlockTo;
+    anchor = localBlockTo;
+    insert = '';
+    const blockHasLineBreak = localBlockTo > localImageTo;
+    const trailing = doc.slice(localBlockTo);
+
+    if (!blockHasLineBreak) {
+      insert = '\n';
+      anchor = localBlockTo + 1;
+    } else if (trailing.trim().length > 0) {
+      const availableLineBreaks = /^\n*/.exec(trailing)?.[0].length ?? 0;
+      insert = '\n'.repeat(Math.max(0, 2 - availableLineBreaks));
+    }
+  }
+
+  editorView.focus();
+  editorView.dispatch({
+    changes: insert.length > 0
+      ? { from: insertionOffset, to: insertionOffset, insert }
+      : undefined,
+    selection: { anchor },
+    effects: setParentImageSelection.of(null),
+    annotations: Transaction.userEvent.of('input.image-enter'),
+  });
+  return true;
+}
+
+function handleSelectedImageBeforeInput(
+  event: InputEvent,
+  editorView: EditorView,
+  baseOffset = 0,
+): boolean {
+  if (
+    event.inputType !== 'insertParagraph' &&
+    event.inputType !== 'insertLineBreak'
+  ) return false;
+  const image = selectedImageRange(editorView.state, baseOffset);
+  if (!image) return false;
+  event.preventDefault();
+  return openParagraphAfterImage(editorView, image, baseOffset);
+}
+
 function withoutStructuralTrailingLineBreak(source: string): string {
   if (source.endsWith('\r\n')) return source.slice(0, -2);
   if (source.endsWith('\n')) return source.slice(0, -1);
@@ -3931,20 +4055,39 @@ function buildDecorations(state: EditorState): DecorationSet {
     }
     if (block.kind === 'image') {
       const image = imageRanges(block)[0];
-      if (image) ranges.push(Decoration.replace({
-        widget: new ImageWidget(
-          image.from,
-          image.to,
-          image.src,
-          image.width,
-          true,
-          explicitImageFrom === image.from,
-          editable,
-          () => selectParentImage(image.from),
-          { from: block.from, to: block.to },
-        ),
-        block: true,
-      }).range(block.from, block.to));
+      if (image) {
+        const selectedImage: SelectedImageRange = {
+          from: image.from,
+          to: image.to,
+          src: image.src,
+          block,
+        };
+        ranges.push(Decoration.replace({
+          widget: new ImageWidget(
+            image.from,
+            image.to,
+            image.src,
+            image.width,
+            true,
+            explicitImageFrom === image.from,
+            editable,
+            () => selectParentImage(image.from),
+            { from: block.from, to: block.to },
+          ),
+          block: true,
+        }).range(block.from, block.to));
+        if (editable) {
+          ranges.push(Decoration.widget({
+            widget: new ImageInsertBelowWidget(
+              selectedImage,
+              () => view!,
+              () => 0,
+            ),
+            block: true,
+            side: 1,
+          }).range(block.to));
+        }
+      }
       continue;
     }
     if (block.kind === 'table') {
@@ -4126,6 +4269,10 @@ function editorTheme(theme: EditorTheme) {
     '.synapse-page-boundary': { position: 'absolute', left: '0', width: '100%', height: '0', borderTop: `1px dashed ${theme.accent}`, pointerEvents: 'none' },
     '.synapse-page-boundary-label': { position: 'absolute', right: '0', top: '0', transform: 'translateY(-50%)', padding: '2px 4px', borderRadius: '4px', color: theme.accent, backgroundColor: theme.background, font: '600 10px/1.2 -apple-system, BlinkMacSystemFont, sans-serif', whiteSpace: 'nowrap' },
     '.synapse-image-block': { position: 'relative', display: 'block', width: 'fit-content', maxWidth: '100%', margin: '5px 0' },
+    '.synapse-image-insert-below': { position: 'relative', display: 'block', boxSizing: 'border-box', width: '100%', minWidth: '120px', height: '24px', padding: '0', border: '0', borderRadius: '4px', color: theme.accent, backgroundColor: 'transparent', cursor: 'text', opacity: '0.45' },
+    '.synapse-image-insert-below::after': { content: '""', position: 'absolute', left: '0', right: '0', top: '50%', height: '1px', borderRadius: '1px', backgroundColor: 'currentColor', opacity: '0', transform: 'scaleX(.35)', transition: 'opacity 80ms ease, transform 80ms ease' },
+    '.synapse-image-insert-below:hover::after, .synapse-image-insert-below:focus-visible::after': { opacity: '1', transform: 'scaleX(1)' },
+    '.synapse-image-insert-below:focus': { outline: 'none' },
     '.synapse-inline-image': { position: 'relative', display: 'inline-block', verticalAlign: 'middle', maxWidth: '100%' },
     '.synapse-image-block img, .synapse-inline-image img': { display: 'block', height: 'auto', borderRadius: '6px', pointerEvents: 'none' },
     '.synapse-image-selected': { outline: `1px solid ${theme.accent}`, outlineOffset: '3px', borderRadius: '6px' },
@@ -4537,29 +4684,9 @@ function imageKeyBindings(baseOffsetValue: number | (() => number) = 0) {
       preventDefault: true,
       run: (editorView: EditorView) => {
         const image = selected(editorView);
-        if (!image || !runtime?.editable) return false;
-        const localTo = image.to - baseOffset();
-        const doc = editorView.state.doc.toString();
-        let insert = '\n\n';
-        let anchor = localTo + insert.length;
-        if (image.block.kind === 'image') {
-          if (doc[localTo] === '\n') {
-            insert = '';
-            anchor = localTo + 1;
-          } else {
-            insert = '\n';
-            anchor = localTo + 1;
-          }
-        }
-        editorView.dispatch({
-          changes: insert.length > 0
-            ? { from: localTo, to: localTo, insert }
-            : undefined,
-          selection: { anchor },
-          effects: setParentImageSelection.of(null),
-          annotations: Transaction.userEvent.of('input.image-enter'),
-        });
-        return true;
+        return image == null
+          ? false
+          : openParagraphAfterImage(editorView, image, baseOffset());
       },
     },
     { key: 'Backspace', preventDefault: true, run: remove },
@@ -4704,9 +4831,9 @@ function extensions(command: InitializeCommand) {
       }
     }),
     EditorView.domEventHandlers({
-      beforeinput() {
+      beforeinput(event, editorView) {
         inputStartedAt = performance.now();
-        return false;
+        return handleSelectedImageBeforeInput(event, editorView);
       },
       pointerdown(event, editorView) {
         clearTableCellSessionsOutside(event.target);

@@ -11,6 +11,74 @@ import '../../support/workspace_fakes.dart';
 import '../../support/workspace_harness.dart';
 
 void main() {
+  testWidgets(
+    'keeps animated sources within the pane while shrinking the window',
+    (tester) async {
+      final vault = MemoryVaultBackend(seedExampleData: false);
+      final note = await vault.createNote(
+        parentPath: '',
+        title: 'Window resize',
+      );
+      for (var index = 0; index < 4; index += 1) {
+        await vault.addImageSource(
+          noteId: note.id,
+          filename: 'resize-$index.png',
+          mimeType: 'image/png',
+          bytes: tinyPng,
+        );
+      }
+      await pumpWorkspace(tester, vault: vault, size: const Size(1280, 2000));
+      final handle = find.byKey(const Key('sources-resize-handle'));
+      await tester.drag(handle, const Offset(0, 800));
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+
+      for (final height in [1200.0, 560.0, 820.0]) {
+        await tester.binding.setSurfaceSize(Size(1280, height));
+        // Check intermediate frames too: pumpAndSettle hides transient overflow.
+        for (var frame = 0; frame < 15; frame += 1) {
+          await tester.pump(const Duration(milliseconds: 16));
+          expect(
+            tester.takeException(),
+            isNull,
+            reason: 'height=$height frame=$frame',
+          );
+          final pane = tester.getRect(
+            find.byKey(const Key('image-input-area')),
+          );
+          final proposals = tester.getRect(
+            find.byKey(const Key('proposal-history-list')),
+          );
+          expect(proposals.height, greaterThan(0));
+          expect(proposals.bottom, lessThanOrEqualTo(pane.bottom + 0.1));
+        }
+      }
+
+      // Shrinking during either direction of the collapse animation must obey
+      // the new constraints too, without losing the saved resize fraction.
+      for (var toggle = 0; toggle < 2; toggle += 1) {
+        await tester.binding.setSurfaceSize(const Size(1280, 2000));
+        await tester.pumpAndSettle();
+        await tester.tap(
+          find.byKey(const Key('toggle-sources-section-button')),
+        );
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 32));
+        await tester.binding.setSurfaceSize(const Size(1280, 560));
+        for (var frame = 0; frame < 15; frame += 1) {
+          await tester.pump(const Duration(milliseconds: 16));
+          expect(tester.takeException(), isNull);
+          expect(
+            tester
+                .getSize(find.byKey(const Key('proposal-history-list')))
+                .height,
+            greaterThan(0),
+          );
+        }
+      }
+    },
+  );
+
   testWidgets('does not overflow the source pane in a compact desktop window', (
     tester,
   ) async {

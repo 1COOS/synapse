@@ -1695,6 +1695,201 @@ describe('CodeMirror live preview', () => {
     expect(window.synapseTest!.getText()).toContain(`${first} between  after`);
   });
 
+  it('opens a writable line after selected block images without splitting their source', async () => {
+    for (const imageMarkdown of [
+      '<img src="Note.assets/attachments/enter.png" width="320">',
+      '![image](Note.assets/attachments/enter.png)',
+    ]) {
+      window.synapseHost!.receive(initialize(imageMarkdown, 'editing'));
+      await new Promise((resolve) => window.setTimeout(resolve, 20));
+
+      expect(document.querySelectorAll('.synapse-image-insert-below')).toHaveLength(1);
+      document.querySelector<HTMLElement>('.synapse-image-block')!.click();
+      const enter = new KeyboardEvent('keydown', {
+        key: 'Enter',
+        code: 'Enter',
+        bubbles: true,
+        cancelable: true,
+      });
+      document.querySelector<HTMLElement>('.cm-content')!.dispatchEvent(enter);
+      await new Promise((resolve) => window.setTimeout(resolve, 20));
+
+      expect(enter.defaultPrevented).toBe(true);
+      expect(window.synapseTest!.getText()).toBe(`${imageMarkdown}\n`);
+      expect(window.synapseTest!.getSelection()).toEqual({
+        anchor: imageMarkdown.length + 1,
+        head: imageMarkdown.length + 1,
+      });
+      expect(document.querySelectorAll('.synapse-image-block')).toHaveLength(1);
+      expect(document.querySelector('.synapse-image-source')).toBeNull();
+
+      document.querySelector<HTMLElement>('.synapse-image-block')!.click();
+      document.querySelector<HTMLElement>('.cm-content')!.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          code: 'Enter',
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+      await new Promise((resolve) => window.setTimeout(resolve, 20));
+      expect(window.synapseTest!.getText()).toBe(`${imageMarkdown}\n`);
+    }
+  });
+
+  it('inserts an independent paragraph between a block image and following text', async () => {
+    const image = '<img src="Note.assets/attachments/before-text.png" width="320">';
+    window.synapseHost!.receive(initialize(`${image}\nAfter`, 'editing'));
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+
+    document.querySelector<HTMLElement>('.synapse-image-block')!.click();
+    document.querySelector<HTMLElement>('.cm-content')!.dispatchEvent(
+      new KeyboardEvent('keydown', {
+        key: 'Enter',
+        code: 'Enter',
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+
+    expect(window.synapseTest!.getText()).toBe(`${image}\n\n\nAfter`);
+    expect(window.synapseTest!.getSelection()).toEqual({
+      anchor: image.length + 1,
+      head: image.length + 1,
+    });
+    window.synapseTest!.insertText('New paragraph');
+    expect(window.synapseTest!.getText()).toBe(
+      `${image}\nNew paragraph\n\nAfter`,
+    );
+  });
+
+  it('handles WebKit paragraph input while a block image is selected', async () => {
+    const image = '<img src="Note.assets/attachments/webkit.png" width="320">';
+    for (const inputType of ['insertParagraph', 'insertLineBreak']) {
+      window.synapseHost!.receive(initialize(`${image}\nAfter`, 'editing'));
+      await new Promise((resolve) => window.setTimeout(resolve, 20));
+
+      document.querySelector<HTMLElement>('.synapse-image-block')!.click();
+      const input = new InputEvent('beforeinput', {
+        bubbles: true,
+        cancelable: true,
+        inputType,
+      });
+      document.querySelector<HTMLElement>('.cm-content')!.dispatchEvent(input);
+      await new Promise((resolve) => window.setTimeout(resolve, 20));
+
+      expect(input.defaultPrevented).toBe(true);
+      expect(window.synapseTest!.getText()).toBe(`${image}\n\n\nAfter`);
+      expect(document.querySelectorAll('.synapse-image-block')).toHaveLength(1);
+      expect(document.querySelector('.synapse-image-source')).toBeNull();
+    }
+  });
+
+  it('uses the image insertion affordance without accumulating blank lines', async () => {
+    const image = '<img src="Note.assets/attachments/click-below.png" width="320">';
+    window.synapseHost!.receive(initialize(`${image}\nAfter`, 'editing'));
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+
+    let affordance = document.querySelector<HTMLButtonElement>(
+      '.synapse-image-insert-below',
+    )!;
+    expect(affordance.getAttribute('aria-label')).toBe('在图片下方开始输入');
+    expect(getComputedStyle(affordance).height).toBe('24px');
+    expect(getComputedStyle(affordance).cursor).toBe('text');
+    affordance.click();
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+    expect(window.synapseTest!.getText()).toBe(`${image}\n\n\nAfter`);
+    expect(window.synapseTest!.getSelection()).toEqual({
+      anchor: image.length + 1,
+      head: image.length + 1,
+    });
+    expect(window.synapseTest!.undo()).toBe(true);
+    expect(window.synapseTest!.getText()).toBe(`${image}\nAfter`);
+    expect(window.synapseTest!.redo()).toBe(true);
+    expect(window.synapseTest!.getText()).toBe(`${image}\n\n\nAfter`);
+
+    affordance = document.querySelector<HTMLButtonElement>(
+      '.synapse-image-insert-below',
+    )!;
+    affordance.click();
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+    expect(window.synapseTest!.getText()).toBe(`${image}\n\n\nAfter`);
+  });
+
+  it('shows the insertion affordance only for editable block images', async () => {
+    const inline = '<img src="Note.assets/attachments/inline.png" width="120">';
+    const block = '<img src="Note.assets/attachments/block.png" width="320">';
+    const markdown = `Before ${inline} after\n\n${block}`;
+
+    window.synapseHost!.receive(initialize(markdown, 'editing'));
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+    expect(document.querySelectorAll('.synapse-image-insert-below')).toHaveLength(1);
+
+    window.synapseHost!.receive(initialize(markdown, 'reading'));
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+    expect(document.querySelector('.synapse-image-insert-below')).toBeNull();
+  });
+
+  it('opens a writable line after an image inside a column', async () => {
+    const image = '![image](Note.assets/attachments/column-enter.png)';
+    const markdown = [
+      '<!-- synapse:columns ratio="50:50" -->',
+      image,
+      '<!-- synapse:column -->',
+      'Right',
+      '<!-- synapse:columns-end -->',
+      '',
+    ].join('\n');
+    window.synapseHost!.receive(initialize(markdown, 'editing'));
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+
+    const affordance = document.querySelector<HTMLButtonElement>(
+      '.synapse-column .synapse-image-insert-below',
+    )!;
+    expect(affordance).not.toBeNull();
+    affordance.click();
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+
+    expect(window.synapseTest!.getText()).toBe([
+      '<!-- synapse:columns ratio="50:50" -->',
+      image,
+      '',
+      '<!-- synapse:column -->',
+      'Right',
+      '<!-- synapse:columns-end -->',
+      '',
+    ].join('\n'));
+    expect(document.querySelector('.synapse-columns')).not.toBeNull();
+    expect(document.querySelector('.synapse-image-source')).toBeNull();
+
+    window.synapseHost!.receive(initialize(markdown, 'editing'));
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+    const imageRoot = document.querySelector<HTMLElement>(
+      '.synapse-column .synapse-image-block',
+    )!;
+    imageRoot.click();
+    const beforeInput = new InputEvent('beforeinput', {
+      bubbles: true,
+      cancelable: true,
+      inputType: 'insertParagraph',
+    });
+    document.querySelector<HTMLElement>(
+      '.synapse-column .cm-content',
+    )!.dispatchEvent(beforeInput);
+    await new Promise((resolve) => window.setTimeout(resolve, 20));
+    expect(beforeInput.defaultPrevented).toBe(true);
+    expect(window.synapseTest!.getText()).toBe([
+      '<!-- synapse:columns ratio="50:50" -->',
+      image,
+      '',
+      '<!-- synapse:column -->',
+      'Right',
+      '<!-- synapse:columns-end -->',
+      '',
+    ].join('\n'));
+  });
+
   it('resizes a selected image from the right handle with mouse events', async () => {
     const src = 'Note.assets/attachments/resize.png';
     const markdown = `<img src="${src}" width="320">\n\nAfter`;

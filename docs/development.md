@@ -30,10 +30,27 @@ cp macos/Runner/Configs/Signing.local.xcconfig.example \
   macos/Runner/Configs/Signing.local.xcconfig
 # 编辑本机文件，把 YOUR_TEAM_ID 替换为 Xcode Accounts 中的 Team ID。
 security find-identity -v -p codesigning
-flutter run -d macos
+./scripts/run_macos.sh
 ```
 
 该命令使用 `DebugProfile.entitlements` 和 Automatic Signing。`Signing.local.xcconfig` 被 Git 忽略，只允许保存 `DEVELOPMENT_TEAM`，不得写入证书、私钥或 API Key。若本机没有有效 Apple Development identity，Debug 构建必须直接失败，不允许回退到可启动但无法访问 Keychain 的 ad-hoc 产物。
+
+`scripts/run_macos.sh` 从自身位置定位项目，仅支持本机 Debug，不接受额外参数；可通过绝对路径在其他目录启动。它使用 Xcode 自带 Python 3 和系统签名工具，不需要额外安装 Python 包。首次使用仍需手动执行 `flutter pub get`，脚本不会自动解析或升级依赖。
+
+启动时读取 Runner 的实际 Debug 设置，核对当前团队的有效证书、描述文件的应用标识、设备资格和有效期，同时兼容 Xcode 新旧描述文件目录。剩余有效期超过 24 小时则直接执行 `flutter run -d macos --debug --no-pub`；否则执行一次带 `-allowProvisioningUpdates` 的 Debug 构建，检查本机和产物内的描述文件、实际签名团队及证书，并进行严格签名验证，再启动 Flutter。终端热重载和退出操作保持不变。
+
+免费 Personal Team 的描述文件有效期较短，自动续签不意味着永久有效。如果 Xcode 返回的文件仍临近过期但有效，会显示警告并允许本次启动，不删除文件或循环重试。缺少证书、账号登录失效、网络或构建错误会停止启动；请按提示检查 Xcode → Settings → Accounts、证书和网络。长时间等待会显示当前阶段，失败诊断保存在 Git 忽略的 `build/macos/signing/preflight-*.log`，不记录完整环境、描述文件或构建设置。
+
+脚本沿用当前 `FLUTTER_XCODE_*` 编译配置和 Flutter 的构建、Swift 包缓存目录，不修改共享 SDK、全局 shell、Team、应用标识或钥匙串权限。直接使用 `flutter run -d macos`、IDE 默认启动或其他构建命令不会自动获得此续签步骤；Release 发布流程不变。
+
+若已经连接 Dart VM，但热重载提示无法创建 `Library/Containers/co.onecoos.synapse/Data/tmp/.../main.dart.incremental.dill`，应另行检查启动终端或 IDE 对该目录的访问权限。这不是描述文件续签失败；本机验证中普通 `flutter run` 也复现了此错误。本脚本不修改系统隐私授权、沙盒或钥匙串权限来绕过它。
+
+启动辅助程序回归测试：
+
+```bash
+bash -n scripts/run_macos.sh
+xcrun python3 -B -m unittest discover -s scripts/tests -p 'test_macos_signing.py' -v
+```
 
 ### 2.2 运行 Web/H5 预览
 

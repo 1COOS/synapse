@@ -1175,6 +1175,129 @@ void main() {
     session.dispose();
   });
 
+  testWidgets(
+    'CodeMirror opens image paragraphs from click keyboard and WebKit input',
+    (tester) async {
+      const first = '<img src="Note.assets/attachments/click.png" width="320">';
+      const second =
+          '<img src="Note.assets/attachments/keyboard.png" width="320">';
+      const third =
+          '<img src="Note.assets/attachments/webkit.png" width="320">';
+      const markdown =
+          '$first\nAfter click\n\n'
+          '$second\nAfter keyboard\n\n'
+          '$third\nAfter WebKit';
+      final session = _session(markdown);
+      final hub = EditorDocumentHub(session);
+      CodeMirrorDocumentSurfaceState? surface;
+
+      await tester.pumpWidget(
+        CupertinoApp(
+          home: SizedBox.expand(
+            child: CodeMirrorDocumentSurface(
+              paneId: 'pane-image-paragraph',
+              hub: hub,
+              mode: CodeMirrorDocumentMode.editing,
+              pageLayout: EditorPageLayout.empty,
+              focused: true,
+              enabled: true,
+              appearance: WorkspaceAppearance.defaults,
+              loadAttachment: (_) async => null,
+              onImageAction: (_) async {},
+              onPastedImage: (_) async {},
+              onCommandRequest: (_) async {},
+              onOutlineChanged: (_) {},
+              onFocusPane: () {},
+              onStateChanged: (state, attached) {
+                surface = attached ? state : null;
+              },
+            ),
+          ),
+        ),
+      );
+      await _pumpUntil(tester, () => surface?.debugReady == true);
+      await _pumpUntilAsync(
+        tester,
+        () async =>
+            await surface!.debugRunJavaScriptReturningResult(
+              'document.querySelectorAll(".synapse-image-insert-below").length',
+            ) ==
+            3,
+      );
+
+      final result =
+          jsonDecode(
+                await surface!.debugRunJavaScriptReturningResult('''
+                  (() => {
+                    document.querySelectorAll(
+                      '.synapse-image-insert-below',
+                    )[0].click();
+                    window.synapseTest.insertText('Clicked paragraph');
+
+                    document.querySelectorAll(
+                      '.synapse-image-block',
+                    )[1].click();
+                    const content = document.querySelector('.cm-content');
+                    const keyboard = new KeyboardEvent('keydown', {
+                      key: 'Enter',
+                      code: 'Enter',
+                      bubbles: true,
+                      cancelable: true,
+                    });
+                    content.dispatchEvent(keyboard);
+                    window.synapseTest.insertText('Keyboard paragraph');
+
+                    document.querySelectorAll(
+                      '.synapse-image-block',
+                    )[2].click();
+                    const beforeInput = new InputEvent('beforeinput', {
+                      bubbles: true,
+                      cancelable: true,
+                      inputType: 'insertParagraph',
+                    });
+                    content.dispatchEvent(beforeInput);
+                    window.synapseTest.insertText('WebKit paragraph');
+
+                    return JSON.stringify({
+                      keyboardPrevented: keyboard.defaultPrevented,
+                      beforeInputPrevented: beforeInput.defaultPrevented,
+                      text: window.synapseTest.getText(),
+                      selection: window.synapseTest.getSelection(),
+                      images: document.querySelectorAll(
+                        '.synapse-image-block',
+                      ).length,
+                      exposedSources: document.querySelectorAll(
+                        '.synapse-image-source',
+                      ).length,
+                      affordances: document.querySelectorAll(
+                        '.synapse-image-insert-below',
+                      ).length,
+                    });
+                  })()
+                ''')
+                    as String,
+              )
+              as Map<String, Object?>;
+      const expected =
+          '$first\nClicked paragraph\n\nAfter click\n\n'
+          '$second\nKeyboard paragraph\n\nAfter keyboard\n\n'
+          '$third\nWebKit paragraph\n\nAfter WebKit';
+      expect(result['keyboardPrevented'], isTrue);
+      expect(result['beforeInputPrevented'], isTrue);
+      expect(result['text'], expected);
+      expect(result['images'], 3);
+      expect(result['exposedSources'], 0);
+      expect(result['affordances'], 3);
+
+      await surface!.flush();
+      await _pumpUntil(tester, () => session.controller.text == expected);
+
+      await tester.pumpWidget(const SizedBox.shrink());
+      hub.dispose();
+      session.dispose();
+    },
+  );
+
   testWidgets('CodeMirror keeps table IME preedit local until composition ends', (
     tester,
   ) async {

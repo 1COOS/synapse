@@ -96,8 +96,10 @@ Embedding Model: 留空
 flutter pub get
 flutter test --no-pub --concurrency=1
 flutter analyze --no-pub
-flutter run -d macos
+./scripts/run_macos.sh
 ```
+
+macOS 推荐使用上述入口：它会检查本机 Debug 签名，描述文件缺失、不可用或将在 24 小时内过期时尝试一次自动续签，再以 `--no-pub` 启动 Flutter，支持热重载。需要有效的 Xcode 账号和当前团队的 Apple Development 证书；续签需要联网。直接执行 `flutter run -d macos` 不包含此检查和续签步骤。详见[开发文档](./docs/development.md)。
 
 Web/H5 预览：
 
